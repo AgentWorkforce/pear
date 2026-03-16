@@ -1,0 +1,143 @@
+@import 'tailwindcss';
+@import '@xterm/xterm/css/xterm.css';
+@import 'allotment/dist/style.css';
+
+/* ── Dark theme (default) ── */
+:root,
+[data-theme='dark'] {
+  --pear-accent: #8cb369;
+  --pear-accent-bright: #a3c585;
+  --pear-accent-dim: #6b9a4b;
+  --pear-yellow: #d4a843;
+  --pear-orange: #d48a43;
+  --pear-red: #c45c5c;
+  --pear-blue: #6b9fc4;
+  --pear-purple: #9b85b5;
+  --pear-teal: #6bab9a;
+  --pear-pink: #c47a9b;
+
+  --pear-text: #d4d4c8;
+  --pear-text-secondary: #a8a897;
+  --pear-text-dim: #7a7a6e;
+  --pear-text-faint: #5c5c52;
+
+  --pear-bg: #161a12;
+  --pear-bg-raised: #1e2318;
+  --pear-bg-surface: #2a3022;
+  --pear-bg-surface-hover: #343a2c;
+  --pear-bg-overlay: #3e4536;
+  --pear-border: #4a5240;
+  --pear-border-subtle: #333a2a;
+}
+
+/* ── Light theme ── */
+[data-theme='light'] {
+  --pear-accent: #5a8a3c;
+  --pear-accent-bright: #6ea04a;
+  --pear-accent-dim: #4a7630;
+  --pear-yellow: #b08920;
+  --pear-orange: #b87530;
+  --pear-red: #c04040;
+  --pear-blue: #3a7fa8;
+  --pear-purple: #7a60a0;
+  --pear-teal: #3a8a78;
+  --pear-pink: #a85878;
+
+  --pear-text: #2a2e22;
+  --pear-text-secondary: #4a5040;
+  --pear-text-dim: #6a7060;
+  --pear-text-faint: #9a9e90;
+
+  --pear-bg: #f5f4f0;
+  --pear-bg-raised: #ececea;
+  --pear-bg-surface: #ffffff;
+  --pear-bg-surface-hover: #f0f0ec;
+  --pear-bg-overlay: #e4e4e0;
+  --pear-border: #d0d0c8;
+  --pear-border-subtle: #e0e0d8;
+}
+
+@layer base {
+  *,
+  *::before,
+  *::after {
+    margin: 0;
+    box-sizing: border-box;
+  }
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  overflow: hidden;
+  background-color: var(--pear-bg);
+  color: var(--pear-text);
+  font-family:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial,
+    sans-serif;
+  font-size: 13px;
+}
+
+.titlebar-drag {
+  -webkit-app-region: drag;
+}
+.titlebar-nodrag {
+  -webkit-app-region: no-drag;
+}
+
+/* Allotment */
+.split-view-view {
+  overflow: hidden !important;
+}
+.sash-container .sash {
+  background: var(--pear-border-subtle) !important;
+}
+.sash-container .sash:hover {
+  background: var(--pear-accent-dim) !important;
+}
+
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--pear-bg-overlay);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--pear-text-faint);
+}
+
+/* react-diff-view */
+.diff-unified {
+  background: var(--pear-bg) !important;
+  color: var(--pear-text) !important;
+  font-size: 12px !important;
+}
+.diff-code-insert {
+  background: color-mix(in srgb, var(--pear-accent) 12%, transparent) !important;
+}
+.diff-code-delete {
+  background: color-mix(in srgb, var(--pear-red) 12%, transparent) !important;
+}
+.diff-gutter {
+  color: var(--pear-text-faint) !important;
+  background: var(--pear-bg-raised) !important;
+  padding: 0 6px !important;
+  min-width: 36px !important;
+}
+
+/* React Flow */
+.react-flow__controls button {
+  background: var(--pear-bg-surface) !important;
+  border-color: var(--pear-border) !important;
+  fill: var(--pear-text-secondary) !important;
+}
+.react-flow__controls button:hover {
+  background: var(--pear-bg-surface-hover) !important;
+}
