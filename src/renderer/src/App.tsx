@@ -12,6 +12,7 @@ import { AddWorktreeDialog } from '@/components/sidebar/AddWorktreeDialog'
 import { SpawnAgentDialog } from '@/components/sidebar/SpawnAgentDialog'
 import { AgentToolbar } from '@/components/common/AgentToolbar'
 import { useWorkspaceStore } from '@/stores/workspace-store'
+import pearLogo from '@/assets/pear-logo.svg'
 import { useUIStore } from '@/stores/ui-store'
 import { useBrokerEvents } from '@/hooks/use-broker-events'
 import { useGitStatus } from '@/hooks/use-git-status'
@@ -29,7 +30,13 @@ export default function App(): React.ReactNode {
   }, [load])
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="relative flex h-full flex-col">
+      {/* Relay logo — top right corner */}
+      <div className="absolute right-4 top-[10px] z-10 flex items-center gap-1.5">
+        <span className="text-[13px] font-semibold text-[var(--pear-text-dim)]">Relay</span>
+        <img src={pearLogo} alt="Pear" className="h-5 w-5" />
+      </div>
+
       <div className="flex min-h-0 flex-1">
         {/* Sidebar — spans full height so logo sits beside traffic lights */}
         <div className="h-full w-[200px] min-w-[160px] max-w-[320px] shrink-0">

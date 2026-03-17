@@ -1,21 +1,16 @@
 import type React from 'react'
 import { useEffect, useRef } from 'react'
-import { Hash, MessageCircle } from 'lucide-react'
+import { Hash } from 'lucide-react'
 import { useAgentStore } from '@/stores/agent-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 import { ChatMessage } from './ChatMessage'
 import { ComposeBar } from './ComposeBar'
 
 export function ChatView(): React.ReactNode {
-  const allMessages = useAgentStore((s) => s.messages)
+  const messages = useAgentStore((s) => s.messages)
   const agents = useAgentStore((s) => s.agents)
   const activeChannelName = useWorkspaceStore((s) => s.activeChannelName)
-  const activeChannelPrefixed = useWorkspaceStore((s) => s.getActiveChannelPrefixed())
   const scrollRef = useRef<HTMLDivElement>(null)
-
-  const messages = activeChannelPrefixed
-    ? allMessages.filter((msg) => msg.channel === activeChannelPrefixed)
-    : allMessages
 
   useEffect(() => {
     if (scrollRef.current) {

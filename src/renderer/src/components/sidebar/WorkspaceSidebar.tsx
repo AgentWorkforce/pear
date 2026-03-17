@@ -3,8 +3,6 @@ import { Plus } from 'lucide-react'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 import { useUIStore } from '@/stores/ui-store'
 import { WorkspaceItem } from './WorkspaceItem'
-import pearLogo from '@/assets/pear-logo.svg'
-
 export function WorkspaceSidebar(): React.ReactNode {
   const workspaces = useWorkspaceStore((s) => s.workspaces)
   const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId)
@@ -12,12 +10,7 @@ export function WorkspaceSidebar(): React.ReactNode {
 
   return (
     <div className="flex h-full flex-col border-r border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)]">
-      <div className="titlebar-drag relative h-[40px] shrink-0">
-        <span className="titlebar-nodrag absolute right-4 top-[14px] flex items-center gap-1.5">
-          <span className="text-[13px] font-semibold text-[var(--pear-text-dim)]">Relay</span>
-          <img src={pearLogo} alt="Pear" className="h-5 w-5" />
-        </span>
-      </div>
+      <div className="titlebar-drag h-[40px] shrink-0" />
 
       <div className="titlebar-nodrag flex items-center justify-between px-4 pb-1 pt-1">
         <span className="text-[11px] font-semibold uppercase tracking-wider text-[var(--pear-text-faint)]">Workspaces</span>

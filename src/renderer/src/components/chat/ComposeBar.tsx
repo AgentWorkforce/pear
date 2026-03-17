@@ -3,7 +3,6 @@ import { useState } from 'react'
 import { Send } from 'lucide-react'
 import { pear } from '@/lib/ipc'
 import { useAgentStore } from '@/stores/agent-store'
-import { useWorkspaceStore } from '@/stores/workspace-store'
 
 export function ComposeBar(): React.ReactNode {
   const [text, setText] = useState('')
@@ -12,11 +11,7 @@ export function ComposeBar(): React.ReactNode {
   const [sendError, setSendError] = useState<string | null>(null)
   const agents = useAgentStore((s) => s.agents)
   const addHumanMessage = useAgentStore((s) => s.addHumanMessage)
-  const activeChannelPrefixed = useWorkspaceStore((s) => s.getActiveChannelPrefixed())
-  const activeWorktree = useWorkspaceStore((s) => s.getActiveWorktree())
-  const runningAgents = agents.filter((a) =>
-    a.status === 'running' && (!a.worktreeId || a.worktreeId === activeWorktree?.id)
-  )
+  const runningAgents = agents.filter((a) => a.status === 'running')
 
   const handleSend = async (): Promise<void> => {
     if (!text.trim() || sending) return
@@ -26,7 +21,7 @@ export function ComposeBar(): React.ReactNode {
     setSendError(null)
     try {
       await pear.broker.sendMessage({ to, text: body, from: 'human' })
-      addHumanMessage(to, body, activeChannelPrefixed || undefined)
+      addHumanMessage(to, body)
       setText('')
     } catch (err) {
       setSendError(err instanceof Error ? err.message : 'Failed to send message')

@@ -17,7 +17,6 @@ export interface ChatMessage {
   body: string
   timestamp: number
   isHuman: boolean
-  channel?: string
 }
 
 export interface RelayMessage {
@@ -59,7 +58,7 @@ interface AgentState {
   trackSpawnedAgent: (name: string, worktreeId: string) => void
   handleBrokerEvent: (event: BrokerEvent) => void
   handleBrokerStatus: (status: { status: string; error?: string }) => void
-  addHumanMessage: (to: string, body: string, channel?: string) => void
+  addHumanMessage: (to: string, body: string) => void
   clearAll: () => void
   getAgentBuffer: (name: string) => string[]
 }
@@ -131,8 +130,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         to: event.target,
         body: event.body,
         timestamp: Date.now(),
-        isHuman: false,
-        channel: event.channel as string | undefined
+        isHuman: false
       }
       const relay: RelayMessage = {
         from: event.from,
@@ -154,15 +152,14 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     })
   },
 
-  addHumanMessage: (to, body, channel?) => {
+  addHumanMessage: (to, body) => {
     const msg: ChatMessage = {
       id: crypto.randomUUID(),
       from: 'human',
       to,
       body,
       timestamp: Date.now(),
-      isHuman: true,
-      channel
+      isHuman: true
     }
     set((state) => ({ messages: [...state.messages, msg] }))
   },
