@@ -10,6 +10,7 @@ import { StatusBar } from '@/components/common/StatusBar'
 import { AddWorkspaceDialog } from '@/components/sidebar/AddWorkspaceDialog'
 import { AddWorktreeDialog } from '@/components/sidebar/AddWorktreeDialog'
 import { SpawnAgentDialog } from '@/components/sidebar/SpawnAgentDialog'
+import { AgentToolbar } from '@/components/common/AgentToolbar'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 import { useUIStore } from '@/stores/ui-store'
 import { useBrokerEvents } from '@/hooks/use-broker-events'
@@ -29,26 +30,34 @@ export default function App(): React.ReactNode {
 
   return (
     <div className="flex h-full flex-col">
-      {/* Title bar drag area */}
-      <div className="titlebar-drag h-[40px] shrink-0" />
+      <div className="flex min-h-0 flex-1">
+        {/* Sidebar — spans full height so logo sits beside traffic lights */}
+        <div className="h-full w-[200px] min-w-[160px] max-w-[320px] shrink-0">
+          <WorkspaceSidebar />
+        </div>
 
-      {/* Main content */}
-      <div className="min-h-0 flex-1">
-        <Allotment>
-          <Allotment.Pane preferredSize={200} minSize={160} maxSize={320}>
-            <WorkspaceSidebar />
-          </Allotment.Pane>
+        {/* Right side: titlebar + main content stacked */}
+        <div className="flex min-w-0 flex-1 flex-col">
+          {/* Title bar drag area — only over main content */}
+          <div className="titlebar-drag h-[40px] shrink-0" />
 
-          <Allotment.Pane>
-            {viewMode === 'terminal' && <TerminalPane />}
-            {viewMode === 'chat' && <ChatView />}
-            {viewMode === 'graph' && <GraphView />}
-          </Allotment.Pane>
+          <AgentToolbar />
 
-          <Allotment.Pane preferredSize={280} minSize={200} maxSize={500}>
-            <DiffPane />
-          </Allotment.Pane>
-        </Allotment>
+          {/* Main content */}
+          <div className="min-h-0 flex-1">
+            <Allotment>
+              <Allotment.Pane>
+                {viewMode === 'terminal' && <TerminalPane />}
+                {viewMode === 'chat' && <ChatView />}
+                {viewMode === 'graph' && <GraphView />}
+              </Allotment.Pane>
+
+              <Allotment.Pane preferredSize={280} minSize={200} maxSize={500}>
+                <DiffPane />
+              </Allotment.Pane>
+            </Allotment>
+          </div>
+        </div>
       </div>
 
       <StatusBar />
