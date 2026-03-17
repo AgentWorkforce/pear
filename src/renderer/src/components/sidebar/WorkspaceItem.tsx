@@ -44,6 +44,7 @@ export function WorkspaceItem({ workspace, isActive }: Props): React.ReactNode {
             }}
             className="rounded p-0.5 hover:bg-[var(--pear-bg-overlay)]"
             title="Add worktree"
+            aria-label="Add worktree"
           >
             <Plus size={12} />
           </button>
@@ -56,6 +57,7 @@ export function WorkspaceItem({ workspace, isActive }: Props): React.ReactNode {
             }}
             className="rounded p-0.5 text-[var(--pear-red)] hover:bg-[var(--pear-bg-overlay)]"
             title="Remove workspace"
+            aria-label="Remove workspace"
           >
             <Trash2 size={12} />
           </button>

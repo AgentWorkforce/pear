@@ -27,6 +27,8 @@ export interface RelayMessage {
   timestamp: number
 }
 
+const MAX_PTY_BUFFER_CHUNKS = 10_000
+
 // Matches the real BrokerEvent discriminated union from @agent-relay/sdk
 interface BrokerEvent {
   kind: string
@@ -111,11 +113,16 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       })
     } else if (kind === 'worker_stream' && event.name && event.chunk) {
       set((state) => ({
-        agents: state.agents.map((a) =>
-          a.name === event.name
-            ? { ...a, ptyBuffer: [...a.ptyBuffer, event.chunk!] }
-            : a
-        )
+        agents: state.agents.map((a) => {
+          if (a.name !== event.name) return a
+          const buffer = [...a.ptyBuffer, event.chunk!]
+          return {
+            ...a,
+            ptyBuffer: buffer.length > MAX_PTY_BUFFER_CHUNKS
+              ? buffer.slice(buffer.length - MAX_PTY_BUFFER_CHUNKS)
+              : buffer
+          }
+        })
       }))
     } else if (kind === 'relay_inbound' && event.from && event.target && event.body) {
       const msg: ChatMessage = {

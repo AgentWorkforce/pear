@@ -3,16 +3,16 @@ import { useGitStore } from '@/stores/git-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 
 export function useGitStatus(): void {
-  const activeWorktree = useWorkspaceStore((s) => s.getActiveWorktree())
+  const activeWorktreePath = useWorkspaceStore((s) => s.getActiveWorktree()?.path ?? null)
   const startPolling = useGitStore((s) => s.startPolling)
   const stopPolling = useGitStore((s) => s.stopPolling)
 
   useEffect(() => {
-    if (activeWorktree) {
-      startPolling(activeWorktree.path)
+    if (activeWorktreePath) {
+      startPolling(activeWorktreePath)
     } else {
       stopPolling()
     }
     return () => stopPolling()
-  }, [activeWorktree?.path, startPolling, stopPolling])
+  }, [activeWorktreePath, startPolling, stopPolling])
 }

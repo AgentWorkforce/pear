@@ -1,5 +1,5 @@
 import type React from 'react'
-import { useMemo, useCallback } from 'react'
+import { useMemo, useCallback, useEffect } from 'react'
 import {
   ReactFlow,
   Background,
@@ -53,8 +53,16 @@ export function GraphView(): React.ReactNode {
     }))
   }, [relayMessages])
 
-  const [nodes, , onNodesChange] = useNodesState(initialNodes)
-  const [edges, , onEdgesChange] = useEdgesState(initialEdges)
+  const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
+  const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges)
+
+  useEffect(() => {
+    setNodes(initialNodes)
+  }, [initialNodes, setNodes])
+
+  useEffect(() => {
+    setEdges(initialEdges)
+  }, [initialEdges, setEdges])
 
   const setActiveAgent = useAgentStore((s) => s.setActiveAgent)
   const onNodeClick = useCallback(

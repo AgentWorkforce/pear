@@ -68,6 +68,7 @@ export function StatusBar(): React.ReactNode {
         onClick={toggleTheme}
         className="ml-1 rounded-md p-1 text-[var(--pear-text-faint)] hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text-dim)]"
         title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
+        aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
       >
         {theme === 'dark' ? <Sun size={12} /> : <Moon size={12} />}
       </button>

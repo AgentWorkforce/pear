@@ -17,6 +17,7 @@ export function WorkspaceSidebar(): React.ReactNode {
           onClick={() => openDialog('add-workspace')}
           className="rounded p-1 text-[var(--pear-text-faint)] hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text)]"
           title="Add workspace"
+          aria-label="Add workspace"
         >
           <Plus size={14} />
         </button>

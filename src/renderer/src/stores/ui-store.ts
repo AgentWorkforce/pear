@@ -27,7 +27,7 @@ const savedTheme = (typeof localStorage !== 'undefined'
   ? localStorage.getItem('pear-theme')
   : null) as Theme | null
 
-const initialTheme: Theme = savedTheme || 'light'
+const initialTheme: Theme = savedTheme || 'dark'
 
 // Apply on load
 if (typeof document !== 'undefined') {

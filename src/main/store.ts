@@ -1,5 +1,5 @@
 import { app } from 'electron'
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs'
+import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'fs'
 import { join } from 'path'
 
 export interface AgentInfo {
@@ -47,7 +47,10 @@ export function loadStore(): StoreData {
 }
 
 export function saveStore(data: StoreData): void {
-  writeFileSync(getStorePath(), JSON.stringify(data, null, 2))
+  const storePath = getStorePath()
+  const tmpPath = storePath + '.tmp'
+  writeFileSync(tmpPath, JSON.stringify(data, null, 2))
+  renameSync(tmpPath, storePath)
 }
 
 export function addWorkspace(name: string, rootPath: string): Workspace {

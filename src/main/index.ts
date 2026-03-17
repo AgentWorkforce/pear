@@ -3,7 +3,17 @@ import { join } from 'path'
 import { registerIpcHandlers } from './ipc-handlers'
 import { brokerManager } from './broker'
 
+app.setName('Pear')
+
 let mainWindow: BrowserWindow | null = null
+let shutdownPromise: Promise<void> | null = null
+
+function shutdownBrokerOnce(): Promise<void> {
+  if (!shutdownPromise) {
+    shutdownPromise = brokerManager.shutdown()
+  }
+  return shutdownPromise
+}
 
 function createWindow(): void {
   mainWindow = new BrowserWindow({
@@ -153,10 +163,10 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', async () => {
-  await brokerManager.shutdown()
+  await shutdownBrokerOnce()
   if (process.platform !== 'darwin') app.quit()
 })
 
 app.on('before-quit', async () => {
-  await brokerManager.shutdown()
+  await shutdownBrokerOnce()
 })

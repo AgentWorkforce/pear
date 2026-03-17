@@ -60,6 +60,7 @@ export function TerminalPane(): React.ReactNode {
                   }}
                   className="ml-1 rounded p-0.5 opacity-0 hover:bg-[var(--pear-bg-overlay)] group-hover:opacity-100"
                   title="Release agent"
+                  aria-label={`Release agent ${agent.name}`}
                 >
                   <X size={12} />
                 </button>
@@ -71,6 +72,7 @@ export function TerminalPane(): React.ReactNode {
           onClick={() => openDialog('spawn-agent')}
           className="px-2 py-1.5 text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
           title="Spawn agent"
+          aria-label="Spawn agent"
         >
           <Plus size={14} />
         </button>

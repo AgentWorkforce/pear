@@ -49,6 +49,7 @@ export function WorktreeItem({ worktree }: Props): React.ReactNode {
           }}
           className="rounded p-0.5 opacity-0 hover:bg-[var(--pear-border)] group-hover:opacity-100"
           title="Spawn agent"
+          aria-label="Spawn agent"
         >
           <BotMessageSquare size={12} />
         </button>
@@ -66,6 +67,7 @@ export function WorktreeItem({ worktree }: Props): React.ReactNode {
               }}
               className="ml-auto rounded p-0.5 opacity-0 hover:bg-[var(--pear-bg-overlay)] group-hover:opacity-100"
               title="Spawn agent"
+              aria-label="Spawn agent"
             >
               <BotMessageSquare size={12} />
             </button>
@@ -108,6 +110,7 @@ export function WorktreeItem({ worktree }: Props): React.ReactNode {
               }}
               className="ml-auto rounded p-0.5 opacity-0 hover:bg-[var(--pear-bg-overlay)] group-hover:opacity-100"
               title="Add channel"
+              aria-label="Add channel"
             >
               <Plus size={12} />
             </button>
@@ -135,6 +138,7 @@ export function WorktreeItem({ worktree }: Props): React.ReactNode {
                   }}
                   className="rounded p-0.5 text-[var(--pear-red)] opacity-0 hover:bg-[var(--pear-bg-overlay)] group-hover:opacity-100"
                   title="Remove channel"
+                  aria-label={`Remove channel ${ch}`}
                 >
                   <Trash2 size={10} />
                 </button>
