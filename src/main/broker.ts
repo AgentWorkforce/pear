@@ -1,3 +1,4 @@
+import { join } from 'path'
 import { BrowserWindow } from 'electron'
 import {
   AgentRelayClient,
@@ -7,6 +8,18 @@ import {
   type BrokerEvent,
   type ListAgent
 } from '@agent-relay/sdk'
+
+// Resolve the broker binary bundled inside @agent-relay/sdk.
+// The SDK normally resolves this via import.meta.url, but that breaks when
+// electron-vite bundles the SDK into the main process (import.meta.url points
+// to out/main/ instead of node_modules/).
+function resolveBundledBrokerBinary(): string {
+  const suffix = `${process.platform}-${process.arch}`
+  return join(
+    __dirname, '..', '..', 'node_modules', '@agent-relay', 'sdk', 'bin',
+    `agent-relay-broker-${suffix}`
+  )
+}
 
 export class BrokerManager {
   private client: AgentRelayClient | null = null
@@ -33,7 +46,8 @@ export class BrokerManager {
     try {
       const opts: AgentRelayClientOptions = {
         cwd,
-        brokerName: name
+        brokerName: name,
+        binaryPath: resolveBundledBrokerBinary()
       }
 
       console.log('[broker] Starting with opts:', JSON.stringify(opts))
@@ -77,6 +91,11 @@ export class BrokerManager {
   async sendInput(name: string, data: string): Promise<void> {
     await this.ensureStarted()
     await this.client!.sendInput(name, data)
+  }
+
+  async resizePty(name: string, rows: number, cols: number): Promise<void> {
+    await this.ensureStarted()
+    await this.client!.resizePty(name, rows, cols)
   }
 
   async sendMessage(input: SendMessageInput): Promise<void> {

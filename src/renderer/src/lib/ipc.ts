@@ -21,6 +21,7 @@ export interface PearAPI {
       cwd?: string
     }) => Promise<void>
     sendInput: (name: string, data: string) => Promise<void>
+    resizePty: (name: string, rows: number, cols: number) => Promise<void>
     sendMessage: (input: { to: string; text: string; from?: string }) => Promise<void>
     releaseAgent: (name: string) => Promise<void>
     listAgents: () => Promise<string[]>

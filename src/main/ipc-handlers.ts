@@ -80,6 +80,10 @@ export function registerIpcHandlers(): void {
     await brokerManager.sendInput(name, data)
   })
 
+  ipcMain.handle('broker:resize-pty', async (_, name: string, rows: number, cols: number) => {
+    await brokerManager.resizePty(name, rows, cols)
+  })
+
   ipcMain.handle('broker:send-message', async (_, input: SendMessageInput) => {
     await brokerManager.sendMessage(input)
   })

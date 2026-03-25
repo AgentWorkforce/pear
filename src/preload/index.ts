@@ -28,6 +28,8 @@ const api = {
       cwd?: string
     }) => ipcRenderer.invoke('broker:spawn-agent', input),
     sendInput: (name: string, data: string) => ipcRenderer.invoke('broker:send-input', name, data),
+    resizePty: (name: string, rows: number, cols: number) =>
+      ipcRenderer.invoke('broker:resize-pty', name, rows, cols),
     sendMessage: (input: { to: string; text: string; from?: string }) =>
       ipcRenderer.invoke('broker:send-message', input),
     releaseAgent: (name: string) => ipcRenderer.invoke('broker:release-agent', name),

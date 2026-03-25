@@ -99,19 +99,31 @@ export function useTerminal(
       if (agentName) pear.broker.sendInput(agentName, data)
     })
 
-    // Focus the terminal so it receives keyboard input
-    term.focus()
+    // Focus the terminal after the browser has finished layout so the
+    // xterm textarea is reachable (Allotment may still be sizing panes
+    // when this effect first runs).
+    requestAnimationFrame(() => term.focus())
 
     termRef.current = term
     fitAddonRef.current = fitAddon
 
-    const resizeObserver = new ResizeObserver(() => {
+    // Sync local xterm size with the broker-side PTY on every resize
+    const syncSize = (): void => {
       try {
         fitAddon.fit()
+        const { rows, cols } = term
+        if (rows > 0 && cols > 0) {
+          pear.broker.resizePty(agentName!, rows, cols)
+        }
       } catch {
-        // ignore
+        // ignore — container may not have dimensions yet
       }
-    })
+    }
+
+    // Send initial size to the broker
+    syncSize()
+
+    const resizeObserver = new ResizeObserver(syncSize)
     resizeObserver.observe(containerRef.current)
 
     return () => {
@@ -147,19 +159,21 @@ export function useTerminal(
     return unsub
   }, [agentName])
 
-  // Refit and refocus when visibility changes
+  // Refit, resize PTY, and refocus when visibility changes
   useEffect(() => {
-    if (visible) {
-      if (fitAddonRef.current) {
-        try {
-          fitAddonRef.current.fit()
-        } catch {
-          // ignore
+    if (visible && termRef.current && fitAddonRef.current) {
+      try {
+        fitAddonRef.current.fit()
+        const { rows, cols } = termRef.current
+        if (rows > 0 && cols > 0 && agentName) {
+          pear.broker.resizePty(agentName, rows, cols)
         }
+      } catch {
+        // ignore
       }
-      termRef.current?.focus()
+      requestAnimationFrame(() => termRef.current?.focus())
     }
-  }, [visible])
+  }, [visible, agentName])
 
   return termRef.current
 }
