@@ -1,13 +1,14 @@
 import type React from 'react'
 import { Settings } from 'lucide-react'
+import { ClaudeIcon, CodexIcon, CopilotIcon, GeminiIcon, OpenCodeIcon } from '@/components/common/AgentIcons'
 import { useUIStore } from '@/stores/ui-store'
 
 const AGENTS = [
-  { cli: 'claude', label: 'claude', icon: '✳️' },
-  { cli: 'codex', label: 'codex', icon: '§' },
-  { cli: 'copilot', label: 'copilot', icon: '🤖' },
-  { cli: 'opencode', label: 'opencode', icon: '▪' },
-  { cli: 'gemini', label: 'gemini', icon: '✦' }
+  { cli: 'claude', label: 'claude', Icon: ClaudeIcon },
+  { cli: 'codex', label: 'codex', Icon: CodexIcon },
+  { cli: 'copilot', label: 'copilot', Icon: CopilotIcon },
+  { cli: 'opencode', label: 'opencode', Icon: OpenCodeIcon },
+  { cli: 'gemini', label: 'gemini', Icon: GeminiIcon }
 ]
 
 export function AgentToolbar(): React.ReactNode {
@@ -29,10 +30,10 @@ export function AgentToolbar(): React.ReactNode {
         <button
           key={agent.cli}
           onClick={() => openDialog('spawn-agent')}
-          className="flex items-center gap-1.5 rounded px-2.5 py-1 text-xs text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text)]"
+          className="flex items-center gap-2.5 rounded px-3 py-1.5 text-sm font-medium tracking-[0.01em] text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text)]"
           title={`Spawn ${agent.label} agent`}
         >
-          <span className="text-sm">{agent.icon}</span>
+          <agent.Icon className="h-4.5 w-4.5 shrink-0" />
           <span>{agent.label}</span>
         </button>
       ))}
