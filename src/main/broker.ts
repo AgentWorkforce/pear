@@ -2,13 +2,13 @@ import { basename, join } from 'path'
 import { BrowserWindow } from 'electron'
 import {
   AgentRelayClient,
+  RelayCast,
   type AgentRelaySpawnOptions,
   type SpawnPtyInput,
   type SendMessageInput,
   type BrokerEvent,
   type ListAgent
 } from '@agent-relay/sdk'
-import { RelayCast } from '@relaycast/sdk'
 import { getAccessToken, getApiUrl } from './auth'
 
 const RELAY_CHAT_BOOTSTRAP_TASK =
