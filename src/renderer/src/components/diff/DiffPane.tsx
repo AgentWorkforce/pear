@@ -17,7 +17,7 @@ export function DiffPane(): React.ReactNode {
 
   if (!worktree) {
     return (
-      <div className="flex h-full items-center justify-center border-l border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)]">
+      <div className="flex h-full items-center justify-center border-l border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-8">
         <p className="text-sm text-[var(--pear-text-faint)]">Select a worktree to see changes</p>
       </div>
     )
@@ -25,8 +25,8 @@ export function DiffPane(): React.ReactNode {
 
   return (
     <div className="flex h-full flex-col border-l border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)]">
-      <div className="shrink-0 border-b border-[var(--pear-border-subtle)] px-2">
-        <div className="flex items-center gap-1">
+      <div className="shrink-0 border-b border-[var(--pear-border-subtle)] px-3 py-1">
+        <div className="flex items-center gap-1.5">
           {(['changes', 'files'] as const).map((tab) => {
             const isActive = activeTab === tab
             return (
@@ -34,7 +34,7 @@ export function DiffPane(): React.ReactNode {
                 key={tab}
                 type="button"
                 onClick={() => setActiveTab(tab)}
-                className={`border-b px-3 py-3 text-sm transition-colors ${
+                className={`rounded-t-lg border-b px-4 py-3.5 text-sm transition-colors ${
                   isActive
                     ? 'border-[var(--pear-text)] text-[var(--pear-text)]'
                     : 'border-transparent text-[var(--pear-text-faint)] hover:text-[var(--pear-text-secondary)]'
@@ -49,17 +49,17 @@ export function DiffPane(): React.ReactNode {
 
       {activeTab === 'changes' ? (
         <div className="flex min-h-0 flex-1 flex-col">
-          <div className="shrink-0 border-b border-[var(--pear-border-subtle)] p-3">
+          <div className="shrink-0 border-b border-[var(--pear-border-subtle)] p-4">
             <textarea
               disabled
               rows={2}
               placeholder="Commit message"
-              className="mb-2 w-full resize-none rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 py-2 text-sm text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] disabled:cursor-not-allowed disabled:opacity-100"
+              className="mb-3 w-full resize-none rounded-xl border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-4 py-3 text-sm text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] disabled:cursor-not-allowed disabled:opacity-100"
             />
             <button
               type="button"
               disabled
-              className="w-full rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 py-2 text-sm text-[var(--pear-text-faint)]"
+              className="w-full rounded-xl border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-4 py-3 text-sm text-[var(--pear-text-faint)]"
             >
               Commit
             </button>

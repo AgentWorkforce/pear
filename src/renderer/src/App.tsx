@@ -12,7 +12,6 @@ import { AddWorktreeDialog } from '@/components/sidebar/AddWorktreeDialog'
 import { SpawnAgentDialog } from '@/components/sidebar/SpawnAgentDialog'
 import { AgentToolbar } from '@/components/common/AgentToolbar'
 import { useWorkspaceStore } from '@/stores/workspace-store'
-import pearLogo from '@/assets/pear-logo.svg'
 import { useUIStore } from '@/stores/ui-store'
 import { useBrokerEvents } from '@/hooks/use-broker-events'
 import { useGitStatus } from '@/hooks/use-git-status'
@@ -31,26 +30,16 @@ export default function App(): React.ReactNode {
 
   return (
     <div className="relative flex h-full flex-col">
-      {/* Relay logo — top right corner */}
-      <div className="absolute right-4 top-[10px] z-10 flex items-center gap-1.5">
-        <span className="text-[13px] font-semibold text-[var(--pear-text-dim)]">Relay</span>
-        <img src={pearLogo} alt="Pear" className="h-5 w-5" />
-      </div>
-
       <div className="flex min-h-0 flex-1">
-        {/* Sidebar — spans full height so logo sits beside traffic lights */}
-        <div className="h-full w-[200px] min-w-[160px] max-w-[320px] shrink-0">
+        <div className="h-full w-[232px] min-w-[188px] max-w-[340px] shrink-0">
           <WorkspaceSidebar />
         </div>
 
-        {/* Right side: titlebar + main content stacked */}
         <div className="flex min-w-0 flex-1 flex-col">
-          {/* Title bar drag area — only over main content */}
           <div className="titlebar-drag h-[40px] shrink-0" />
 
           <AgentToolbar />
 
-          {/* Main content */}
           <div className="min-h-0 flex-1">
             <Allotment>
               <Allotment.Pane>
@@ -69,7 +58,6 @@ export default function App(): React.ReactNode {
 
       <StatusBar />
 
-      {/* Dialogs */}
       {activeDialog === 'add-workspace' && <AddWorkspaceDialog />}
       {activeDialog === 'add-worktree' && <AddWorktreeDialog />}
       {activeDialog === 'spawn-agent' && <SpawnAgentDialog />}

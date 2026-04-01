@@ -7,53 +7,57 @@ import { useAgentStore } from '@/stores/agent-store'
 import { useUIStore, type Theme } from '@/stores/ui-store'
 
 const DARK_THEME = {
-  background: '#161a12',
-  foreground: '#d4d4c8',
-  cursor: '#8cb369',
-  selectionBackground: '#3a3e32',
-  black: '#2a2e22',
-  red: '#c45c5c',
-  green: '#8cb369',
-  yellow: '#d4a843',
-  blue: '#6b9fc4',
-  magenta: '#9b85b5',
-  cyan: '#6bab9a',
-  white: '#d4d4c8',
-  brightBlack: '#5c5c52',
-  brightRed: '#d47070',
-  brightGreen: '#a3c585',
-  brightYellow: '#e0bc5e',
-  brightBlue: '#85b5d4',
-  brightMagenta: '#b09fc9',
-  brightCyan: '#85c4b3',
-  brightWhite: '#e8e8dc'
+  background: '#0b1017',
+  foreground: '#d7e0ea',
+  cursor: '#74b8e2',
+  selectionBackground: '#203247',
+  black: '#121a24',
+  red: '#f0727f',
+  green: '#6bd4bc',
+  yellow: '#e6d78d',
+  blue: '#74b8e2',
+  magenta: '#c9a7ff',
+  cyan: '#04d1f6',
+  white: '#d7e0ea',
+  brightBlack: '#64707d',
+  brightRed: '#ff8a96',
+  brightGreen: '#89e4cb',
+  brightYellow: '#f1e5a7',
+  brightBlue: '#94cbef',
+  brightMagenta: '#dcc6ff',
+  brightCyan: '#6fe7ff',
+  brightWhite: '#edf4fb'
 }
 
 const LIGHT_THEME = {
-  background: '#f5f4f0',
-  foreground: '#2a2e22',
-  cursor: '#5a8a3c',
-  selectionBackground: '#d0e8c0',
-  black: '#2a2e22',
-  red: '#c04040',
-  green: '#5a8a3c',
-  yellow: '#b08920',
-  blue: '#3a7fa8',
-  magenta: '#7a60a0',
-  cyan: '#3a8a78',
-  white: '#f5f4f0',
-  brightBlack: '#6a7060',
-  brightRed: '#d05050',
-  brightGreen: '#6ea04a',
-  brightYellow: '#c09830',
-  brightBlue: '#4a90b8',
-  brightMagenta: '#8a70b0',
-  brightCyan: '#4a9a88',
+  background: '#f7fafc',
+  foreground: '#111827',
+  cursor: '#4a90c2',
+  selectionBackground: '#d7e7f4',
+  black: '#111827',
+  red: '#d95b63',
+  green: '#2e9f92',
+  yellow: '#c89934',
+  blue: '#4a90c2',
+  magenta: '#8b72d8',
+  cyan: '#2e9f92',
+  white: '#f7fafc',
+  brightBlack: '#6b7280',
+  brightRed: '#ea717a',
+  brightGreen: '#4fb4a7',
+  brightYellow: '#d8ac4f',
+  brightBlue: '#6aa7d2',
+  brightMagenta: '#a28ae7',
+  brightCyan: '#4fbab0',
   brightWhite: '#ffffff'
 }
 
 function getXtermTheme(theme: Theme): typeof DARK_THEME {
   return theme === 'light' ? LIGHT_THEME : DARK_THEME
+}
+
+function hasLayout(el: HTMLElement): boolean {
+  return el.clientWidth > 0 && el.clientHeight > 0
 }
 
 export function useTerminal(
@@ -69,111 +73,177 @@ export function useTerminal(
   useEffect(() => {
     if (!containerRef.current || !agentName) return
 
-    const term = new Terminal({
-      theme: getXtermTheme(theme),
-      fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, monospace",
-      fontSize: 13,
-      lineHeight: 1.3,
-      cursorBlink: true,
-      allowProposedApi: true
-    })
+    const container = containerRef.current
+    let unsubStore: (() => void) | null = null
+    let term: Terminal | null = null
+    let fitAddon: FitAddon | null = null
+    let resizeObserver: ResizeObserver | null = null
+    let disposed = false
+    let cleanupBounce: (() => void) | null = null
 
-    const fitAddon = new FitAddon()
-    term.loadAddon(fitAddon)
-    term.loadAddon(new WebLinksAddon())
-    term.open(containerRef.current)
-
-    try {
-      fitAddon.fit()
-    } catch {
-      // Container may not have dimensions yet
+    const focusTerminal = (): void => {
+      if (!term) return
+      requestAnimationFrame(() => {
+        if (!disposed) {
+          term?.focus()
+        }
+      })
     }
 
-    const buffer = useAgentStore.getState().getAgentBuffer(agentName)
-    for (const chunk of buffer) {
-      term.write(chunk)
-    }
-    writtenChunksRef.current = buffer.length
-
-    term.onData((data) => {
-      if (agentName) pear.broker.sendInput(agentName, data)
-    })
-
-    // Focus the terminal after the browser has finished layout so the
-    // xterm textarea is reachable (Allotment may still be sizing panes
-    // when this effect first runs).
-    requestAnimationFrame(() => term.focus())
-
-    termRef.current = term
-    fitAddonRef.current = fitAddon
-
-    // Sync local xterm size with the broker-side PTY on every resize
-    const syncSize = (): void => {
+    const safeFitAndSync = (): void => {
+      if (!term || !fitAddon || !hasLayout(container)) return
       try {
         fitAddon.fit()
-        const { rows, cols } = term
-        if (rows > 0 && cols > 0) {
-          pear.broker.resizePty(agentName!, rows, cols)
-        }
       } catch {
-        // ignore — container may not have dimensions yet
+        return
+      }
+      const { rows, cols } = term
+      if (rows > 0 && cols > 0) {
+        pear.broker.resizePty(agentName!, rows, cols)
       }
     }
 
-    // Send initial size to the broker
-    syncSize()
+    const init = (): void => {
+      if (disposed) return
+      if (!hasLayout(container)) {
+        requestAnimationFrame(init)
+        return
+      }
 
-    const resizeObserver = new ResizeObserver(syncSize)
-    resizeObserver.observe(containerRef.current)
+      term = new Terminal({
+        theme: getXtermTheme(theme),
+        fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, monospace",
+        fontSize: 13,
+        lineHeight: 1.3,
+        cursorBlink: true,
+        allowProposedApi: true
+      })
+
+      fitAddon = new FitAddon()
+      term.loadAddon(fitAddon)
+      term.loadAddon(new WebLinksAddon())
+
+      // Forward keystrokes + terminal protocol responses to PTY
+      term.onData((data) => {
+        pear.broker.sendInput(agentName!, data).catch((err) => {
+          console.error('[terminal] sendInput failed:', err)
+        })
+      })
+
+      term.open(container)
+      safeFitAndSync()
+
+      // Replay buffered output then subscribe for new chunks
+      const buffer = useAgentStore.getState().getAgentBuffer(agentName!)
+      for (const chunk of buffer) {
+        term.write(chunk)
+      }
+      writtenChunksRef.current = buffer.length
+
+      const t = term
+      unsubStore = useAgentStore.subscribe((state) => {
+        const agent = state.agents.find((a) => a.name === agentName)
+        if (!agent) return
+        const newChunks = agent.ptyBuffer.slice(writtenChunksRef.current)
+        if (newChunks.length > 0) {
+          for (const chunk of newChunks) {
+            t.write(chunk)
+          }
+          writtenChunksRef.current = agent.ptyBuffer.length
+        }
+      })
+
+      termRef.current = term
+      fitAddonRef.current = fitAddon
+
+      focusTerminal()
+
+      // Spawn dialogs and pane layout updates can steal focus immediately after
+      // mount. Retry a few times so the xterm textarea reliably becomes active.
+      const focusTimers = [0, 50, 150, 300].map((delay) =>
+        setTimeout(() => focusTerminal(), delay)
+      )
+
+      resizeObserver = new ResizeObserver(() => safeFitAndSync())
+      resizeObserver.observe(container)
+
+      // The PTY starts at a default size before the terminal connects.
+      // Bounce the size to force a SIGWINCH so the running process redraws
+      // at the correct dimensions.
+      const bounceTimer = setTimeout(() => {
+        if (!term || !fitAddon || !hasLayout(container)) return
+        try {
+          fitAddon.fit()
+        } catch {
+          return
+        }
+        const { rows, cols } = term
+        if (rows > 1 && cols > 0) {
+          pear.broker.resizePty(agentName!, rows - 1, cols).then(() => {
+            pear.broker.resizePty(agentName!, rows, cols)
+          }).catch(() => {})
+        }
+      }, 200)
+      cleanupBounce = () => {
+        clearTimeout(bounceTimer)
+        for (const timer of focusTimers) {
+          clearTimeout(timer)
+        }
+      }
+    }
+
+    requestAnimationFrame(init)
+
+    // Click-to-focus
+    const handleMouseDown = (): void => {
+      focusTerminal()
+    }
+    container.addEventListener('mousedown', handleMouseDown)
 
     return () => {
-      resizeObserver.disconnect()
-      term.dispose()
+      disposed = true
+      cleanupBounce?.()
+      unsubStore?.()
+      container.removeEventListener('mousedown', handleMouseDown)
+      resizeObserver?.disconnect()
+      term?.dispose()
       termRef.current = null
       fitAddonRef.current = null
       writtenChunksRef.current = 0
     }
   }, [containerRef, agentName])
 
-  // Update xterm theme when app theme changes
   useEffect(() => {
     if (termRef.current) {
       termRef.current.options.theme = getXtermTheme(theme)
     }
   }, [theme])
 
-  // Subscribe to new PTY output
   useEffect(() => {
-    if (!agentName || !termRef.current) return
-
-    const unsub = useAgentStore.subscribe((state) => {
-      const agent = state.agents.find((a) => a.name === agentName)
-      if (!agent) return
-      const newChunks = agent.ptyBuffer.slice(writtenChunksRef.current)
-      for (const chunk of newChunks) {
-        termRef.current?.write(chunk)
+    if (!visible || !termRef.current || !fitAddonRef.current) return
+    const container = containerRef.current
+    if (!container || !hasLayout(container)) return
+    try {
+      fitAddonRef.current.fit()
+      const { rows, cols } = termRef.current
+      if (rows > 0 && cols > 0 && agentName) {
+        pear.broker.resizePty(agentName, rows, cols)
       }
-      writtenChunksRef.current = agent.ptyBuffer.length
-    })
-
-    return unsub
-  }, [agentName])
-
-  // Refit, resize PTY, and refocus when visibility changes
-  useEffect(() => {
-    if (visible && termRef.current && fitAddonRef.current) {
-      try {
-        fitAddonRef.current.fit()
-        const { rows, cols } = termRef.current
-        if (rows > 0 && cols > 0 && agentName) {
-          pear.broker.resizePty(agentName, rows, cols)
-        }
-      } catch {
-        // ignore
-      }
-      requestAnimationFrame(() => termRef.current?.focus())
+    } catch {
+      // ignore
     }
+    const timer = setTimeout(() => termRef.current?.focus(), 50)
+    return () => clearTimeout(timer)
   }, [visible, agentName])
+
+  useEffect(() => {
+    if (!visible) return
+    const handleWindowFocus = (): void => {
+      setTimeout(() => termRef.current?.focus(), 50)
+    }
+    window.addEventListener('focus', handleWindowFocus)
+    return () => window.removeEventListener('focus', handleWindowFocus)
+  }, [visible])
 
   return termRef.current
 }

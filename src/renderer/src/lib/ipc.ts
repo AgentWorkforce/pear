@@ -12,6 +12,7 @@ export interface PearAPI {
   }
   broker: {
     start: (cwd: string, name: string) => Promise<void>
+    connectCloud: () => Promise<string>
     spawnAgent: (input: {
       name: string
       cli: string
@@ -46,6 +47,11 @@ export interface PearAPI {
       content: string
       size: number
     }>
+  }
+  auth: {
+    login: () => Promise<{ loggedIn: boolean; apiUrl?: string; user?: { name?: string; email?: string; organizationName?: string; workspaceName?: string } }>
+    logout: () => Promise<void>
+    status: () => Promise<{ loggedIn: boolean; apiUrl?: string; user?: { name?: string; email?: string; organizationName?: string; workspaceName?: string } }>
   }
   onMenu: (channel: string, callback: (...args: unknown[]) => void) => () => void
 }

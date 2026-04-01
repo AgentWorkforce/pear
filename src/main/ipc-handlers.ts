@@ -13,6 +13,7 @@ import {
 import { brokerManager } from './broker'
 import * as git from './git'
 import * as filesystem from './filesystem'
+import * as auth from './auth'
 
 function assertPathWithinWorkspaces(targetPath: string): void {
   const resolved = resolve(targetPath)
@@ -74,6 +75,12 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('broker:spawn-agent', async (_, input: SpawnPtyInput) => {
     return brokerManager.spawnAgent(input)
+  })
+
+  ipcMain.handle('broker:connect-cloud', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) throw new Error('No window')
+    return brokerManager.connectCloud(win)
   })
 
   ipcMain.handle('broker:send-input', async (_, name: string, data: string) => {
@@ -141,5 +148,18 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('fs:read-preview', async (_, filePath: string) => {
     assertPathWithinWorkspaces(filePath)
     return filesystem.readTextPreview(filePath)
+  })
+
+  // --- Auth ---
+  ipcMain.handle('auth:login', async () => {
+    return auth.login()
+  })
+
+  ipcMain.handle('auth:logout', () => {
+    auth.logout()
+  })
+
+  ipcMain.handle('auth:status', () => {
+    return auth.getAuthStatus()
   })
 }

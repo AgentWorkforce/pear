@@ -5,7 +5,12 @@ import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin({ exclude: ['@agent-relay/sdk'] })]
+    plugins: [externalizeDepsPlugin({ exclude: ['@agent-relay/sdk'] })],
+    build: {
+      rollupOptions: {
+        external: ['ws']
+      }
+    }
   },
   preload: {
     plugins: [externalizeDepsPlugin()]

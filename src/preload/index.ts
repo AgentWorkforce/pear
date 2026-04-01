@@ -19,6 +19,7 @@ const api = {
   },
   broker: {
     start: (cwd: string, name: string) => ipcRenderer.invoke('broker:start', cwd, name),
+    connectCloud: () => ipcRenderer.invoke('broker:connect-cloud') as Promise<string>,
     spawnAgent: (input: {
       name: string
       cli: string
@@ -60,6 +61,11 @@ const api = {
   fs: {
     listDir: (dirPath: string) => ipcRenderer.invoke('fs:list-dir', dirPath),
     readPreview: (filePath: string) => ipcRenderer.invoke('fs:read-preview', filePath)
+  },
+  auth: {
+    login: () => ipcRenderer.invoke('auth:login') as Promise<{ loggedIn: boolean; apiUrl?: string }>,
+    logout: () => ipcRenderer.invoke('auth:logout'),
+    status: () => ipcRenderer.invoke('auth:status') as Promise<{ loggedIn: boolean; apiUrl?: string }>
   },
   onMenu: (channel: string, callback: (...args: unknown[]) => void) => {
     const handler = (_: unknown, ...args: unknown[]): void => callback(...args)

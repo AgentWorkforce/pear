@@ -1,5 +1,5 @@
 import type React from 'react'
-import { X, Plus, Terminal as TermIcon } from 'lucide-react'
+import { X, Plus } from 'lucide-react'
 import { useAgentStore } from '@/stores/agent-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 import { useUIStore } from '@/stores/ui-store'
@@ -18,7 +18,7 @@ export function TerminalPane(): React.ReactNode {
 
   if (agents.length === 0) {
     return (
-      <div className="flex h-full flex-col items-center justify-center bg-[var(--pear-bg)] text-[var(--pear-text-faint)]">
+      <div className="flex h-full flex-col items-center justify-center bg-[var(--pear-bg)] px-8 text-[var(--pear-text-faint)]">
         <p className="text-sm text-[var(--pear-text-dim)]">No agents running</p>
         <button
           onClick={() => openDialog('spawn-agent')}
@@ -33,15 +33,19 @@ export function TerminalPane(): React.ReactNode {
   return (
     <div className="flex h-full flex-col bg-[var(--pear-bg)]">
       {/* Tab bar */}
-      <div className="flex shrink-0 items-center gap-0 border-b border-[var(--pear-bg-surface)] bg-[var(--pear-bg-raised)]">
+      <div className="flex shrink-0 items-center gap-0 border-b border-[var(--pear-bg-surface)] bg-[var(--pear-bg-raised)] px-1.5 py-1">
         <div className="flex flex-1 overflow-x-auto">
           {agents.map((agent) => (
-            <button
+            <div
               key={agent.name}
+              role="tab"
+              tabIndex={0}
+              aria-selected={activeAgentName === agent.name}
               onClick={() => setActiveAgent(agent.name)}
-              className={`group flex items-center gap-2 border-r border-[var(--pear-bg-surface)] px-4 py-2.5 text-sm transition-colors ${
+              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActiveAgent(agent.name) } }}
+              className={`group my-1 flex cursor-pointer items-center gap-2.5 rounded-xl border border-transparent px-4 py-3 text-sm transition-colors ${
                 activeAgentName === agent.name
-                  ? 'bg-[var(--pear-bg)] text-[var(--pear-text)]'
+                  ? 'bg-[var(--pear-bg)] text-[var(--pear-text)] shadow-sm'
                   : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)]'
               }`}
             >
@@ -58,19 +62,19 @@ export function TerminalPane(): React.ReactNode {
                     e.stopPropagation()
                     pear.broker.releaseAgent(agent.name)
                   }}
-                  className="ml-1 rounded p-0.5 opacity-0 hover:bg-[var(--pear-bg-overlay)] group-hover:opacity-100"
+                  className="ml-1 rounded-md p-1 opacity-0 hover:bg-[var(--pear-bg-overlay)] group-hover:opacity-100"
                   title="Release agent"
                   aria-label={`Release agent ${agent.name}`}
                 >
                   <X size={12} />
                 </button>
               )}
-            </button>
+            </div>
           ))}
         </div>
         <button
           onClick={() => openDialog('spawn-agent')}
-          className="px-2 py-1.5 text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
+          className="rounded-xl px-3 py-2 text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
           title="Spawn agent"
           aria-label="Spawn agent"
         >

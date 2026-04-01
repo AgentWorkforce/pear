@@ -15,22 +15,22 @@ export function AgentToolbar(): React.ReactNode {
   const openDialog = useUIStore((s) => s.openDialog)
 
   return (
-    <div className="flex shrink-0 items-center gap-1 border-b border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-3 py-1.5">
+    <div className="flex shrink-0 items-center gap-2 border-b border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-4 py-2.5">
       <button
-        className="rounded p-1.5 text-[var(--pear-text-faint)] hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text)]"
+        className="rounded-lg p-2 text-[var(--pear-text-faint)] hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text)]"
         title="Settings"
         aria-label="Agent settings"
       >
         <Settings size={14} />
       </button>
 
-      <div className="mx-1 h-4 w-px bg-[var(--pear-border-subtle)]" />
+      <div className="mx-1 h-5 w-px bg-[var(--pear-border-subtle)]" />
 
       {AGENTS.map((agent) => (
         <button
           key={agent.cli}
           onClick={() => openDialog('spawn-agent')}
-          className="flex items-center gap-2.5 rounded px-3 py-1.5 text-sm font-medium tracking-[0.01em] text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text)]"
+          className="flex items-center gap-2.5 rounded-xl px-4 py-2 text-sm font-medium tracking-[0.01em] text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text)]"
           title={`Spawn ${agent.label} agent`}
         >
           <agent.Icon className="h-4.5 w-4.5 shrink-0" />

@@ -26,7 +26,7 @@ export function WorkspaceItem({ workspace, isActive }: Props): React.ReactNode {
   return (
     <div>
       <div
-        className={`group flex cursor-pointer items-center gap-2 rounded-md px-2 py-2 text-sm transition-colors ${
+        className={`group flex cursor-pointer items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm transition-colors ${
           isActive
             ? 'bg-[var(--pear-bg-surface)] text-[var(--pear-text)]'
             : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)]/50'
@@ -42,7 +42,7 @@ export function WorkspaceItem({ workspace, isActive }: Props): React.ReactNode {
               e.stopPropagation()
               openDialog('add-worktree')
             }}
-            className="rounded p-0.5 hover:bg-[var(--pear-bg-overlay)]"
+            className="rounded-md p-1 hover:bg-[var(--pear-bg-overlay)]"
             title="Add worktree"
             aria-label="Add worktree"
           >
@@ -55,7 +55,7 @@ export function WorkspaceItem({ workspace, isActive }: Props): React.ReactNode {
                 removeWorkspace(workspace.id)
               }
             }}
-            className="rounded p-0.5 text-[var(--pear-red)] hover:bg-[var(--pear-bg-overlay)]"
+            className="rounded-md p-1 text-[var(--pear-red)] hover:bg-[var(--pear-bg-overlay)]"
             title="Remove workspace"
             aria-label="Remove workspace"
           >
@@ -65,9 +65,9 @@ export function WorkspaceItem({ workspace, isActive }: Props): React.ReactNode {
       </div>
 
       {expanded && (
-        <div className="ml-4">
+        <div className="ml-5 mt-1.5 space-y-0.5">
           {workspace.worktrees.length === 0 ? (
-            <div className="px-2 py-2 text-xs text-[var(--pear-text-faint)]">No worktrees</div>
+            <div className="px-3 py-2 text-xs text-[var(--pear-text-faint)]">No worktrees</div>
           ) : (
             workspace.worktrees.map((wt) => <WorktreeItem key={wt.id} worktree={wt} />)
           )}

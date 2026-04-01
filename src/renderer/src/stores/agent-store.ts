@@ -26,7 +26,14 @@ export interface RelayMessage {
   timestamp: number
 }
 
+export interface BrokerErrorEntry {
+  id: string
+  message: string
+  timestamp: number
+}
+
 const MAX_PTY_BUFFER_CHUNKS = 10_000
+const MAX_BROKER_ERRORS = 12
 
 // Matches the real BrokerEvent discriminated union from @agent-relay/sdk
 interface BrokerEvent {
@@ -53,6 +60,7 @@ interface AgentState {
   relayMessages: RelayMessage[]
   brokerStatus: 'disconnected' | 'connected' | 'error'
   brokerError: string | null
+  brokerErrors: BrokerErrorEntry[]
 
   setActiveAgent: (name: string | null) => void
   trackSpawnedAgent: (name: string, worktreeId: string) => void
@@ -70,6 +78,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   relayMessages: [],
   brokerStatus: 'disconnected',
   brokerError: null,
+  brokerErrors: [],
 
   setActiveAgent: (name) => set({ activeAgentName: name }),
 
@@ -146,9 +155,28 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   },
 
   handleBrokerStatus: (status) => {
-    set({
-      brokerStatus: status.status as 'connected' | 'disconnected' | 'error',
-      brokerError: status.error || null
+    set((state) => {
+      const nextStatus = status.status as 'connected' | 'disconnected' | 'error'
+      const nextError = status.error || null
+      const shouldRecord =
+        nextStatus === 'error' &&
+        !!nextError &&
+        (state.brokerStatus !== 'error' || state.brokerErrors[0]?.message !== nextError)
+
+      return {
+        brokerStatus: nextStatus,
+        brokerError: nextError,
+        brokerErrors: shouldRecord
+          ? [
+              {
+                id: crypto.randomUUID(),
+                message: nextError,
+                timestamp: Date.now()
+              },
+              ...state.brokerErrors
+            ].slice(0, MAX_BROKER_ERRORS)
+          : state.brokerErrors
+      }
     })
   },
 
@@ -171,7 +199,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       messages: [],
       relayMessages: [],
       brokerStatus: 'disconnected',
-      brokerError: null
+      brokerError: null,
+      brokerErrors: []
     }),
 
   getAgentBuffer: (name) => {

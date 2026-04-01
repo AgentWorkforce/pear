@@ -29,7 +29,7 @@ export function ChatView(): React.ReactNode {
   return (
     <div className="flex h-full flex-col bg-[var(--pear-bg)]">
       {/* Header */}
-      <div className="shrink-0 border-b border-[var(--pear-bg-surface)] bg-[var(--pear-bg-raised)] px-5 py-3">
+      <div className="shrink-0 border-b border-[var(--pear-bg-surface)] bg-[var(--pear-bg-raised)] px-6 py-4">
         {activeChannelName ? (
           <span className="flex items-center gap-1.5 text-sm font-medium text-[var(--pear-text-secondary)]">
             <Hash size={14} />
@@ -44,13 +44,13 @@ export function ChatView(): React.ReactNode {
       </div>
 
       {/* Messages */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-4">
+      <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-6">
         {messages.length === 0 ? (
           <div className="flex h-full items-center justify-center text-sm text-[var(--pear-text-faint)]">
             No messages yet. Agent messages will appear here.
           </div>
         ) : (
-          <div className="space-y-3">
+          <div className="space-y-4">
             {messages.map((msg) => (
               <ChatMessage key={msg.id} message={msg} />
             ))}

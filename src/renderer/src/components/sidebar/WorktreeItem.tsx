@@ -26,7 +26,7 @@ export function WorktreeItem({ worktree }: Props): React.ReactNode {
   return (
     <div>
       <div
-        className={`group flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm transition-colors ${
+        className={`group flex cursor-pointer items-center gap-2 rounded-xl px-3 py-2 text-sm transition-colors ${
           isActive
             ? 'bg-[var(--pear-bg-overlay)] text-[var(--pear-text)]'
             : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)]'
@@ -47,7 +47,7 @@ export function WorktreeItem({ worktree }: Props): React.ReactNode {
             setActiveWorktree(worktree.id)
             openDialog('spawn-agent')
           }}
-          className="rounded p-0.5 opacity-0 hover:bg-[var(--pear-border)] group-hover:opacity-100"
+          className="rounded-md p-1 opacity-0 hover:bg-[var(--pear-border)] group-hover:opacity-100"
           title="Spawn agent"
           aria-label="Spawn agent"
         >
@@ -56,16 +56,16 @@ export function WorktreeItem({ worktree }: Props): React.ReactNode {
       </div>
 
       {isActive && (
-        <div className="ml-4 mt-1">
+        <div className="ml-5 mt-2.5">
           {/* Agents */}
-          <div className="group flex items-center gap-1 px-2 py-1">
+          <div className="group flex items-center gap-1 px-3 py-1.5">
             <span className="text-xs font-medium text-[var(--pear-text-faint)]">Agents</span>
             <button
               onClick={(e) => {
                 e.stopPropagation()
                 openDialog('spawn-agent')
               }}
-              className="ml-auto rounded p-0.5 opacity-0 hover:bg-[var(--pear-bg-overlay)] group-hover:opacity-100"
+              className="ml-auto rounded-md p-1 opacity-0 hover:bg-[var(--pear-bg-overlay)] group-hover:opacity-100"
               title="Spawn agent"
               aria-label="Spawn agent"
             >
@@ -73,12 +73,12 @@ export function WorktreeItem({ worktree }: Props): React.ReactNode {
             </button>
           </div>
           {agents.length === 0 ? (
-            <div className="px-2 py-1 text-xs text-[var(--pear-text-faint)]">No agents</div>
+            <div className="px-3 py-2 text-xs text-[var(--pear-text-faint)]">No agents</div>
           ) : (
             agents.map((agent) => (
               <div
                 key={agent.name}
-                className={`group flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-sm transition-colors ${
+                className={`group flex cursor-pointer items-center gap-2 rounded-xl px-3 py-1.5 text-sm transition-colors ${
                   activeAgentName === agent.name
                     ? 'bg-[var(--pear-bg-surface)] text-[var(--pear-text)]'
                     : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)]/50'
@@ -100,7 +100,7 @@ export function WorktreeItem({ worktree }: Props): React.ReactNode {
           )}
 
           {/* Channels */}
-          <div className="group mt-2 flex items-center gap-1 px-2 py-1">
+          <div className="group mt-3 flex items-center gap-1 px-3 py-1.5">
             <span className="text-xs font-medium text-[var(--pear-text-faint)]">Channels</span>
             <button
               onClick={(e) => {
@@ -108,7 +108,7 @@ export function WorktreeItem({ worktree }: Props): React.ReactNode {
                 const name = window.prompt('Channel name:')
                 if (name?.trim()) addChannel(name.trim())
               }}
-              className="ml-auto rounded p-0.5 opacity-0 hover:bg-[var(--pear-bg-overlay)] group-hover:opacity-100"
+              className="ml-auto rounded-md p-1 opacity-0 hover:bg-[var(--pear-bg-overlay)] group-hover:opacity-100"
               title="Add channel"
               aria-label="Add channel"
             >
@@ -118,7 +118,7 @@ export function WorktreeItem({ worktree }: Props): React.ReactNode {
           {(worktree.channels || []).map((ch) => (
             <div
               key={ch}
-              className={`group flex cursor-pointer items-center gap-1.5 rounded-md px-2 py-1 text-sm transition-colors ${
+              className={`group flex cursor-pointer items-center gap-2 rounded-xl px-3 py-1.5 text-sm transition-colors ${
                 activeChannelName === ch
                   ? 'bg-[var(--pear-bg-surface)] text-[var(--pear-text)]'
                   : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)]/50'
@@ -136,7 +136,7 @@ export function WorktreeItem({ worktree }: Props): React.ReactNode {
                     e.stopPropagation()
                     removeChannel(ch)
                   }}
-                  className="rounded p-0.5 text-[var(--pear-red)] opacity-0 hover:bg-[var(--pear-bg-overlay)] group-hover:opacity-100"
+                  className="rounded-md p-1 text-[var(--pear-red)] opacity-0 hover:bg-[var(--pear-bg-overlay)] group-hover:opacity-100"
                   title="Remove channel"
                   aria-label={`Remove channel ${ch}`}
                 >
