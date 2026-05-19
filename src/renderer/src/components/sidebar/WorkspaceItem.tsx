@@ -1,9 +1,9 @@
 import type React from 'react'
 import { useState } from 'react'
-import { ChevronRight, ChevronDown, FolderGit2, Trash2, Plus } from 'lucide-react'
+import { AlertTriangle, Folder, Trash2 } from 'lucide-react'
+import { ClaudeIcon, CodexIcon } from '@/components/common/AgentIcons'
+import { spawnWorkspaceAgent, type SpawnAgentCli } from '@/lib/spawn-agent'
 import { useWorkspaceStore, type Workspace } from '@/stores/workspace-store'
-import { useUIStore } from '@/stores/ui-store'
-import { WorktreeItem } from './WorktreeItem'
 
 interface Props {
   workspace: Workspace
@@ -11,65 +11,105 @@ interface Props {
 }
 
 export function WorkspaceItem({ workspace, isActive }: Props): React.ReactNode {
-  const [expanded, setExpanded] = useState(isActive)
+  const [spawningCli, setSpawningCli] = useState<SpawnAgentCli | null>(null)
+  const [error, setError] = useState<string | null>(null)
   const setActiveWorkspace = useWorkspaceStore((s) => s.setActiveWorkspace)
   const removeWorkspace = useWorkspaceStore((s) => s.removeWorkspace)
-  const openDialog = useUIStore((s) => s.openDialog)
 
-  const handleSelect = async (): Promise<void> => {
-    if (!isActive) {
-      await setActiveWorkspace(workspace.id)
+  const handleSpawn = async (cli: SpawnAgentCli): Promise<void> => {
+    setError(null)
+    setSpawningCli(cli)
+    try {
+      await spawnWorkspaceAgent(workspace, cli)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setSpawningCli(null)
     }
-    setExpanded(!expanded)
+  }
+
+  const handleSelect = (): void => {
+    setError(null)
+    setActiveWorkspace(workspace.id).catch((err) => {
+      setError(err instanceof Error ? err.message : String(err))
+    })
+  }
+
+  const handleRemove = (): void => {
+    if (!window.confirm(`Remove workspace "${workspace.name}"? This won't delete any files.`)) return
+    removeWorkspace(workspace.id).catch((err) => {
+      setError(err instanceof Error ? err.message : String(err))
+    })
   }
 
   return (
-    <div>
-      <div
-        className={`group flex cursor-pointer items-center gap-2.5 rounded-xl px-3 py-2.5 text-sm transition-colors ${
-          isActive
-            ? 'bg-[var(--pear-bg-surface)] text-[var(--pear-text)]'
-            : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)]/50'
-        }`}
-        onClick={handleSelect}
-      >
-        {expanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        <FolderGit2 size={14} className="text-[var(--pear-accent)]" />
-        <span className="flex-1 truncate">{workspace.name}</span>
-        <div className="flex gap-0.5 opacity-0 group-hover:opacity-100">
-          <button
-            onClick={(e) => {
-              e.stopPropagation()
-              openDialog('add-worktree')
-            }}
-            className="rounded-md p-1 hover:bg-[var(--pear-bg-overlay)]"
-            title="Add worktree"
-            aria-label="Add worktree"
-          >
-            <Plus size={12} />
-          </button>
-          <button
-            onClick={(e) => {
-              e.stopPropagation()
-              if (window.confirm(`Remove workspace "${workspace.name}"? This won't delete any files.`)) {
-                removeWorkspace(workspace.id)
-              }
-            }}
-            className="rounded-md p-1 text-[var(--pear-red)] hover:bg-[var(--pear-bg-overlay)]"
-            title="Remove workspace"
-            aria-label="Remove workspace"
-          >
-            <Trash2 size={12} />
-          </button>
-        </div>
+    <div
+      className={`rounded-xl border transition-colors ${
+        isActive
+          ? 'border-[var(--pear-border)] bg-[var(--pear-bg-surface)]'
+          : 'border-transparent hover:bg-[var(--pear-bg-surface-hover)]/45'
+      }`}
+    >
+      <div className="flex items-center gap-1.5 rounded-xl px-3 py-2.5 text-sm">
+        <button
+          type="button"
+          className="flex min-w-0 flex-1 items-center gap-2.5 text-left"
+          onClick={handleSelect}
+        >
+          <Folder size={14} className="shrink-0 text-[var(--pear-accent)]" />
+          <div className="min-w-0 flex-1">
+            <div className="truncate text-[var(--pear-text)]">{workspace.name}</div>
+            {isActive && (
+              <div className="truncate text-[11px] text-[var(--pear-text-faint)]">{workspace.rootPath}</div>
+            )}
+          </div>
+          {!workspace.rootPathExists && (
+            <AlertTriangle
+              size={13}
+              className="shrink-0 text-[var(--pear-yellow)]"
+              aria-label="Workspace path missing"
+            />
+          )}
+        </button>
+        <button
+          type="button"
+          onClick={handleRemove}
+          className="rounded-md p-1 text-[var(--pear-red)] opacity-70 hover:bg-[var(--pear-bg-overlay)] hover:opacity-100"
+          title="Remove workspace"
+          aria-label="Remove workspace"
+        >
+          <Trash2 size={12} />
+        </button>
       </div>
 
-      {expanded && (
-        <div className="ml-5 mt-1.5 space-y-0.5">
-          {workspace.worktrees.length === 0 ? (
-            <div className="px-3 py-2 text-xs text-[var(--pear-text-faint)]">No worktrees</div>
-          ) : (
-            workspace.worktrees.map((wt) => <WorktreeItem key={wt.id} worktree={wt} />)
+      {isActive && (
+        <div className="px-3 pb-3">
+          <div className="grid grid-cols-2 gap-2">
+            <button
+              type="button"
+              onClick={() => handleSpawn('claude')}
+              disabled={!workspace.rootPathExists || spawningCli !== null}
+              className="flex min-w-0 items-center justify-center gap-2 rounded-lg border border-[var(--pear-border)] px-3 py-2 text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:cursor-not-allowed disabled:opacity-40"
+              title={workspace.rootPathExists ? 'Spawn Claude' : `Path not found: ${workspace.rootPath}`}
+            >
+              <ClaudeIcon className="h-4 w-4 shrink-0" />
+              <span className="truncate">{spawningCli === 'claude' ? 'Starting' : 'Claude'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSpawn('codex')}
+              disabled={!workspace.rootPathExists || spawningCli !== null}
+              className="flex min-w-0 items-center justify-center gap-2 rounded-lg border border-[var(--pear-border)] px-3 py-2 text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:cursor-not-allowed disabled:opacity-40"
+              title={workspace.rootPathExists ? 'Spawn Codex' : `Path not found: ${workspace.rootPath}`}
+            >
+              <CodexIcon className="h-4 w-4 shrink-0" />
+              <span className="truncate">{spawningCli === 'codex' ? 'Starting' : 'Codex'}</span>
+            </button>
+          </div>
+          {error && (
+            <p className="mt-2 rounded-md border border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 px-2.5 py-2 text-[11px] text-[var(--pear-red)]">
+              {error}
+            </p>
           )}
         </div>
       )}

@@ -7,13 +7,14 @@ import {
   removeWorkspace,
   setActiveWorkspace,
   updateWorkspace,
-  addWorktreeChannel,
-  removeWorktreeChannel
+  addWorkspaceChannel,
+  removeWorkspaceChannel
 } from './store'
 import { brokerManager } from './broker'
 import * as git from './git'
 import * as filesystem from './filesystem'
 import * as auth from './auth'
+import { assertDirectory, isDirectory } from './path-utils'
 
 function assertPathWithinWorkspaces(targetPath: string): void {
   const resolved = resolve(targetPath)
@@ -28,7 +29,13 @@ export function registerIpcHandlers(): void {
   // --- Workspace ---
   ipcMain.handle('workspace:list', () => {
     const data = loadStore()
-    return { workspaces: data.workspaces, activeId: data.activeWorkspaceId }
+    return {
+      workspaces: data.workspaces.map((workspace) => ({
+        ...workspace,
+        rootPathExists: isDirectory(workspace.rootPath)
+      })),
+      activeId: data.activeWorkspaceId
+    }
   })
 
   ipcMain.handle('workspace:add', async (event, name: string, rootPath?: string) => {
@@ -58,23 +65,41 @@ export function registerIpcHandlers(): void {
     updateWorkspace(id, update)
   })
 
-  ipcMain.handle('worktree:add-channel', (_, workspaceId: string, worktreeId: string, name: string) => {
-    addWorktreeChannel(workspaceId, worktreeId, name)
+  ipcMain.handle('workspace:add-channel', (_, workspaceId: string, name: string) => {
+    addWorkspaceChannel(workspaceId, name)
   })
 
-  ipcMain.handle('worktree:remove-channel', (_, workspaceId: string, worktreeId: string, name: string) => {
-    removeWorktreeChannel(workspaceId, worktreeId, name)
+  ipcMain.handle('workspace:remove-channel', (_, workspaceId: string, name: string) => {
+    removeWorkspaceChannel(workspaceId, name)
   })
 
   // --- Broker ---
-  ipcMain.handle('broker:start', async (event, cwd: string, name: string) => {
+  ipcMain.handle('broker:start', async (event, cwd: string, name: string, channels?: string[]) => {
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win) throw new Error('No window')
-    await brokerManager.start(cwd, name, win)
+    if (!isDirectory(cwd)) {
+      console.warn(`[broker] Workspace path no longer exists; skipping broker start: ${cwd}`)
+      return false
+    }
+    await brokerManager.start(cwd, name, win, channels)
+    return true
+  })
+
+  ipcMain.handle('broker:sync-channels', async (_, channels: string[]) => {
+    await brokerManager.syncChannels(channels)
   })
 
   ipcMain.handle('broker:spawn-agent', async (_, input: SpawnPtyInput) => {
     return brokerManager.spawnAgent(input)
+  })
+
+  ipcMain.handle('broker:attach-terminal', async (_, input: {
+    name: string
+    rows?: number
+    cols?: number
+    mode?: 'view' | 'drive' | 'passthrough'
+  }) => {
+    return brokerManager.attachTerminal(input)
   })
 
   ipcMain.handle('broker:connect-cloud', async (event) => {
@@ -110,11 +135,13 @@ export function registerIpcHandlers(): void {
   // --- Git ---
   ipcMain.handle('git:list-worktrees', async (_, root: string) => {
     assertPathWithinWorkspaces(root)
+    if (!isDirectory(root)) return []
     return git.listWorktrees(root)
   })
 
   ipcMain.handle('git:add-worktree', async (_, root: string, branch: string, baseBranch?: string) => {
     assertPathWithinWorkspaces(root)
+    assertDirectory(root, 'Workspace path')
     return git.addWorktree(root, branch, baseBranch)
   })
 
@@ -126,16 +153,19 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('git:status', async (_, path: string) => {
     assertPathWithinWorkspaces(path)
+    if (!isDirectory(path)) return []
     return git.getStatus(path)
   })
 
   ipcMain.handle('git:diff', async (_, path: string, file?: string) => {
     assertPathWithinWorkspaces(path)
+    if (!isDirectory(path)) return ''
     return git.getDiff(path, file)
   })
 
   ipcMain.handle('git:branches', async (_, root: string) => {
     assertPathWithinWorkspaces(root)
+    if (!isDirectory(root)) return []
     return git.listBranches(root)
   })
 

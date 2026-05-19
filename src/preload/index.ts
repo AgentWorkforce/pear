@@ -10,15 +10,15 @@ const api = {
     setActive: (id: string | null) => ipcRenderer.invoke('workspace:set-active', id),
     update: (id: string, update: Record<string, unknown>) =>
       ipcRenderer.invoke('workspace:update', id, update),
-  },
-  worktree: {
-    addChannel: (workspaceId: string, worktreeId: string, name: string) =>
-      ipcRenderer.invoke('worktree:add-channel', workspaceId, worktreeId, name),
-    removeChannel: (workspaceId: string, worktreeId: string, name: string) =>
-      ipcRenderer.invoke('worktree:remove-channel', workspaceId, worktreeId, name)
+    addChannel: (workspaceId: string, name: string) =>
+      ipcRenderer.invoke('workspace:add-channel', workspaceId, name),
+    removeChannel: (workspaceId: string, name: string) =>
+      ipcRenderer.invoke('workspace:remove-channel', workspaceId, name)
   },
   broker: {
-    start: (cwd: string, name: string) => ipcRenderer.invoke('broker:start', cwd, name),
+    start: (cwd: string, name: string, channels?: string[]) =>
+      ipcRenderer.invoke('broker:start', cwd, name, channels) as Promise<boolean>,
+    syncChannels: (channels: string[]) => ipcRenderer.invoke('broker:sync-channels', channels),
     connectCloud: () => ipcRenderer.invoke('broker:connect-cloud') as Promise<string>,
     spawnAgent: (input: {
       name: string
@@ -28,6 +28,12 @@ const api = {
       channels?: string[]
       cwd?: string
     }) => ipcRenderer.invoke('broker:spawn-agent', input),
+    attachTerminal: (input: {
+      name: string
+      rows?: number
+      cols?: number
+      mode?: 'view' | 'drive' | 'passthrough'
+    }) => ipcRenderer.invoke('broker:attach-terminal', input),
     sendInput: (name: string, data: string) => ipcRenderer.invoke('broker:send-input', name, data),
     resizePty: (name: string, rows: number, cols: number) =>
       ipcRenderer.invoke('broker:resize-pty', name, rows, cols),

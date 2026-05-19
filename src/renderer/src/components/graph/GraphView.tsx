@@ -12,6 +12,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { useAgentStore } from '@/stores/agent-store'
+import { useWorkspaceStore } from '@/stores/workspace-store'
 import { AgentNode } from './AgentNode'
 import { MessageEdge } from './MessageEdge'
 import { Network } from 'lucide-react'
@@ -20,8 +21,15 @@ const nodeTypes = { agent: AgentNode }
 const edgeTypes = { message: MessageEdge }
 
 export function GraphView(): React.ReactNode {
-  const agents = useAgentStore((s) => s.agents)
-  const relayMessages = useAgentStore((s) => s.relayMessages)
+  const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId)
+  const allAgents = useAgentStore((s) => s.agents)
+  const allRelayMessages = useAgentStore((s) => s.relayMessages)
+  const agents = activeWorkspaceId
+    ? allAgents.filter((agent) => agent.workspaceId === activeWorkspaceId)
+    : allAgents
+  const relayMessages = activeWorkspaceId
+    ? allRelayMessages.filter((message) => message.workspaceId === activeWorkspaceId)
+    : allRelayMessages
 
   const initialNodes: Node[] = useMemo(() => {
     const cols = Math.ceil(Math.sqrt(agents.length))

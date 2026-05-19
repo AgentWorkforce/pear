@@ -1,6 +1,5 @@
 @import 'tailwindcss';
 @import '@xterm/xterm/css/xterm.css';
-@import 'allotment/dist/style.css';
 
 /* ── Dark theme (default) ── */
 :root,
@@ -103,17 +102,6 @@ body,
   cursor: text;
 }
 
-/* Allotment */
-.split-view-view {
-  overflow: hidden !important;
-}
-.sash-container .sash {
-  background: var(--pear-border-subtle) !important;
-}
-.sash-container .sash:hover {
-  background: var(--pear-accent-dim) !important;
-}
-
 /* Scrollbar */
 ::-webkit-scrollbar {
   width: 6px;
@@ -128,33 +116,4 @@ body,
 }
 ::-webkit-scrollbar-thumb:hover {
   background: var(--pear-text-faint);
-}
-
-/* react-diff-view */
-.diff-unified {
-  background: var(--pear-bg) !important;
-  color: var(--pear-text) !important;
-  font-size: 12px !important;
-}
-.diff-code-insert {
-  background: color-mix(in srgb, var(--pear-accent) 12%, transparent) !important;
-}
-.diff-code-delete {
-  background: color-mix(in srgb, var(--pear-red) 12%, transparent) !important;
-}
-.diff-gutter {
-  color: var(--pear-text-faint) !important;
-  background: var(--pear-bg-raised) !important;
-  padding: 0 6px !important;
-  min-width: 36px !important;
-}
-
-/* React Flow */
-.react-flow__controls button {
-  background: var(--pear-bg-surface) !important;
-  border-color: var(--pear-border) !important;
-  fill: var(--pear-text-secondary) !important;
-}
-.react-flow__controls button:hover {
-  background: var(--pear-bg-surface-hover) !important;
 }

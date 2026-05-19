@@ -2,50 +2,15 @@ import { basename, join } from 'path'
 import { BrowserWindow } from 'electron'
 import {
   AgentRelayClient,
-  RelayCast,
   type AgentRelaySpawnOptions,
   type SpawnPtyInput,
   type SendMessageInput,
   type BrokerEvent,
-  type ListAgent
+  type ListAgent,
+  type InboundDeliveryMode
 } from '@agent-relay/sdk'
 import { getAccessToken, getApiUrl } from './auth'
-
-const RELAY_CHAT_BOOTSTRAP_TASK =
-  'You are connected to Agent Relay inside Pear. Wait for relay messages and reply using Relaycast tools.'
-
-const RELAY_CHAT_CONVENTIONS = [
-  'When you receive `Relay message from <sender> ...`, answer using `mcp__relaycast__message_dm_send`.',
-  'For channel replies, use `mcp__relaycast__message_post`.',
-  'For thread replies, use `mcp__relaycast__message_reply`.',
-  'When responding to relay messages, do not reply only in terminal text.'
-].join('\n')
-
-function hasRelayChatConventions(task?: string): boolean {
-  const normalized = task?.toLowerCase().trim()
-  if (!normalized) return false
-
-  return (
-    normalized.includes('mcp__relaycast__message_dm_send') ||
-    normalized.includes('mcp__relaycast__message_post') ||
-    normalized.includes('mcp__relaycast__message_reply') ||
-    normalized.includes('do not reply only in terminal text')
-  )
-}
-
-function buildRelayAwareTask(task?: string): string | undefined {
-  const normalized = task?.trim()
-
-  if (!normalized) {
-    return `${RELAY_CHAT_BOOTSTRAP_TASK}\n\n${RELAY_CHAT_CONVENTIONS}`
-  }
-
-  if (hasRelayChatConventions(normalized)) {
-    return normalized
-  }
-
-  return `${normalized}\n\n${RELAY_CHAT_BOOTSTRAP_TASK}\n\n${RELAY_CHAT_CONVENTIONS}`
-}
+import { assertDirectory } from './path-utils'
 
 function isShellLikeCommand(cli: string): boolean {
   const normalized = basename(cli).toLowerCase()
@@ -87,13 +52,39 @@ function resolveBundledBrokerBinary(): string {
   )
 }
 
+type TerminalAttachMode = 'view' | 'drive' | 'passthrough'
+
+export interface AttachTerminalInput {
+  name: string
+  rows?: number
+  cols?: number
+  mode?: TerminalAttachMode
+}
+
+export interface AttachTerminalResult {
+  name: string
+  mode: InboundDeliveryMode
+  previousMode?: InboundDeliveryMode
+  pending: number
+  snapshot?: {
+    rows: number
+    cols: number
+    cursor: [number, number]
+    screen: string
+  }
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === 'number' && Number.isInteger(value) && value > 0
+}
+
 export class BrokerManager {
   private client: AgentRelayClient | null = null
   private window: BrowserWindow | null = null
   private unsubEvent: (() => void) | null = null
   private _cwd: string | null = null
   private _name: string | null = null
-  private ensuredHumanIdentities = new Set<string>()
+  private _channels: string[] = []
 
   // Cloud connection state
   private cloudSandboxId: string | null = null
@@ -110,16 +101,19 @@ export class BrokerManager {
     return this.cloudSandboxId !== null
   }
 
-  async start(cwd: string, name: string, win: BrowserWindow): Promise<void> {
+  async start(cwd: string, name: string, win: BrowserWindow, channels: string[] = []): Promise<void> {
+    assertDirectory(cwd, 'Workspace path')
     await this.shutdown()
     this.window = win
     this._cwd = cwd
     this._name = name
+    this._channels = Array.from(new Set(channels.map((channel) => channel.trim()).filter(Boolean)))
 
     try {
       const opts: AgentRelaySpawnOptions = {
         cwd,
         brokerName: name,
+        channels: this._channels,
         binaryPath: resolveBundledBrokerBinary(),
         onStderr: (line: string) => {
           console.error('[broker stderr]', line)
@@ -203,7 +197,7 @@ export class BrokerManager {
       throw new Error('Broker not started — select a workspace first')
     }
     // Try to auto-start
-    await this.start(this._cwd, this._name, this.window)
+    await this.start(this._cwd, this._name, this.window, this._channels)
   }
 
   private attachClient(client: AgentRelayClient): void {
@@ -213,31 +207,6 @@ export class BrokerManager {
         this.window.webContents.send('broker:event', event)
       }
     })
-  }
-
-  private async ensureHumanIdentity(name: string): Promise<void> {
-    await this.ensureStarted()
-
-    let workspaceKey = this.client?.workspaceKey
-    if (!workspaceKey) {
-      const session = await this.client?.getSession()
-      workspaceKey = session?.workspace_key
-    }
-    if (!workspaceKey) return
-
-    const cacheKey = `${workspaceKey}:${name}`
-    if (this.ensuredHumanIdentities.has(cacheKey)) return
-
-    const relay = new RelayCast({
-      apiKey: workspaceKey,
-      baseUrl: process.env.RELAYCAST_BASE_URL || 'https://api.relaycast.dev'
-    })
-
-    await relay.agents.registerOrRotate({
-      name,
-      type: 'human'
-    })
-    this.ensuredHumanIdentities.add(cacheKey)
   }
 
   async spawnAgent(input: SpawnPtyInput): Promise<{ name: string; runtime: string }> {
@@ -251,18 +220,73 @@ export class BrokerManager {
           model: undefined,
           skipRelayPrompt: true
         }
-      : {
-          ...input,
-          task: buildRelayAwareTask(input.task)
-        }
+      : input
 
     await this.ensureStarted()
     return this.client!.spawnPty(relayAwareInput)
   }
 
-  async sendInput(name: string, data: string): Promise<void> {
+  async attachTerminal(input: AttachTerminalInput): Promise<AttachTerminalResult> {
+    const name = input.name.trim()
+    if (!name) {
+      throw new Error('Agent name is required')
+    }
+
     await this.ensureStarted()
-    await this.client!.sendInput(name, data)
+    const client = this.client!
+    const mode: InboundDeliveryMode = input.mode === 'drive' ? 'manual_flush' : 'auto_inject'
+    let previousMode: InboundDeliveryMode | undefined
+
+    try {
+      previousMode = await client.getInboundDeliveryMode(name)
+    } catch (err) {
+      console.warn(`[broker] Failed to read delivery mode for ${name}:`, err)
+    }
+
+    // Pear's terminal behaves like Relay CLI passthrough by default: the human
+    // can type while broker-managed inbound messages continue to auto-inject.
+    await client.setInboundDeliveryMode(name, mode)
+
+    if (isPositiveInteger(input.rows) && isPositiveInteger(input.cols)) {
+      try {
+        await client.resizePty(name, input.rows, input.cols)
+      } catch (err) {
+        console.warn(`[broker] Failed to sync PTY size for ${name}:`, err)
+      }
+    }
+
+    const pending = mode === 'manual_flush'
+      ? await client.getPending(name).then((messages) => messages.length).catch(() => 0)
+      : 0
+
+    try {
+      const snapshot = await client.snapshot(name, 'ansi')
+      return {
+        name,
+        mode,
+        previousMode,
+        pending,
+        snapshot: {
+          rows: snapshot.rows,
+          cols: snapshot.cols,
+          cursor: snapshot.cursor,
+          screen: Buffer.from(snapshot.screen, 'base64').toString('utf-8')
+        }
+      }
+    } catch (err) {
+      console.warn(`[broker] Failed to capture terminal snapshot for ${name}:`, err)
+      return {
+        name,
+        mode,
+        previousMode,
+        pending
+      }
+    }
+  }
+
+  async sendInput(name: string, data: string): Promise<{ name: string; bytes_written: number }> {
+    await this.ensureStarted()
+    return this.client!.sendInput(name, data)
   }
 
   async resizePty(name: string, rows: number, cols: number): Promise<void> {
@@ -272,14 +296,45 @@ export class BrokerManager {
 
   async sendMessage(input: SendMessageInput): Promise<void> {
     await this.ensureStarted()
-    if (input.from?.trim().toLowerCase() === 'human') {
-      try {
-        await this.ensureHumanIdentity('human')
-      } catch (error) {
-        console.warn('[broker] Failed to ensure Relaycast human identity:', error)
-      }
-    }
     await this.client!.sendMessage(input)
+  }
+
+  async syncChannels(channels: string[]): Promise<void> {
+    const nextChannels = Array.from(
+      new Set(channels.map((channel) => channel.trim()).filter(Boolean))
+    )
+    const previousChannels = this._channels
+    this._channels = nextChannels
+
+    if (!this.client) {
+      return
+    }
+
+    const added = nextChannels.filter((channel) => !previousChannels.includes(channel))
+    const removed = previousChannels.filter((channel) => !nextChannels.includes(channel))
+
+    if (!added.length && !removed.length) {
+      return
+    }
+
+    const agents = await this.client.listAgents()
+    if (!agents.length) {
+      if (!this.isCloud && this._cwd && this._name && this.window) {
+        await this.start(this._cwd, this._name, this.window, nextChannels)
+      }
+      return
+    }
+
+    await Promise.all(
+      agents.map(async (agent) => {
+        if (added.length) {
+          await this.client!.subscribeChannels(agent.name, added)
+        }
+        if (removed.length) {
+          await this.client!.unsubscribeChannels(agent.name, removed)
+        }
+      })
+    )
   }
 
   async releaseAgent(name: string): Promise<void> {
@@ -298,7 +353,6 @@ export class BrokerManager {
       this.unsubEvent = null
     }
     this.cloudSandboxId = null
-    this.ensuredHumanIdentities.clear()
     if (this.client) {
       try {
         await this.client.shutdown()

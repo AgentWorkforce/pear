@@ -27,22 +27,75 @@ interface AuthStatus {
   user?: UserInfo
 }
 
-const getAuthPath = (): string => {
+const getAuthDir = (): string => {
   const dir = join(app.getPath('userData'), 'config')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  return join(dir, 'auth.json')
+  return dir
+}
+
+const getAuthPath = (): string => {
+  return join(getAuthDir(), 'auth.json')
+}
+
+const getAuthMetaPath = (): string => {
+  return join(getAuthDir(), 'auth-meta.json')
+}
+
+function hasStoredTokens(): boolean {
+  try {
+    return readFileSync(getAuthPath()).length > 0
+  } catch {
+    return false
+  }
+}
+
+function normalizeUserInfo(value: unknown): UserInfo | undefined {
+  if (!value || typeof value !== 'object') return undefined
+
+  const record = value as Record<string, unknown>
+  const user: UserInfo = {}
+
+  if (typeof record.name === 'string') user.name = record.name
+  if (typeof record.email === 'string') user.email = record.email
+  if (typeof record.organizationName === 'string') user.organizationName = record.organizationName
+  if (typeof record.workspaceName === 'string') user.workspaceName = record.workspaceName
+
+  return Object.keys(user).length > 0 ? user : undefined
+}
+
+function saveAuthMeta(tokens: Pick<StoredTokens, 'apiUrl' | 'user'>): void {
+  const meta = {
+    apiUrl: tokens.apiUrl,
+    user: tokens.user
+  }
+  writeFileSync(getAuthMetaPath(), JSON.stringify(meta, null, 2))
+}
+
+function loadAuthMeta(): Pick<AuthStatus, 'apiUrl' | 'user'> {
+  try {
+    const record = JSON.parse(readFileSync(getAuthMetaPath(), 'utf8')) as Record<string, unknown>
+    return {
+      apiUrl: typeof record.apiUrl === 'string' ? record.apiUrl : CLOUD_API_URL,
+      user: normalizeUserInfo(record.user)
+    }
+  } catch {
+    return { apiUrl: CLOUD_API_URL }
+  }
 }
 
 function saveTokens(tokens: StoredTokens): void {
   const encrypted = safeStorage.encryptString(JSON.stringify(tokens))
   writeFileSync(getAuthPath(), encrypted)
+  saveAuthMeta(tokens)
 }
 
 function loadTokens(): StoredTokens | null {
   try {
     const raw = readFileSync(getAuthPath())
     const decrypted = safeStorage.decryptString(raw)
-    return JSON.parse(decrypted) as StoredTokens
+    const tokens = JSON.parse(decrypted) as StoredTokens
+    saveAuthMeta(tokens)
+    return tokens
   } catch {
     return null
   }
@@ -51,6 +104,7 @@ function loadTokens(): StoredTokens | null {
 function clearTokens(): void {
   try {
     writeFileSync(getAuthPath(), '')
+    writeFileSync(getAuthMetaPath(), '')
   } catch {
     // ignore
   }
@@ -142,9 +196,9 @@ export function logout(): void {
 }
 
 export function getAuthStatus(): AuthStatus {
-  const tokens = loadTokens()
-  if (!tokens) return { loggedIn: false }
-  return { loggedIn: true, apiUrl: tokens.apiUrl, user: tokens.user }
+  if (!hasStoredTokens()) return { loggedIn: false }
+  const meta = loadAuthMeta()
+  return { loggedIn: true, apiUrl: meta.apiUrl, user: meta.user }
 }
 
 /**
@@ -161,6 +215,8 @@ export async function getAccessToken(): Promise<string | null> {
 }
 
 export function getApiUrl(): string {
-  const tokens = loadTokens()
-  return tokens?.apiUrl || CLOUD_API_URL
+  if (hasStoredTokens()) {
+    return loadAuthMeta().apiUrl || CLOUD_API_URL
+  }
+  return CLOUD_API_URL
 }

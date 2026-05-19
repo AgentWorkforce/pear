@@ -1,6 +1,7 @@
 import { execFile } from 'child_process'
 import { existsSync } from 'fs'
 import { promisify } from 'util'
+import { assertDirectory } from './path-utils'
 
 const exec = promisify(execFile)
 
@@ -18,6 +19,7 @@ export interface FileStatus {
 }
 
 async function git(args: string[], cwd: string): Promise<string> {
+  assertDirectory(cwd, 'Git working directory')
   const { stdout } = await exec('git', args, { cwd, maxBuffer: 10 * 1024 * 1024 })
   return stdout
 }
@@ -26,7 +28,9 @@ async function gitAllowNonZeroExit(args: string[], cwd: string): Promise<string>
   try {
     return await git(args, cwd)
   } catch (error) {
-    const stdout = error instanceof Error && 'stdout' in error ? error.stdout : ''
+    const stdout = error instanceof Error && 'stdout' in error
+      ? (error as { stdout?: unknown }).stdout
+      : undefined
     if (typeof stdout === 'string') return stdout
     throw error
   }

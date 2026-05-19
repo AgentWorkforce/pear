@@ -1,9 +1,9 @@
 import type React from 'react'
 import { useEffect, useRef, useState } from 'react'
-import { AlertCircle, GitBranch, Sun, Moon, X } from 'lucide-react'
+import { AlertCircle, Sun, Moon, X } from 'lucide-react'
 import { useAgentStore } from '@/stores/agent-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
-import { useUIStore, type ViewMode } from '@/stores/ui-store'
+import { useUIStore } from '@/stores/ui-store'
 
 const errorTimeFormatter = new Intl.DateTimeFormat(undefined, {
   month: 'short',
@@ -23,16 +23,15 @@ export function StatusBar(): React.ReactNode {
   const brokerErrors = useAgentStore((s) => s.brokerErrors)
   const agents = useAgentStore((s) => s.agents)
   const workspace = useWorkspaceStore((s) => s.getActiveWorkspace())
-  const worktree = useWorkspaceStore((s) => s.getActiveWorktree())
-  const viewMode = useUIStore((s) => s.viewMode)
-  const setViewMode = useUIStore((s) => s.setViewMode)
   const theme = useUIStore((s) => s.theme)
   const toggleTheme = useUIStore((s) => s.toggleTheme)
   const [isErrorPanelOpen, setIsErrorPanelOpen] = useState(false)
   const errorButtonRef = useRef<HTMLButtonElement>(null)
   const errorPanelRef = useRef<HTMLDivElement>(null)
 
-  const runningAgents = agents.filter((a) => a.status === 'running').length
+  const runningAgents = agents.filter(
+    (a) => a.status === 'running' && (!workspace || a.workspaceId === workspace.id)
+  ).length
   const canOpenErrorPanel = brokerStatus === 'error' || brokerErrors.length > 0
   const latestError = brokerError || brokerErrors[0]?.message || null
   const historicalErrors =
@@ -192,32 +191,10 @@ export function StatusBar(): React.ReactNode {
       {workspace && (
         <div className="flex items-center gap-1.5">
           <span className="text-[var(--pear-text-secondary)]">{workspace.name}</span>
-          {worktree && (
-            <>
-              <GitBranch size={10} />
-              <span>{worktree.branch}</span>
-            </>
-          )}
         </div>
       )}
 
       <div className="flex-1" />
-
-      <div className="flex items-center gap-1.5">
-        {(['terminal', 'chat', 'graph'] as ViewMode[]).map((mode) => (
-          <button
-            key={mode}
-            onClick={() => setViewMode(mode)}
-            className={`rounded-lg px-3 py-1.5 ${
-              viewMode === mode
-                ? 'bg-[var(--pear-bg-surface)] text-[var(--pear-text)]'
-                : 'text-[var(--pear-text-faint)] hover:text-[var(--pear-text-dim)]'
-            }`}
-          >
-            {mode}
-          </button>
-        ))}
-      </div>
 
       <button
         onClick={toggleTheme}

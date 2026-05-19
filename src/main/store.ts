@@ -2,25 +2,17 @@ import { app } from 'electron'
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'fs'
 import { join } from 'path'
 
-export interface AgentInfo {
-  name: string
-  cli: string
-  model?: string
-  status: 'running' | 'exited'
-}
-
 export interface Worktree {
   id: string
   branch: string
   path: string
-  agents: AgentInfo[]
-  channels: string[]
 }
 
 export interface Workspace {
   id: string
   name: string
   rootPath: string
+  channels: string[]
   worktrees: Worktree[]
 }
 
@@ -37,10 +29,77 @@ const getStorePath = (): string => {
 
 const defaultData: StoreData = { workspaces: [], activeWorkspaceId: null }
 
+function normalizeWorktree(value: unknown): Worktree | null {
+  if (!value || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  const id = typeof record.id === 'string' ? record.id : typeof record.path === 'string' ? record.path : null
+  const branch = typeof record.branch === 'string' ? record.branch : null
+  const path = typeof record.path === 'string' ? record.path : null
+
+  if (!id || !branch || !path) return null
+
+  return { id, branch, path }
+}
+
+function normalizeChannels(
+  workspaceChannels: unknown,
+  legacyWorktrees: Array<Record<string, unknown>>
+): string[] {
+  const workspaceList = Array.isArray(workspaceChannels)
+    ? workspaceChannels.filter((value): value is string => typeof value === 'string')
+    : []
+  const legacyList = legacyWorktrees.flatMap((worktree) =>
+    Array.isArray(worktree.channels)
+      ? worktree.channels.filter((value): value is string => typeof value === 'string')
+      : []
+  )
+  const deduped = Array.from(new Set([...workspaceList, ...legacyList].map((channel) => channel.trim()).filter(Boolean)))
+  return deduped.length > 0 ? deduped : ['general']
+}
+
+function normalizeWorkspace(value: unknown): Workspace | null {
+  if (!value || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  const id = typeof record.id === 'string' ? record.id : null
+  const name = typeof record.name === 'string' ? record.name : null
+  const rootPath = typeof record.rootPath === 'string' ? record.rootPath : null
+  const legacyWorktrees = Array.isArray(record.worktrees)
+    ? record.worktrees.filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === 'object')
+    : []
+  const worktrees = legacyWorktrees.map(normalizeWorktree).filter((entry): entry is Worktree => entry !== null)
+
+  if (!id || !name || !rootPath) return null
+
+  return {
+    id,
+    name,
+    rootPath,
+    channels: normalizeChannels(record.channels, legacyWorktrees),
+    worktrees
+  }
+}
+
+function normalizeStore(raw: unknown): StoreData {
+  if (!raw || typeof raw !== 'object') return { ...defaultData }
+  const record = raw as Record<string, unknown>
+  const workspaces = Array.isArray(record.workspaces)
+    ? record.workspaces.map(normalizeWorkspace).filter((entry): entry is Workspace => entry !== null)
+    : []
+  const activeWorkspaceId =
+    typeof record.activeWorkspaceId === 'string' || record.activeWorkspaceId === null
+      ? record.activeWorkspaceId
+      : null
+
+  return {
+    workspaces,
+    activeWorkspaceId
+  }
+}
+
 export function loadStore(): StoreData {
   try {
     const raw = readFileSync(getStorePath(), 'utf-8')
-    return JSON.parse(raw) as StoreData
+    return normalizeStore(JSON.parse(raw))
   } catch {
     return { ...defaultData }
   }
@@ -59,6 +118,7 @@ export function addWorkspace(name: string, rootPath: string): Workspace {
     id: crypto.randomUUID(),
     name,
     rootPath,
+    channels: ['general'],
     worktrees: []
   }
   data.workspaces.push(ws)
@@ -79,24 +139,20 @@ export function setActiveWorkspace(id: string | null): void {
   saveStore(data)
 }
 
-export function addWorktreeChannel(workspaceId: string, worktreeId: string, channelName: string): void {
+export function addWorkspaceChannel(workspaceId: string, channelName: string): void {
   const data = loadStore()
   const ws = data.workspaces.find((w) => w.id === workspaceId)
-  if (!ws) return
-  const wt = ws.worktrees.find((w) => w.id === worktreeId)
-  if (wt && !wt.channels.includes(channelName)) {
-    wt.channels.push(channelName)
+  if (ws && !ws.channels.includes(channelName)) {
+    ws.channels.push(channelName)
     saveStore(data)
   }
 }
 
-export function removeWorktreeChannel(workspaceId: string, worktreeId: string, channelName: string): void {
+export function removeWorkspaceChannel(workspaceId: string, channelName: string): void {
   const data = loadStore()
   const ws = data.workspaces.find((w) => w.id === workspaceId)
-  if (!ws) return
-  const wt = ws.worktrees.find((w) => w.id === worktreeId)
-  if (wt) {
-    wt.channels = wt.channels.filter((c) => c !== channelName)
+  if (ws) {
+    ws.channels = ws.channels.filter((c) => c !== channelName)
     saveStore(data)
   }
 }

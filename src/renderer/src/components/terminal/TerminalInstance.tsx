@@ -11,5 +11,12 @@ export function TerminalInstance({ agentName, visible }: Props): React.ReactNode
   const containerRef = useRef<HTMLDivElement>(null)
   useTerminal(containerRef, agentName, visible)
 
-  return <div ref={containerRef} className="titlebar-nodrag h-full w-full p-1" />
+  return (
+    <div
+      ref={containerRef}
+      tabIndex={0}
+      aria-label={`${agentName} terminal`}
+      className="titlebar-nodrag h-full w-full p-1 outline-none"
+    />
+  )
 }

@@ -24,7 +24,7 @@ function createWindow(): void {
     show: false,
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 16 },
-    backgroundColor: '#161a12',
+    backgroundColor: '#08111a',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
@@ -75,13 +75,6 @@ function createMenu(): void {
             mainWindow?.webContents.send('menu:new-workspace')
           }
         },
-        {
-          label: 'New Worktree',
-          accelerator: 'CmdOrCtrl+T',
-          click: (): void => {
-            mainWindow?.webContents.send('menu:new-worktree')
-          }
-        },
         { type: 'separator' },
         {
           label: 'Spawn Agent',
@@ -102,28 +95,6 @@ function createMenu(): void {
     {
       label: 'View',
       submenu: [
-        {
-          label: 'Terminal',
-          accelerator: 'CmdOrCtrl+1',
-          click: (): void => {
-            mainWindow?.webContents.send('menu:view-mode', 'terminal')
-          }
-        },
-        {
-          label: 'Chat',
-          accelerator: 'CmdOrCtrl+J',
-          click: (): void => {
-            mainWindow?.webContents.send('menu:view-mode', 'chat')
-          }
-        },
-        {
-          label: 'Graph',
-          accelerator: 'CmdOrCtrl+G',
-          click: (): void => {
-            mainWindow?.webContents.send('menu:view-mode', 'graph')
-          }
-        },
-        { type: 'separator' },
         { role: 'reload' },
         { role: 'forceReload' },
         { role: 'toggleDevTools' },

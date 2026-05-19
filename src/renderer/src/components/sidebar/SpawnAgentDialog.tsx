@@ -1,42 +1,22 @@
 import type React from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { X } from 'lucide-react'
-import { pear } from '@/lib/ipc'
+import { ClaudeIcon, CodexIcon } from '@/components/common/AgentIcons'
+import { spawnWorkspaceAgent, type SpawnAgentCli } from '@/lib/spawn-agent'
 import { useWorkspaceStore } from '@/stores/workspace-store'
-import { useAgentStore } from '@/stores/agent-store'
 import { useUIStore } from '@/stores/ui-store'
 
-const CLI_OPTIONS = [
-  { value: 'shell', label: 'Shell Terminal' },
-  { value: 'claude', label: 'Claude Code' },
-  { value: 'codex', label: 'Codex' },
-  { value: 'gemini', label: 'Gemini CLI' },
-  { value: 'opencode', label: 'OpenCode' }
+const AGENT_OPTIONS: Array<{ cli: SpawnAgentCli; label: string; Icon: typeof ClaudeIcon }> = [
+  { cli: 'claude', label: 'Claude', Icon: ClaudeIcon },
+  { cli: 'codex', label: 'Codex', Icon: CodexIcon }
 ]
 
-const inputClass =
-  'w-full rounded-lg border border-[var(--pear-border)] bg-[var(--pear-bg)] px-4 py-2.5 text-sm text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent)] focus:ring-1 focus:ring-[var(--pear-accent)]/30'
-
-type SpawnTarget = 'local' | 'cloud'
-
 export function SpawnAgentDialog(): React.ReactNode {
-  const [name, setName] = useState('')
-  const [cli, setCli] = useState('claude')
-  const [model, setModel] = useState('')
-  const [task, setTask] = useState('')
-  const [target, setTarget] = useState<SpawnTarget>('local')
-  const [selectedChannels, setSelectedChannels] = useState<string[]>([])
+  const [spawningCli, setSpawningCli] = useState<SpawnAgentCli | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const [submitting, setSubmitting] = useState(false)
-  const [loggedIn, setLoggedIn] = useState(false)
-
-  useEffect(() => {
-    pear.auth.status().then((s) => setLoggedIn(s.loggedIn))
-  }, [])
-  const worktree = useWorkspaceStore((s) => s.getActiveWorktree())
   const workspace = useWorkspaceStore((s) => s.getActiveWorkspace())
-  const trackSpawnedAgent = useAgentStore((s) => s.trackSpawnedAgent)
   const closeDialog = useUIStore((s) => s.closeDialog)
+  const openDialog = useUIStore((s) => s.openDialog)
   const dialogRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
@@ -46,8 +26,6 @@ export function SpawnAgentDialog(): React.ReactNode {
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [closeDialog])
-
-  const isShellSession = cli === 'shell'
 
   const handleDialogKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (e.key !== 'Tab') return
@@ -68,41 +46,22 @@ export function SpawnAgentDialog(): React.ReactNode {
     }
   }, [])
 
-  const handleSubmit = async (e: React.FormEvent): Promise<void> => {
-    e.preventDefault()
-    if (!name.trim()) return
+  const handleSpawn = async (cli: SpawnAgentCli): Promise<void> => {
+    if (!workspace) {
+      closeDialog()
+      openDialog('add-workspace')
+      return
+    }
+
     setError(null)
-    setSubmitting(true)
+    setSpawningCli(cli)
     try {
-      const agentName = name.trim()
-      if (target === 'cloud') {
-        // Create cloud sandbox with broker, connect WS, then spawn agent
-        await pear.broker.connectCloud()
-        await pear.broker.spawnAgent({
-          name: agentName,
-          cli,
-          model: isShellSession ? undefined : (model || undefined),
-          task: isShellSession ? undefined : (task || undefined),
-        })
-        trackSpawnedAgent(agentName, 'cloud')
-      } else {
-        await pear.broker.spawnAgent({
-          name: agentName,
-          cli,
-          model: isShellSession ? undefined : (model || undefined),
-          task: isShellSession ? undefined : (task || undefined),
-          channels: !isShellSession && selectedChannels.length > 0 && workspace && worktree
-            ? selectedChannels.map((c) => `${workspace.name}-${worktree.branch}-${c}`)
-            : undefined,
-          cwd: worktree?.path || workspace?.rootPath
-        })
-        trackSpawnedAgent(agentName, worktree?.id || workspace?.rootPath || '')
-      }
+      await spawnWorkspaceAgent(workspace, cli)
       closeDialog()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
-      setSubmitting(false)
+      setSpawningCli(null)
     }
   }
 
@@ -113,147 +72,58 @@ export function SpawnAgentDialog(): React.ReactNode {
         role="dialog"
         aria-modal="true"
         aria-label="Spawn Agent"
-        className="w-[420px] rounded-xl border border-[var(--pear-border)] bg-[var(--pear-bg-surface)] shadow-2xl"
+        className="w-[360px] rounded-xl border border-[var(--pear-border)] bg-[var(--pear-bg-surface)] shadow-2xl"
         onClick={(e) => e.stopPropagation()}
         onKeyDown={handleDialogKeyDown}
       >
-        <div className="flex items-center justify-between border-b border-[var(--pear-border-subtle)] px-6 py-4">
+        <div className="flex items-center justify-between border-b border-[var(--pear-border-subtle)] px-5 py-4">
           <h2 className="text-base font-semibold">Spawn Agent</h2>
           <button onClick={closeDialog} aria-label="Close dialog" className="rounded-md p-1.5 text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]">
             <X size={14} />
           </button>
         </div>
 
-        <form onSubmit={handleSubmit} className="px-6 py-5">
-          <div className="space-y-4">
-            <div>
-              <label className="mb-2 block text-xs font-medium text-[var(--pear-text-secondary)]">Agent name</label>
-              <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="auth-agent" className={inputClass} />
-            </div>
-            <div>
-              <label className="mb-2 block text-xs font-medium text-[var(--pear-text-secondary)]">Run on</label>
-              <div className="flex gap-2">
-                <button
-                  type="button"
-                  onClick={() => setTarget('local')}
-                  className={`flex-1 rounded-lg border px-3 py-2 text-sm transition-colors ${
-                    target === 'local'
-                      ? 'border-[var(--pear-accent)] bg-[var(--pear-accent)]/10 text-[var(--pear-text)]'
-                      : 'border-[var(--pear-border)] text-[var(--pear-text-dim)] hover:border-[var(--pear-text-faint)]'
-                  }`}
-                >
-                  Local
-                </button>
-                <button
-                  type="button"
-                  onClick={() => { if (loggedIn) setTarget('cloud') }}
-                  disabled={!loggedIn}
-                  className={`flex-1 rounded-lg border px-3 py-2 text-sm transition-colors ${
-                    target === 'cloud'
-                      ? 'border-[var(--pear-accent)] bg-[var(--pear-accent)]/10 text-[var(--pear-text)]'
-                      : 'border-[var(--pear-border)] text-[var(--pear-text-dim)] hover:border-[var(--pear-text-faint)]'
-                  } disabled:cursor-not-allowed disabled:opacity-40`}
-                  title={loggedIn ? undefined : 'Sign in to spawn on cloud'}
-                >
-                  Cloud
-                </button>
+        <div className="px-5 py-5">
+          {workspace ? (
+            <div className="space-y-3">
+              <div className="truncate text-xs text-[var(--pear-text-faint)]">{workspace.rootPath}</div>
+              <div className="grid grid-cols-2 gap-3">
+                {AGENT_OPTIONS.map(({ cli, label, Icon }) => (
+                  <button
+                    key={cli}
+                    type="button"
+                    autoFocus={cli === 'claude'}
+                    onClick={() => handleSpawn(cli)}
+                    disabled={!workspace.rootPathExists || spawningCli !== null}
+                    className="flex min-h-[92px] flex-col items-center justify-center gap-2 rounded-lg border border-[var(--pear-border)] text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:cursor-not-allowed disabled:opacity-40"
+                    title={workspace.rootPathExists ? `Spawn ${label}` : `Path not found: ${workspace.rootPath}`}
+                  >
+                    <Icon className="h-6 w-6" />
+                    <span>{spawningCli === cli ? 'Starting' : label}</span>
+                  </button>
+                ))}
               </div>
-              {!loggedIn && target === 'local' && (
-                <p className="mt-1.5 text-[11px] text-[var(--pear-text-faint)]">Sign in to enable cloud agents</p>
-              )}
             </div>
-            <div className={`grid gap-3 ${isShellSession ? 'grid-cols-1' : 'grid-cols-2'}`}>
-              <div>
-                <label className="mb-2 block text-xs font-medium text-[var(--pear-text-secondary)]">CLI</label>
-                <select value={cli} onChange={(e) => setCli(e.target.value)} className={inputClass}>
-                  {CLI_OPTIONS.map((opt) => (
-                    <option key={opt.value} value={opt.value}>{opt.label}</option>
-                  ))}
-                </select>
-              </div>
-              {!isShellSession && (
-                <div>
-                  <label className="mb-2 block text-xs font-medium text-[var(--pear-text-secondary)]">Model</label>
-                  <input value={model} onChange={(e) => setModel(e.target.value)} placeholder="optional" className={inputClass} />
-                </div>
-              )}
-            </div>
-            {!isShellSession && (
-              <>
-                <div>
-                  <label className="mb-2 block text-xs font-medium text-[var(--pear-text-secondary)]">Task</label>
-                  <textarea
-                    value={task}
-                    onChange={(e) => setTask(e.target.value)}
-                    placeholder="Describe what this agent should do..."
-                    rows={3}
-                    className={`${inputClass} resize-none`}
-                  />
-                </div>
-                <div>
-                  <label className="mb-2 block text-xs font-medium text-[var(--pear-text-secondary)]">Channels</label>
-                  {(worktree?.channels || []).length > 0 ? (
-                    <div className="space-y-1.5 rounded-lg border border-[var(--pear-border)] bg-[var(--pear-bg)] px-4 py-2.5">
-                      {(worktree?.channels || []).map((ch) => (
-                        <label key={ch} className="flex items-center gap-2 text-sm text-[var(--pear-text)]">
-                          <input
-                            type="checkbox"
-                            checked={selectedChannels.includes(ch)}
-                            onChange={(e) => {
-                              if (e.target.checked) {
-                                setSelectedChannels([...selectedChannels, ch])
-                              } else {
-                                setSelectedChannels(selectedChannels.filter((c) => c !== ch))
-                              }
-                            }}
-                            className="rounded border-[var(--pear-border)]"
-                          />
-                          # {ch}
-                        </label>
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-xs text-[var(--pear-text-faint)]">No channels in worktree</p>
-                  )}
-                </div>
-              </>
-            )}
-          </div>
+          ) : (
+            <button
+              type="button"
+              autoFocus
+              onClick={() => {
+                closeDialog()
+                openDialog('add-workspace')
+              }}
+              className="w-full rounded-lg border border-dashed border-[var(--pear-border)] px-4 py-6 text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]"
+            >
+              Add workspace
+            </button>
+          )}
 
-          {target === 'local' && (worktree || workspace) && (
-            <p className="mt-3 text-xs text-[var(--pear-text-faint)]">
-              cwd: {worktree?.path || workspace?.rootPath}
-            </p>
-          )}
-          {isShellSession && (
-            <p className="mt-3 text-xs text-[var(--pear-text-faint)]">
-              Opens an interactive login shell in the selected workspace.
-            </p>
-          )}
-          {target === 'cloud' && (
-            <p className="mt-3 text-xs text-[var(--pear-text-faint)]">
-              Runs in a cloud sandbox via Daytona
-            </p>
-          )}
           {error && (
             <p className="mt-3 rounded-md border border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 px-3 py-2 text-xs text-[var(--pear-red)]">
               {error}
             </p>
           )}
-
-          <div className="mt-5 flex justify-end gap-3">
-            <button type="button" onClick={closeDialog} className="rounded-lg px-4 py-2 text-sm text-[var(--pear-text-dim)] hover:text-[var(--pear-text)]">
-              Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={!name.trim() || submitting}
-              className="rounded-lg bg-[var(--pear-accent)] px-5 py-2 text-sm font-medium text-white hover:bg-[var(--pear-accent-bright)] disabled:opacity-40"
-            >
-              {submitting ? 'Spawning...' : 'Spawn'}
-            </button>
-          </div>
-        </form>
+        </div>
       </div>
     </div>
   )

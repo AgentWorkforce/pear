@@ -5,9 +5,11 @@ export interface Agent {
   cli: string
   model?: string
   status: 'running' | 'exited'
+  workspaceId?: string
   worktreePath?: string
   worktreeId?: string
   ptyBuffer: string[]
+  pendingDeliveryIds: string[]
 }
 
 export interface ChatMessage {
@@ -17,6 +19,7 @@ export interface ChatMessage {
   body: string
   timestamp: number
   isHuman: boolean
+  workspaceId?: string
 }
 
 export interface RelayMessage {
@@ -24,6 +27,7 @@ export interface RelayMessage {
   target: string
   body: string
   timestamp: number
+  workspaceId?: string
 }
 
 export interface BrokerErrorEntry {
@@ -48,9 +52,44 @@ interface BrokerEvent {
   target?: string
   body?: string
   event_id?: string
+  idle_secs?: number
   code?: number
   signal?: string
   [key: string]: unknown
+}
+
+function addPendingDelivery(agent: Agent, eventId?: string): Agent {
+  if (!eventId || agent.pendingDeliveryIds.includes(eventId)) {
+    return agent
+  }
+
+  return {
+    ...agent,
+    pendingDeliveryIds: [...agent.pendingDeliveryIds, eventId]
+  }
+}
+
+function clearPendingDeliveries(agent: Agent, eventId?: string): Agent {
+  if (!agent.pendingDeliveryIds.length) {
+    return agent
+  }
+
+  if (!eventId) {
+    return {
+      ...agent,
+      pendingDeliveryIds: []
+    }
+  }
+
+  const nextPending = agent.pendingDeliveryIds.filter((id) => id !== eventId)
+  if (nextPending.length === agent.pendingDeliveryIds.length) {
+    return agent
+  }
+
+  return {
+    ...agent,
+    pendingDeliveryIds: nextPending
+  }
 }
 
 interface AgentState {
@@ -63,10 +102,10 @@ interface AgentState {
   brokerErrors: BrokerErrorEntry[]
 
   setActiveAgent: (name: string | null) => void
-  trackSpawnedAgent: (name: string, worktreeId: string) => void
+  trackSpawnedAgent: (name: string, workspaceId: string, worktreeId?: string, cli?: string) => void
   handleBrokerEvent: (event: BrokerEvent) => void
   handleBrokerStatus: (status: { status: string; error?: string }) => void
-  addHumanMessage: (to: string, body: string) => void
+  addHumanMessage: (to: string, body: string, workspaceId?: string) => void
   clearAll: () => void
   getAgentBuffer: (name: string) => string[]
 }
@@ -82,12 +121,25 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   setActiveAgent: (name) => set({ activeAgentName: name }),
 
-  // Called right after spawning to associate the agent with a worktree
-  trackSpawnedAgent: (name, worktreeId) => {
+  // Called right after spawning to associate the agent with a workspace.
+  trackSpawnedAgent: (name, workspaceId, worktreeId, cli) => {
     set((state) => ({
-      agents: state.agents.map((a) =>
-        a.name === name ? { ...a, worktreeId } : a
-      )
+      agents: state.agents.some((a) => a.name === name)
+        ? state.agents.map((a) =>
+            a.name === name ? { ...a, workspaceId, worktreeId, cli: cli || a.cli } : a
+          )
+        : [
+            ...state.agents,
+            {
+              name,
+              cli: cli || 'unknown',
+              status: 'running',
+              workspaceId,
+              worktreeId,
+              ptyBuffer: [],
+              pendingDeliveryIds: []
+            }
+          ]
     }))
   },
 
@@ -96,16 +148,28 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
     if (kind === 'agent_spawned' && event.name) {
       set((state) => ({
-        agents: [
-          ...state.agents,
-          {
-            name: event.name!,
-            cli: event.cli || 'unknown',
-            model: event.model,
-            status: 'running',
-            ptyBuffer: []
-          }
-        ],
+        agents: state.agents.some((a) => a.name === event.name)
+          ? state.agents.map((a) =>
+              a.name === event.name
+                ? {
+                    ...a,
+                    cli: event.cli || a.cli,
+                    model: event.model || a.model,
+                    status: 'running'
+                  }
+                : a
+            )
+          : [
+              ...state.agents,
+              {
+                name: event.name!,
+                cli: event.cli || 'unknown',
+                model: event.model,
+                status: 'running',
+                ptyBuffer: [],
+                pendingDeliveryIds: []
+              }
+            ],
         activeAgentName: state.activeAgentName || event.name!
       }))
     } else if ((kind === 'agent_exited' || kind === 'agent_released') && event.name) {
@@ -132,24 +196,53 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           }
         })
       }))
-    } else if (kind === 'relay_inbound' && event.from && event.target && event.body) {
-      const msg: ChatMessage = {
-        id: event.event_id || crypto.randomUUID(),
-        from: event.from,
-        to: event.target,
-        body: event.body,
-        timestamp: Date.now(),
-        isHuman: false
-      }
-      const relay: RelayMessage = {
-        from: event.from,
-        target: event.target,
-        body: event.body,
-        timestamp: Date.now()
-      }
+    } else if (
+      ['delivery_queued', 'delivery_injected', 'delivery_active', 'delivery_ack'].includes(kind) &&
+      event.name
+    ) {
       set((state) => ({
+        agents: state.agents.map((a) =>
+          a.name === event.name ? addPendingDelivery(a, event.event_id) : a
+        )
+      }))
+    } else if (kind === 'delivery_failed' && event.name) {
+      set((state) => ({
+        agents: state.agents.map((a) =>
+          a.name === event.name ? clearPendingDeliveries(a, event.event_id) : a
+        )
+      }))
+    } else if (kind === 'relay_inbound' && event.from && event.target && event.body) {
+      set((state) => {
+        const workspaceId = state.agents.find((a) => a.name === event.from)?.workspaceId
+        const msg: ChatMessage = {
+          id: event.event_id || crypto.randomUUID(),
+          from: event.from,
+          to: event.target,
+          body: event.body,
+          timestamp: Date.now(),
+          isHuman: false,
+          workspaceId
+        }
+        const relay: RelayMessage = {
+          from: event.from,
+          target: event.target,
+          body: event.body,
+          timestamp: Date.now(),
+          workspaceId
+        }
+        return {
+        agents: state.agents.map((a) =>
+          a.name === event.from ? clearPendingDeliveries(a) : a
+        ),
         messages: [...state.messages, msg],
         relayMessages: [...state.relayMessages, relay]
+        }
+      })
+    } else if (kind === 'agent_idle' && event.name) {
+      set((state) => ({
+        agents: state.agents.map((a) =>
+          a.name === event.name ? clearPendingDeliveries(a) : a
+        )
       }))
     }
   },
@@ -180,14 +273,15 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     })
   },
 
-  addHumanMessage: (to, body) => {
+  addHumanMessage: (to, body, workspaceId) => {
     const msg: ChatMessage = {
       id: crypto.randomUUID(),
       from: 'human',
       to,
       body,
       timestamp: Date.now(),
-      isHuman: true
+      isHuman: true,
+      workspaceId
     }
     set((state) => ({ messages: [...state.messages, msg] }))
   },

@@ -7,10 +7,17 @@ import { ChatMessage } from './ChatMessage'
 import { ComposeBar } from './ComposeBar'
 
 export function ChatView(): React.ReactNode {
-  const messages = useAgentStore((s) => s.messages)
-  const agents = useAgentStore((s) => s.agents)
+  const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId)
+  const allMessages = useAgentStore((s) => s.messages)
+  const allAgents = useAgentStore((s) => s.agents)
   const activeChannelName = useWorkspaceStore((s) => s.activeChannelName)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const messages = activeWorkspaceId
+    ? allMessages.filter((msg) => msg.workspaceId === activeWorkspaceId)
+    : allMessages
+  const agents = activeWorkspaceId
+    ? allAgents.filter((agent) => agent.workspaceId === activeWorkspaceId)
+    : allAgents
 
   useEffect(() => {
     if (scrollRef.current) {
@@ -18,7 +25,7 @@ export function ChatView(): React.ReactNode {
     }
   }, [messages.length])
 
-  if (agents.length === 0) {
+  if (agents.length === 0 && !activeChannelName) {
     return (
       <div className="flex h-full items-center justify-center bg-[var(--pear-bg)]">
         <p className="text-xs text-[var(--pear-text-faint)]">Spawn an agent to start messaging</p>
@@ -47,7 +54,9 @@ export function ChatView(): React.ReactNode {
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-6 py-6">
         {messages.length === 0 ? (
           <div className="flex h-full items-center justify-center text-sm text-[var(--pear-text-faint)]">
-            No messages yet. Agent messages will appear here.
+            {activeChannelName
+              ? `No messages yet. Send the first message in #${activeChannelName}.`
+              : 'No messages yet. Messages will appear here.'}
           </div>
         ) : (
           <div className="space-y-4">

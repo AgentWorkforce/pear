@@ -5,13 +5,12 @@ export interface PearAPI {
     remove: (id: string) => Promise<void>
     setActive: (id: string | null) => Promise<void>
     update: (id: string, update: Record<string, unknown>) => Promise<void>
-  }
-  worktree: {
-    addChannel: (workspaceId: string, worktreeId: string, name: string) => Promise<void>
-    removeChannel: (workspaceId: string, worktreeId: string, name: string) => Promise<void>
+    addChannel: (workspaceId: string, name: string) => Promise<void>
+    removeChannel: (workspaceId: string, name: string) => Promise<void>
   }
   broker: {
-    start: (cwd: string, name: string) => Promise<void>
+    start: (cwd: string, name: string, channels?: string[]) => Promise<boolean>
+    syncChannels: (channels: string[]) => Promise<void>
     connectCloud: () => Promise<string>
     spawnAgent: (input: {
       name: string
@@ -20,8 +19,25 @@ export interface PearAPI {
       task?: string
       channels?: string[]
       cwd?: string
-    }) => Promise<void>
-    sendInput: (name: string, data: string) => Promise<void>
+    }) => Promise<{ name: string; runtime: string }>
+    attachTerminal: (input: {
+      name: string
+      rows?: number
+      cols?: number
+      mode?: 'view' | 'drive' | 'passthrough'
+    }) => Promise<{
+      name: string
+      mode: 'auto_inject' | 'manual_flush'
+      previousMode?: 'auto_inject' | 'manual_flush'
+      pending: number
+      snapshot?: {
+        rows: number
+        cols: number
+        cursor: [number, number]
+        screen: string
+      }
+    }>
+    sendInput: (name: string, data: string) => Promise<{ name: string; bytes_written: number }>
     resizePty: (name: string, rows: number, cols: number) => Promise<void>
     sendMessage: (input: { to: string; text: string; from?: string }) => Promise<void>
     releaseAgent: (name: string) => Promise<void>
