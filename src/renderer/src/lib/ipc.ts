@@ -1,3 +1,20 @@
+export type TerminalAttachMode = 'view' | 'drive' | 'passthrough'
+export type InboundDeliveryMode = 'auto_inject' | 'manual_flush'
+export type MessageInjectionMode = 'wait' | 'steer'
+
+export interface PendingRelayMessage {
+  from: string
+  body: string
+  target: string
+  thread_id?: string
+  workspace_id?: string
+  workspace_alias?: string
+  priority: number
+  mode: MessageInjectionMode
+  queued_at_ms: number
+  event_id?: string
+}
+
 export interface PearAPI {
   workspace: {
     list: () => Promise<{ workspaces: unknown[]; activeId: string | null }>
@@ -24,11 +41,11 @@ export interface PearAPI {
       name: string
       rows?: number
       cols?: number
-      mode?: 'view' | 'drive' | 'passthrough'
+      mode?: TerminalAttachMode
     }) => Promise<{
       name: string
-      mode: 'auto_inject' | 'manual_flush'
-      previousMode?: 'auto_inject' | 'manual_flush'
+      mode: InboundDeliveryMode
+      previousMode?: InboundDeliveryMode
       pending: number
       snapshot?: {
         rows: number
@@ -38,6 +55,14 @@ export interface PearAPI {
       }
     }>
     sendInput: (name: string, data: string) => Promise<{ name: string; bytes_written: number }>
+    setTerminalMode: (name: string, mode: TerminalAttachMode) => Promise<{
+      name: string
+      mode: InboundDeliveryMode
+      flushed: number
+      pending: number
+    }>
+    getPending: (name: string) => Promise<PendingRelayMessage[]>
+    flushPending: (name: string) => Promise<{ flushed: number }>
     resizePty: (name: string, rows: number, cols: number) => Promise<void>
     sendMessage: (input: { to: string; text: string; from?: string }) => Promise<void>
     releaseAgent: (name: string) => Promise<void>

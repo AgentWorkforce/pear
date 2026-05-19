@@ -112,6 +112,18 @@ export function registerIpcHandlers(): void {
     await brokerManager.sendInput(name, data)
   })
 
+  ipcMain.handle('broker:set-terminal-mode', async (_, name: string, mode: 'view' | 'drive' | 'passthrough') => {
+    return brokerManager.setTerminalMode(name, mode)
+  })
+
+  ipcMain.handle('broker:get-pending', async (_, name: string) => {
+    return brokerManager.getPendingMessages(name)
+  })
+
+  ipcMain.handle('broker:flush-pending', async (_, name: string) => {
+    return brokerManager.flushPending(name)
+  })
+
   ipcMain.handle('broker:resize-pty', async (_, name: string, rows: number, cols: number) => {
     await brokerManager.resizePty(name, rows, cols)
   })

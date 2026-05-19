@@ -35,6 +35,10 @@ const api = {
       mode?: 'view' | 'drive' | 'passthrough'
     }) => ipcRenderer.invoke('broker:attach-terminal', input),
     sendInput: (name: string, data: string) => ipcRenderer.invoke('broker:send-input', name, data),
+    setTerminalMode: (name: string, mode: 'view' | 'drive' | 'passthrough') =>
+      ipcRenderer.invoke('broker:set-terminal-mode', name, mode),
+    getPending: (name: string) => ipcRenderer.invoke('broker:get-pending', name),
+    flushPending: (name: string) => ipcRenderer.invoke('broker:flush-pending', name),
     resizePty: (name: string, rows: number, cols: number) =>
       ipcRenderer.invoke('broker:resize-pty', name, rows, cols),
     sendMessage: (input: { to: string; text: string; from?: string }) =>

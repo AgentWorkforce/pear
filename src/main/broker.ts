@@ -7,7 +7,8 @@ import {
   type SendMessageInput,
   type BrokerEvent,
   type ListAgent,
-  type InboundDeliveryMode
+  type InboundDeliveryMode,
+  type PendingRelayMessage
 } from '@agent-relay/sdk'
 import { getAccessToken, getApiUrl } from './auth'
 import { assertDirectory } from './path-utils'
@@ -76,6 +77,10 @@ export interface AttachTerminalResult {
 
 function isPositiveInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0
+}
+
+function toInboundDeliveryMode(mode?: TerminalAttachMode): InboundDeliveryMode {
+  return mode === 'drive' ? 'manual_flush' : 'auto_inject'
 }
 
 export class BrokerManager {
@@ -234,7 +239,7 @@ export class BrokerManager {
 
     await this.ensureStarted()
     const client = this.client!
-    const mode: InboundDeliveryMode = input.mode === 'drive' ? 'manual_flush' : 'auto_inject'
+    const mode = toInboundDeliveryMode(input.mode)
     let previousMode: InboundDeliveryMode | undefined
 
     try {
@@ -287,6 +292,49 @@ export class BrokerManager {
   async sendInput(name: string, data: string): Promise<{ name: string; bytes_written: number }> {
     await this.ensureStarted()
     return this.client!.sendInput(name, data)
+  }
+
+  async setTerminalMode(
+    name: string,
+    mode: TerminalAttachMode
+  ): Promise<{ name: string; mode: InboundDeliveryMode; flushed: number; pending: number }> {
+    const trimmedName = name.trim()
+    if (!trimmedName) {
+      throw new Error('Agent name is required')
+    }
+
+    await this.ensureStarted()
+    const result = await this.client!.setInboundDeliveryMode(trimmedName, toInboundDeliveryMode(mode))
+    const pending = result.mode === 'manual_flush'
+      ? await this.client!.getPending(trimmedName).then((messages) => messages.length).catch(() => 0)
+      : 0
+
+    return {
+      name: trimmedName,
+      mode: result.mode,
+      flushed: result.flushed,
+      pending
+    }
+  }
+
+  async getPendingMessages(name: string): Promise<PendingRelayMessage[]> {
+    const trimmedName = name.trim()
+    if (!trimmedName) {
+      throw new Error('Agent name is required')
+    }
+
+    await this.ensureStarted()
+    return this.client!.getPending(trimmedName)
+  }
+
+  async flushPending(name: string): Promise<{ flushed: number }> {
+    const trimmedName = name.trim()
+    if (!trimmedName) {
+      throw new Error('Agent name is required')
+    }
+
+    await this.ensureStarted()
+    return this.client!.flushPending(trimmedName)
   }
 
   async resizePty(name: string, rows: number, cols: number): Promise<void> {

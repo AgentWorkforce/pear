@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
-import { pear } from '@/lib/ipc'
+import { pear, type TerminalAttachMode } from '@/lib/ipc'
 import { useAgentStore } from '@/stores/agent-store'
 import { useUIStore, type Theme } from '@/stores/ui-store'
 
@@ -128,13 +128,32 @@ interface TerminalSize {
 export function useTerminal(
   containerRef: React.RefObject<HTMLDivElement | null>,
   agentName: string | null,
-  visible: boolean
+  visible: boolean,
+  active: boolean = visible,
+  terminalMode: TerminalAttachMode = 'passthrough'
 ): Terminal | null {
   const termRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
   const writtenChunksRef = useRef<number>(0)
+  const activeRef = useRef(active)
+  const terminalModeRef = useRef<TerminalAttachMode>(terminalMode)
   const theme = useUIStore((s) => s.theme)
   const activeDialog = useUIStore((s) => s.activeDialog)
+
+  useEffect(() => {
+    activeRef.current = active
+  }, [active])
+
+  useEffect(() => {
+    terminalModeRef.current = terminalMode
+  }, [terminalMode])
+
+  useEffect(() => {
+    if (!agentName) return
+    pear.broker.setTerminalMode(agentName, terminalMode).catch((err) => {
+      console.error('[terminal] setTerminalMode failed:', err)
+    })
+  }, [agentName, terminalMode])
 
   useEffect(() => {
     if (!containerRef.current || !agentName) return
@@ -147,15 +166,17 @@ export function useTerminal(
     let disposed = false
     let cleanupBounce: (() => void) | null = null
     const sendInput = (data: string): void => {
+      if (terminalModeRef.current === 'view') return
       pear.broker.sendInput(agentName!, data).catch((err) => {
         console.error('[terminal] sendInput failed:', err)
       })
     }
 
-    const focusTerminal = (): void => {
+    const focusTerminal = (requireActive = false): void => {
       if (!term) return
+      if (requireActive && !activeRef.current) return
       requestAnimationFrame(() => {
-        if (!disposed) {
+        if (!disposed && (!requireActive || activeRef.current)) {
           container.focus({ preventScroll: true })
           term?.textarea?.focus({ preventScroll: true })
           term?.focus()
@@ -215,7 +236,7 @@ export function useTerminal(
           name: agentName!,
           rows: initialSize?.rows,
           cols: initialSize?.cols,
-          mode: 'drive'
+          mode: terminalModeRef.current
         })
 
         if (disposed) return
@@ -270,12 +291,12 @@ export function useTerminal(
       termRef.current = term
       fitAddonRef.current = fitAddon
 
-      focusTerminal()
+      focusTerminal(true)
 
       // Spawn dialogs and pane layout updates can steal focus immediately after
       // mount. Retry a few times so the xterm textarea reliably becomes active.
       const focusTimers = [0, 50, 150, 300].map((delay) =>
-        setTimeout(() => focusTerminal(), delay)
+        setTimeout(() => focusTerminal(true), delay)
       )
 
       resizeObserver = new ResizeObserver(() => safeFitAndSync())
@@ -375,24 +396,26 @@ export function useTerminal(
     } catch {
       // ignore
     }
+    if (!active) return
     const timer = setTimeout(() => termRef.current?.focus(), 50)
     return () => clearTimeout(timer)
-  }, [visible, agentName])
+  }, [visible, active, agentName])
 
   useEffect(() => {
-    if (!visible) return
+    if (!visible || !active) return
     const handleWindowFocus = (): void => {
       setTimeout(() => termRef.current?.focus(), 50)
     }
     window.addEventListener('focus', handleWindowFocus)
     return () => window.removeEventListener('focus', handleWindowFocus)
-  }, [visible])
+  }, [visible, active])
 
   useEffect(() => {
-    if (!visible || !agentName || activeDialog) return
+    if (!visible || !active || terminalMode === 'view' || !agentName || activeDialog) return
     const container = containerRef.current
 
     const sendInput = (data: string): void => {
+      if (terminalModeRef.current === 'view') return
       pear.broker.sendInput(agentName, data).catch((err) => {
         console.error('[terminal] sendInput failed:', err)
       })
@@ -445,7 +468,7 @@ export function useTerminal(
       window.removeEventListener('keydown', handleGlobalKeyDown, true)
       window.removeEventListener('paste', handleGlobalPaste, true)
     }
-  }, [visible, agentName, activeDialog, containerRef])
+  }, [visible, active, terminalMode, agentName, activeDialog, containerRef])
 
   return termRef.current
 }

@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import type { TerminalAttachMode } from '@/lib/ipc'
 
 export interface Agent {
   name: string
@@ -8,6 +9,7 @@ export interface Agent {
   workspaceId?: string
   worktreePath?: string
   worktreeId?: string
+  terminalMode: TerminalAttachMode
   ptyBuffer: string[]
   pendingDeliveryIds: string[]
 }
@@ -102,6 +104,7 @@ interface AgentState {
   brokerErrors: BrokerErrorEntry[]
 
   setActiveAgent: (name: string | null) => void
+  setAgentTerminalMode: (name: string, mode: TerminalAttachMode) => void
   trackSpawnedAgent: (name: string, workspaceId: string, worktreeId?: string, cli?: string) => void
   handleBrokerEvent: (event: BrokerEvent) => void
   handleBrokerStatus: (status: { status: string; error?: string }) => void
@@ -121,6 +124,14 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   setActiveAgent: (name) => set({ activeAgentName: name }),
 
+  setAgentTerminalMode: (name, mode) => {
+    set((state) => ({
+      agents: state.agents.map((agent) =>
+        agent.name === name ? { ...agent, terminalMode: mode } : agent
+      )
+    }))
+  },
+
   // Called right after spawning to associate the agent with a workspace.
   trackSpawnedAgent: (name, workspaceId, worktreeId, cli) => {
     set((state) => ({
@@ -136,6 +147,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
               status: 'running',
               workspaceId,
               worktreeId,
+              terminalMode: 'passthrough',
               ptyBuffer: [],
               pendingDeliveryIds: []
             }
@@ -155,7 +167,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                     ...a,
                     cli: event.cli || a.cli,
                     model: event.model || a.model,
-                    status: 'running'
+                    status: 'running',
+                    terminalMode: a.terminalMode || 'passthrough'
                   }
                 : a
             )
@@ -166,6 +179,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                 cli: event.cli || 'unknown',
                 model: event.model,
                 status: 'running',
+                terminalMode: 'passthrough',
                 ptyBuffer: [],
                 pendingDeliveryIds: []
               }
@@ -196,20 +210,45 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           }
         })
       }))
-    } else if (
-      ['delivery_queued', 'delivery_injected', 'delivery_active', 'delivery_ack'].includes(kind) &&
-      event.name
-    ) {
+    } else if (kind === 'delivery_queued' && event.name) {
       set((state) => ({
         agents: state.agents.map((a) =>
           a.name === event.name ? addPendingDelivery(a, event.event_id) : a
         )
       }))
-    } else if (kind === 'delivery_failed' && event.name) {
+    } else if (kind === 'delivery_active' && event.name) {
+      set((state) => ({
+        agents: state.agents.map((a) =>
+          a.name === event.name ? addPendingDelivery(a, event.event_id) : a
+        )
+      }))
+    } else if (
+      ['delivery_injected', 'delivery_verified', 'delivery_ack', 'delivery_failed', 'message_delivery_confirmed', 'message_delivery_failed'].includes(kind) &&
+      event.name
+    ) {
       set((state) => ({
         agents: state.agents.map((a) =>
           a.name === event.name ? clearPendingDeliveries(a, event.event_id) : a
         )
+      }))
+    } else if (kind === 'agent_pending_drained' && event.name) {
+      set((state) => ({
+        agents: state.agents.map((a) =>
+          a.name === event.name ? clearPendingDeliveries(a) : a
+        )
+      }))
+    } else if (kind === 'agent_inbound_delivery_mode_changed' && event.name) {
+      set((state) => ({
+        agents: state.agents.map((a) => {
+          if (a.name !== event.name) return a
+          if (event.mode === 'manual_flush') {
+            return { ...a, terminalMode: 'drive' }
+          }
+          return {
+            ...a,
+            terminalMode: a.terminalMode === 'drive' ? 'passthrough' : a.terminalMode
+          }
+        })
       }))
     } else if (kind === 'relay_inbound' && event.from && event.target && event.body) {
       set((state) => {
@@ -231,11 +270,11 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           workspaceId
         }
         return {
-        agents: state.agents.map((a) =>
-          a.name === event.from ? clearPendingDeliveries(a) : a
-        ),
-        messages: [...state.messages, msg],
-        relayMessages: [...state.relayMessages, relay]
+          agents: state.agents.map((a) =>
+            a.name === event.from ? clearPendingDeliveries(a) : a
+          ),
+          messages: [...state.messages, msg],
+          relayMessages: [...state.relayMessages, relay]
         }
       })
     } else if (kind === 'agent_idle' && event.name) {

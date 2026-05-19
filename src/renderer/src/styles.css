@@ -1,5 +1,6 @@
 @import 'tailwindcss';
 @import '@xterm/xterm/css/xterm.css';
+@import 'allotment/dist/style.css';
 
 /* ── Dark theme (default) ── */
 :root,
@@ -100,6 +101,11 @@ body,
 
 .xterm {
   cursor: text;
+}
+
+.pear-terminal-split {
+  --focus-border: var(--pear-accent-dim);
+  --separator-border: var(--pear-border-subtle);
 }
 
 /* Scrollbar */
