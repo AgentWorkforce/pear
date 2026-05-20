@@ -118,7 +118,7 @@ function getTabTitle(tab: AppTabInput): string {
     case 'project-settings':
       return 'Settings'
     case 'broker-details':
-      return 'Broker'
+      return 'Agent Relay Status'
     case 'source-control':
       return 'Source Control'
   }

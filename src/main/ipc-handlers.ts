@@ -139,6 +139,22 @@ export function registerIpcHandlers(): void {
     await brokerManager.syncChannels(projectId, channels)
   })
 
+  ipcMain.handle('broker:auto-fix-runtime', async (
+    event,
+    projectId: string,
+    cwd: string,
+    name: string,
+    channels?: string[],
+    errorMessage?: string
+  ) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) throw new Error('No window')
+    if (!isDirectory(cwd)) {
+      throw new Error(`Project path no longer exists: ${cwd}`)
+    }
+    return brokerManager.autoFixRuntime(projectId, cwd, name, win, channels, errorMessage)
+  })
+
   ipcMain.handle('broker:spawn-agent', async (_, projectId: string, input: SpawnPtyInput) => {
     return brokerManager.spawnAgent(projectId, input)
   })

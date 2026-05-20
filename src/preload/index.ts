@@ -30,6 +30,13 @@ const api = {
       ipcRenderer.invoke('broker:start', projectId, cwd, name, channels) as Promise<boolean>,
     syncChannels: (projectId: string, channels: string[]) =>
       ipcRenderer.invoke('broker:sync-channels', projectId, channels),
+    autoFixRuntime: (
+      projectId: string,
+      cwd: string,
+      name: string,
+      channels?: string[],
+      errorMessage?: string
+    ) => ipcRenderer.invoke('broker:auto-fix-runtime', projectId, cwd, name, channels, errorMessage) as Promise<{ removed: string[] }>,
     connectCloud: () => ipcRenderer.invoke('broker:connect-cloud') as Promise<string>,
     spawnAgent: (projectId: string, input: {
       name: string

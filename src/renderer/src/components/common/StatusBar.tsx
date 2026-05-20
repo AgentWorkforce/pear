@@ -32,8 +32,8 @@ export function StatusBar(): React.ReactNode {
     <div className="relative flex h-[38px] shrink-0 items-center gap-6 border-t border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-6 text-xs text-[var(--pear-text-dim)]">
       <button
         type="button"
-        title="Open broker details"
-        aria-label={`Broker status ${brokerStatus}. Open broker details.`}
+        title="Open Agent Relay Status"
+        aria-label={`Agent Relay status ${brokerStatus}. Open Agent Relay Status.`}
         onClick={() => openTab({ kind: 'broker-details' })}
         className={`flex items-center gap-2 rounded-full px-2.5 py-1 transition-colors ${
           brokerStatus === 'error'

@@ -195,7 +195,7 @@ body,
 }
 
 .diff-view .diff-block-gutter.is-active {
-  background: var(--diff-gutter-selected-background-color);
+  background: var(--diff-gutter-selected-border-color);
 }
 
 .diff-view .diff-block-selector {
@@ -314,7 +314,7 @@ body,
 
 .diff-view .diff-line:hover .diff-block-gutter.is-active,
 .diff-view .diff-line-block-hover .diff-block-gutter.is-active {
-  background: var(--diff-gutter-selected-hover-background-color);
+  background: var(--diff-gutter-selected-border-color);
 }
 
 .diff-view .diff-line:hover .diff-gutter-selected,

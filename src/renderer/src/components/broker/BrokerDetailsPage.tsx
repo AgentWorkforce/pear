@@ -1,6 +1,6 @@
 import type React from 'react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { AlertCircle, Check, Cloud, Copy, KeyRound, RefreshCw, Server, TerminalSquare } from 'lucide-react'
+import { AlertCircle, Check, Cloud, Copy, KeyRound, RefreshCw, Server, TerminalSquare, Wrench } from 'lucide-react'
 import { pear, type BrokerDetails, type BrokerListAgent } from '@/lib/ipc'
 import { type BrokerErrorEntry, useAgentStore } from '@/stores/agent-store'
 import { useProjectStore, type Project } from '@/stores/project-store'
@@ -33,6 +33,28 @@ function formatUptime(seconds: number | undefined): string {
 
 function getProjectName(projects: Project[], projectId: string): string {
   return projects.find((project) => project.id === projectId)?.name || projectId
+}
+
+function getProjectBrokerName(project: Project): string {
+  return `pear-${project.relayWorkspaceId}`
+}
+
+function getDefaultProjectRoot(project: Project): Project['roots'][number] | undefined {
+  return project.roots.find((root) => root.pathExists) || project.roots[0]
+}
+
+function isRecoverableBrokerRuntimeError(message: string): boolean {
+  const hasBrokerLockConflict = /another broker instance is already running in this directory/i.test(message)
+  const hasLivePidConflict = /another broker instance is already running in this directory \(pid:\s*\d+/i.test(message)
+  const hasStaleLockSignal =
+    /stale broker lock detected/i.test(message) ||
+    /broker lock held but no valid PID file found/i.test(message)
+
+  return !hasLivePidConflict && (hasStaleLockSignal || hasBrokerLockConflict)
+}
+
+function getAutoFixableBrokerError(entries: BrokerErrorEntry[]): BrokerErrorEntry | undefined {
+  return entries.find((entry) => isRecoverableBrokerRuntimeError(entry.message))
 }
 
 function getConnectionStatusLabel(status: BrokerDetails['connectionFileStatus']): string {
@@ -101,7 +123,7 @@ function buildAgentFallbackDetails(
 
 function getIssueLabel(entry: BrokerErrorEntry, index: number, currentErrorId: string | undefined): string {
   if (entry.id === currentErrorId) return 'Current issue'
-  return index === 0 ? 'Latest issue' : 'Broker error'
+  return index === 0 ? 'Latest issue' : 'Agent Relay error'
 }
 
 function BrokerErrorRows({
@@ -148,7 +170,7 @@ function BrokerIssueBlock({
     <div>
       <div className="mb-3 flex items-center gap-2">
         <AlertCircle size={15} className="text-[var(--pear-red)]" />
-        <h3 className="text-sm font-semibold text-[var(--pear-text)]">Broker issues</h3>
+        <h3 className="text-sm font-semibold text-[var(--pear-text)]">Agent Relay issues</h3>
       </div>
       <BrokerErrorRows entries={entries} currentErrorId={currentErrorId} />
     </div>
@@ -156,14 +178,27 @@ function BrokerIssueBlock({
 }
 
 function ProjectBrokerIssueSection({
+  project,
   projectName,
   entries,
-  currentErrorId
+  currentErrorId,
+  fixing,
+  fixError,
+  onAutoFix
 }: {
+  project?: Project
   projectName: string
   entries: BrokerErrorEntry[]
   currentErrorId?: string
+  fixing?: boolean
+  fixError?: string
+  onAutoFix?: (project: Project, entry: BrokerErrorEntry) => void
 }): React.ReactNode {
+  const autoFixEntry = getAutoFixableBrokerError(entries)
+  const autoFixAction = project && autoFixEntry && onAutoFix
+    ? { project, entry: autoFixEntry, run: onAutoFix }
+    : null
+
   return (
     <section className="rounded-lg border border-[var(--pear-red)]/25 bg-[var(--pear-bg-surface)]">
       <div className="flex flex-wrap items-start justify-between gap-4 border-b border-[var(--pear-red)]/15 px-5 py-4">
@@ -179,13 +214,30 @@ function ProjectBrokerIssueSection({
               </span>
             </div>
             <p className="mt-1 text-sm text-[var(--pear-text-faint)]">
-              Broker did not start or is not currently managed by this window.
+              Agent Relay did not start or is not currently managed by this window.
             </p>
           </div>
         </div>
+        {autoFixAction && (
+          <button
+            type="button"
+            onClick={() => autoFixAction.run(autoFixAction.project, autoFixAction.entry)}
+            disabled={fixing}
+            className="inline-flex items-center gap-2 rounded-md border border-[var(--pear-red)]/30 bg-[var(--pear-red)]/10 px-3 py-2 text-sm text-[var(--pear-red)] hover:bg-[var(--pear-red)]/15 disabled:cursor-wait disabled:opacity-60"
+            title="Clear stale Agent Relay runtime files and restart this session"
+          >
+            {fixing ? <RefreshCw size={14} className="animate-spin" /> : <Wrench size={14} />}
+            <span>{fixing ? 'Fixing' : 'Auto Fix'}</span>
+          </button>
+        )}
       </div>
       <div className="p-5">
         <BrokerErrorRows entries={entries} currentErrorId={currentErrorId} />
+        {fixError && (
+          <p className="mt-3 rounded-lg border border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 px-3 py-2 text-sm text-[var(--pear-red)]">
+            {fixError}
+          </p>
+        )}
       </div>
     </section>
   )
@@ -321,7 +373,7 @@ function BrokerCommands({ broker }: { broker: BrokerDetails }): React.ReactNode 
   if (!commands.length) {
     return (
       <div className="rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35 p-4 text-sm text-[var(--pear-text-faint)]">
-        Restart Pear to load full broker connection details for CLI commands.
+        Restart Pear to load full Agent Relay connection details for CLI commands.
       </div>
     )
   }
@@ -391,7 +443,7 @@ function BrokerCard({
 
       <div className="space-y-5 p-5">
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <DetailField label="Broker URL" value={broker.url || 'n/a'} copy={!!broker.url} />
+          <DetailField label="Agent Relay URL" value={broker.url || 'n/a'} copy={!!broker.url} />
           <DetailField label="API key" value={apiKey} copy={!!broker.apiKey} />
           <DetailField label="Port" value={broker.port ? String(broker.port) : 'n/a'} />
           <DetailField label="PID / sandbox" value={String(broker.brokerPid || broker.cloudSandboxId || 'n/a')} />
@@ -444,7 +496,7 @@ function BrokerCard({
             </div>
           ) : (
             <div className="rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-3 py-6 text-center text-sm text-[var(--pear-text-faint)]">
-              No agents registered with this broker
+              No agents registered with this Agent Relay session
             </div>
           )}
         </div>
@@ -469,6 +521,8 @@ export function BrokerDetailsPage(): React.ReactNode {
   const [brokerDetails, setBrokerDetails] = useState<BrokerDetails[]>([])
   const [detailsLoading, setDetailsLoading] = useState(false)
   const [detailsError, setDetailsError] = useState<string | null>(null)
+  const [autoFixingProjectId, setAutoFixingProjectId] = useState<string | null>(null)
+  const [autoFixErrors, setAutoFixErrors] = useState<Record<string, string>>({})
 
   const currentErrorId = brokerStatus === 'error' && brokerError && brokerErrors[0]?.message === brokerError
     ? brokerErrors[0].id
@@ -505,7 +559,7 @@ export function BrokerDetailsPage(): React.ReactNode {
       const liveAgents = await pear.broker.listAgents()
       setBrokerDetails(buildAgentFallbackDetails(liveAgents, projects, brokerStatus))
       setDetailsError(
-        'Broker details API is not loaded in this window. Restart Pear for full broker diagnostics and API-key CLI strings.'
+        'Agent Relay status API is not loaded in this window. Restart Pear for full diagnostics and API-key CLI strings.'
       )
     } catch (err) {
       setDetailsError(err instanceof Error ? err.message : String(err))
@@ -513,6 +567,40 @@ export function BrokerDetailsPage(): React.ReactNode {
       setDetailsLoading(false)
     }
   }, [brokerStatus, projects])
+
+  const handleAutoFix = useCallback(async (project: Project, entry: BrokerErrorEntry): Promise<void> => {
+    const root = getDefaultProjectRoot(project)
+    if (!root?.pathExists) {
+      setAutoFixErrors((errors) => ({
+        ...errors,
+        [project.id]: `Project path no longer exists: ${root?.path || project.rootPath}`
+      }))
+      return
+    }
+
+    setAutoFixingProjectId(project.id)
+    setAutoFixErrors((errors) => {
+      const { [project.id]: _removed, ...remaining } = errors
+      return remaining
+    })
+    try {
+      await pear.broker.autoFixRuntime(
+        project.id,
+        root.path,
+        getProjectBrokerName(project),
+        project.channels,
+        entry.message
+      )
+      await loadBrokerDetails()
+    } catch (err) {
+      setAutoFixErrors((errors) => ({
+        ...errors,
+        [project.id]: err instanceof Error ? err.message : String(err)
+      }))
+    } finally {
+      setAutoFixingProjectId(null)
+    }
+  }, [loadBrokerDetails])
 
   useEffect(() => {
     void loadBrokerDetails()
@@ -523,9 +611,9 @@ export function BrokerDetailsPage(): React.ReactNode {
       <div className="shrink-0 border-b border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-6 py-5">
         <div className="flex flex-wrap items-start justify-between gap-4">
           <div>
-            <h1 className="text-xl font-semibold text-[var(--pear-text)]">Broker details</h1>
+            <h1 className="text-xl font-semibold text-[var(--pear-text)]">Agent Relay Status</h1>
             <p className="mt-1 text-sm text-[var(--pear-text-faint)]">
-              Running broker sessions, local connection metadata, and CLI-ready commands.
+              Running sessions, local connection metadata, and CLI-ready commands.
             </p>
           </div>
           <button
@@ -549,7 +637,7 @@ export function BrokerDetailsPage(): React.ReactNode {
 
         {detailsLoading && !hasBrokerSections ? (
           <div className="rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-surface)] px-3 py-12 text-center text-sm text-[var(--pear-text-faint)]">
-            Loading broker details...
+            Loading Agent Relay status...
           </div>
         ) : hasBrokerSections ? (
           <div className="space-y-5">
@@ -565,22 +653,26 @@ export function BrokerDetailsPage(): React.ReactNode {
             {unmatchedProjectErrorGroups.map(([projectId, entries]) => (
               <ProjectBrokerIssueSection
                 key={projectId}
+                project={projects.find((project) => project.id === projectId)}
                 projectName={getProjectName(projects, projectId)}
                 entries={entries}
                 currentErrorId={currentErrorId}
+                fixing={autoFixingProjectId === projectId}
+                fixError={autoFixErrors[projectId]}
+                onAutoFix={(project, entry) => void handleAutoFix(project, entry)}
               />
             ))}
           </div>
         ) : (
           <div className="rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-surface)] px-3 py-12 text-center text-sm text-[var(--pear-text-faint)]">
-            No managed brokers running
+            No managed Agent Relay sessions running
           </div>
         )}
 
         {unattributedBrokerErrors.length > 0 && (
           <div className="mt-5">
             <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.12em] text-[var(--pear-text-faint)]">
-              Unattributed broker errors
+              Unattributed Agent Relay errors
             </p>
             <BrokerErrorRows entries={unattributedBrokerErrors} currentErrorId={currentErrorId} />
           </div>

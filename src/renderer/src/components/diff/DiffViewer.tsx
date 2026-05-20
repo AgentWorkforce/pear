@@ -74,28 +74,42 @@ async function buildHighlightedTokens(file: FileData, theme: 'dark' | 'light'): 
   const filePath = file.newPath === '/dev/null' ? file.oldPath : file.newPath
   const old: TokenNode[][] = []
   const next: TokenNode[][] = []
+  const highlightableChanges: ChangeData[] = []
 
   for (const hunk of file.hunks) {
     for (const change of hunk.changes) {
       if (change.type === 'insert' || change.type === 'delete' || change.type === 'normal') {
-        const highlightedLine = await highlightCode(change.content, filePath, theme)
-        const tokenNodes = toTokenNodes(highlightedLine[0] || [])
-
-        if (change.type === 'insert' && change.lineNumber > 0) {
-          next[change.lineNumber - 1] = tokenNodes
-        }
-
-        if (change.type === 'delete' && change.lineNumber > 0) {
-          old[change.lineNumber - 1] = tokenNodes
-        }
-
-        if (change.type === 'normal') {
-          if (change.oldLineNumber > 0) old[change.oldLineNumber - 1] = tokenNodes
-          if (change.newLineNumber > 0) next[change.newLineNumber - 1] = tokenNodes
-        }
+        highlightableChanges.push(change)
       }
     }
   }
+
+  if (highlightableChanges.length === 0) {
+    return { old, new: next }
+  }
+
+  const highlightedLines = await highlightCode(
+    highlightableChanges.map((change) => change.content).join('\n'),
+    filePath,
+    theme
+  )
+
+  highlightableChanges.forEach((change, index) => {
+    const tokenNodes = toTokenNodes(highlightedLines[index] || [])
+
+    if (change.type === 'insert' && change.lineNumber > 0) {
+      next[change.lineNumber - 1] = tokenNodes
+    }
+
+    if (change.type === 'delete' && change.lineNumber > 0) {
+      old[change.lineNumber - 1] = tokenNodes
+    }
+
+    if (change.type === 'normal') {
+      if (change.oldLineNumber > 0) old[change.oldLineNumber - 1] = tokenNodes
+      if (change.newLineNumber > 0) next[change.newLineNumber - 1] = tokenNodes
+    }
+  })
 
   return { old, new: next }
 }
@@ -419,6 +433,17 @@ export const DiffViewer = memo(function DiffViewer({
       }
     })
   }, [expandedFiles, fileSources, files])
+  const selectionMapsByFilePath = useMemo(() => {
+    const maps = new Map<string, SelectionMaps>()
+    if (!selectable) return maps
+
+    displayFiles.forEach((file) => {
+      const filePath = getDiffFilePath(file)
+      maps.set(filePath, buildSelectionMaps(filePath, file.hunks))
+    })
+
+    return maps
+  }, [displayFiles, selectable])
 
   function setLines(filePath: string, lineIds: string[], selected: boolean): void {
     if (onSetLines) {
@@ -531,7 +556,7 @@ export const DiffViewer = memo(function DiffViewer({
         const filePath = getDiffFilePath(file)
         const source = fileSources[filePath]
         const expanded = expandedFiles.has(filePath)
-        const selectionMaps = buildSelectionMaps(filePath, file.hunks)
+        const selectionMaps = selectionMapsByFilePath.get(filePath)
         const highlightedTokens = highlightedFiles[index]
         const toggleExpanded = (): void => {
           setExpandedFiles((current) => {
@@ -546,13 +571,13 @@ export const DiffViewer = memo(function DiffViewer({
         }
         const renderChange = (change: ChangeData, key: string): React.ReactElement => {
           const changeKey = getChangeKey(change)
-          const lineId = selectable && isSelectableChange(change)
+          const lineId = selectable && selectionMaps && isSelectableChange(change)
             ? selectionMaps.lineIdsByChangeKey.get(changeKey)
             : undefined
-          const blockLineIds = selectable && isSelectableChange(change)
+          const blockLineIds = selectable && selectionMaps && isSelectableChange(change)
             ? selectionMaps.blockLineIdsByChangeKey.get(changeKey) || []
             : []
-          const blockId = selectable && isSelectableChange(change)
+          const blockId = selectable && selectionMaps && isSelectableChange(change)
             ? selectionMaps.blockIdByChangeKey.get(changeKey)
             : undefined
           const selected = !!lineId && isLineSelected(filePath, lineId)

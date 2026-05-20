@@ -213,7 +213,8 @@ export const useGitStore = create<GitState>((set, get) => ({
     get().stopPolling()
     get().fetchStatus(rootPath)
     get().fetchSummary(rootPath)
-    get().fetchDiff(rootPath)
+    const selectedFile = get().selectedFile
+    if (selectedFile) get().fetchDiff(rootPath, selectedFile)
     const interval = setInterval(() => {
       get().fetchStatus(rootPath)
       get().fetchSummary(rootPath)

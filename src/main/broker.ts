@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from 'fs'
+import { rm } from 'fs/promises'
 import { basename, join } from 'path'
 import { BrowserWindow } from 'electron'
 import {
@@ -89,6 +90,10 @@ export interface AttachTerminalResult {
 export interface GeneratedCommitDraft {
   title: string
   body: string
+}
+
+export interface BrokerRuntimeAutoFixResult {
+  removed: string[]
 }
 
 function isPositiveInteger(value: unknown): value is number {
@@ -292,6 +297,48 @@ function parseGeneratedCommitDraft(text: string): GeneratedCommitDraft {
   throw new Error('Commit message agent did not return a usable JSON draft')
 }
 
+function getBrokerRuntimeSafeName(name: string): string {
+  return name
+    .split('')
+    .map((char) => /[a-z0-9-]/i.test(char) ? char : '-')
+    .join('')
+}
+
+function getBrokerRuntimeCleanupPaths(cwd: string, brokerName: string): string[] {
+  const root = join(cwd, '.agent-relay')
+  const safeName = getBrokerRuntimeSafeName(brokerName)
+
+  return [
+    join(root, 'connection.json'),
+    join(root, `broker-${safeName}.lock`),
+    join(root, `state-${safeName}.json`),
+    join(root, `pending-${safeName}.json`)
+  ]
+}
+
+function isRecoverableBrokerRuntimeError(err: unknown): boolean {
+  const message = toErrorMessage(err)
+  const hasBrokerLockConflict = /another broker instance is already running in this directory/i.test(message)
+  const hasLivePidConflict = /another broker instance is already running in this directory \(pid:\s*\d+/i.test(message)
+  const hasStaleLockSignal =
+    /stale broker lock detected/i.test(message) ||
+    /broker lock held but no valid PID file found/i.test(message)
+
+  return !hasLivePidConflict && (hasStaleLockSignal || hasBrokerLockConflict)
+}
+
+async function clearBrokerRuntimeFiles(cwd: string, brokerName: string): Promise<string[]> {
+  const removed: string[] = []
+
+  for (const filePath of getBrokerRuntimeCleanupPaths(cwd, brokerName)) {
+    if (!existsSync(filePath)) continue
+    await rm(filePath, { force: true })
+    removed.push(filePath)
+  }
+
+  return removed
+}
+
 function getAvailableAgentName(requestedName: string, existingNames: Set<string>): string {
   const trimmedName = requestedName.trim()
   if (!existingNames.has(trimmedName)) {
@@ -425,7 +472,7 @@ export class BrokerManager {
       return
     }
 
-    try {
+    const startBroker = async (): Promise<void> => {
       const opts: AgentRelaySpawnOptions = {
         cwd,
         brokerName: name,
@@ -453,11 +500,43 @@ export class BrokerManager {
       })
 
       this.sendStatus(normalizedProjectId, 'connected')
+    }
+
+    try {
+      await startBroker()
     } catch (err) {
       console.error(`[broker] Failed to start for project ${normalizedProjectId}:`, err)
       this.sendStatusToWindow(win, normalizedProjectId, 'error', String(err))
       throw err
     }
+  }
+
+  async autoFixRuntime(
+    projectId: string,
+    cwd: string,
+    name: string,
+    win: BrowserWindow,
+    channels: string[] = [],
+    errorMessage?: string
+  ): Promise<BrokerRuntimeAutoFixResult> {
+    const normalizedProjectId = projectId.trim()
+    if (!normalizedProjectId) {
+      throw new Error('Project id is required')
+    }
+    if (errorMessage && !isRecoverableBrokerRuntimeError(errorMessage)) {
+      throw new Error('This broker error does not look like stale Agent Relay runtime state.')
+    }
+
+    assertDirectory(cwd, 'Project path')
+    await this.shutdown(normalizedProjectId)
+    const removed = await clearBrokerRuntimeFiles(cwd, name)
+    console.warn(
+      `[broker] Auto-fixed runtime files for project ${normalizedProjectId}:`,
+      removed.length > 0 ? removed : '(no files existed)'
+    )
+    await delay(250)
+    await this.start(normalizedProjectId, cwd, name, win, channels)
+    return { removed }
   }
 
   /**

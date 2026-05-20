@@ -144,6 +144,13 @@ export interface PearAPI {
   broker: {
     start: (projectId: string, cwd: string, name: string, channels?: string[]) => Promise<boolean>
     syncChannels: (projectId: string, channels: string[]) => Promise<void>
+    autoFixRuntime: (
+      projectId: string,
+      cwd: string,
+      name: string,
+      channels?: string[],
+      errorMessage?: string
+    ) => Promise<{ removed: string[] }>
     connectCloud: () => Promise<string>
     spawnAgent: (projectId: string, input: {
       name: string

@@ -227,6 +227,9 @@ export function ProjectSidebar(): React.ReactNode {
         )}
       </div>
 
+      <div className="shrink-0 border-t border-[var(--pear-border-subtle)] px-3 py-2">
+        <AccountMenu />
+      </div>
     </div>
   )
 }

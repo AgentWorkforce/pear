@@ -73,9 +73,9 @@ export function CommandMenu(): React.ReactNode {
     },
     {
       id: 'broker-details',
-      label: 'Broker details',
-      description: 'Open broker connection details and CLI commands',
-      keywords: ['broker', 'connection', 'port', 'api key', 'cli'],
+      label: 'Agent Relay Status',
+      description: 'Open Agent Relay health, connection details, and CLI commands',
+      keywords: ['broker', 'agent relay', 'status', 'connection', 'port', 'api key', 'cli'],
       Icon: Server,
       run: () => {
         openTab({ kind: 'broker-details' })

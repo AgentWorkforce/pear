@@ -1053,10 +1053,6 @@ export function DiffPane(): React.ReactNode {
       })
       .slice(0, 6)
   }, [activeProjectId, agents, coAuthorInput, coAuthors])
-  const selectedPatch = useMemo(
-    () => buildSelectedPatch(diff, selectedLineIds),
-    [diff, selectedLineIds]
-  )
   const selectedFileList = useMemo(() => Array.from(selectedFiles), [selectedFiles])
   const selectedChangeFileList = useMemo(
     () => selectedChangeFiles(selectedFiles, selectedLineIds),
@@ -1326,6 +1322,11 @@ export function DiffPane(): React.ReactNode {
     focusCoAuthorInput()
   }
 
+  function selectedPatchInput(): string | undefined {
+    const patch = buildSelectedPatch(diff, selectedLineIds)
+    return patch || undefined
+  }
+
   function addCoAuthor(coAuthor: CoAuthor | string): void {
     if (!normalizeCoAuthor(coAuthor)) return
     setCoAuthors((current) => mergeCoAuthors(current, coAuthor))
@@ -1381,7 +1382,7 @@ export function DiffPane(): React.ReactNode {
     try {
       const draft = await generateCommitMessage(root.path, {
         wholeFiles: selectedFileList,
-        patch: selectedPatch || undefined
+        patch: selectedPatchInput()
       })
       setTitle(draft.title)
       setBody(draft.body)
@@ -1401,7 +1402,7 @@ export function DiffPane(): React.ReactNode {
         title,
         body: appendCoAuthorTrailers(body, commitCoAuthors),
         wholeFiles: selectedFileList,
-        patch: selectedPatch || undefined
+        patch: selectedPatchInput()
       })
       setTitle('')
       setBody('')
