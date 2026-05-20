@@ -1,10 +1,12 @@
 import { execFile, spawn } from 'child_process'
+import { createHash } from 'crypto'
 import { existsSync } from 'fs'
 import { appendFile, mkdtemp, readFile, rm } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { promisify } from 'util'
 import { assertDirectory } from './path-utils'
+import { cacheAvatarFromUrl, cachedAvatarUrl } from './avatar-cache'
 
 const exec = promisify(execFile)
 
@@ -31,6 +33,7 @@ export interface GitHistoryCoAuthor {
   name: string
   email: string
   avatarUrl?: string
+  cachedAvatarUrl?: string
 }
 
 export interface GitHistoryCommit {
@@ -39,6 +42,7 @@ export interface GitHistoryCommit {
   author: string
   authorEmail: string
   authorAvatarUrl?: string
+  authorCachedAvatarUrl?: string
   coAuthors: GitHistoryCoAuthor[]
   date: string
   subject: string
@@ -649,10 +653,12 @@ export async function getHistory(path: string, limit = 30): Promise<GitHistoryCo
     })
 
   const githubAvatarsByHash = await fetchGitHubCommitAvatars(path, commits.map((commit) => commit.hash))
-  return commits.map((commit) => {
+  const commitsWithGithubAvatars = commits.map((commit) => {
     const githubAvatar = githubAvatarsByHash.get(commit.hash)?.authorAvatarUrl
     return githubAvatar ? { ...commit, authorAvatarUrl: githubAvatar } : commit
   })
+
+  return withCachedCommitAvatars(commitsWithGithubAvatars)
 }
 
 function githubUsernameFromEmail(email: string): string | null {
@@ -667,7 +673,53 @@ function avatarUrlForAuthorEmail(email: string): string | undefined {
     return `https://github.com/${encodeURIComponent(githubUsername)}.png?size=96`
   }
 
-  return undefined
+  return gravatarUrlForEmail(email)
+}
+
+function gravatarUrlForEmail(email: string): string | undefined {
+  const normalized = email.trim().toLowerCase()
+  if (!normalized) return undefined
+
+  const hash = createHash('md5').update(normalized).digest('hex')
+  return `https://www.gravatar.com/avatar/${hash}?d=404&s=96`
+}
+
+function authorAvatarCacheIdentity(name: string, email: string, sourceUrl?: string): {
+  sourceUrl?: string
+  githubUsername?: string
+  email?: string
+  name?: string
+} {
+  return {
+    sourceUrl,
+    githubUsername: githubUsernameFromEmail(email) || undefined,
+    email,
+    name
+  }
+}
+
+async function withCachedCommitAvatars(commits: GitHistoryCommit[]): Promise<GitHistoryCommit[]> {
+  return Promise.all(commits.map(async (commit) => {
+    const authorIdentity = authorAvatarCacheIdentity(commit.author, commit.authorEmail, commit.authorAvatarUrl)
+    const authorCachedAvatarUrl = commit.authorAvatarUrl
+      ? await cacheAvatarFromUrl(commit.authorAvatarUrl, authorIdentity)
+      : cachedAvatarUrl(authorIdentity)
+
+    const coAuthors = await Promise.all(commit.coAuthors.map(async (coAuthor) => {
+      const coAuthorIdentity = authorAvatarCacheIdentity(coAuthor.name, coAuthor.email, coAuthor.avatarUrl)
+      const coAuthorCachedAvatarUrl = coAuthor.avatarUrl
+        ? await cacheAvatarFromUrl(coAuthor.avatarUrl, coAuthorIdentity)
+        : cachedAvatarUrl(coAuthorIdentity)
+
+      return coAuthorCachedAvatarUrl
+        ? { ...coAuthor, cachedAvatarUrl: coAuthorCachedAvatarUrl }
+        : coAuthor
+    }))
+
+    return authorCachedAvatarUrl
+      ? { ...commit, authorCachedAvatarUrl, coAuthors }
+      : { ...commit, coAuthors }
+  }))
 }
 
 function parseTagDecorations(decorations: string): string[] {
