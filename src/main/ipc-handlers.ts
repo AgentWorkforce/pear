@@ -1,4 +1,4 @@
-import { ipcMain, dialog, BrowserWindow } from 'electron'
+import { ipcMain, dialog, BrowserWindow, shell } from 'electron'
 import { resolve } from 'path'
 import type { SpawnPtyInput, SendMessageInput } from '@agent-relay/sdk'
 import {
@@ -223,6 +223,10 @@ export function registerIpcHandlers(): void {
     return brokerManager.listBrokerDetails()
   })
 
+  ipcMain.handle('broker:list-events', () => {
+    return brokerManager.listBrokerEvents()
+  })
+
   ipcMain.handle('broker:shutdown', async () => {
     await brokerManager.shutdown()
   })
@@ -306,6 +310,18 @@ export function registerIpcHandlers(): void {
     return git.getCommitDiff(path, hash, file)
   })
 
+  ipcMain.handle('git:discard-files', async (_, path: string, files: string[]) => {
+    assertPathWithinProjects(path)
+    if (!isDirectory(path)) throw new Error('Git working directory is unavailable')
+    return git.discardFiles(path, files)
+  })
+
+  ipcMain.handle('git:add-gitignore-patterns', async (_, path: string, patterns: string[]) => {
+    assertPathWithinProjects(path)
+    if (!isDirectory(path)) throw new Error('Git working directory is unavailable')
+    return git.addGitignorePatterns(path, patterns)
+  })
+
   ipcMain.handle('git:commit-selection', async (_, path: string, input: git.GitCommitSelectionInput) => {
     assertPathWithinProjects(path)
     if (!isDirectory(path)) throw new Error('Git working directory is unavailable')
@@ -330,6 +346,12 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('fs:read-preview', async (_, filePath: string) => {
     assertPathWithinProjects(filePath)
     return filesystem.readTextPreview(filePath)
+  })
+
+  ipcMain.handle('fs:reveal-path', async (_, filePath: string) => {
+    const resolvedPath = resolve(filePath)
+    assertPathWithinProjects(resolvedPath)
+    shell.showItemInFolder(resolvedPath)
   })
 
   // --- Auth ---

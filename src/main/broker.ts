@@ -103,6 +103,9 @@ function isPositiveInteger(value: unknown): value is number {
 const BROKER_DETAILS_TIMEOUT_MS = 3_000
 const COMMIT_DRAFT_MAX_DIFF_CHARS = 80_000
 const COMMIT_DRAFT_TIMEOUT_MS = 180_000
+const MAX_BROKER_EVENT_HISTORY = 3_000
+const BROKER_EVENT_HISTORY_TTL_MS = 12 * 60 * 60 * 1_000
+const MAX_EVENT_TEXT_CHARS = 1_200
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -112,11 +115,42 @@ function toErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
+function normalizeEventTimestamp(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return undefined
+  }
+  return value < 1_000_000_000_000 ? value * 1_000 : value
+}
+
+function compactEventText(value: unknown): unknown {
+  if (typeof value !== 'string' || value.length <= MAX_EVENT_TEXT_CHARS) {
+    return value
+  }
+  return `${value.slice(0, MAX_EVENT_TEXT_CHARS)}...`
+}
+
+function compactBrokerEvent(event: BrokerEvent): BrokerEvent {
+  const compacted = { ...(event as Record<string, unknown>) }
+  for (const key of ['body', 'chunk', 'message', 'reason', 'lastError']) {
+    if (key in compacted) {
+      compacted[key] = compactEventText(compacted[key])
+    }
+  }
+  return compacted as BrokerEvent
+}
+
 function isUnsupportedInputStreamError(err: unknown): boolean {
   const status = typeof err === 'object' && err !== null && 'status' in err
     ? (err as { status?: unknown }).status
     : undefined
   return status === 404 || /\b404\b|not found|unsupported/i.test(toErrorMessage(err))
+}
+
+function isMissingAgentError(err: unknown): boolean {
+  const status = typeof err === 'object' && err !== null && 'status' in err
+    ? (err as { status?: unknown }).status
+    : undefined
+  return status === 404 || /agent_not_found|no worker named|not found/i.test(toErrorMessage(err))
 }
 
 function withBrokerDetailsTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
@@ -316,7 +350,10 @@ function getBrokerRuntimeCleanupPaths(cwd: string, brokerName: string): string[]
   ]
 }
 
-function isRecoverableBrokerRuntimeError(err: unknown): boolean {
+function isRecoverableBrokerRuntimeError(
+  err: unknown,
+  options: { allowLivePidConflict?: boolean } = {}
+): boolean {
   const message = toErrorMessage(err)
   const hasBrokerLockConflict = /another broker instance is already running in this directory/i.test(message)
   const hasLivePidConflict = /another broker instance is already running in this directory \(pid:\s*\d+/i.test(message)
@@ -324,7 +361,8 @@ function isRecoverableBrokerRuntimeError(err: unknown): boolean {
     /stale broker lock detected/i.test(message) ||
     /broker lock held but no valid PID file found/i.test(message)
 
-  return !hasLivePidConflict && (hasStaleLockSignal || hasBrokerLockConflict)
+  return (options.allowLivePidConflict || !hasLivePidConflict) &&
+    (hasStaleLockSignal || hasBrokerLockConflict)
 }
 
 async function clearBrokerRuntimeFiles(cwd: string, brokerName: string): Promise<string[]> {
@@ -410,6 +448,13 @@ export interface BrokerDetails {
   error?: string
 }
 
+export interface BrokerEventRecord {
+  id: string
+  projectId: string
+  timestamp: number
+  event: BrokerEvent
+}
+
 interface BrokerStateSnapshot {
   agents: ListAgent[]
   pendingDeliveryCount: number
@@ -435,6 +480,8 @@ export class BrokerManager {
   private inputQueues = new Map<string, QueuedInput>()
   private inputStreams = new Map<string, PtyInputStream>()
   private inputStreamFallbacks = new Set<string>()
+  private eventHistory: BrokerEventRecord[] = []
+  private eventSerial = 0
 
   get cwd(): string | null {
     return this.sessions.values().next().value?.cwd || null
@@ -523,7 +570,10 @@ export class BrokerManager {
     if (!normalizedProjectId) {
       throw new Error('Project id is required')
     }
-    if (errorMessage && !isRecoverableBrokerRuntimeError(errorMessage)) {
+    const hasManagedSession = this.sessions.has(normalizedProjectId)
+    if (errorMessage && !isRecoverableBrokerRuntimeError(errorMessage, {
+      allowLivePidConflict: hasManagedSession
+    })) {
       throw new Error('This broker error does not look like stale Agent Relay runtime state.')
     }
 
@@ -636,9 +686,19 @@ export class BrokerManager {
 
   private attachClient(projectId: string, client: AgentRelayClient, win: BrowserWindow): () => void {
     return client.onEvent((event: BrokerEvent) => {
+      const record = this.recordBrokerEvent(projectId, event)
+
       if (event.kind === 'agent_spawned' && event.name) {
         this.rememberAgentProject(event.name, projectId)
-      } else if ((event.kind === 'agent_exit' || event.kind === 'agent_exited' || event.kind === 'agent_released') && event.name) {
+      } else if (event.kind === 'agent_exit' && event.name) {
+        this.closeInputStream(this.getInputStreamKey(projectId, event.name), 1000, 'agent closed')
+        this.forgetAgentProject(event.name, projectId)
+        void client.release(event.name, 'agent exit').catch((err) => {
+          if (!isMissingAgentError(err)) {
+            console.warn(`[broker] Failed to release exited agent ${event.name}:`, err)
+          }
+        })
+      } else if ((event.kind === 'agent_exited' || event.kind === 'agent_released') && event.name) {
         this.closeInputStream(this.getInputStreamKey(projectId, event.name), 1000, 'agent closed')
         this.forgetAgentProject(event.name, projectId)
       } else if (event.name) {
@@ -648,9 +708,46 @@ export class BrokerManager {
       }
 
       if (win && !win.isDestroyed()) {
-        win.webContents.send('broker:event', { ...event, projectId })
+        win.webContents.send('broker:event', {
+          ...event,
+          projectId,
+          observedAt: record.timestamp,
+          historyId: record.id
+        })
       }
     })
+  }
+
+  private recordBrokerEvent(projectId: string, event: BrokerEvent): BrokerEventRecord {
+    const eventRecord = event as Record<string, unknown>
+    const timestamp = normalizeEventTimestamp(eventRecord.timestamp) ?? Date.now()
+    const record: BrokerEventRecord = {
+      id: `${projectId}:${++this.eventSerial}`,
+      projectId,
+      timestamp,
+      event: compactBrokerEvent(event)
+    }
+
+    this.eventHistory.push(record)
+    this.pruneBrokerEventHistory()
+    return record
+  }
+
+  private pruneBrokerEventHistory(now = Date.now()): void {
+    const cutoff = now - BROKER_EVENT_HISTORY_TTL_MS
+    if (this.eventHistory.length <= MAX_BROKER_EVENT_HISTORY) {
+      const firstFreshIndex = this.eventHistory.findIndex((entry) => entry.timestamp >= cutoff)
+      if (firstFreshIndex > 0) {
+        this.eventHistory.splice(0, firstFreshIndex)
+      } else if (firstFreshIndex === -1 && this.eventHistory.length > 0) {
+        this.eventHistory = []
+      }
+      return
+    }
+
+    this.eventHistory = this.eventHistory
+      .filter((entry) => entry.timestamp >= cutoff)
+      .slice(-MAX_BROKER_EVENT_HISTORY)
   }
 
   private rememberAgentProject(name: string, projectId: string): void {
@@ -1199,6 +1296,14 @@ export class BrokerManager {
     )
 
     return details
+  }
+
+  listBrokerEvents(): BrokerEventRecord[] {
+    this.pruneBrokerEventHistory()
+    return this.eventHistory.map((entry) => ({
+      ...entry,
+      event: { ...(entry.event as Record<string, unknown>) } as BrokerEvent
+    }))
   }
 
   private async getBrokerStateSnapshot(session: BrokerSession): Promise<BrokerStateSnapshot> {
