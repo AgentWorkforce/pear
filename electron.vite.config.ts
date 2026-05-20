@@ -8,7 +8,7 @@ export default defineConfig({
     plugins: [externalizeDepsPlugin({ exclude: ['@agent-relay/sdk'] })],
     build: {
       rollupOptions: {
-        external: ['ws']
+        external: ['ws', 'ssh2', 'cpu-features']
       }
     }
   },
