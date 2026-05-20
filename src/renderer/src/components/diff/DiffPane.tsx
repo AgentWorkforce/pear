@@ -1,18 +1,20 @@
 import type React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
-  ArrowUp,
   Check,
   ChevronDown,
   ChevronUp,
+  Copy,
+  Expand,
   FileDiff,
   Filter,
   GitBranch,
   GitCommitHorizontal,
-  GripHorizontal,
   GripVertical,
   Lock,
   Loader2,
+  Minimize2,
   Plus,
   RefreshCw,
   Search,
@@ -21,7 +23,14 @@ import {
   X
 } from 'lucide-react'
 import { buildSelectedPatch, getFilePathFromLineSelectionId, getSelectableLineIds } from '@/lib/diff-selection'
-import { pear, type GitBranchInfo, type GitBranchSyncStatus, type GitHistoryCommit } from '@/lib/ipc'
+import {
+  pear,
+  type AuthUser,
+  type GitBranchInfo,
+  type GitBranchSyncStatus,
+  type GitHistoryCoAuthor,
+  type GitHistoryCommit
+} from '@/lib/ipc'
 import { normalizeChannelName, useProjectStore, type Project } from '@/stores/project-store'
 import { useGitStore } from '@/stores/git-store'
 import { useUIStore } from '@/stores/ui-store'
@@ -35,25 +44,15 @@ import {
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
 import { DiffViewer } from './DiffViewer'
 import { getAgentKey, useAgentStore, type Agent } from '@/stores/agent-store'
+import { formatGitDiffLineCount } from '@/lib/format'
 
 type PaneTab = 'changes' | 'history'
-type AuthUser = {
-  name?: string
-  email?: string
-  githubUsername?: string
-  username?: string
-  avatarUrl?: string
-  organizationName?: string
-  projectName?: string
-}
 type CoAuthor = { username: string; name?: string; cli?: string }
 
 const LEFT_SIDEBAR_MIN_WIDTH = 300
 const LEFT_SIDEBAR_MAX_WIDTH = 640
 const HISTORY_FILES_MIN_WIDTH = 240
 const HISTORY_FILES_MAX_WIDTH = 620
-const HISTORY_DETAILS_MIN_HEIGHT = 88
-const HISTORY_DETAILS_MAX_HEIGHT = 280
 const SOURCE_HEADER_HEIGHT = 54
 const FILE_CONTEXT_MENU_WIDTH = 360
 const FILE_CONTEXT_MENU_MAX_HEIGHT = 430
@@ -64,6 +63,7 @@ type FileContextMenuState = {
   y: number
   paths: string[]
 }
+type EmptyFileProbe = { rootPath: string; path: string; empty: boolean }
 
 function projectRootPath(project: Project): string {
   return project.roots.find((root) => root.pathExists)?.path || project.roots[0]?.path || project.rootPath
@@ -120,15 +120,14 @@ function useWindowFocused(): boolean {
   return focused
 }
 
-function selectedFileRowClass(active: boolean, windowFocused: boolean): string {
-  if (active && windowFocused) return 'bg-[#0b73d9] text-white'
+function selectedFileRowClass(active: boolean, _windowFocused: boolean): string {
   if (active) return 'bg-[#46515c] text-[var(--pear-text)]'
   return 'text-[var(--pear-text)] hover:bg-[var(--pear-bg-surface-hover)]'
 }
 
-function selectedFilePathTone(active: boolean, windowFocused: boolean): FilePathLabelTone {
+function selectedFilePathTone(active: boolean, _windowFocused: boolean): FilePathLabelTone {
   if (!active) return 'default'
-  return windowFocused ? 'selectedActive' : 'selectedInactive'
+  return 'selectedActive'
 }
 
 function selectionCheckboxClass(
@@ -214,6 +213,15 @@ function scrollFileRowIntoView(container: HTMLElement | null, path: string | nul
 
   const row = Array.from(container.querySelectorAll<HTMLElement>('[data-file-list-path]'))
     .find((element) => element.dataset.fileListPath === path)
+
+  row?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+}
+
+function scrollCommitRowIntoView(container: HTMLElement | null, hash: string | null): void {
+  if (!container || !hash) return
+
+  const row = Array.from(container.querySelectorAll<HTMLElement>('[data-commit-list-hash]'))
+    .find((element) => element.dataset.commitListHash === hash)
 
   row?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
 }
@@ -352,18 +360,26 @@ function agentToCoAuthor(agent: Agent): CoAuthor | null {
   }
 }
 
-function bodyPreview(body: string): string {
+function commitMessagePreview(body: string): string {
   return body
     .split('\n')
     .map((line) => line.trim())
     .filter(Boolean)
-    .slice(0, 6)
-    .join('\n')
+    .slice(0, 2)
+    .join(' ')
 }
 
 function selectedChangeFiles(selectedFiles: Set<string>, selectedLineIds: Set<string>): string[] {
   const partialFiles = Array.from(selectedLineIds).map(getFilePathFromLineSelectionId)
   return Array.from(new Set([...selectedFiles, ...partialFiles])).filter(Boolean)
+}
+
+function EmptyFileState(): React.ReactNode {
+  return (
+    <div className="flex h-full items-center justify-center px-4 text-[13px] font-medium text-[var(--pear-text)]">
+      The file is empty
+    </div>
+  )
 }
 
 function sameStringSet(left: Set<string>, right: Set<string>): boolean {
@@ -382,12 +398,114 @@ function nextFilePath(paths: string[], currentPath: string | null, direction: 1 
     return direction === 1 ? paths[0] : paths[paths.length - 1]
   }
 
-  const nextIndex = clamp(currentIndex + direction, 0, paths.length - 1)
+  const nextIndex = (currentIndex + direction + paths.length) % paths.length
   return paths[nextIndex] || null
 }
 
 function pluralize(count: number, singular: string, plural = `${singular}s`): string {
   return `${count} ${count === 1 ? singular : plural}`
+}
+
+function normalizePathSeparators(path: string): string {
+  return path.replace(/\\/g, '/')
+}
+
+function absoluteFilePath(rootPath: string, filePath: string): string {
+  const separator = rootPath.includes('\\') ? '\\' : '/'
+  return `${rootPath.replace(/[\\/]+$/, '')}${separator}${filePath.replace(/^[\\/]+/, '')}`
+}
+
+function fileNameFromPath(path: string): string {
+  const parts = normalizePathSeparators(path).split('/')
+  return parts[parts.length - 1] || path
+}
+
+function fileExtension(path: string): string | null {
+  const fileName = fileNameFromPath(path)
+  const index = fileName.lastIndexOf('.')
+  if (index <= 0 || index === fileName.length - 1) return null
+  return fileName.slice(index)
+}
+
+function commonFileExtension(paths: string[]): string | null {
+  const extensions = paths.map(fileExtension)
+  const first = extensions[0]
+  if (!first || extensions.some((extension) => extension !== first)) return null
+  return first
+}
+
+function containingFolder(path: string): string | null {
+  const normalized = normalizePathSeparators(path).replace(/\/+$/, '')
+  const separatorIndex = normalized.lastIndexOf('/')
+  if (separatorIndex <= 0) return null
+  return normalized.slice(0, separatorIndex)
+}
+
+function escapeGitignorePattern(value: string): string {
+  const escaped = normalizePathSeparators(value).replace(/[\\#*?\[\]]/g, '\\$&')
+  return escaped.startsWith('!') ? `\\${escaped}` : escaped
+}
+
+function gitignoreFilePattern(path: string): string {
+  return `/${escapeGitignorePattern(path.replace(/^[\\/]+/, ''))}`
+}
+
+function gitignoreFolderPattern(path: string): string {
+  return `/${escapeGitignorePattern(path.replace(/^[\\/]+|[\\/]+$/g, ''))}/`
+}
+
+function gitignoreExtensionPattern(extension: string): string {
+  return `*${extension}`
+}
+
+function compactReviewDiff(diff: string): string {
+  if (diff.length <= REVIEW_DIFF_MAX_CHARS) return diff
+  return `${diff.slice(0, REVIEW_DIFF_MAX_CHARS)}\n\n[diff truncated at ${REVIEW_DIFF_MAX_CHARS} characters]`
+}
+
+function fileRange(paths: string[], startPath: string, endPath: string): string[] {
+  const startIndex = paths.indexOf(startPath)
+  const endIndex = paths.indexOf(endPath)
+  if (startIndex === -1 || endIndex === -1) return [endPath]
+
+  const [start, end] = startIndex <= endIndex ? [startIndex, endIndex] : [endIndex, startIndex]
+  return paths.slice(start, end + 1)
+}
+
+function orderedSelectedPaths(paths: string[], selectedPaths: Set<string>): string[] {
+  return paths.filter((path) => selectedPaths.has(path))
+}
+
+function contextMenuPosition(clientX: number, clientY: number): { x: number; y: number } {
+  const x = Math.min(clientX, Math.max(8, window.innerWidth - FILE_CONTEXT_MENU_WIDTH - 8))
+  const y = Math.min(clientY, Math.max(8, window.innerHeight - FILE_CONTEXT_MENU_MAX_HEIGHT - 8))
+  return { x, y }
+}
+
+async function writeClipboardText(text: string): Promise<void> {
+  if (navigator.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text)
+    return
+  }
+
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.style.position = 'fixed'
+  textarea.style.left = '-9999px'
+  document.body.appendChild(textarea)
+  textarea.focus()
+  textarea.select()
+  document.execCommand('copy')
+  textarea.remove()
+}
+
+function nextReviewChannelName(existingNames: Iterable<string>): string {
+  const existing = new Set(Array.from(existingNames).map(normalizeChannelName).filter(Boolean))
+  let index = 1
+  while (existing.has(`review-files-${index}`)) {
+    index += 1
+  }
+  return `review-files-${index}`
 }
 
 function shouldPublishBranch(status: GitBranchSyncStatus | null, lastFetchedAt: number | null): boolean {
@@ -421,10 +539,252 @@ function syncStatusText(
   return 'Check remote status'
 }
 
-function CommitAvatar({ author }: { author: string }): React.ReactNode {
+function CommitAuthorTooltip({
+  anchorRef,
+  visible,
+  name,
+  email
+}: {
+  anchorRef: React.RefObject<HTMLElement | null>
+  visible: boolean
+  name: string
+  email?: string
+}): React.ReactNode {
+  const [position, setPosition] = useState<{ left: number; top: number } | null>(null)
+
+  useEffect(() => {
+    if (!visible) {
+      setPosition(null)
+      return
+    }
+
+    function updatePosition(): void {
+      const anchor = anchorRef.current
+      if (!anchor) {
+        setPosition(null)
+        return
+      }
+
+      const rect = anchor.getBoundingClientRect()
+      const tooltipWidth = 260
+      const tooltipHeight = email ? 64 : 44
+      const gutter = 8
+      const left = clamp(
+        rect.left + rect.width / 2 - tooltipWidth / 2,
+        gutter,
+        window.innerWidth - tooltipWidth - gutter
+      )
+      let top = rect.top - tooltipHeight - gutter
+      if (top < gutter) {
+        top = rect.bottom + gutter
+      }
+
+      setPosition({
+        left,
+        top: clamp(top, gutter, window.innerHeight - tooltipHeight - gutter)
+      })
+    }
+
+    updatePosition()
+    window.addEventListener('resize', updatePosition)
+    window.addEventListener('scroll', updatePosition, true)
+    return () => {
+      window.removeEventListener('resize', updatePosition)
+      window.removeEventListener('scroll', updatePosition, true)
+    }
+  }, [anchorRef, email, visible])
+
+  if (!visible || !position || typeof document === 'undefined') return null
+
+  return createPortal(
+    <span
+      className="commit-author-tooltip-panel"
+      role="tooltip"
+      style={{ left: position.left, top: position.top }}
+    >
+      <span className="truncate font-semibold text-[var(--pear-text)]">{name}</span>
+      {email && <span className="truncate text-[var(--pear-text-secondary)]">{email}</span>}
+    </span>,
+    document.body
+  )
+}
+
+function CommitAuthorTooltipTrigger({
+  name,
+  email,
+  className,
+  children
+}: {
+  name: string
+  email?: string
+  className: string
+  children: React.ReactNode
+}): React.ReactNode {
+  const anchorRef = useRef<HTMLSpanElement>(null)
+  const [visible, setVisible] = useState(false)
+  const label = email ? `${name} <${email}>` : name
+
   return (
-    <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--pear-bg-overlay)] text-[10px] font-semibold text-[var(--pear-text)]">
-      {authorInitial(author)}
+    <span
+      ref={anchorRef}
+      className={className}
+      aria-label={label}
+      onMouseEnter={() => setVisible(true)}
+      onMouseLeave={() => setVisible(false)}
+    >
+      {children}
+      <CommitAuthorTooltip anchorRef={anchorRef} visible={visible} name={name} email={email} />
+    </span>
+  )
+}
+
+function CommitAvatar({
+  author,
+  email,
+  avatarUrl,
+  active = false
+}: {
+  author: string
+  email?: string
+  avatarUrl?: string
+  active?: boolean
+}): React.ReactNode {
+  const [imageFailed, setImageFailed] = useState(false)
+
+  useEffect(() => {
+    setImageFailed(false)
+  }, [avatarUrl])
+
+  if (avatarUrl && !imageFailed) {
+    return (
+      <CommitAuthorTooltipTrigger name={author} email={email} className="commit-primary-author-wrap">
+        <img
+          src={avatarUrl}
+          alt={author}
+          className="h-[18px] w-[18px] shrink-0 rounded-full bg-[var(--pear-bg-overlay)] object-cover"
+          referrerPolicy="no-referrer"
+          onError={() => setImageFailed(true)}
+        />
+      </CommitAuthorTooltipTrigger>
+    )
+  }
+
+  return (
+    <CommitAuthorTooltipTrigger name={author} email={email} className="commit-primary-author-wrap">
+      <span className={`flex h-[18px] w-[18px] shrink-0 items-center justify-center rounded-full bg-[var(--pear-bg-overlay)] text-[9px] font-semibold ${
+        active ? 'text-white' : 'text-[var(--pear-text)]'
+      }`}>
+        {authorInitial(author)}
+      </span>
+    </CommitAuthorTooltipTrigger>
+  )
+}
+
+function avatarUrlForCommit(commit: GitHistoryCommit, authUser: AuthUser | null): string | undefined {
+  const authAvatarUrl = githubAvatarUrl(authUser)?.trim()
+  const commitEmail = commit.authorEmail.trim().toLowerCase()
+  const authEmail = authUser?.email?.trim().toLowerCase()
+  const commitAuthor = commit.author.trim().toLowerCase()
+  const authName = authUser?.name?.trim().toLowerCase()
+  const authUsername = (authUser?.githubUsername || authUser?.username)?.trim().toLowerCase()
+
+  if (
+    authAvatarUrl &&
+    ((commitEmail && authEmail && commitEmail === authEmail) ||
+      (commitAuthor && authName && commitAuthor === authName) ||
+      (commitAuthor && authUsername && commitAuthor === authUsername))
+  ) {
+    return authAvatarUrl
+  }
+
+  return commit.authorAvatarUrl
+}
+
+function coAuthorCli(coAuthor: GitHistoryCoAuthor): string | undefined {
+  const identity = `${coAuthor.name} ${coAuthor.email}`.toLowerCase()
+  if (identity.includes('claude') || identity.includes('anthropic')) return 'claude'
+  if (identity.includes('codex') || identity.includes('openai') || identity.includes('chatgpt')) return 'codex'
+  if (identity.includes('gemini') || identity.includes('google')) return 'gemini'
+  if (identity.includes('copilot')) return 'copilot'
+  if (identity.includes('opencode')) return 'opencode'
+  return undefined
+}
+
+function commitCoAuthors(commit: GitHistoryCommit): GitHistoryCoAuthor[] {
+  return commit.coAuthors || []
+}
+
+function commitAuthorLabel(commit: GitHistoryCommit): string {
+  return [commit.author, ...commitCoAuthors(commit).map((coAuthor) => coAuthor.name)]
+    .map((name) => name.trim())
+    .filter(Boolean)
+    .join(', ')
+}
+
+function CommitCoAuthorBadge({
+  coAuthor,
+  active
+}: {
+  coAuthor: GitHistoryCoAuthor
+  active: boolean
+}): React.ReactNode {
+  const [imageFailed, setImageFailed] = useState(false)
+  const cli = coAuthorCli(coAuthor)
+  useEffect(() => {
+    setImageFailed(false)
+  }, [coAuthor.avatarUrl])
+
+  return (
+    <CommitAuthorTooltipTrigger
+      name={coAuthor.name}
+      email={coAuthor.email}
+      className="commit-author-avatar-wrap"
+    >
+      {coAuthor.avatarUrl && !imageFailed && !cli ? (
+        <img
+          src={coAuthor.avatarUrl}
+          alt={coAuthor.name}
+          className="commit-co-author-avatar object-cover"
+          referrerPolicy="no-referrer"
+          onError={() => setImageFailed(true)}
+        />
+      ) : cli ? (
+        <span className="commit-co-author-avatar bg-[#b45f43] text-white">
+          <AgentHarnessIcon cli={cli} className="h-[13px] w-[13px]" />
+        </span>
+      ) : (
+        <span className={`commit-co-author-avatar bg-[var(--pear-bg-overlay)] text-[9px] font-semibold ${
+          active ? 'text-white' : 'text-[var(--pear-text)]'
+        }`}>
+          {authorInitial(coAuthor.name)}
+        </span>
+      )}
+    </CommitAuthorTooltipTrigger>
+  )
+}
+
+function CommitAuthorStack({
+  commit,
+  authorAvatarUrl,
+  active
+}: {
+  commit: GitHistoryCommit
+  authorAvatarUrl?: string
+  active: boolean
+}): React.ReactNode {
+  const coAuthors = commitCoAuthors(commit)
+
+  return (
+    <span className={`commit-author-stack ${coAuthors.length > 0 ? 'has-co-authors' : ''}`}>
+      <CommitAvatar
+        author={commit.author}
+        email={commit.authorEmail}
+        avatarUrl={authorAvatarUrl}
+        active={active}
+      />
+      {coAuthors.map((coAuthor) => (
+        <CommitCoAuthorBadge key={`${coAuthor.email}:${coAuthor.name}`} coAuthor={coAuthor} active={active} />
+      ))}
     </span>
   )
 }
@@ -444,7 +804,7 @@ function CommitAuthorAvatar({ user }: { user: AuthUser | null }): React.ReactNod
         src={avatarUrl}
         alt={label}
         title={label}
-        className="h-[48px] w-[48px] shrink-0 rounded-full border border-[var(--pear-border)] bg-[var(--pear-bg-overlay)] object-cover"
+        className="h-9 w-9 shrink-0 rounded-full border border-[var(--pear-border)] bg-[var(--pear-bg-overlay)] object-cover"
         referrerPolicy="no-referrer"
         onError={() => setImageFailed(true)}
       />
@@ -453,7 +813,7 @@ function CommitAuthorAvatar({ user }: { user: AuthUser | null }): React.ReactNod
 
   return (
     <span
-      className="flex h-[48px] w-[48px] shrink-0 items-center justify-center rounded-full border border-[var(--pear-border)] bg-[var(--pear-accent)] text-[15px] font-semibold text-[var(--pear-bg)]"
+      className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[var(--pear-border)] bg-[var(--pear-accent)] text-[13px] font-semibold text-[var(--pear-bg)]"
       title={label}
       aria-label={label}
     >
@@ -486,13 +846,13 @@ function CoAuthorPicker({
   onRemoveCoAuthor: (username: string) => void
 }): React.ReactNode {
   return (
-    <div className="flex min-h-12 items-center gap-2 border-t border-[var(--pear-border-subtle)] px-3 py-2">
-      <span className="shrink-0 text-[16px] font-medium text-[var(--pear-text-secondary)]">Co-Authors</span>
+    <div className="flex min-h-10 items-center gap-2 border-t border-[var(--pear-border-subtle)] px-2.5 py-2">
+      <span className="shrink-0 text-[13px] font-medium text-[var(--pear-text-secondary)]">Co-Authors</span>
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
         {coAuthors.map((coAuthor) => (
           <span
             key={coAuthorKey(coAuthor.username)}
-            className="flex h-8 max-w-[180px] items-center gap-1 rounded-md border border-[var(--pear-accent-dim)] bg-[var(--pear-bg-overlay)] px-2 text-[16px] font-semibold text-[var(--pear-text)]"
+            className="flex h-7 max-w-[180px] items-center gap-1 rounded-md border border-[var(--pear-accent-dim)] bg-[var(--pear-bg-overlay)] px-2 text-[13px] font-semibold text-[var(--pear-text)]"
           >
             <span className="min-w-0 truncate">@{coAuthor.username}</span>
             <button
@@ -513,7 +873,7 @@ function CoAuthorPicker({
             onChange={(event) => onInputChange(event.target.value)}
             onKeyDown={onInputKeyDown}
             placeholder="@username"
-            className="h-8 w-full min-w-[132px] border-0 bg-transparent text-[16px] text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)]"
+            className="h-7 w-full min-w-[132px] border-0 bg-transparent text-[13px] text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)]"
             aria-label="Co-author username"
             autoCapitalize="none"
             autoComplete="off"
@@ -529,7 +889,7 @@ function CoAuthorPicker({
                     type="button"
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => onSelectSuggestion(suggestion)}
-                    className={`flex w-full items-center gap-3 px-3 py-2.5 text-left text-[15px] ${
+                    className={`flex w-full items-center gap-3 px-3 py-2 text-left text-[13px] ${
                       active
                         ? 'bg-[var(--pear-bg-overlay)] text-[var(--pear-text)]'
                         : 'text-[var(--pear-text-secondary)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]'
@@ -558,33 +918,45 @@ function CoAuthorPicker({
 function HistoryCommit({
   commit,
   active,
+  authorAvatarUrl,
   onSelect
 }: {
   commit: GitHistoryCommit
   active: boolean
+  authorAvatarUrl?: string
   onSelect: () => void
 }): React.ReactNode {
+  const tags = commit.tags.slice(0, 2)
+
   return (
     <button
       type="button"
+      tabIndex={-1}
       onClick={onSelect}
-      className={`w-full border-b border-[var(--pear-border-subtle)] px-3 py-3 text-left transition-colors ${
+      data-commit-list-hash={commit.hash}
+      className={`commit-history-row w-full border-b border-[var(--pear-border-subtle)] px-2.5 py-2 text-left transition-colors ${
         active
-          ? 'bg-[var(--pear-accent-dim)] text-white'
+          ? 'bg-[var(--pear-selection-blue)] text-white'
           : 'text-[var(--pear-text-secondary)] hover:bg-[var(--pear-bg-surface-hover)]'
       }`}
     >
-      <div className="flex min-w-0 items-center gap-2.5">
-        <span className="min-w-0 flex-1 truncate text-[15px] font-semibold">{commit.subject}</span>
-        {active && (
-          <span className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full bg-white text-[var(--pear-accent-dim)]">
-            <ArrowUp size={14} strokeWidth={2.6} />
+      <div className="flex min-w-0 items-center gap-2">
+        <span className="min-w-0 flex-1 truncate text-[13px] font-semibold leading-5">{commit.subject}</span>
+        {tags.map((tag) => (
+          <span
+            key={tag}
+            className={`max-w-[104px] shrink-0 truncate rounded-full px-2 py-0.5 text-[12px] font-semibold leading-4 ${
+              active ? 'bg-white/20 text-white' : 'bg-[#5c6672] text-white'
+            }`}
+            title={tag}
+          >
+            {tag}
           </span>
-        )}
+        ))}
       </div>
-      <div className={`mt-1.5 flex items-center gap-2 text-xs ${active ? 'text-white/80' : 'text-[var(--pear-text-faint)]'}`}>
-        <CommitAvatar author={commit.author} />
-        <span className="truncate">{commit.author}</span>
+      <div className={`mt-1 flex min-w-0 items-center gap-1.5 text-[12px] leading-4 ${active ? 'text-white/90' : 'text-[var(--pear-text-faint)]'}`}>
+        <CommitAuthorStack commit={commit} authorAvatarUrl={authorAvatarUrl} active={active} />
+        <span className="min-w-0 truncate">{commitAuthorLabel(commit)}</span>
         <span className="shrink-0">•</span>
         <span className="shrink-0">{formatRelativeDate(commit.date)}</span>
       </div>
@@ -592,29 +964,90 @@ function HistoryCommit({
   )
 }
 
-function HistoryCommitDetails({ commit }: { commit: GitHistoryCommit }): React.ReactNode {
-  const preview = bodyPreview(commit.body)
+function HistoryCommitDetails({
+  commit,
+  authorAvatarUrl,
+  expanded,
+  onCopyHash,
+  onToggleExpanded
+}: {
+  commit: GitHistoryCommit
+  authorAvatarUrl?: string
+  expanded: boolean
+  onCopyHash: () => void
+  onToggleExpanded: () => void
+}): React.ReactNode {
+  const message = commit.body.trim()
+  const preview = commitMessagePreview(message)
+  const coAuthors = commitCoAuthors(commit)
+  const authorLabel = expanded
+    ? [
+        commit.authorEmail ? `${commit.author} <${commit.authorEmail}>` : commit.author,
+        ...coAuthors.map((coAuthor) =>
+          coAuthor.email ? `${coAuthor.name} <${coAuthor.email}>` : coAuthor.name
+        )
+      ].filter(Boolean).join(', ')
+    : commitAuthorLabel(commit)
+  const hashLabel = expanded ? commit.hash : commit.shortHash
+  const additionsLabel = expanded
+    ? `${formatGitDiffLineCount(commit.additions)} added ${commit.additions === 1 ? 'line' : 'lines'}`
+    : `+${formatGitDiffLineCount(commit.additions)}`
+  const deletionsLabel = expanded
+    ? `${formatGitDiffLineCount(commit.deletions)} removed ${commit.deletions === 1 ? 'line' : 'lines'}`
+    : `-${formatGitDiffLineCount(commit.deletions)}`
 
   return (
-    <div className="flex h-full flex-col px-4 py-3">
-      <div className="flex min-w-0 items-start gap-3">
-        <div className="min-w-0 flex-1">
-          <h2 className="truncate text-lg font-semibold text-[var(--pear-text)]">{commit.subject}</h2>
-          {preview && (
-            <pre className="mt-2 max-h-20 overflow-hidden whitespace-pre-wrap font-mono text-[13px] leading-5 text-[var(--pear-text-secondary)]">
-              {preview}
-            </pre>
-          )}
-        </div>
+    <div className={`flex flex-col bg-[linear-gradient(135deg,rgba(255,255,255,0.06),rgba(116,184,226,0.035)_44%,rgba(255,255,255,0.015))] px-4 backdrop-blur-md ${
+      expanded ? 'min-h-[180px] py-3' : 'min-h-[76px] justify-center py-2'
+    }`}>
+      <div className="flex min-w-0 items-center gap-2">
+        <h2 className="min-w-0 truncate text-[17px] font-semibold leading-5 text-[var(--pear-text)]">
+          {commit.subject}
+        </h2>
+        <button
+          type="button"
+          onClick={onToggleExpanded}
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--pear-text-secondary)] transition-colors hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
+          title={expanded ? 'Collapse commit details' : 'Expand commit details'}
+          aria-label={expanded ? 'Collapse commit details' : 'Expand commit details'}
+          aria-expanded={expanded}
+        >
+          {expanded ? <Minimize2 size={15} /> : <Expand size={15} />}
+        </button>
       </div>
-      <div className="mt-auto flex min-w-0 items-center gap-3 pt-3 text-xs text-[var(--pear-text-dim)]">
-        <CommitAvatar author={commit.author} />
-        <span className="truncate">{commit.author}</span>
+      {message && (
+        <pre
+          className={expanded
+            ? 'mt-2 max-h-[260px] overflow-y-auto whitespace-pre-wrap rounded bg-black/10 px-2.5 py-2 font-mono text-[13px] leading-5 text-[var(--pear-text-secondary)]'
+            : 'mt-1 min-w-0 overflow-hidden text-ellipsis whitespace-nowrap font-mono text-[12px] leading-4 text-[var(--pear-text-secondary)]'
+          }
+        >
+          {expanded ? message : preview}
+        </pre>
+      )}
+      <div className={`${expanded && message ? 'mt-2' : 'mt-1'} flex min-w-0 items-center gap-2.5 text-[13px] leading-5 text-[var(--pear-text-dim)]`}>
+        <CommitAuthorStack commit={commit} authorAvatarUrl={authorAvatarUrl} active={false} />
+        <span className="min-w-0 truncate font-semibold text-[var(--pear-text-secondary)]">
+          {authorLabel}
+        </span>
         <GitCommitHorizontal size={14} className="shrink-0 text-[var(--pear-text-faint)]" />
-        <span className="shrink-0 font-mono">{commit.shortHash}</span>
+        <span className={`${expanded ? 'max-w-[42ch]' : 'shrink-0'} min-w-0 truncate font-mono text-[var(--pear-text-secondary)]`}>
+          {hashLabel}
+        </span>
+        <button
+          type="button"
+          onClick={onCopyHash}
+          className="flex h-6 w-6 shrink-0 items-center justify-center rounded text-[var(--pear-text-faint)] transition-colors hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
+          title="Copy commit hash"
+          aria-label="Copy commit hash"
+        >
+          <Copy size={14} />
+        </button>
         <span className="min-w-0 truncate">{formatRelativeDate(commit.date)}</span>
-        <span className="ml-auto shrink-0 text-[var(--pear-green)]">+{commit.additions}</span>
-        <span className="shrink-0 text-[var(--pear-red)]">-{commit.deletions}</span>
+        <div className="ml-auto flex shrink-0 items-center gap-3 font-semibold">
+          <span className="text-[var(--pear-green)]">{additionsLabel}</span>
+          <span className="text-[var(--pear-red)]">{deletionsLabel}</span>
+        </div>
       </div>
     </div>
   )
@@ -777,6 +1210,7 @@ function CurrentProjectSelector({ width }: { width: number }): React.ReactNode {
 }
 
 type BranchSwitchMode = 'stash' | 'carry'
+type BranchSelectorTab = 'branches' | 'worktrees'
 
 function branchDisplayName(branch: GitBranchInfo): string {
   return branch.remote ? branch.name.replace(/^[^/]+\//, '') : branch.name
@@ -800,6 +1234,7 @@ function CurrentBranchSelector({
   const [switchingBranch, setSwitchingBranch] = useState(false)
   const [pendingBranch, setPendingBranch] = useState<GitBranchInfo | null>(null)
   const [switchMode, setSwitchMode] = useState<BranchSwitchMode>('stash')
+  const [activeBranchTab, setActiveBranchTab] = useState<BranchSelectorTab>('branches')
   const [error, setError] = useState<string | null>(null)
 
   const filteredBranches = useMemo(() => {
@@ -807,8 +1242,11 @@ function CurrentBranchSelector({
     if (!normalizedQuery) return branches
     return branches.filter((branch) => branch.name.toLowerCase().includes(normalizedQuery))
   }, [branches, query])
-  const defaultBranches = filteredBranches.filter((branch) => branch.defaultBranch && !branch.remote)
-  const otherBranches = filteredBranches.filter((branch) => !branch.defaultBranch || branch.remote)
+  const defaultBranches = useMemo(() => {
+    const localDefaults = filteredBranches.filter((branch) => branch.defaultBranch && !branch.remote)
+    return localDefaults.length > 0 ? localDefaults : filteredBranches.filter((branch) => branch.defaultBranch)
+  }, [filteredBranches])
+  const otherBranches = filteredBranches.filter((branch) => !branch.defaultBranch)
 
   async function loadBranches(): Promise<void> {
     setBranchesLoading(true)
@@ -830,11 +1268,12 @@ function CurrentBranchSelector({
     setBranches([])
     setPendingBranch(null)
     setSwitchMode('stash')
+    setActiveBranchTab('branches')
   }, [rootPath])
 
   useEffect(() => {
-    if (open) void loadBranches()
-  }, [open])
+    if (open && activeBranchTab === 'branches') void loadBranches()
+  }, [open, activeBranchTab])
 
   async function switchBranch(branch: GitBranchInfo, stashChanges: boolean): Promise<void> {
     setError(null)
@@ -926,67 +1365,92 @@ function CurrentBranchSelector({
       </button>
 
       {open && (
-        <div className="absolute left-0 top-full z-50 w-[460px] border-b border-r border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] pb-2 shadow-xl">
-          <div className="grid h-8 grid-cols-2 border-b border-[var(--pear-border-subtle)]">
-            <div className="flex items-center justify-center border-b-2 border-[var(--pear-accent)] text-[13px] font-semibold text-[var(--pear-text)]">
+        <div className="absolute left-0 top-full z-50 w-[460px] overflow-hidden bg-[var(--pear-bg)] pb-2 shadow-2xl">
+          <div className="grid h-9 grid-cols-2 bg-[var(--pear-bg-surface-hover)]">
+            <button
+              type="button"
+              data-focus-ring="none"
+              onClick={() => setActiveBranchTab('branches')}
+              className={`flex items-center justify-center border-b-2 text-[13px] font-semibold ${
+                activeBranchTab === 'branches'
+                  ? 'border-[var(--pear-selection-blue)] text-[var(--pear-text)]'
+                  : 'border-transparent text-[var(--pear-text-faint)] hover:text-[var(--pear-text)]'
+              }`}
+            >
               Branches
-            </div>
-            <div className="flex items-center justify-center border-b-2 border-transparent text-[13px] font-semibold text-[var(--pear-text-faint)]">
-              Pull Requests
-              <span className="ml-1.5 rounded-full bg-[var(--pear-bg-overlay)] px-1.5 text-[10px] text-[var(--pear-text-secondary)]">
-                0
-              </span>
-            </div>
+            </button>
+            <button
+              type="button"
+              data-focus-ring="none"
+              onClick={() => setActiveBranchTab('worktrees')}
+              className={`flex items-center justify-center border-b-2 text-[13px] font-semibold ${
+                activeBranchTab === 'worktrees'
+                  ? 'border-[var(--pear-selection-blue)] text-[var(--pear-text)]'
+                  : 'border-transparent text-[var(--pear-text-faint)] hover:text-[var(--pear-text)]'
+              }`}
+            >
+              Worktrees
+            </button>
           </div>
 
-          <div className="flex items-center gap-2 px-2 py-2">
-            <label className="flex h-7 min-w-0 flex-1 items-center gap-2 rounded-md border border-[var(--pear-accent-dim)] bg-[var(--pear-bg)] px-2.5 text-[12px] text-[var(--pear-text-secondary)] ring-1 ring-[var(--pear-accent-dim)]">
-              <Search size={12} className="shrink-0 text-[var(--pear-text-faint)]" />
-              <input
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder="Filter"
-                className="min-w-0 flex-1 border-0 bg-transparent text-[12px] text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)]"
-              />
-              {query && (
-                <button
-                  type="button"
-                  onClick={() => setQuery('')}
-                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--pear-text-secondary)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
-                  aria-label="Clear branch filter"
-                >
-                  <X size={12} />
-                </button>
-              )}
-            </label>
-          </div>
+          {activeBranchTab === 'branches' ? (
+            <>
+              <div className="flex items-center gap-2 px-2 py-2">
+                <label className="flex h-7 min-w-0 flex-1 items-center gap-2 rounded-md border border-[var(--pear-accent-dim)] bg-[var(--pear-bg)] px-2.5 text-[12px] text-[var(--pear-text-secondary)] ring-1 ring-[var(--pear-accent-dim)]">
+                  <Search size={12} className="shrink-0 text-[var(--pear-text-faint)]" />
+                  <input
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                    placeholder="Filter"
+                    className="min-w-0 flex-1 border-0 bg-transparent text-[12px] text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)]"
+                  />
+                  {query && (
+                    <button
+                      type="button"
+                      onClick={() => setQuery('')}
+                      className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--pear-text-secondary)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
+                      aria-label="Clear branch filter"
+                    >
+                      <X size={12} />
+                    </button>
+                  )}
+                </label>
+              </div>
 
-          <div className="max-h-[360px] overflow-y-auto">
-            {branchesLoading ? (
-              <div className="px-3 py-4 text-xs text-[var(--pear-text-faint)]">Loading branches...</div>
-            ) : error ? (
-              <div className="px-3 py-4 text-xs text-[var(--pear-red)]">{error}</div>
-            ) : filteredBranches.length === 0 ? (
-              <div className="px-3 py-4 text-xs text-[var(--pear-text-faint)]">No branches match</div>
-            ) : (
-              <>
-                {defaultBranches.length > 0 && (
-                  <div className="pb-1.5">
-                    <div className="px-3.5 pb-1 pt-2 text-[12px] font-semibold text-[var(--pear-text-faint)]">
-                      Default Branch
+              <div className="max-h-[360px] overflow-y-auto">
+                {branchesLoading ? (
+                  <div className="px-3 py-4 text-xs text-[var(--pear-text-faint)]">Loading branches...</div>
+                ) : error ? (
+                  <div className="px-3 py-4 text-xs text-[var(--pear-red)]">{error}</div>
+                ) : filteredBranches.length === 0 ? (
+                  <div className="px-3 py-4 text-xs text-[var(--pear-text-faint)]">No branches match</div>
+                ) : (
+                  <>
+                    {defaultBranches.length > 0 && (
+                      <div className="pb-1.5">
+                        <div className="px-3.5 pb-1 pt-2 text-[12px] font-semibold text-[var(--pear-text-faint)]">
+                          Default Branch
+                        </div>
+                        {defaultBranches.map(renderBranch)}
+                      </div>
+                    )}
+                    <div>
+                      {defaultBranches.length > 0 && (
+                        <div className="px-3.5 pb-1 pt-2 text-[12px] font-semibold text-[var(--pear-text-faint)]">
+                          Other Branches
+                        </div>
+                      )}
+                      {otherBranches.map(renderBranch)}
                     </div>
-                    {defaultBranches.map(renderBranch)}
-                  </div>
+                  </>
                 )}
-                <div>
-                  <div className="px-3.5 pb-1 pt-2 text-[12px] font-semibold text-[var(--pear-text-faint)]">
-                    Other Branches
-                  </div>
-                  {otherBranches.map(renderBranch)}
-                </div>
-              </>
-            )}
-          </div>
+              </div>
+            </>
+          ) : (
+            <div className="flex h-[220px] items-center justify-center px-4 text-[13px] font-medium text-[var(--pear-text-faint)]">
+              Coming soon
+            </div>
+          )}
         </div>
       )}
 
@@ -1135,6 +1599,129 @@ function FetchOriginButton({
   )
 }
 
+function ContextMenuDivider(): React.ReactNode {
+  return <div className="my-1 h-px bg-white/12" />
+}
+
+function ContextMenuItem({
+  label,
+  onClick,
+  disabled = false
+}: {
+  label: string
+  onClick: () => void
+  disabled?: boolean
+}): React.ReactNode {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      className="flex h-8 w-full items-center rounded-md px-3 text-left text-[13px] font-medium text-[var(--pear-text)] outline-none hover:bg-[var(--pear-selection-blue)] hover:text-white disabled:cursor-not-allowed disabled:opacity-45 disabled:hover:bg-transparent disabled:hover:text-[var(--pear-text)]"
+    >
+      <span className="min-w-0 truncate">{label}</span>
+    </button>
+  )
+}
+
+function FileContextMenu({
+  menu,
+  onClose,
+  onDiscard,
+  onIgnorePatterns,
+  onInclude,
+  onExclude,
+  onCopyPaths,
+  onReveal,
+  onExplain
+}: {
+  menu: FileContextMenuState
+  onClose: () => void
+  onDiscard: (paths: string[]) => Promise<void>
+  onIgnorePatterns: (patterns: string[]) => Promise<void>
+  onInclude: (paths: string[]) => void
+  onExclude: (paths: string[]) => void
+  onCopyPaths: (paths: string[], relative: boolean) => Promise<void>
+  onReveal: (paths: string[]) => Promise<void>
+  onExplain: (paths: string[]) => Promise<void>
+}): React.ReactNode {
+  const { paths } = menu
+  const multi = paths.length > 1
+  const extension = commonFileExtension(paths)
+  const folder = !multi ? containingFolder(paths[0]) : null
+  const selectedChangeLabel = `${paths.length} Selected Change${paths.length === 1 ? '' : 's'}`
+
+  function run(action: () => void): void {
+    onClose()
+    action()
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-[95]"
+      onClick={onClose}
+      onContextMenu={(event) => {
+        event.preventDefault()
+        onClose()
+      }}
+    >
+      <div
+        role="menu"
+        className="fixed max-h-[430px] overflow-y-auto rounded-xl border border-white/15 bg-[rgba(24,31,40,0.98)] p-1.5 shadow-2xl backdrop-blur"
+        style={{ left: menu.x, top: menu.y, width: FILE_CONTEXT_MENU_WIDTH }}
+        onClick={(event) => event.stopPropagation()}
+        onContextMenu={(event) => event.preventDefault()}
+      >
+        <ContextMenuItem
+          label={multi ? `Discard ${selectedChangeLabel}` : 'Discard Changes'}
+          onClick={() => run(() => void onDiscard(paths))}
+        />
+        <ContextMenuDivider />
+        <ContextMenuItem
+          label={multi
+            ? `Ignore ${paths.length} Selected Files (Add to .gitignore)`
+            : 'Ignore File (Add to .gitignore)'}
+          onClick={() => run(() => void onIgnorePatterns(paths.map(gitignoreFilePattern)))}
+        />
+        {folder && (
+          <ContextMenuItem
+            label="Ignore Folder (Add to .gitignore)"
+            onClick={() => run(() => void onIgnorePatterns([gitignoreFolderPattern(folder)]))}
+          />
+        )}
+        {extension && (
+          <ContextMenuItem
+            label={`Ignore All ${extension} Files (Add to .gitignore)`}
+            onClick={() => run(() => void onIgnorePatterns([gitignoreExtensionPattern(extension)]))}
+          />
+        )}
+        {multi && (
+          <>
+            <ContextMenuDivider />
+            <ContextMenuItem label="Include Selected Files" onClick={() => run(() => onInclude(paths))} />
+            <ContextMenuItem label="Exclude Selected Files" onClick={() => run(() => onExclude(paths))} />
+          </>
+        )}
+        <ContextMenuDivider />
+        <ContextMenuItem
+          label={multi ? 'Copy Paths' : 'Copy File Path'}
+          onClick={() => run(() => void onCopyPaths(paths, false))}
+        />
+        <ContextMenuItem
+          label={multi ? 'Copy Relative Paths' : 'Copy Relative File Path'}
+          onClick={() => run(() => void onCopyPaths(paths, true))}
+        />
+        <ContextMenuDivider />
+        <ContextMenuItem label="Reveal in Finder" onClick={() => run(() => void onReveal(paths))} />
+        <ContextMenuItem
+          label="Have agent explain these changes"
+          onClick={() => run(() => void onExplain(paths))}
+        />
+      </div>
+    </div>
+  )
+}
+
 export function DiffPane(): React.ReactNode {
   const [activeTab, setActiveTab] = useState<PaneTab>('changes')
   const [filter, setFilter] = useState('')
@@ -1146,19 +1733,24 @@ export function DiffPane(): React.ReactNode {
   const [selectedCoAuthorSuggestionIndex, setSelectedCoAuthorSuggestionIndex] = useState(0)
   const [selectedFiles, setSelectedFiles] = useState<Set<string>>(new Set())
   const [selectedLineIds, setSelectedLineIds] = useState<Set<string>>(new Set())
+  const [emptyFileProbe, setEmptyFileProbe] = useState<EmptyFileProbe | null>(null)
   const [selectionInitialized, setSelectionInitialized] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
   const [leftSidebarWidth, setLeftSidebarWidth] = useState(420)
   const [historyFilesWidth, setHistoryFilesWidth] = useState(360)
-  const [historyDetailsHeight, setHistoryDetailsHeight] = useState(136)
+  const [commitDetailsExpanded, setCommitDetailsExpanded] = useState(false)
   const [branchSyncStatus, setBranchSyncStatus] = useState<GitBranchSyncStatus | null>(null)
   const [branchStatusLoading, setBranchStatusLoading] = useState(false)
   const [branchSyncLoading, setBranchSyncLoading] = useState(false)
   const [branchSyncError, setBranchSyncError] = useState<string | null>(null)
   const [lastFetchedByRoot, setLastFetchedByRoot] = useState<Record<string, number>>({})
   const [authUser, setAuthUser] = useState<AuthUser | null>(null)
+  const [fileContextMenu, setFileContextMenu] = useState<FileContextMenuState | null>(null)
+  const [fileRowSelection, setFileRowSelection] = useState<Set<string>>(new Set())
+  const [fileRowSelectionAnchor, setFileRowSelectionAnchor] = useState<string | null>(null)
   const coAuthorInputRef = useRef<HTMLInputElement>(null)
   const changedFilesListRef = useRef<HTMLDivElement>(null)
+  const historyCommitListRef = useRef<HTMLDivElement>(null)
   const historyFilesListRef = useRef<HTMLDivElement>(null)
   const windowFocused = useWindowFocused()
   const root = useProjectStore((s) => s.getActiveRoot())
@@ -1183,6 +1775,7 @@ export function DiffPane(): React.ReactNode {
   const fetchStatus = useGitStore((s) => s.fetchStatus)
   const fetchSummary = useGitStore((s) => s.fetchSummary)
   const fetchHistory = useGitStore((s) => s.fetchHistory)
+  const selectedFileEntry = files.find((file) => file.path === selectedFile)
 
   const filteredFiles = useMemo(() => {
     const query = filter.trim().toLowerCase()
@@ -1223,6 +1816,7 @@ export function DiffPane(): React.ReactNode {
     [selectedFiles, selectedLineIds]
   )
   const filteredFilePaths = useMemo(() => filteredFiles.map((file) => file.path), [filteredFiles])
+  const historyCommitHashes = useMemo(() => history.map((commit) => commit.hash), [history])
   const selectedCommitFilePaths = useMemo(
     () => selectedCommit?.files.map((file) => file.path) || [],
     [selectedCommit]
@@ -1313,7 +1907,14 @@ export function DiffPane(): React.ReactNode {
     setCoAuthorInput('')
     setCoAuthors([])
     setSelectedCoAuthorSuggestionIndex(0)
+    setFileContextMenu(null)
+    setFileRowSelection(new Set())
+    setFileRowSelectionAnchor(null)
   }, [root?.path])
+
+  useEffect(() => {
+    setCommitDetailsExpanded(false)
+  }, [selectedCommit?.hash])
 
   useEffect(() => {
     if (!coAuthorPanelOpen) return
@@ -1360,6 +1961,44 @@ export function DiffPane(): React.ReactNode {
   }, [files, selectionInitialized])
 
   useEffect(() => {
+    const currentPaths = new Set(files.map((file) => file.path))
+    setFileRowSelection((current) => {
+      const next = new Set(Array.from(current).filter((path) => currentPaths.has(path)))
+      return sameStringSet(current, next) ? current : next
+    })
+    setFileRowSelectionAnchor((current) => current && currentPaths.has(current) ? current : null)
+    setFileContextMenu((current) => {
+      if (!current) return current
+      const nextPaths = current.paths.filter((path) => currentPaths.has(path))
+      return nextPaths.length === current.paths.length ? current : null
+    })
+  }, [files])
+
+  useEffect(() => {
+    if (!fileContextMenu) return
+
+    function handleKeyDown(event: KeyboardEvent): void {
+      if (event.key === 'Escape') {
+        setFileContextMenu(null)
+      }
+    }
+
+    function closeMenu(): void {
+      setFileContextMenu(null)
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('resize', closeMenu)
+    window.addEventListener('scroll', closeMenu, true)
+
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('resize', closeMenu)
+      window.removeEventListener('scroll', closeMenu, true)
+    }
+  }, [fileContextMenu])
+
+  useEffect(() => {
     if (activeTab !== 'changes' || !root?.pathExists) return
 
     const firstFile = files[0]?.path || null
@@ -1376,9 +2015,62 @@ export function DiffPane(): React.ReactNode {
   }, [activeTab, files, root?.path, root?.pathExists, selectFile, selectedFile])
 
   useEffect(() => {
+    if (activeTab !== 'changes' || !root?.pathExists) return
+
+    window.requestAnimationFrame(() => {
+      changedFilesListRef.current?.focus({ preventScroll: true })
+    })
+  }, [activeTab, root?.path, root?.pathExists])
+
+  useEffect(() => {
+    if (activeTab !== 'history' || !root?.pathExists) return
+
+    window.requestAnimationFrame(() => {
+      historyCommitListRef.current?.focus({ preventScroll: true })
+    })
+  }, [activeTab, root?.path, root?.pathExists])
+
+  useEffect(() => {
+    if (!root?.pathExists || !selectedFileEntry || loading || diff.trim()) {
+      setEmptyFileProbe(null)
+      return
+    }
+
+    let cancelled = false
+    const rootPath = root.path
+    const filePath = selectedFileEntry.path
+
+    setEmptyFileProbe((current) =>
+      current?.rootPath === rootPath && current.path === filePath ? current : null
+    )
+
+    pear.fs.readPreview(absoluteFilePath(rootPath, filePath))
+      .then((preview) => {
+        if (cancelled) return
+        setEmptyFileProbe({
+          rootPath,
+          path: filePath,
+          empty: preview.kind !== 'missing' && preview.size === 0
+        })
+      })
+      .catch(() => {
+        if (!cancelled) setEmptyFileProbe({ rootPath, path: filePath, empty: false })
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [diff, loading, root?.path, root?.pathExists, selectedFileEntry?.path])
+
+  useEffect(() => {
     if (activeTab !== 'changes') return
     scrollFileRowIntoView(changedFilesListRef.current, selectedFile)
   }, [activeTab, filteredFilePaths, selectedFile])
+
+  useEffect(() => {
+    if (activeTab !== 'history') return
+    scrollCommitRowIntoView(historyCommitListRef.current, selectedCommit?.hash || null)
+  }, [activeTab, historyCommitHashes, selectedCommit?.hash])
 
   useEffect(() => {
     if (activeTab !== 'history') return
@@ -1421,7 +2113,7 @@ export function DiffPane(): React.ReactNode {
   if (!root?.pathExists) {
     return (
       <div className="flex h-full items-center justify-center bg-[var(--pear-bg)] px-8">
-        <p className="text-sm text-[var(--pear-text-faint)]">Select an available project root to see changes.</p>
+        <p className="text-[13px] text-[var(--pear-text-faint)]">Select an available project root to see changes.</p>
       </div>
     )
   }
@@ -1441,9 +2133,20 @@ export function DiffPane(): React.ReactNode {
     coAuthorPanelOpen &&
     coAuthorSuggestions.length > 0 &&
     (coAuthorInput.trim().length > 0 || coAuthors.length === 0)
-  const selectedFileEntry = files.find((file) => file.path === selectedFile)
   const selectedCommitFileEntry = selectedCommit?.files.find((file) => file.path === selectedCommitFile)
   const lastFetchedAt = root?.path ? lastFetchedByRoot[root.path] || null : null
+  const selectedFileIsEmpty = !!selectedFileEntry &&
+    emptyFileProbe?.rootPath === root.path &&
+    emptyFileProbe.path === selectedFileEntry.path &&
+    emptyFileProbe.empty
+  const selectedFileProbePending = !!selectedFileEntry &&
+    !loading &&
+    !diff.trim() &&
+    (
+      !emptyFileProbe ||
+      emptyFileProbe.rootPath !== root.path ||
+      emptyFileProbe.path !== selectedFileEntry.path
+    )
 
   function toggleAllVisible(): void {
     setSelectedFiles((current) => {
@@ -1503,11 +2206,66 @@ export function DiffPane(): React.ReactNode {
     }
   }
 
+  function selectChangedFileRow(path: string, event?: React.MouseEvent): void {
+    selectFile(path, root.path)
+
+    if (event?.shiftKey && fileRowSelectionAnchor) {
+      setFileRowSelection(new Set(fileRange(filteredFilePaths, fileRowSelectionAnchor, path)))
+      return
+    }
+
+    if (event?.metaKey || event?.ctrlKey) {
+      setFileRowSelection((current) => {
+        const next = new Set(current)
+        if (next.has(path)) {
+          next.delete(path)
+        } else {
+          next.add(path)
+        }
+        return next.size > 0 ? next : new Set([path])
+      })
+      setFileRowSelectionAnchor(path)
+      return
+    }
+
+    setFileRowSelection(new Set([path]))
+    setFileRowSelectionAnchor(path)
+  }
+
+  function selectChangedFilePath(path: string, extendRange = false): void {
+    selectFile(path, root.path)
+    if (extendRange && fileRowSelectionAnchor) {
+      setFileRowSelection(new Set(fileRange(filteredFilePaths, fileRowSelectionAnchor, path)))
+      return
+    }
+    setFileRowSelection(new Set([path]))
+    setFileRowSelectionAnchor(path)
+  }
+
+  function handleChangedFileContextMenu(event: React.MouseEvent, path: string): void {
+    event.preventDefault()
+    event.stopPropagation()
+
+    const selectedPaths = fileRowSelection.has(path)
+      ? orderedSelectedPaths(filteredFilePaths, fileRowSelection)
+      : [path]
+    if (!fileRowSelection.has(path)) {
+      setFileRowSelection(new Set([path]))
+      setFileRowSelectionAnchor(path)
+      selectFile(path, root.path)
+    }
+
+    setFileContextMenu({
+      ...contextMenuPosition(event.clientX, event.clientY),
+      paths: selectedPaths
+    })
+  }
+
   function handleChangedFilesKeyDown(event: React.KeyboardEvent): void {
     if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
       event.preventDefault()
       const path = nextFilePath(filteredFilePaths, selectedFile, event.key === 'ArrowDown' ? 1 : -1)
-      if (path) selectFile(path, root.path)
+      if (path) selectChangedFilePath(path, event.shiftKey)
       return
     }
 
@@ -1517,6 +2275,31 @@ export function DiffPane(): React.ReactNode {
       if (selectedFile && filteredFilePaths.includes(selectedFile)) {
         selectFile(selectedFile, root.path)
       }
+      return
+    }
+
+    if (event.key === ' ') {
+      event.preventDefault()
+      if (selectedFile && filteredFilePaths.includes(selectedFile)) {
+        const selected = selectedFiles.has(selectedFile) || fullySelectedLineFilePaths.has(selectedFile)
+        toggleFile(selectedFile, selected)
+      }
+    }
+  }
+
+  function handleHistoryCommitsKeyDown(event: React.KeyboardEvent): void {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      const hash = nextFilePath(historyCommitHashes, selectedCommit?.hash || null, event.key === 'ArrowDown' ? 1 : -1)
+      const commit = hash ? history.find((entry) => entry.hash === hash) || null : null
+      if (commit) void selectCommit(root.path, commit)
+      return
+    }
+
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      event.stopPropagation()
+      if (selectedCommit) void selectCommit(root.path, selectedCommit)
     }
   }
 
@@ -1645,6 +2428,161 @@ export function DiffPane(): React.ReactNode {
     }
   }
 
+  async function copySelectedCommitHash(): Promise<void> {
+    if (!selectedCommit) return
+    try {
+      await writeClipboardText(selectedCommit.hash)
+      setMessage(`Copied ${selectedCommit.shortHash}.`)
+    } catch {
+      setMessage('Unable to copy commit hash')
+    }
+  }
+
+  function includeContextFiles(paths: string[]): void {
+    setSelectedFiles((current) => new Set([...current, ...paths]))
+    setSelectedLineIds((current) => {
+      const next = new Set(Array.from(current).filter((id) => !paths.includes(getFilePathFromLineSelectionId(id))))
+      return sameStringSet(current, next) ? current : next
+    })
+    setMessage(`Included ${pluralize(paths.length, 'file')}.`)
+  }
+
+  function excludeContextFiles(paths: string[]): void {
+    setSelectedFiles((current) => {
+      const next = new Set(current)
+      paths.forEach((path) => next.delete(path))
+      return next
+    })
+    setSelectedLineIds((current) => {
+      const next = new Set(Array.from(current).filter((id) => !paths.includes(getFilePathFromLineSelectionId(id))))
+      return sameStringSet(current, next) ? current : next
+    })
+    setMessage(`Excluded ${pluralize(paths.length, 'file')}.`)
+  }
+
+  async function discardContextFiles(paths: string[]): Promise<void> {
+    const confirmed = window.confirm(
+      paths.length === 1
+        ? `Discard changes in ${paths[0]}? This cannot be undone.`
+        : `Discard changes in ${paths.length} selected files? This cannot be undone.`
+    )
+    if (!confirmed) return
+
+    setMessage(null)
+    try {
+      await pear.git.discardFiles(root.path, paths)
+      setFileRowSelection(new Set())
+      setFileRowSelectionAnchor(null)
+      await refreshRepository()
+      setMessage(`Discarded ${pluralize(paths.length, 'change')}.`)
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to discard changes')
+    }
+  }
+
+  async function ignoreContextPatterns(patterns: string[]): Promise<void> {
+    setMessage(null)
+    try {
+      await pear.git.addGitignorePatterns(root.path, patterns)
+      await refreshRepository()
+      setMessage(`Updated .gitignore with ${pluralize(patterns.length, 'pattern')}.`)
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to update .gitignore')
+    }
+  }
+
+  async function copyContextPaths(paths: string[], relative: boolean): Promise<void> {
+    try {
+      const text = paths
+        .map((path) => relative ? path : absoluteFilePath(root.path, path))
+        .join('\n')
+      await writeClipboardText(text)
+      setMessage(`Copied ${relative ? 'relative ' : ''}${pluralize(paths.length, 'path')}.`)
+    } catch {
+      setMessage('Unable to copy paths')
+    }
+  }
+
+  async function revealContextPath(paths: string[]): Promise<void> {
+    const firstPath = paths[0]
+    if (!firstPath) return
+    try {
+      await pear.fs.revealPath(absoluteFilePath(root.path, firstPath))
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to reveal file')
+    }
+  }
+
+  async function explainContextFiles(paths: string[]): Promise<void> {
+    setMessage(null)
+    try {
+      if (!activeProjectId) throw new Error('No project selected')
+
+      const projectStore = useProjectStore.getState()
+      const project = projectStore.getActiveProject()
+      if (!project) throw new Error('No project selected')
+
+      await projectStore.ensureBroker()
+      const liveAgents = await pear.broker.listAgents(activeProjectId)
+      const existingChannels = [
+        ...project.channels,
+        ...liveAgents.map((agent) => agent.name),
+        ...agents.flatMap((agent) => agent.channels || []),
+        ...liveAgents.flatMap((agent) => agent.channels || [])
+      ]
+      const channelName = nextReviewChannelName(existingChannels)
+      const requestedName = channelName
+      const diffs = await Promise.all(paths.map((path) => pear.git.diff(root.path, path).catch(() => '')))
+      const selectedDiff = compactReviewDiff(diffs.filter(Boolean).join('\n'))
+      if (!selectedDiff.trim()) throw new Error('No diff available for selected files')
+
+      const reviewRequest = [
+        'Please explain these selected git changes.',
+        '',
+        'Focus on what changed, why it matters, and any risks or follow-up checks.',
+        '',
+        'Files:',
+        ...paths.map((path) => `- ${path}`),
+        '',
+        'Diff:',
+        '```diff',
+        selectedDiff,
+        '```'
+      ].join('\n')
+      const spawned = await pear.broker.spawnAgent(activeProjectId, {
+        name: requestedName,
+        cli: 'codex',
+        cwd: root.path,
+        channels: [channelName],
+        task: `You are subscribed to #${channelName}. Respond in that channel to the human review request with a concise explanation of the selected git changes.`
+      })
+      const agentName = spawned.name || requestedName
+
+      await pear.broker.attachTerminal({
+        projectId: activeProjectId,
+        name: agentName,
+        mode: 'passthrough'
+      }).catch(() => undefined)
+
+      useAgentStore.getState().trackSpawnedAgent(agentName, activeProjectId, root.id, 'codex', root.path, {
+        channels: [channelName],
+        terminalMode: 'passthrough'
+      })
+      useAgentStore.getState().setActiveAgentKey(getAgentKey(activeProjectId, agentName))
+      useUIStore.getState().openTab({ kind: 'channel', projectId: activeProjectId, channelName })
+
+      await pear.broker.sendMessage(activeProjectId, {
+        to: `#${channelName}`,
+        text: reviewRequest,
+        from: 'human'
+      })
+      useAgentStore.getState().addHumanMessage(`#${channelName}`, reviewRequest, activeProjectId)
+      setMessage(`Spawned ${agentName} in #${channelName}.`)
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Unable to spawn review agent')
+    }
+  }
+
   return (
     <div className="flex h-full min-h-0 flex-col bg-[var(--pear-bg)]">
       <div
@@ -1672,63 +2610,65 @@ export function DiffPane(): React.ReactNode {
           className="flex h-full shrink-0 flex-col border-r border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)]"
           style={{ width: leftSidebarWidth }}
         >
-          <div className="grid h-7 shrink-0 grid-cols-2 border-b border-[var(--pear-border-subtle)]">
-          <button
-            type="button"
-            onClick={() => setActiveTab('changes')}
-            className={`flex items-center justify-center gap-1.5 border-b-2 text-[13px] font-semibold ${
-              activeTab === 'changes'
-                ? 'border-[var(--pear-accent)] text-[var(--pear-text)]'
-                : 'border-transparent text-[var(--pear-text-faint)] hover:text-[var(--pear-text-secondary)]'
-            }`}
-          >
-            Changes
-            {files.length > 0 && (
-              <span className="rounded-full bg-[var(--pear-bg-overlay)] px-1.5 text-[10px] text-[var(--pear-text-secondary)]">
-                {files.length}
-              </span>
-            )}
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('history')}
-            className={`flex items-center justify-center gap-1.5 border-b-2 text-[13px] font-semibold ${
-              activeTab === 'history'
-                ? 'border-[var(--pear-accent)] text-[var(--pear-text)]'
-                : 'border-transparent text-[var(--pear-text-faint)] hover:text-[var(--pear-text-secondary)]'
-            }`}
-          >
-            History
-          </button>
-        </div>
+          <div className="grid h-11 shrink-0 grid-cols-2 border-b border-[var(--pear-border-subtle)]">
+            <button
+              type="button"
+              onClick={() => setActiveTab('changes')}
+              className={`flex items-center justify-center gap-2 border-b-2 px-4 text-[14px] font-semibold transition-colors hover:bg-[var(--pear-bg-surface-hover)] ${
+                activeTab === 'changes'
+                  ? 'border-[var(--pear-selection-blue)] text-[var(--pear-text)]'
+                  : 'border-transparent text-[var(--pear-text-faint)] hover:text-[var(--pear-text-secondary)]'
+              }`}
+            >
+              Changes
+              {files.length > 0 && (
+                <span className="rounded-full bg-[var(--pear-bg-overlay)] px-2 py-0.5 text-[11px] leading-none text-[var(--pear-text-secondary)]">
+                  {files.length}
+                </span>
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('history')}
+              className={`flex items-center justify-center gap-2 border-b-2 px-4 text-[14px] font-semibold transition-colors hover:bg-[var(--pear-bg-surface-hover)] ${
+                activeTab === 'history'
+                  ? 'border-[var(--pear-selection-blue)] text-[var(--pear-text)]'
+                  : 'border-transparent text-[var(--pear-text-faint)] hover:text-[var(--pear-text-secondary)]'
+              }`}
+            >
+              History
+            </button>
+          </div>
 
-        {activeTab === 'changes' ? (
-          <>
-            <div className="shrink-0 border-b border-[var(--pear-border-subtle)] px-2 py-2">
-              <label className="flex h-8 items-center gap-2 rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-2.5 text-[13px] text-[var(--pear-text-secondary)]">
-                <Filter size={14} className="text-[var(--pear-text-faint)]" />
-                <input
-                  value={filter}
-                  onChange={(event) => setFilter(event.target.value)}
-                  placeholder="Filter"
-                  className="min-w-0 flex-1 border-0 bg-transparent outline-none placeholder:text-[var(--pear-text-faint)]"
-                />
-              </label>
-            </div>
+          {activeTab === 'changes' ? (
+            <>
+              <div className="shrink-0 border-b border-[var(--pear-border-subtle)] px-2 py-2">
+                <label className="flex h-8 items-center gap-2 rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-2.5 text-[13px] text-[var(--pear-text-secondary)]">
+                  <Filter size={14} className="text-[var(--pear-text-faint)]" />
+                  <input
+                    value={filter}
+                    onChange={(event) => setFilter(event.target.value)}
+                    placeholder="Filter"
+                    className="min-w-0 flex-1 border-0 bg-transparent text-[13px] outline-none placeholder:text-[var(--pear-text-faint)]"
+                  />
+                </label>
+              </div>
 
             <div
               ref={changedFilesListRef}
-              className="min-h-0 flex-1 overflow-y-auto border-b border-[var(--pear-border-subtle)] focus:outline-none"
+              data-focus-ring="none"
+              className="min-h-0 flex-1 overflow-y-auto border-b border-[var(--pear-border-subtle)]"
               tabIndex={0}
               onKeyDown={handleChangedFilesKeyDown}
               aria-label="Changed files"
             >
               <button
                 type="button"
+                tabIndex={-1}
                 onClick={toggleAllVisible}
                 role="checkbox"
                 aria-checked={someVisibleSelected ? 'mixed' : allVisibleSelected}
-                className="group flex h-9 w-full items-center gap-2 border-b border-[var(--pear-border-subtle)] px-3 text-left text-[14px] text-[var(--pear-text)] outline-none hover:bg-[var(--pear-bg-surface-hover)] focus:outline-none focus-visible:outline-none"
+                className="group flex h-8 w-full items-center gap-2 border-b border-[var(--pear-border-subtle)] px-2.5 text-left text-[13px] text-[var(--pear-text)] outline-none hover:bg-[var(--pear-bg-surface-hover)] focus:outline-none focus-visible:outline-none"
               >
                 <SelectionCheckbox
                   state={allVisibleSelected ? 'checked' : someVisibleSelected ? 'mixed' : 'unchecked'}
@@ -1737,7 +2677,7 @@ export function DiffPane(): React.ReactNode {
               </button>
 
               {filteredFiles.length === 0 ? (
-                <div className="px-3 py-8 text-sm text-[var(--pear-text-faint)]">
+                <div className="px-3 py-8 text-[13px] text-[var(--pear-text-faint)]">
                   {files.length === 0 ? 'No changes detected' : 'No files match the filter'}
                 </div>
               ) : (
@@ -1747,46 +2687,50 @@ export function DiffPane(): React.ReactNode {
                   const selected = wholeFileSelected || fullySelectedByLines
                   const partiallySelected = !selected && partiallySelectedFilePaths.has(file.path)
                   const active = selectedFile === file.path
+                  const rowActive = fileRowSelection.size > 0 ? fileRowSelection.has(file.path) : active
                   const kind = fileChangeKindFromStatus(file.status)
                   const statusLabel = fileChangeStatusLabel(kind)
                   return (
                     <div
                       key={file.path}
                       data-file-list-path={file.path}
-                      className={`group flex h-9 items-center gap-2 border-b border-[var(--pear-border-subtle)] pr-3 ${
-                        selectedFileRowClass(active, windowFocused)
+                      onContextMenu={(event) => handleChangedFileContextMenu(event, file.path)}
+                      className={`group flex h-8 items-center gap-2 border-b border-[var(--pear-border-subtle)] pr-2.5 ${
+                        selectedFileRowClass(rowActive, windowFocused)
                       }`}
                     >
                       <button
                         type="button"
+                        tabIndex={-1}
                         onClick={() => toggleFile(file.path, selected)}
                         role="checkbox"
                         aria-checked={partiallySelected ? 'mixed' : selected}
-                        className="group flex h-9 w-10 shrink-0 items-center justify-center outline-none transition-colors focus:outline-none focus-visible:outline-none"
+                        className="group flex h-8 w-9 shrink-0 items-center justify-center outline-none transition-colors focus:outline-none focus-visible:outline-none"
                         title={selected ? 'Unselect file' : 'Select entire file'}
                         aria-label={selected ? `Unselect ${file.path}` : `Select entire ${file.path}`}
                       >
                         <SelectionCheckbox
                           state={selected ? 'checked' : partiallySelected ? 'mixed' : 'unchecked'}
-                          active={active}
+                          active={rowActive}
                           windowFocused={windowFocused}
                         />
                       </button>
                       <button
                         type="button"
-                        onClick={() => selectFile(file.path, root.path)}
+                        tabIndex={-1}
+                        onClick={(event) => selectChangedFileRow(file.path, event)}
                         className="flex h-full min-w-0 flex-1 items-center gap-2 text-left outline-none focus:outline-none focus-visible:outline-none"
                       >
                         <FilePathLabel
                           path={file.path}
                           oldPath={file.oldPath}
-                          className="flex-1 text-[14px]"
-                          tone={selectedFilePathTone(active, windowFocused)}
+                          className="flex-1 text-[13px]"
+                          tone={selectedFilePathTone(rowActive, windowFocused)}
                         />
                         {file.staged && (
                           <span
                             className={`rounded px-1.5 py-0.5 text-[10px] ${
-                              active && windowFocused
+                              rowActive && windowFocused
                                 ? 'bg-white/20 text-white'
                                 : 'bg-[var(--pear-bg-overlay)] text-[var(--pear-accent-bright)]'
                             }`}
@@ -1794,7 +2738,7 @@ export function DiffPane(): React.ReactNode {
                             staged
                           </span>
                         )}
-                        <FileChangeStatusIcon kind={kind} label={statusLabel} active={active && windowFocused} />
+                        <FileChangeStatusIcon kind={kind} label={statusLabel} />
                       </button>
                     </div>
                   )
@@ -1802,29 +2746,29 @@ export function DiffPane(): React.ReactNode {
               )}
             </div>
 
-            <div className="shrink-0 space-y-[12px] p-[16px]">
-              <div className="flex items-center gap-[12px]">
+            <div className="shrink-0 space-y-2.5 p-3">
+              <div className="flex items-center gap-2.5">
                 <CommitAuthorAvatar user={authUser} />
                 <input
                   value={title}
                   onChange={(event) => setTitle(event.target.value)}
                   placeholder="Summary (required)"
-                  className="h-[48px] min-w-0 flex-1 rounded-lg border border-[var(--pear-border)] bg-[var(--pear-bg)] px-[12px] text-[16px] text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent)] focus:ring-1 focus:ring-[var(--pear-accent)]/30"
+                  className="h-9 min-w-0 flex-1 rounded-md border border-[var(--pear-border)] bg-[var(--pear-bg)] px-2.5 text-[13px] text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent)] focus:ring-1 focus:ring-[var(--pear-accent)]/30"
                 />
               </div>
-              <div className="rounded-lg border border-[var(--pear-border)] bg-[var(--pear-bg)] focus-within:border-[var(--pear-accent)] focus-within:ring-1 focus-within:ring-[var(--pear-accent)]/30">
+              <div className="rounded-md border border-[var(--pear-border)] bg-[var(--pear-bg)] focus-within:border-[var(--pear-accent)] focus-within:ring-1 focus-within:ring-[var(--pear-accent)]/30">
                 <textarea
                   value={body}
                   onChange={(event) => setBody(event.target.value)}
                   placeholder="Description"
                   rows={5}
-                  className="h-[184px] w-full resize-none border-0 bg-transparent px-[12px] py-[12px] text-[16px] text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)]"
+                  className="h-28 w-full resize-none border-0 bg-transparent px-2.5 py-2 text-[13px] leading-5 text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)]"
                 />
-                <div className="flex h-[40px] items-center gap-[8px] px-[12px] pb-[12px]">
+                <div className="flex h-8 items-center gap-2 px-2.5 pb-2">
                   <button
                     type="button"
                     onClick={handleAddCoAuthor}
-                    className={`flex h-[32px] w-[32px] items-center justify-center rounded-md transition-colors ${
+                    className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors ${
                       coAuthorPanelVisible
                         ? 'bg-[var(--pear-bg-overlay)] text-[var(--pear-accent-bright)] ring-1 ring-[var(--pear-accent-dim)]'
                         : 'text-[var(--pear-text-secondary)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]'
@@ -1833,18 +2777,18 @@ export function DiffPane(): React.ReactNode {
                     aria-label="Add co-author"
                     aria-pressed={coAuthorPanelVisible}
                   >
-                    <UserPlus size={20} />
+                    <UserPlus size={16} />
                   </button>
-                  <span className="h-[28px] w-px bg-[var(--pear-border)]" />
+                  <span className="h-6 w-px bg-[var(--pear-border)]" />
                   <button
                     type="button"
                     onClick={handleGenerate}
                     disabled={selectedCommitFileCount === 0 || actionLoading}
-                    className="flex h-[32px] w-[32px] items-center justify-center rounded-md text-[var(--pear-text-secondary)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)] disabled:opacity-40"
+                    className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--pear-text-secondary)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)] disabled:opacity-40"
                     title="Generate commit message"
                     aria-label="Generate commit message"
                   >
-                    {actionLoading ? <Loader2 size={18} className="animate-spin" /> : <WandSparkles size={20} />}
+                    {actionLoading ? <Loader2 size={15} className="animate-spin" /> : <WandSparkles size={16} />}
                   </button>
                 </div>
                 {coAuthorPanelVisible && (
@@ -1866,10 +2810,10 @@ export function DiffPane(): React.ReactNode {
                 type="button"
                 onClick={handleCommit}
                 disabled={!canCommit}
-                className="flex h-[50px] w-full items-center justify-center rounded-lg bg-[var(--pear-accent-dim)] px-[16px] text-[16px] font-medium text-white transition-colors hover:bg-[var(--pear-accent)] disabled:bg-[var(--pear-bg-surface)] disabled:text-[var(--pear-text-faint)]"
+                className="flex h-9 w-full items-center justify-center rounded-md bg-[var(--pear-accent-dim)] px-3 text-[13px] font-medium text-white transition-colors hover:bg-[var(--pear-accent)] disabled:bg-[var(--pear-bg-surface)] disabled:text-[var(--pear-text-faint)]"
               >
                 {actionLoading ? (
-                  <Loader2 size={18} className="mr-2 animate-spin" />
+                  <Loader2 size={15} className="mr-2 animate-spin" />
                 ) : null}
                 Commit {selectedCommitFileCount} file{selectedCommitFileCount === 1 ? '' : 's'} to{' '}
                 <span className="ml-1 font-semibold">{commitTarget}</span>
@@ -1882,21 +2826,28 @@ export function DiffPane(): React.ReactNode {
             </div>
           </>
         ) : (
-          <div className="flex min-h-0 flex-1 flex-col">
+          <div className="flex min-h-0 flex-1 flex-col" onKeyDown={handleHistoryCommitsKeyDown}>
             <div className="shrink-0 border-b border-[var(--pear-border-subtle)] p-2">
               <button
                 type="button"
+                tabIndex={-1}
                 className="flex h-9 w-full items-center gap-2 rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 text-left text-[13px] text-[var(--pear-text-faint)]"
               >
                 <GitBranch size={14} />
                 <span className="truncate">Select Branch to Compare...</span>
               </button>
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto">
+            <div
+              ref={historyCommitListRef}
+              data-focus-ring="none"
+              className="min-h-0 flex-1 overflow-y-auto"
+              tabIndex={0}
+              aria-label="Commit history"
+            >
               {historyLoading && history.length === 0 ? (
-                <div className="px-3 py-6 text-sm text-[var(--pear-text-faint)]">Loading history...</div>
+                <div className="px-3 py-6 text-[13px] text-[var(--pear-text-faint)]">Loading history...</div>
               ) : history.length === 0 ? (
-                <div className="px-3 py-6 text-sm text-[var(--pear-text-faint)]">No commits yet</div>
+                <div className="px-3 py-6 text-[13px] text-[var(--pear-text-faint)]">No commits yet</div>
               ) : (
                 <div>
                   {history.map((commit) => (
@@ -1904,6 +2855,7 @@ export function DiffPane(): React.ReactNode {
                       key={commit.hash}
                       commit={commit}
                       active={selectedCommit?.hash === commit.hash}
+                      authorAvatarUrl={avatarUrlForCommit(commit, authUser)}
                       onSelect={() => selectCommit(root.path, commit)}
                     />
                   ))}
@@ -1916,6 +2868,7 @@ export function DiffPane(): React.ReactNode {
 
       <button
         type="button"
+        tabIndex={-1}
         aria-label="Resize source control panel"
         className="group flex h-full w-1.5 shrink-0 cursor-col-resize items-center justify-center bg-[var(--pear-bg)] hover:bg-[var(--pear-bg-surface-hover)]"
         onPointerDown={(event) =>
@@ -1959,59 +2912,51 @@ export function DiffPane(): React.ReactNode {
                 onToggleLine={toggleLine}
                 onSetLines={setLinesSelected}
               />
+            ) : selectedFileIsEmpty ? (
+              <EmptyFileState />
             ) : (
-              <div className="flex h-full items-center justify-center px-4 text-sm text-[var(--pear-text-faint)]">
-                {loading
+              <div className="flex h-full items-center justify-center px-4 text-[13px] text-[var(--pear-text-faint)]">
+                {loading || selectedFileProbePending
                   ? 'Loading diff...'
                   : files.length === 0
                     ? 'No changes detected'
-                    : 'Select a file to view its diff'}
+                    : selectedFileEntry
+                      ? 'No diff available'
+                      : 'Select a file to view its diff'}
               </div>
             )}
           </div>
         </section>
       ) : (
         <section className="flex min-w-0 flex-1 flex-col">
-          <div
-            className="shrink-0 border-b border-[var(--pear-border-subtle)] bg-[var(--pear-bg-surface)]"
-            style={{ height: historyDetailsHeight }}
-          >
+          <div className="shrink-0 border-b border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)]">
             {selectedCommit ? (
-              <HistoryCommitDetails commit={selectedCommit} />
+              <HistoryCommitDetails
+                commit={selectedCommit}
+                authorAvatarUrl={avatarUrlForCommit(selectedCommit, authUser)}
+                expanded={commitDetailsExpanded}
+                onCopyHash={() => void copySelectedCommitHash()}
+                onToggleExpanded={() => setCommitDetailsExpanded((expanded) => !expanded)}
+              />
             ) : (
-              <div className="flex h-full items-center px-4 text-sm text-[var(--pear-text-faint)]">
+              <div className="flex min-h-[88px] items-center px-4 text-[13px] text-[var(--pear-text-faint)]">
                 Select a commit to see its files and diff
               </div>
             )}
           </div>
-          <button
-            type="button"
-            aria-label="Resize commit details panel"
-            className="group flex h-1.5 shrink-0 cursor-row-resize items-center justify-center bg-[var(--pear-bg)] hover:bg-[var(--pear-bg-surface-hover)]"
-            onPointerDown={(event) =>
-              startPanelResize(event, {
-                axis: 'y',
-                startValue: historyDetailsHeight,
-                min: HISTORY_DETAILS_MIN_HEIGHT,
-                max: HISTORY_DETAILS_MAX_HEIGHT,
-                onResize: setHistoryDetailsHeight
-              })
-            }
-          >
-            <GripHorizontal size={13} className="opacity-0 text-[var(--pear-text-faint)] group-hover:opacity-100" />
-          </button>
 
           <div className="flex min-h-0 flex-1">
             <aside
               className="flex h-full shrink-0 flex-col border-r border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)]"
               style={{ width: historyFilesWidth }}
             >
-              <div className="flex h-7 shrink-0 items-center justify-center border-b border-[var(--pear-border-subtle)] text-[13px] font-semibold text-[var(--pear-text)]">
+              <div className="flex h-8 shrink-0 items-center justify-center border-b border-[var(--pear-border-subtle)] text-[13px] font-semibold text-[var(--pear-text)]">
                 {selectedCommit?.files.length || 0} changed file{selectedCommit?.files.length === 1 ? '' : 's'}
               </div>
               <div
                 ref={historyFilesListRef}
-                className="min-h-0 flex-1 overflow-y-auto focus:outline-none"
+                data-focus-ring="none"
+                className="min-h-0 flex-1 overflow-y-auto"
                 tabIndex={0}
                 onKeyDown={handleHistoryFilesKeyDown}
                 aria-label="Commit files"
@@ -2027,7 +2972,7 @@ export function DiffPane(): React.ReactNode {
                         type="button"
                         data-file-list-path={file.path}
                         onClick={() => selectCommitFile(root.path, file.path)}
-                        className={`flex h-7 w-full min-w-0 items-center gap-2 border-b border-[var(--pear-border-subtle)] px-2.5 text-left outline-none focus:outline-none focus-visible:outline-none ${
+                        className={`flex h-8 w-full min-w-0 items-center gap-2 border-b border-[var(--pear-border-subtle)] px-2.5 text-left outline-none focus:outline-none focus-visible:outline-none ${
                           selectedFileRowClass(active, windowFocused)
                         }`}
                       >
@@ -2037,17 +2982,18 @@ export function DiffPane(): React.ReactNode {
                           className="flex-1 text-[13px]"
                           tone={selectedFilePathTone(active, windowFocused)}
                         />
-                        <FileChangeStatusIcon kind={kind} label={statusLabel} active={active && windowFocused} />
+                        <FileChangeStatusIcon kind={kind} label={statusLabel} />
                       </button>
                     )
                   })
                 ) : (
-                  <div className="px-3 py-6 text-sm text-[var(--pear-text-faint)]">No commit selected</div>
+                  <div className="px-3 py-6 text-[13px] text-[var(--pear-text-faint)]">No commit selected</div>
                 )}
               </div>
             </aside>
             <button
               type="button"
+              tabIndex={-1}
               aria-label="Resize history files panel"
               className="group flex h-full w-1.5 shrink-0 cursor-col-resize items-center justify-center bg-[var(--pear-bg)] hover:bg-[var(--pear-bg-surface-hover)]"
               onPointerDown={(event) =>
@@ -2080,7 +3026,7 @@ export function DiffPane(): React.ReactNode {
                 {commitDiff ? (
                   <DiffViewer diff={commitDiff} focusedFilePath={selectedCommitFile} />
                 ) : (
-                  <div className="flex h-full items-center justify-center px-4 text-sm text-[var(--pear-text-faint)]">
+                  <div className="flex h-full items-center justify-center px-4 text-[13px] text-[var(--pear-text-faint)]">
                     Select a commit file to see its diff
                   </div>
                 )}
@@ -2090,6 +3036,19 @@ export function DiffPane(): React.ReactNode {
         </section>
       )}
       </div>
+      {fileContextMenu && (
+        <FileContextMenu
+          menu={fileContextMenu}
+          onClose={() => setFileContextMenu(null)}
+          onDiscard={discardContextFiles}
+          onIgnorePatterns={ignoreContextPatterns}
+          onInclude={includeContextFiles}
+          onExclude={excludeContextFiles}
+          onCopyPaths={copyContextPaths}
+          onReveal={revealContextPath}
+          onExplain={explainContextFiles}
+        />
+      )}
     </div>
   )
 }

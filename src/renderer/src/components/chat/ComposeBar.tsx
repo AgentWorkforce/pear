@@ -21,6 +21,7 @@ import {
   getDirectMessageRecipientTargets,
   getDirectMessageRoomTitle
 } from '@/lib/direct-messages'
+import { applyChatFormat, looksLikeUrl, type ChatFormatAction } from '@/lib/chat-formatting'
 import { pear } from '@/lib/ipc'
 import { useAgentStore } from '@/stores/agent-store'
 import { useProjectStore } from '@/stores/project-store'
@@ -29,34 +30,59 @@ interface ComposerChromeButtonProps {
   label: string
   children: React.ReactNode
   className?: string
+  active?: boolean
+  disabled?: boolean
+  onClick?: (event: React.MouseEvent<HTMLButtonElement>) => void
+  onMouseDown?: (event: React.MouseEvent<HTMLButtonElement>) => void
 }
 
 function ComposerChromeButton({
   label,
   children,
-  className = ''
+  className = '',
+  active = false,
+  disabled = false,
+  onClick,
+  onMouseDown
 }: ComposerChromeButtonProps): React.ReactNode {
   return (
     <button
       type="button"
-      disabled
+      disabled={disabled}
       aria-label={label}
-      className={`flex h-8 min-w-8 items-center justify-center rounded-md px-2 text-[var(--pear-text-dim)] disabled:cursor-default disabled:opacity-100 ${className}`}
+      title={label}
+      onClick={onClick}
+      onMouseDown={(event) => {
+        if (!onMouseDown) return
+        event.preventDefault()
+        onMouseDown(event)
+      }}
+      className={`flex h-7 min-w-7 items-center justify-center rounded-md px-2 text-[var(--pear-text-dim)] transition-colors ${
+        active
+          ? 'bg-[var(--pear-bg-overlay)] text-[var(--pear-text)]'
+          : disabled
+            ? 'cursor-default opacity-55'
+            : 'hover:bg-[var(--pear-bg-overlay)] hover:text-[var(--pear-text)]'
+      } ${className}`}
     >
       {children}
     </button>
   )
 }
 
-const CHANNEL_FORMAT_CONTROLS = [
-  { label: 'Bold', icon: Bold },
-  { label: 'Italic', icon: Italic },
-  { label: 'Underline', icon: Underline },
-  { label: 'Strikethrough', icon: Strikethrough },
-  { label: 'Insert link', icon: Link2 },
-  { label: 'Numbered list', icon: ListOrdered },
-  { label: 'Bulleted list', icon: List },
-  { label: 'Code', icon: Code }
+const CHANNEL_FORMAT_CONTROLS: {
+  label: string
+  action: ChatFormatAction
+  icon: React.ComponentType<{ size?: number }>
+}[] = [
+  { label: 'Bold', action: 'bold', icon: Bold },
+  { label: 'Italic', action: 'italic', icon: Italic },
+  { label: 'Underline', action: 'underline', icon: Underline },
+  { label: 'Strikethrough', action: 'strikethrough', icon: Strikethrough },
+  { label: 'Insert link', action: 'link', icon: Link2 },
+  { label: 'Numbered list', action: 'numbered-list', icon: ListOrdered },
+  { label: 'Bulleted list', action: 'bulleted-list', icon: List },
+  { label: 'Code', action: 'code', icon: Code }
 ]
 
 const CHANNEL_ACTION_CONTROLS = [
@@ -112,6 +138,7 @@ function getMentionInitials(name: string): string {
 export function ComposeBar({ directMessageParticipants }: ComposeBarProps = {}): React.ReactNode {
   const [text, setText] = useState('')
   const [recipient, setRecipient] = useState('broadcast')
+  const [formattingVisible, setFormattingVisible] = useState(true)
   const [sending, setSending] = useState(false)
   const [sendError, setSendError] = useState<string | null>(null)
   const [cursorPosition, setCursorPosition] = useState(0)
@@ -156,8 +183,8 @@ export function ComposeBar({ directMessageParticipants }: ComposeBarProps = {}):
     if (!textarea) return
 
     textarea.style.height = '0px'
-    const minHeight = 120
-    const maxHeight = 260
+    const minHeight = 56
+    const maxHeight = 140
     const nextHeight = Math.min(textarea.scrollHeight, maxHeight)
     textarea.style.height = `${Math.max(nextHeight, minHeight)}px`
   }, [text])
@@ -180,14 +207,18 @@ export function ComposeBar({ directMessageParticipants }: ComposeBarProps = {}):
     }
   }, [dismissedMentionToken, mentionToken])
 
-  const focusTextareaAt = (nextCursorPosition: number): void => {
+  const focusTextareaSelection = (nextSelectionStart: number, nextSelectionEnd = nextSelectionStart): void => {
     window.requestAnimationFrame(() => {
       const textarea = textareaRef.current
       if (!textarea) return
       textarea.focus()
-      textarea.setSelectionRange(nextCursorPosition, nextCursorPosition)
-      setCursorPosition(nextCursorPosition)
+      textarea.setSelectionRange(nextSelectionStart, nextSelectionEnd)
+      setCursorPosition(nextSelectionEnd)
     })
+  }
+
+  const focusTextareaAt = (nextCursorPosition: number): void => {
+    focusTextareaSelection(nextCursorPosition)
   }
 
   const insertMention = (agentName: string): void => {
@@ -197,6 +228,27 @@ export function ComposeBar({ directMessageParticipants }: ComposeBarProps = {}):
     setText(nextText)
     setDismissedMentionToken(null)
     focusTextareaAt(nextCursorPosition)
+  }
+
+  const applyFormatToSelection = (action: ChatFormatAction): void => {
+    const textarea = textareaRef.current
+    const selectionStart = textarea?.selectionStart ?? text.length
+    const selectionEnd = textarea?.selectionEnd ?? selectionStart
+    const selectedText = text.slice(selectionStart, selectionEnd)
+    const linkUrl = action === 'link'
+      ? window.prompt('Enter link URL', looksLikeUrl(selectedText) ? selectedText.trim() : 'https://')
+      : undefined
+
+    if (action === 'link' && linkUrl === null) {
+      focusTextareaSelection(selectionStart, selectionEnd)
+      return
+    }
+
+    const result = applyChatFormat(text, selectionStart, selectionEnd, action, { linkUrl: linkUrl || undefined })
+
+    setText(result.text)
+    setDismissedMentionToken(null)
+    focusTextareaSelection(result.selectionStart, result.selectionEnd)
   }
 
   const handleSend = async (): Promise<void> => {
@@ -248,6 +300,27 @@ export function ComposeBar({ directMessageParticipants }: ComposeBarProps = {}):
   }
 
   const handleKeyDown = (e: React.KeyboardEvent): void => {
+    const modifierPressed = e.metaKey || e.ctrlKey
+    if (modifierPressed && !e.altKey) {
+      const key = e.key.toLowerCase()
+      const shortcutAction: ChatFormatAction | null =
+        key === 'b' && !e.shiftKey ? 'bold'
+        : key === 'i' && !e.shiftKey ? 'italic'
+        : key === 'u' && !e.shiftKey ? 'underline'
+        : key === 'k' && !e.shiftKey ? 'link'
+        : key === 'x' && e.shiftKey ? 'strikethrough'
+        : key === '7' && e.shiftKey ? 'numbered-list'
+        : key === '8' && e.shiftKey ? 'bulleted-list'
+        : key === 'c' && e.shiftKey ? 'code'
+        : null
+
+      if (shortcutAction) {
+        e.preventDefault()
+        applyFormatToSelection(shortcutAction)
+        return
+      }
+    }
+
     if (showMentionSuggestions) {
       if (e.key === 'ArrowDown') {
         e.preventDefault()
@@ -294,22 +367,28 @@ export function ComposeBar({ directMessageParticipants }: ComposeBarProps = {}):
       : `Message @${recipient}`
 
   return (
-    <div className="shrink-0 border-t border-[var(--pear-bg-surface)] bg-[var(--pear-bg-raised)] p-5">
+    <div className="shrink-0 border-t border-[var(--pear-bg-surface)] bg-[var(--pear-bg-raised)] p-4">
       {sendError && (
         <div className="mb-3 rounded-lg border border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 px-4 py-2 text-xs text-[var(--pear-red)]">
           {sendError}
         </div>
       )}
-      <div className="rounded-lg border border-[var(--pear-bg-overlay)] bg-[var(--pear-bg-surface)] px-4 py-3">
-        <div className="flex flex-wrap items-center gap-0.5 border-b border-[var(--pear-bg-overlay)] pb-2">
-          {CHANNEL_FORMAT_CONTROLS.map(({ label, icon: Icon }) => (
-            <ComposerChromeButton key={label} label={label}>
-              <Icon size={16} />
-            </ComposerChromeButton>
-          ))}
-        </div>
+      <div className="rounded-lg border border-[var(--pear-bg-overlay)] bg-[var(--pear-bg-surface)] px-4 py-3 transition-colors focus-within:border-[var(--pear-border)]">
+        {formattingVisible && (
+          <div className="flex flex-wrap items-center gap-0.5 border-b border-[var(--pear-bg-overlay)] pb-2.5">
+            {CHANNEL_FORMAT_CONTROLS.map(({ label, action, icon: Icon }) => (
+              <ComposerChromeButton
+                key={label}
+                label={label}
+                onMouseDown={() => applyFormatToSelection(action)}
+              >
+                <Icon size={16} />
+              </ComposerChromeButton>
+            ))}
+          </div>
+        )}
 
-        <div className="relative mt-3">
+        <div className={`relative ${formattingVisible ? 'mt-2.5' : ''}`}>
           {showMentionSuggestions && (
             <div className="absolute bottom-full left-0 z-20 mb-3 w-full max-w-[420px] overflow-hidden rounded-lg border border-[var(--pear-bg-overlay)] bg-[var(--pear-bg-raised)] shadow-2xl">
               <div className="border-b border-[var(--pear-bg-overlay)] px-4 py-2 text-[11px] font-medium uppercase tracking-[0.12em] text-[var(--pear-text-faint)]">
@@ -381,13 +460,14 @@ export function ComposeBar({ directMessageParticipants }: ComposeBarProps = {}):
               setCursorPosition(e.currentTarget.selectionStart)
             }}
             placeholder={placeholder}
-            rows={4}
+            rows={2}
             disabled={sending}
-            className="block w-full resize-none bg-transparent px-1 py-1 text-[15px] leading-6 text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] disabled:opacity-50"
+            data-focus-ring="none"
+            className="block w-full resize-none bg-transparent px-2 py-2 text-[15px] leading-6 text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] disabled:opacity-50"
           />
         </div>
 
-        <div className="mt-3 flex items-center justify-between border-t border-[var(--pear-bg-overlay)] pt-3">
+        <div className="mt-2.5 flex items-center justify-between border-t border-[var(--pear-bg-overlay)] pt-2.5">
           <div className="flex flex-wrap items-center gap-1">
             {!isChannelComposer && !isDirectMessageComposer && (
               <>
@@ -407,15 +487,20 @@ export function ComposeBar({ directMessageParticipants }: ComposeBarProps = {}):
                 <div className="mx-1 h-5 w-px bg-[var(--pear-bg-overlay)]" />
               </>
             )}
-            <ComposerChromeButton label="Add item">
+            <ComposerChromeButton label="Add item" disabled>
               <Plus size={18} />
             </ComposerChromeButton>
             <div className="mx-1 h-5 w-px bg-[var(--pear-bg-overlay)]" />
-            <ComposerChromeButton label="Formatting" className="text-sm font-medium">
+            <ComposerChromeButton
+              label="Formatting"
+              active={formattingVisible}
+              className="text-sm font-medium"
+              onClick={() => setFormattingVisible((visible) => !visible)}
+            >
               <span>Aa</span>
             </ComposerChromeButton>
             {CHANNEL_ACTION_CONTROLS.map(({ label, icon: Icon }) => (
-              <ComposerChromeButton key={label} label={label}>
+              <ComposerChromeButton key={label} label={label} disabled>
                 <Icon size={17} />
               </ComposerChromeButton>
             ))}

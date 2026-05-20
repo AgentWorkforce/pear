@@ -52,31 +52,91 @@ function hasStoredTokens(): boolean {
 }
 
 function normalizeUserInfo(value: unknown): UserInfo | undefined {
-  if (!value || typeof value !== 'object') return undefined
+  if (!isRecord(value)) return undefined
 
-  const record = value as Record<string, unknown>
+  const record = value
+  const githubRecord = firstObject(record, [
+    'github',
+    'githubUser',
+    'github_user',
+    'githubProfile',
+    'github_profile',
+    'githubAccount',
+    'github_account'
+  ])
   const user: UserInfo = {}
   const githubUsername =
-    firstString(record, ['githubUsername', 'github_username', 'username', 'login'])
+    firstString(record, ['githubUsername', 'github_username', 'githubLogin', 'github_login']) ||
+    firstString(githubRecord, ['githubUsername', 'github_username', 'username', 'login']) ||
+    firstString(record, ['username', 'login'])
   const avatarUrl =
+    firstString(record, ['githubAvatarUrl', 'github_avatar_url']) ||
+    firstString(githubRecord, ['avatarUrl', 'avatar_url', 'avatar', 'picture', 'image']) ||
     firstString(record, ['avatarUrl', 'avatar_url', 'avatar', 'picture', 'image'])
 
-  if (typeof record.name === 'string') user.name = record.name
-  if (typeof record.email === 'string') user.email = record.email
+  const name = firstString(record, ['name', 'displayName', 'display_name'])
+  const email = firstString(record, ['email'])
+  const organizationName = firstString(record, ['organizationName', 'organization_name'])
+  const projectName = firstString(record, ['projectName', 'project_name'])
+
+  if (name) user.name = name
+  if (email) user.email = email
   if (githubUsername) user.githubUsername = githubUsername
   if (avatarUrl) user.avatarUrl = avatarUrl
-  if (typeof record.organizationName === 'string') user.organizationName = record.organizationName
-  if (typeof record.projectName === 'string') user.projectName = record.projectName
+  if (organizationName) user.organizationName = organizationName
+  if (projectName) user.projectName = projectName
 
   return Object.keys(user).length > 0 ? user : undefined
 }
 
-function firstString(record: Record<string, unknown>, keys: string[]): string | undefined {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function firstString(record: Record<string, unknown> | undefined, keys: string[]): string | undefined {
+  if (!record) return undefined
   for (const key of keys) {
     const value = record[key]
     if (typeof value === 'string' && value.trim()) return value.trim()
   }
   return undefined
+}
+
+function firstObject(record: Record<string, unknown> | undefined, keys: string[]): Record<string, unknown> | undefined {
+  if (!record) return undefined
+  for (const key of keys) {
+    const value = record[key]
+    if (isRecord(value)) return value
+  }
+  return undefined
+}
+
+function mergeUserInfo(previous: UserInfo | undefined, next: UserInfo | undefined): UserInfo | undefined {
+  const normalizedPrevious = normalizeUserInfo(previous)
+  const normalizedNext = normalizeUserInfo(next)
+  if (!normalizedPrevious && !normalizedNext) return undefined
+  return { ...(normalizedPrevious || {}), ...(normalizedNext || {}) }
+}
+
+function hasGithubAvatarIdentity(user: UserInfo | undefined): boolean {
+  const normalized = normalizeUserInfo(user)
+  return !!(
+    normalized?.githubUsername ||
+    (normalized?.avatarUrl && isGithubAvatarUrl(normalized.avatarUrl))
+  )
+}
+
+function isGithubAvatarUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && (
+      url.hostname === 'avatars.githubusercontent.com' ||
+      url.hostname === 'avatars.github.com' ||
+      url.hostname === 'github.com'
+    )
+  } catch {
+    return false
+  }
 }
 
 function saveAuthMeta(tokens: Pick<StoredTokens, 'apiUrl' | 'user'>): void {
@@ -127,24 +187,40 @@ function clearTokens(): void {
 }
 
 async function fetchWhoami(apiUrl: string, accessToken: string): Promise<UserInfo | undefined> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 2500)
+
   try {
     const res = await fetch(`${apiUrl}/api/v1/auth/whoami`, {
-      headers: { Authorization: `Bearer ${accessToken}` }
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: controller.signal
     })
     if (!res.ok) return undefined
-    const data = await res.json()
+    const data = await res.json() as unknown
+    const record = isRecord(data) ? data : {}
+    const userRecord = firstObject(record, ['user']) || record
+    const organizationRecord = firstObject(record, ['organization', 'org'])
+    const projectRecord = firstObject(record, ['project'])
+    const githubRecord =
+      firstObject(record, ['github', 'githubUser', 'github_user', 'githubProfile', 'github_profile', 'githubAccount', 'github_account']) ||
+      firstObject(userRecord, ['github', 'githubUser', 'github_user', 'githubProfile', 'github_profile', 'githubAccount', 'github_account'])
+
     return normalizeUserInfo({
-      name: data.user?.name,
-      email: data.user?.email,
-      githubUsername:
-        data.user?.githubUsername || data.user?.github_username || data.user?.username || data.user?.login,
-      avatarUrl:
-        data.user?.avatarUrl || data.user?.avatar_url || data.user?.avatar || data.user?.picture || data.user?.image,
-      organizationName: data.organization?.name,
-      projectName: data.project?.name
+      ...userRecord,
+      github: githubRecord,
+      organizationName:
+        firstString(userRecord, ['organizationName', 'organization_name']) ||
+        firstString(record, ['organizationName', 'organization_name']) ||
+        firstString(organizationRecord, ['name']),
+      projectName:
+        firstString(userRecord, ['projectName', 'project_name']) ||
+        firstString(record, ['projectName', 'project_name']) ||
+        firstString(projectRecord, ['name'])
     })
   } catch {
     return undefined
+  } finally {
+    clearTimeout(timeout)
   }
 }
 
@@ -215,8 +291,22 @@ export function logout(): void {
   clearTokens()
 }
 
-export function getAuthStatus(): AuthStatus {
+export async function getAuthStatus(): Promise<AuthStatus> {
   if (!hasStoredTokens()) return { loggedIn: false }
+
+  const tokens = loadTokens()
+  if (tokens) {
+    const cachedUser = normalizeUserInfo(tokens.user)
+    const freshUser = hasGithubAvatarIdentity(cachedUser)
+      ? undefined
+      : await fetchWhoami(tokens.apiUrl, tokens.accessToken)
+    const user = mergeUserInfo(tokens.user, freshUser)
+    if (freshUser) {
+      saveTokens({ ...tokens, user })
+    }
+    return { loggedIn: true, apiUrl: tokens.apiUrl, user }
+  }
+
   const meta = loadAuthMeta()
   return { loggedIn: true, apiUrl: meta.apiUrl, user: meta.user }
 }

@@ -97,7 +97,7 @@ function getTabId(tab: AppTabInput): string {
     case 'project-settings':
       return `project-settings:${tab.projectId || 'global'}`
     case 'broker-details':
-      return 'broker-details'
+      return `broker-details:${tab.projectId || 'global'}`
     case 'source-control':
       return `source-control:${tab.projectId || 'global'}`
   }

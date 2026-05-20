@@ -12,12 +12,12 @@ import {
   MessageSquare,
   RefreshCw,
   Server,
-  TerminalSquare,
   Wrench
 } from 'lucide-react'
 import { pear, type BrokerDetails, type BrokerEventRecord, type BrokerListAgent } from '@/lib/ipc'
 import { type BrokerErrorEntry, useAgentStore } from '@/stores/agent-store'
 import { useProjectStore, type Project } from '@/stores/project-store'
+import { useUIStore } from '@/stores/ui-store'
 
 const errorTimeFormatter = new Intl.DateTimeFormat(undefined, {
   month: 'short',
@@ -95,17 +95,23 @@ function getConnectionStatusLabel(status: BrokerDetails['connectionFileStatus'])
   return 'n/a'
 }
 
-function shellQuote(value: string): string {
-  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) return value
-  return `'${value.replace(/'/g, `'\\''`)}'`
+function compactValue(value: string | undefined, fallback = 'n/a'): string {
+  return value?.trim() || fallback
 }
 
-function getCliTargetName(broker: BrokerDetails): string {
-  return broker.agents[0]?.name || '<agent>'
+function getPrimaryRelaycastWorkspace(
+  broker: BrokerDetails
+): NonNullable<BrokerDetails['relaycast']>['workspaces'][number] | undefined {
+  return broker.relaycast?.workspaces.find((workspace) => workspace.default) || broker.relaycast?.workspaces[0]
 }
 
-function getStateDir(connectionPath: string | undefined): string | undefined {
-  return connectionPath?.replace(/\/connection\.json$/, '')
+function getBrokerRuntimeSummary(broker: BrokerDetails): string {
+  const owner = broker.brokerPid || broker.cloudSandboxId
+  return [
+    broker.kind,
+    owner ? `owner ${owner}` : null,
+    `uptime ${formatUptime(broker.session?.uptimeSecs)}`
+  ].filter(Boolean).join(' / ')
 }
 
 function buildAgentFallbackDetails(
@@ -346,22 +352,6 @@ function CopyButton({ value, label = 'Copy' }: { value: string; label?: string }
   )
 }
 
-function CommandRow({ label, value }: { label: string; value: string }): React.ReactNode {
-  return (
-    <div className="rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35 p-3">
-      <div className="mb-2 flex items-center justify-between gap-3">
-        <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-[var(--pear-text-faint)]">
-          {label}
-        </p>
-        <CopyButton value={value} />
-      </div>
-      <pre className="max-h-28 overflow-auto whitespace-pre-wrap break-words rounded-md bg-[var(--pear-bg-raised)] px-3 py-2 font-mono text-[11px] leading-5 text-[var(--pear-text-secondary)]">
-        {value}
-      </pre>
-    </div>
-  )
-}
-
 function DetailField({
   label,
   value,
@@ -384,75 +374,85 @@ function DetailField({
   )
 }
 
-function BrokerCommands({ broker }: { broker: BrokerDetails }): React.ReactNode {
-  const target = getCliTargetName(broker)
-  const quotedTarget = target === '<agent>' ? target : shellQuote(target)
-  const stateDir = getStateDir(broker.connectionPath)
-  const explicitBrokerArgs = broker.url && broker.apiKey
-    ? `--broker-url ${shellQuote(broker.url)} --api-key ${shellQuote(broker.apiKey)}`
-    : null
-  const commands = [
-    explicitBrokerArgs
-      ? {
-          label: 'Read-only view',
-          value: `agent-relay view ${quotedTarget} ${explicitBrokerArgs}`
-        }
-      : null,
-    explicitBrokerArgs
-      ? {
-          label: 'Drive agent',
-          value: `agent-relay drive ${quotedTarget} ${explicitBrokerArgs}`
-        }
-      : null,
-    explicitBrokerArgs
-      ? {
-          label: 'Passthrough',
-          value: `agent-relay passthrough ${quotedTarget} ${explicitBrokerArgs}`
-        }
-      : null,
-    explicitBrokerArgs
-      ? {
-          label: 'Export once',
-          value: [
-            `export RELAY_BROKER_URL=${shellQuote(broker.url)}`,
-            `export RELAY_BROKER_API_KEY=${shellQuote(broker.apiKey)}`,
-            `agent-relay view ${quotedTarget}`
-          ].join('\n')
-        }
-      : null,
-    stateDir
-      ? {
-          label: 'Connection file',
-          value: `agent-relay view ${quotedTarget} --state-dir ${shellQuote(stateDir)}`
-        }
-      : null,
-    broker.cwd
-      ? {
-          label: 'From project root',
-          value: `cd ${shellQuote(broker.cwd)} && agent-relay view ${quotedTarget}`
-        }
-      : null
-  ].filter((entry): entry is { label: string; value: string } => entry !== null)
+function CompactMetaRow({
+  label,
+  value,
+  copyValue
+}: {
+  label: string
+  value: string
+  copyValue?: string
+}): React.ReactNode {
+  return (
+    <div className="grid min-w-0 grid-cols-[126px_minmax(0,1fr)_auto] items-center gap-2 border-b border-[var(--pear-border-subtle)] py-2 last:border-b-0">
+      <span className="text-[11px] text-[var(--pear-text-faint)]">{label}</span>
+      <span className="min-w-0 truncate font-mono text-[12px] text-[var(--pear-text-secondary)]" title={value}>
+        {value}
+      </span>
+      {copyValue ? <CopyButton value={copyValue} label="Copy" /> : <span />}
+    </div>
+  )
+}
 
-  if (!commands.length) {
-    return (
-      <div className="rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35 p-4 text-sm text-[var(--pear-text-faint)]">
-        Restart Pear to load full Agent Relay connection details for CLI commands.
-      </div>
-    )
-  }
+function BrokerMetadataSummary({ broker }: { broker: BrokerDetails }): React.ReactNode {
+  const apiKey = broker.apiKey || (broker.apiKeyAvailable ? 'stored in connection file' : 'n/a')
+  const primaryWorkspace = getPrimaryRelaycastWorkspace(broker)
+  const workspaceId = broker.relaycast?.defaultWorkspaceId || primaryWorkspace?.workspaceId
+  const workspaceKey = broker.relaycast?.workspaceKey || broker.session?.workspaceKey
+  const workspaceAlias = primaryWorkspace?.workspaceAlias || undefined
+  const selfAgent = primaryWorkspace
+    ? `${primaryWorkspace.selfName} / ${primaryWorkspace.selfAgentId}`
+    : 'n/a'
+  const relaycastAuth = typeof broker.relaycast?.authenticated === 'boolean'
+    ? broker.relaycast.authenticated ? 'authenticated' : 'not authenticated'
+    : 'unknown'
+  const workspaceCount = typeof broker.relaycast?.workspaceCount === 'number'
+    ? `${broker.relaycast.workspaceCount} workspace${broker.relaycast.workspaceCount === 1 ? '' : 's'}`
+    : 'workspace count unknown'
 
   return (
-    <div className="grid gap-3 lg:grid-cols-2">
-      {commands.map((command) => (
-        <CommandRow key={command.label} label={command.label} value={command.value} />
-      ))}
+    <div className="rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-3 py-1">
+      <CompactMetaRow label="Endpoint" value={compactValue(broker.url)} copyValue={broker.url} />
+      <CompactMetaRow label="API key" value={apiKey} copyValue={broker.apiKey} />
+      <CompactMetaRow
+        label="Relaycast"
+        value={[relaycastAuth, workspaceCount].filter(Boolean).join(' / ')}
+      />
+      <CompactMetaRow
+        label="Workspace ID"
+        value={compactValue(workspaceAlias ? `${workspaceAlias} (${workspaceId || 'no id'})` : workspaceId)}
+        copyValue={workspaceId}
+      />
+      <CompactMetaRow label="Workspace key" value={compactValue(workspaceKey)} copyValue={workspaceKey} />
+      <CompactMetaRow label="Self agent" value={selfAgent} copyValue={primaryWorkspace?.selfAgentId} />
+      <CompactMetaRow
+        label="Runtime"
+        value={`${getBrokerRuntimeSummary(broker)} / protocol ${broker.session ? `v${broker.session.protocolVersion}` : 'unknown'}`}
+      />
+      <CompactMetaRow
+        label="State"
+        value={`${getConnectionStatusLabel(broker.connectionFileStatus)} / ${broker.agentCount} agents / ${broker.pendingDeliveryCount} pending`}
+      />
+      <CompactMetaRow label="Root" value={broker.cwd || 'cloud sandbox'} copyValue={broker.cwd || undefined} />
+      <CompactMetaRow
+        label="Connection file"
+        value={compactValue(broker.connectionPath)}
+        copyValue={broker.connectionPath}
+      />
     </div>
   )
 }
 
 function getEventKind(entry: BrokerEventRecord): string {
   return typeof entry.event.kind === 'string' ? entry.event.kind : 'unknown'
+}
+
+function isDisplayBrokerEvent(entry: BrokerEventRecord): boolean {
+  return getEventKind(entry) !== 'worker_stream'
+}
+
+function eventMatchesProject(entry: BrokerEventRecord, projectId: string | undefined): boolean {
+  return !projectId || entry.projectId === projectId
 }
 
 function getEventString(event: BrokerEventRecord['event'], key: string): string | undefined {
@@ -480,6 +480,11 @@ function humanizeEventKind(kind: string): string {
     .filter(Boolean)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ')
+}
+
+function getEventDisplayName(kind: string): string {
+  if (kind === 'broker_initialized') return 'Agent Relay initialized'
+  return humanizeEventKind(kind)
 }
 
 const ERROR_EVENT_KINDS = new Set([
@@ -511,7 +516,7 @@ function getBrokerEventErrorMessage(entry: BrokerEventRecord): string {
     getEventString(event, 'reason') ||
     describeBrokerEvent(entry),
     360
-  ) || humanizeEventKind(getEventKind(entry))
+  ) || getEventDisplayName(getEventKind(entry))
 }
 
 function describeBrokerEvent(entry: BrokerEventRecord): string {
@@ -526,6 +531,8 @@ function describeBrokerEvent(entry: BrokerEventRecord): string {
   const eventId = getEventString(event, 'event_id')
 
   switch (kind) {
+    case 'broker_initialized':
+      return `Agent Relay initialized${getEventString(event, 'url') ? ` at ${getEventString(event, 'url')}` : ''}`
     case 'relay_inbound':
       return `${from || 'unknown'} sent to ${target || 'unknown'}${body ? `: ${body}` : ''}`
     case 'relaycast_published':
@@ -569,7 +576,7 @@ function describeBrokerEvent(entry: BrokerEventRecord): string {
       return `${name || 'agent'} unsubscribed from ${getEventChannels(event) || 'channels'}`
     default:
       return [
-        humanizeEventKind(kind),
+        getEventDisplayName(kind),
         name || from,
         message || body || chunk
       ].filter(Boolean).join(': ')
@@ -748,7 +755,7 @@ function BrokerEventErrorPanel({
             className="rounded-lg border border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 px-3 py-2.5"
           >
             <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--pear-red)]">
-              <span className="font-medium uppercase">{humanizeEventKind(getEventKind(entry))}</span>
+              <span className="font-medium uppercase">{getEventDisplayName(getEventKind(entry))}</span>
               <span className="text-[var(--pear-text-faint)]">{formatErrorTimestamp(entry.timestamp)}</span>
             </div>
             <p className="mt-1 text-sm text-[var(--pear-text)]">{getBrokerEventErrorMessage(entry)}</p>
@@ -808,7 +815,7 @@ function BrokerEventFeed({
                       }`}
                     >
                       {isError ? <AlertCircle size={11} /> : <MessageSquare size={11} />}
-                      {humanizeEventKind(kind)}
+                      {getEventDisplayName(kind)}
                     </span>
                     {getEventString(entry.event, 'name') && (
                       <span className="truncate text-[11px] text-[var(--pear-text-faint)]">
@@ -853,7 +860,6 @@ function BrokerCard({
   onAutoFix?: (project: Project, entry: BrokerErrorEntry) => void
 }): React.ReactNode {
   const Icon = broker.kind === 'cloud' ? Cloud : Server
-  const apiKey = broker.apiKey || (broker.apiKeyAvailable ? 'stored in connection file' : 'n/a')
 
   return (
     <section className="rounded-lg border border-[var(--pear-border)] bg-[var(--pear-bg-surface)]">
@@ -896,28 +902,7 @@ function BrokerCard({
       </div>
 
       <div className="space-y-5 p-5">
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-          <DetailField label="Agent Relay URL" value={broker.url || 'n/a'} copy={!!broker.url} />
-          <DetailField label="API key" value={apiKey} copy={!!broker.apiKey} />
-          <DetailField label="Port" value={broker.port ? String(broker.port) : 'n/a'} />
-          <DetailField label="PID / sandbox" value={String(broker.brokerPid || broker.cloudSandboxId || 'n/a')} />
-          <DetailField label="Root" value={broker.cwd || 'cloud sandbox'} copy={!!broker.cwd} />
-          <DetailField label="Connection file" value={broker.connectionPath || 'n/a'} copy={!!broker.connectionPath} />
-          <DetailField label="Connection status" value={getConnectionStatusLabel(broker.connectionFileStatus)} />
-          <DetailField label="Uptime" value={formatUptime(broker.session?.uptimeSecs)} />
-          <DetailField label="Protocol" value={broker.session ? `v${broker.session.protocolVersion}` : 'unknown'} />
-          <DetailField label="Mode" value={broker.session?.mode || 'unknown'} />
-          <DetailField label="Agents" value={String(broker.agentCount)} />
-          <DetailField label="Pending deliveries" value={String(broker.pendingDeliveryCount)} />
-        </div>
-
-        <div>
-          <div className="mb-3 flex items-center gap-2">
-            <TerminalSquare size={15} className="text-[var(--pear-accent)]" />
-            <h3 className="text-sm font-semibold text-[var(--pear-text)]">CLI strings</h3>
-          </div>
-          <BrokerCommands broker={broker} />
-        </div>
+        <BrokerMetadataSummary broker={broker} />
 
         <div>
           <div className="mb-3 flex items-center gap-2">
@@ -925,26 +910,23 @@ function BrokerCard({
             <h3 className="text-sm font-semibold text-[var(--pear-text)]">Agents</h3>
           </div>
           {broker.agents.length > 0 ? (
-            <div className="overflow-x-auto rounded-lg border border-[var(--pear-border-subtle)]">
-              <div className="grid min-w-[560px] grid-cols-[minmax(160px,1.2fr)_minmax(90px,0.7fr)_minmax(90px,0.7fr)_minmax(120px,1fr)_minmax(80px,0.5fr)] border-b border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-3 py-2 text-[11px] uppercase tracking-[0.1em] text-[var(--pear-text-faint)]">
-                <span>Name</span>
-                <span>Runtime</span>
-                <span>CLI</span>
-                <span>State</span>
-                <span>PID</span>
-              </div>
+            <div className="space-y-2">
               {broker.agents.map((agent) => (
                 <div
                   key={agent.name}
-                  className="grid min-w-[560px] grid-cols-[minmax(160px,1.2fr)_minmax(90px,0.7fr)_minmax(90px,0.7fr)_minmax(120px,1fr)_minmax(80px,0.5fr)] border-b border-[var(--pear-border-subtle)] px-3 py-2 text-sm last:border-b-0"
+                  className="rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-3 py-2"
                 >
-                  <span className="min-w-0 truncate font-medium text-[var(--pear-text)]" title={agent.name}>
-                    {agent.name}
-                  </span>
-                  <span className="min-w-0 truncate text-[var(--pear-text-secondary)]">{agent.runtime}</span>
-                  <span className="min-w-0 truncate text-[var(--pear-text-secondary)]">{agent.cli || 'unknown'}</span>
-                  <span className="min-w-0 truncate text-[var(--pear-text-secondary)]">{agent.currentState || 'unknown'}</span>
-                  <span className="min-w-0 truncate text-[var(--pear-text-secondary)]">{agent.pid || 'n/a'}</span>
+                  <div className="flex min-w-0 items-center justify-between gap-3">
+                    <span className="min-w-0 truncate font-medium text-[var(--pear-text)]" title={agent.name}>
+                      {agent.name}
+                    </span>
+                    <span className="shrink-0 rounded-full bg-[var(--pear-bg-overlay)] px-2 py-0.5 text-[11px] text-[var(--pear-text-secondary)]">
+                      {agent.currentState || 'unknown'}
+                    </span>
+                  </div>
+                  <p className="mt-1 truncate text-[11px] text-[var(--pear-text-faint)]">
+                    {[agent.runtime, agent.cli || 'unknown cli', agent.pid ? `pid ${agent.pid}` : 'no pid'].join(' / ')}
+                  </p>
                 </div>
               ))}
             </div>
@@ -983,38 +965,58 @@ export function BrokerDetailsPage(): React.ReactNode {
   const hydrateBrokerEvents = useAgentStore((s) => s.hydrateBrokerEvents)
   const syncBrokerDetailsStatus = useAgentStore((s) => s.syncBrokerDetailsStatus)
   const projects = useProjectStore((s) => s.projects)
+  const activeProjectId = useProjectStore((s) => s.activeProjectId)
+  const activeBrokerTabProjectId = useUIStore((s) => {
+    const activeTab = s.tabs.find((tab) => tab.id === s.activeTabId)
+    return activeTab?.kind === 'broker-details' ? activeTab.projectId : undefined
+  })
   const [brokerDetails, setBrokerDetails] = useState<BrokerDetails[]>([])
   const [detailsLoading, setDetailsLoading] = useState(false)
   const [detailsError, setDetailsError] = useState<string | null>(null)
   const [autoFixingProjectId, setAutoFixingProjectId] = useState<string | null>(null)
   const [autoFixErrors, setAutoFixErrors] = useState<Record<string, string>>({})
 
+  const pageProjectId = activeBrokerTabProjectId || activeProjectId || undefined
+  const pageProjectName = pageProjectId ? getProjectName(projects, pageProjectId) : 'All projects'
   const currentErrorId = brokerStatus === 'error' && brokerError && brokerErrors[0]?.message === brokerError
     ? brokerErrors[0].id
     : undefined
+  const scopedBrokerDetails = useMemo(
+    () => pageProjectId
+      ? brokerDetails.filter((broker) => broker.projectId === pageProjectId)
+      : brokerDetails,
+    [brokerDetails, pageProjectId]
+  )
   const brokerErrorsByProject = useMemo(() => {
     const grouped = new Map<string, BrokerErrorEntry[]>()
     for (const entry of brokerErrors) {
       if (!entry.projectId) continue
+      if (pageProjectId && entry.projectId !== pageProjectId) continue
       const entries = grouped.get(entry.projectId) || []
       entries.push(entry)
       grouped.set(entry.projectId, entries)
     }
     return grouped
-  }, [brokerErrors])
+  }, [brokerErrors, pageProjectId])
   const unmatchedProjectErrorGroups = useMemo(() => {
-    const brokerProjectIds = new Set(brokerDetails.map((broker) => broker.projectId))
+    const brokerProjectIds = new Set(scopedBrokerDetails.map((broker) => broker.projectId))
     return Array.from(brokerErrorsByProject.entries()).filter(([projectId]) => !brokerProjectIds.has(projectId))
-  }, [brokerDetails, brokerErrorsByProject])
+  }, [brokerErrorsByProject, scopedBrokerDetails])
   const unattributedBrokerErrors = useMemo(
-    () => brokerErrors.filter((entry) => !entry.projectId),
-    [brokerErrors]
+    () => pageProjectId ? [] : brokerErrors.filter((entry) => !entry.projectId),
+    [brokerErrors, pageProjectId]
   )
   const sortedBrokerEvents = useMemo(
     () => [...brokerEvents].sort((left, right) => left.timestamp - right.timestamp),
     [brokerEvents]
   )
-  const hasBrokerSections = brokerDetails.length > 0 || unmatchedProjectErrorGroups.length > 0
+  const scopedBrokerEvents = useMemo(
+    () => sortedBrokerEvents.filter((entry) =>
+      isDisplayBrokerEvent(entry) && eventMatchesProject(entry, pageProjectId)
+    ),
+    [pageProjectId, sortedBrokerEvents]
+  )
+  const hasBrokerSections = scopedBrokerDetails.length > 0 || unmatchedProjectErrorGroups.length > 0
 
   const loadBrokerDetails = useCallback(async (): Promise<void> => {
     setDetailsLoading(true)
@@ -1038,7 +1040,7 @@ export function BrokerDetailsPage(): React.ReactNode {
       setBrokerDetails(details)
       syncBrokerDetailsStatus(details)
       setDetailsError(
-        'Agent Relay status API is not loaded in this window. Restart Pear for full diagnostics and API-key CLI strings.'
+        'Agent Relay status API is not loaded in this window. Restart Pear for full diagnostics and connection metadata.'
       )
     } catch (err) {
       setDetailsError(err instanceof Error ? err.message : String(err))
@@ -1092,7 +1094,9 @@ export function BrokerDetailsPage(): React.ReactNode {
           <div>
             <h1 className="text-xl font-semibold text-[var(--pear-text)]">Agent Relay Status</h1>
             <p className="mt-1 text-sm text-[var(--pear-text-faint)]">
-              Running sessions, local connection metadata, and CLI-ready commands.
+              {pageProjectId
+                ? `${pageProjectName} broker activity, event feed, and compact connection metadata.`
+                : 'Project broker activity, event feed, and compact connection metadata.'}
             </p>
           </div>
           <button
@@ -1114,50 +1118,52 @@ export function BrokerDetailsPage(): React.ReactNode {
           </div>
         )}
 
-        {detailsLoading && !hasBrokerSections ? (
-          <div className="rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-surface)] px-3 py-12 text-center text-sm text-[var(--pear-text-faint)]">
-            Loading Agent Relay status...
-          </div>
-        ) : hasBrokerSections ? (
-          <div className="space-y-5">
-            {brokerDetails.map((broker) => (
-              <BrokerCard
-                key={broker.projectId}
-                broker={broker}
-                projectName={getProjectName(projects, broker.projectId)}
-                statusErrors={brokerErrorsByProject.get(broker.projectId) || []}
-                currentErrorId={currentErrorId}
-                project={projects.find((project) => project.id === broker.projectId)}
-                fixing={autoFixingProjectId === broker.projectId}
-                fixError={autoFixErrors[broker.projectId]}
-                onAutoFix={(project, entry) => void handleAutoFix(project, entry)}
-              />
-            ))}
-            {unmatchedProjectErrorGroups.map(([projectId, entries]) => (
-              <ProjectBrokerIssueSection
-                key={projectId}
-                project={projects.find((project) => project.id === projectId)}
-                projectName={getProjectName(projects, projectId)}
-                entries={entries}
-                currentErrorId={currentErrorId}
-                fixing={autoFixingProjectId === projectId}
-                fixError={autoFixErrors[projectId]}
-                onAutoFix={(project, entry) => void handleAutoFix(project, entry)}
-              />
-            ))}
-          </div>
-        ) : (
-          <div className="rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-surface)] px-3 py-12 text-center text-sm text-[var(--pear-text-faint)]">
-            No managed Agent Relay sessions running
-          </div>
-        )}
+        <MessageThroughputPanel events={scopedBrokerEvents} />
 
-        <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+        <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,1.35fr)_minmax(340px,0.65fr)]">
+          <BrokerEventFeed events={scopedBrokerEvents} projects={projects} />
           <div className="space-y-5">
-            <BrokerEventErrorPanel events={sortedBrokerEvents} projects={projects} />
-            <MessageThroughputPanel events={sortedBrokerEvents} />
+            <BrokerEventErrorPanel events={scopedBrokerEvents} projects={projects} />
+            {detailsLoading && !hasBrokerSections ? (
+              <div className="rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-surface)] px-3 py-12 text-center text-sm text-[var(--pear-text-faint)]">
+                Loading Agent Relay status...
+              </div>
+            ) : hasBrokerSections ? (
+              <div className="space-y-5">
+                {scopedBrokerDetails.map((broker) => (
+                  <BrokerCard
+                    key={broker.projectId}
+                    broker={broker}
+                    projectName={getProjectName(projects, broker.projectId)}
+                    statusErrors={brokerErrorsByProject.get(broker.projectId) || []}
+                    currentErrorId={currentErrorId}
+                    project={projects.find((project) => project.id === broker.projectId)}
+                    fixing={autoFixingProjectId === broker.projectId}
+                    fixError={autoFixErrors[broker.projectId]}
+                    onAutoFix={(project, entry) => void handleAutoFix(project, entry)}
+                  />
+                ))}
+                {unmatchedProjectErrorGroups.map(([projectId, entries]) => (
+                  <ProjectBrokerIssueSection
+                    key={projectId}
+                    project={projects.find((project) => project.id === projectId)}
+                    projectName={getProjectName(projects, projectId)}
+                    entries={entries}
+                    currentErrorId={currentErrorId}
+                    fixing={autoFixingProjectId === projectId}
+                    fixError={autoFixErrors[projectId]}
+                    onAutoFix={(project, entry) => void handleAutoFix(project, entry)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-surface)] px-3 py-12 text-center text-sm text-[var(--pear-text-faint)]">
+                {pageProjectId
+                  ? 'No managed Agent Relay session running for this project'
+                  : 'No managed Agent Relay sessions running'}
+              </div>
+            )}
           </div>
-          <BrokerEventFeed events={sortedBrokerEvents} projects={projects} />
         </div>
 
         {unattributedBrokerErrors.length > 0 && (

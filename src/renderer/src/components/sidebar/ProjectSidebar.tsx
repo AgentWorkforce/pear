@@ -3,7 +3,7 @@ import { useState, useEffect, useCallback } from 'react'
 import { LogOut, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
-import { pear } from '@/lib/ipc'
+import { pear, type AuthUser } from '@/lib/ipc'
 import { ProjectItem } from './ProjectItem'
 
 function AgentRelayLogo(): React.ReactNode {
@@ -46,20 +46,92 @@ function projectInitial(name: string): string {
   return name.trim().charAt(0).toUpperCase() || '?'
 }
 
-function UserAvatar({ name, email }: { name?: string; email?: string }): React.ReactNode {
-  const initials = name
-    ? name.split(' ').map(p => p[0]).join('').slice(0, 2).toUpperCase()
-    : email?.[0]?.toUpperCase() || '?'
+function userInitials(user?: AuthUser): string {
+  if (user?.name?.trim()) {
+    return user.name
+      .trim()
+      .split(/\s+/)
+      .map((part) => part[0])
+      .join('')
+      .slice(0, 2)
+      .toUpperCase()
+  }
+
+  return user?.email?.trim().charAt(0).toUpperCase() || '?'
+}
+
+function githubUsernameFromEmail(email?: string): string {
+  const match = email?.trim().match(/^(?:\d+\+)?([^@]+)@users\.noreply\.github\.com$/i)
+  return match?.[1] || ''
+}
+
+function normalizeGithubUsername(value?: string): string {
+  return (value || '')
+    .trim()
+    .replace(/^@+/, '')
+    .replace(/[^A-Za-z0-9-]/g, '')
+}
+
+function isGithubAvatarUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && (
+      url.hostname === 'avatars.githubusercontent.com' ||
+      url.hostname === 'avatars.github.com' ||
+      url.hostname === 'github.com'
+    )
+  } catch {
+    return false
+  }
+}
+
+function githubAvatarUrl(user?: AuthUser): string | null {
+  const providedAvatarUrl = user?.avatarUrl?.trim()
+  if (providedAvatarUrl && isGithubAvatarUrl(providedAvatarUrl)) {
+    return providedAvatarUrl
+  }
+
+  const username = normalizeGithubUsername(
+    user?.githubUsername || user?.username || githubUsernameFromEmail(user?.email)
+  )
+  return username ? `https://github.com/${encodeURIComponent(username)}.png?size=96` : null
+}
+
+function UserAvatar({ user }: { user?: AuthUser }): React.ReactNode {
+  const label = user?.name || user?.email || 'User'
+  const avatarUrl = githubAvatarUrl(user)
+  const [imageFailed, setImageFailed] = useState(false)
+
+  useEffect(() => {
+    setImageFailed(false)
+  }, [avatarUrl])
+
+  if (avatarUrl && !imageFailed) {
+    return (
+      <img
+        src={avatarUrl}
+        alt={label}
+        title={label}
+        className="h-7 w-7 shrink-0 rounded-full bg-[var(--pear-bg-overlay)] object-cover"
+        referrerPolicy="no-referrer"
+        onError={() => setImageFailed(true)}
+      />
+    )
+  }
 
   return (
-    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[var(--pear-accent)] text-[10px] font-semibold text-[var(--pear-bg)]">
-      {initials}
+    <div
+      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[var(--pear-accent)] text-[10px] font-semibold text-[var(--pear-bg)]"
+      title={label}
+      aria-label={label}
+    >
+      {userInitials(user)}
     </div>
   )
 }
 
 function AccountMenu(): React.ReactNode {
-  const [auth, setAuth] = useState<{ loggedIn: boolean; user?: { name?: string; email?: string; organizationName?: string } }>({ loggedIn: false })
+  const [auth, setAuth] = useState<{ loggedIn: boolean; user?: AuthUser }>({ loggedIn: false })
   const [loading, setLoading] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
 
@@ -104,7 +176,7 @@ function AccountMenu(): React.ReactNode {
         onClick={() => setMenuOpen(!menuOpen)}
         className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm text-[var(--pear-text)] hover:bg-[var(--pear-bg-surface)]"
       >
-        <UserAvatar name={auth.user?.name} email={auth.user?.email} />
+        <UserAvatar user={auth.user} />
         <div className="min-w-0 flex-1 text-left">
           <div className="truncate text-sm leading-tight">{auth.user?.name || auth.user?.email || 'User'}</div>
           {auth.user?.organizationName && (

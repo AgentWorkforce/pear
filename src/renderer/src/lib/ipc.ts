@@ -60,8 +60,24 @@ export interface BrokerDetails {
   session?: {
     brokerVersion: string
     protocolVersion: number
+    workspaceKey?: string
+    defaultWorkspaceId?: string
     mode: string
     uptimeSecs: number
+  }
+  relaycast?: {
+    workspaceKey?: string
+    defaultWorkspaceId?: string
+    authenticated?: boolean
+    workspaceCount?: number
+    workspaces: Array<{
+      workspaceId: string
+      workspaceAlias?: string | null
+      selfName: string
+      selfAgentId: string
+      authenticated: boolean
+      default: boolean
+    }>
   }
   agentCount: number
   pendingDeliveryCount: number
@@ -91,13 +107,23 @@ export interface GitHistoryFile {
   status: string
 }
 
+export interface GitHistoryCoAuthor {
+  name: string
+  email: string
+  avatarUrl?: string
+}
+
 export interface GitHistoryCommit {
   hash: string
   shortHash: string
   author: string
+  authorEmail: string
+  authorAvatarUrl?: string
+  coAuthors: GitHistoryCoAuthor[]
   date: string
   subject: string
   body: string
+  tags: string[]
   additions: number
   deletions: number
   files: GitHistoryFile[]
@@ -134,6 +160,22 @@ export interface GitBranchSyncStatus {
 
 export interface GitCheckoutBranchOptions {
   stashChanges?: boolean
+}
+
+export interface AuthUser {
+  name?: string
+  email?: string
+  githubUsername?: string
+  username?: string
+  avatarUrl?: string
+  organizationName?: string
+  projectName?: string
+}
+
+export interface AuthStatus {
+  loggedIn: boolean
+  apiUrl?: string
+  user?: AuthUser
 }
 
 export interface PearAPI {
@@ -244,9 +286,9 @@ export interface PearAPI {
     revealPath: (filePath: string) => Promise<void>
   }
   auth: {
-    login: () => Promise<{ loggedIn: boolean; apiUrl?: string; user?: { name?: string; email?: string; organizationName?: string; projectName?: string } }>
+    login: () => Promise<AuthStatus>
     logout: () => Promise<void>
-    status: () => Promise<{ loggedIn: boolean; apiUrl?: string; user?: { name?: string; email?: string; organizationName?: string; projectName?: string } }>
+    status: () => Promise<AuthStatus>
   }
   onMenu: (channel: string, callback: (...args: unknown[]) => void) => () => void
 }

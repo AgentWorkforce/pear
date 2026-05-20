@@ -1,5 +1,6 @@
 import type React from 'react'
 import { FileDiff, Moon, Sun } from 'lucide-react'
+import { formatGitDiffLineCount } from '@/lib/format'
 import { useAgentStore } from '@/stores/agent-store'
 import { useGitStore } from '@/stores/git-store'
 import { useProjectStore } from '@/stores/project-store'
@@ -34,7 +35,11 @@ export function StatusBar(): React.ReactNode {
         type="button"
         title="Open Agent Relay Status"
         aria-label={`Agent Relay status ${brokerStatus}. Open Agent Relay Status.`}
-        onClick={() => openTab({ kind: 'broker-details' })}
+        onClick={() => openTab({
+          kind: 'broker-details',
+          projectId: project?.id,
+          title: project ? `${project.name} Relay` : undefined
+        })}
         className={`flex items-center gap-2 rounded-full px-2.5 py-1 transition-colors ${
           brokerStatus === 'error'
             ? 'border border-[var(--pear-red)]/25 bg-[var(--pear-red)]/10 text-[var(--pear-text)] hover:bg-[var(--pear-red)]/15'
@@ -72,9 +77,9 @@ export function StatusBar(): React.ReactNode {
           <span>{changedFiles.length} changed file{changedFiles.length === 1 ? '' : 's'}</span>
           {(summary.additions > 0 || summary.deletions > 0) && (
             <span className="tabular-nums">
-              <span className="text-[var(--pear-green)]">+{summary.additions}</span>
+              <span className="text-[var(--pear-green)]">+{formatGitDiffLineCount(summary.additions)}</span>
               <span className="mx-1 text-[var(--pear-text-faint)]">/</span>
-              <span className="text-[var(--pear-red)]">-{summary.deletions}</span>
+              <span className="text-[var(--pear-red)]">-{formatGitDiffLineCount(summary.deletions)}</span>
             </span>
           )}
         </button>

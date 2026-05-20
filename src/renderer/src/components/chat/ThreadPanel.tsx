@@ -2,6 +2,7 @@ import type React from 'react'
 import { useEffect, useRef, useState } from 'react'
 import { Send, User, X } from 'lucide-react'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
+import { renderChatMessageBody } from '@/lib/chat-formatting'
 import { useAgentStore } from '@/stores/agent-store'
 import type {
   ChatMessage as ChatMessageType,
@@ -49,9 +50,9 @@ function ThreadReplyRow({ reply }: { reply: ChatThreadReply }): React.ReactNode 
           </span>
           <span className="text-[10px] text-[var(--pear-text-faint)]">{formatTime(reply.timestamp)}</span>
         </div>
-        <p className="mt-0.5 whitespace-pre-wrap break-words text-sm leading-5 text-[var(--pear-text)]">
-          {reply.body}
-        </p>
+        <div className="mt-0.5 space-y-1 break-words text-sm leading-5 text-[var(--pear-text)]">
+          {renderChatMessageBody(reply.body)}
+        </div>
       </div>
     </div>
   )

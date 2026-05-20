@@ -27,17 +27,40 @@ export interface GitHistoryFile {
   status: string
 }
 
+export interface GitHistoryCoAuthor {
+  name: string
+  email: string
+  avatarUrl?: string
+}
+
 export interface GitHistoryCommit {
   hash: string
   shortHash: string
   author: string
+  authorEmail: string
+  authorAvatarUrl?: string
+  coAuthors: GitHistoryCoAuthor[]
   date: string
   subject: string
   body: string
+  tags: string[]
   additions: number
   deletions: number
   files: GitHistoryFile[]
 }
+
+type GitHubRepo = {
+  owner: string
+  repo: string
+}
+
+type GitHubCommitAvatar = {
+  authorAvatarUrl?: string
+}
+
+const gitHubCommitAvatarCache = new Map<string, GitHubCommitAvatar>()
+// Git suppresses merge file details unless a merge diff strategy is requested.
+const mergeDiffArgs = ['--diff-merges=first-parent']
 
 export interface GitCommitSelectionInput {
   title: string
@@ -195,16 +218,17 @@ export async function discardFiles(path: string, files: string[]): Promise<void>
   }
 
   if (trackedTargets.size > 0) {
+    const tracked = Array.from(trackedTargets)
     if (await hasHead(path)) {
-      await git(['restore', '--source=HEAD', '--staged', '--worktree', '--', ...trackedTargets], path)
+      await git(['restore', '--source=HEAD', '--staged', '--worktree', '--', ...tracked], path)
     } else {
-      await gitAllowNonZeroExit(['rm', '--cached', '-r', '--', ...trackedTargets], path).catch(() => '')
+      await gitAllowNonZeroExit(['rm', '--cached', '-r', '--', ...tracked], path).catch(() => '')
       trackedTargets.forEach((target) => untrackedTargets.add(target))
     }
   }
 
   if (untrackedTargets.size > 0) {
-    await git(['clean', '-f', '-d', '--', ...untrackedTargets], path)
+    await git(['clean', '-f', '-d', '--', ...Array.from(untrackedTargets)], path)
   }
 }
 
@@ -417,7 +441,7 @@ export async function listBranchDetails(path: string): Promise<GitBranchInfo[]> 
   const output = await git([
     'for-each-ref',
     '--sort=-committerdate',
-    '--format=%(refname:short)%x1f%(committerdate:iso-strict)%x1f%(HEAD)',
+    '--format=%(refname)%00%(refname:short)%00%(committerdate:iso-strict)%00%(HEAD)',
     'refs/heads',
     'refs/remotes'
   ], path)
@@ -427,11 +451,12 @@ export async function listBranchDetails(path: string): Promise<GitBranchInfo[]> 
     .map((line) => line.trim())
     .filter(Boolean)
     .map((line) => {
-      const [name, lastCommitDate = '', head = ''] = line.split('\x1f')
+      const [fullName, name, lastCommitDate = '', head = ''] = line.split('\0')
       const remotePrefix = remote ? `${remote}/` : ''
       const isRemote = !!remotePrefix && name.startsWith(remotePrefix)
       const comparableName = isRemote ? name.slice(remotePrefix.length) : name
       return {
+        fullName,
         name,
         current: head === '*',
         remote: isRemote,
@@ -439,7 +464,8 @@ export async function listBranchDetails(path: string): Promise<GitBranchInfo[]> 
         defaultBranch: !!defaultRemoteBranch && comparableName === defaultRemoteBranch
       }
     })
-    .filter((branch) => branch.name !== `${remote}/HEAD`)
+    .filter((branch) => !branch.fullName.startsWith('refs/remotes/') || !branch.fullName.endsWith('/HEAD'))
+    .map(({ fullName: _fullName, ...branch }) => branch)
 }
 
 export async function checkoutBranch(
@@ -568,25 +594,28 @@ export async function getHistory(path: string, limit = 30): Promise<GitHistoryCo
       'log',
       `--max-count=${boundedLimit}`,
       '--date=iso-strict',
-      '--format=%x1e%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1f%b%x1c',
+      '--decorate=full',
+      '--format=%x1e%H%x1f%h%x1f%an%x1f%ae%x1f%ad%x1f%s%x1f%b%x1f%D%x1c',
+      ...mergeDiffArgs,
       '--name-status'
     ], path),
     git([
       'log',
       `--max-count=${boundedLimit}`,
       '--format=%x1e%H%x1c',
+      ...mergeDiffArgs,
       '--numstat'
     ], path)
   ])
   const statsByHash = parseHistoryStats(statsOutput)
 
-  return output
+  const commits = output
     .split('\x1e')
     .map((entry) => entry.trim())
     .filter(Boolean)
     .map((entry) => {
       const [header, fileBlock = ''] = entry.split('\x1c')
-      const [hash, shortHash, author, date, subject, body = ''] = header.split('\x1f')
+      const [hash, shortHash, author, authorEmail = '', date, subject, body = '', decorations = ''] = header.split('\x1f')
       const files = fileBlock
         .split('\n')
         .map((line) => line.trim())
@@ -606,14 +635,182 @@ export async function getHistory(path: string, limit = 30): Promise<GitHistoryCo
         hash,
         shortHash,
         author,
+        authorEmail,
+        authorAvatarUrl: avatarUrlForAuthorEmail(authorEmail),
+        coAuthors: parseCoAuthorTrailers(body),
         date,
         subject,
         body: body.trim(),
+        tags: parseTagDecorations(decorations),
         additions: stats.additions,
         deletions: stats.deletions,
         files
       }
     })
+
+  const githubAvatarsByHash = await fetchGitHubCommitAvatars(path, commits.map((commit) => commit.hash))
+  return commits.map((commit) => {
+    const githubAvatar = githubAvatarsByHash.get(commit.hash)?.authorAvatarUrl
+    return githubAvatar ? { ...commit, authorAvatarUrl: githubAvatar } : commit
+  })
+}
+
+function githubUsernameFromEmail(email: string): string | null {
+  const match = email.trim().match(/^(?:\d+\+)?(.+)@users\.noreply\.github\.com$/i)
+  const username = match?.[1]
+  return username && !username.includes('/') ? username : null
+}
+
+function avatarUrlForAuthorEmail(email: string): string | undefined {
+  const githubUsername = githubUsernameFromEmail(email)
+  if (githubUsername) {
+    return `https://github.com/${encodeURIComponent(githubUsername)}.png?size=96`
+  }
+
+  return undefined
+}
+
+function parseTagDecorations(decorations: string): string[] {
+  return decorations
+    .split(',')
+    .map((decoration) => decoration.trim())
+    .filter((decoration) => decoration.startsWith('tag: '))
+    .map((decoration) => decoration.replace(/^tag:\s+/, '').replace(/^refs\/tags\//, ''))
+    .filter(Boolean)
+}
+
+function parseCoAuthorTrailers(body: string): GitHistoryCoAuthor[] {
+  const coAuthors = new Map<string, GitHistoryCoAuthor>()
+  const trailerPattern = /^Co-authored-by:\s*(.*?)\s*<([^>]+)>\s*$/gim
+  let match: RegExpExecArray | null
+
+  while ((match = trailerPattern.exec(body)) !== null) {
+    const name = match[1]?.trim()
+    const email = match[2]?.trim()
+    if (!name || !email) continue
+
+    const key = email.toLowerCase()
+    if (coAuthors.has(key)) continue
+
+    const avatarUrl = avatarUrlForAuthorEmail(email)
+    coAuthors.set(key, {
+      name,
+      email,
+      ...(avatarUrl ? { avatarUrl } : {})
+    })
+  }
+
+  return Array.from(coAuthors.values())
+}
+
+function parseGitHubRemoteUrl(value: string): GitHubRepo | null {
+  const remoteUrl = value.trim()
+  const sshMatch = remoteUrl.match(/^(?:ssh:\/\/)?git@github\.com[:/]([^/]+)\/(.+?)(?:\.git)?$/i)
+  if (sshMatch?.[1] && sshMatch[2]) {
+    return {
+      owner: sshMatch[1],
+      repo: sshMatch[2].replace(/\.git$/i, '')
+    }
+  }
+
+  try {
+    const url = new URL(remoteUrl)
+    if (url.hostname.toLowerCase() !== 'github.com') return null
+    const [owner, repo] = url.pathname.replace(/^\/+|\/+$/g, '').split('/')
+    if (!owner || !repo) return null
+    return {
+      owner,
+      repo: repo.replace(/\.git$/i, '')
+    }
+  } catch {
+    return null
+  }
+}
+
+async function getGitHubRepo(path: string): Promise<GitHubRepo | null> {
+  const remote = await getPreferredRemote(path)
+  if (!remote) return null
+
+  try {
+    return parseGitHubRemoteUrl(await git(['remote', 'get-url', remote], path))
+  } catch {
+    return null
+  }
+}
+
+function isGitHubAvatarUrl(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && url.hostname === 'avatars.githubusercontent.com'
+  } catch {
+    return false
+  }
+}
+
+async function fetchGitHubCommitAvatars(path: string, hashes: string[]): Promise<Map<string, GitHubCommitAvatar>> {
+  const avatarsByHash = new Map<string, GitHubCommitAvatar>()
+  const repo = await getGitHubRepo(path)
+  const uniqueHashes = Array.from(new Set(hashes.filter(Boolean))).slice(0, 60)
+  if (!repo || uniqueHashes.length === 0) return avatarsByHash
+
+  const repoKey = `${repo.owner}/${repo.repo}`.toLowerCase()
+  const missingHashes = uniqueHashes.filter((hash) => {
+    const cached = gitHubCommitAvatarCache.get(`${repoKey}:${hash}`)
+    if (cached) {
+      avatarsByHash.set(hash, cached)
+      return false
+    }
+    return true
+  })
+  if (missingHashes.length === 0) return avatarsByHash
+
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 1800)
+
+  try {
+    let nextIndex = 0
+    const workers = Array.from({ length: Math.min(6, missingHashes.length) }, async () => {
+      while (nextIndex < missingHashes.length) {
+        const hash = missingHashes[nextIndex]
+        nextIndex += 1
+
+        try {
+          const response = await fetch(
+            `https://api.github.com/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.repo)}/commits/${encodeURIComponent(hash)}`,
+            {
+              signal: controller.signal,
+              headers: {
+                Accept: 'application/vnd.github+json',
+                'User-Agent': 'pear-git-history'
+              }
+            }
+          )
+          if (!response.ok) continue
+
+          const payload = await response.json() as {
+            author?: {
+              avatar_url?: unknown
+            } | null
+          }
+          const avatarUrl = payload.author?.avatar_url
+          if (isGitHubAvatarUrl(avatarUrl)) {
+            const avatar = { authorAvatarUrl: avatarUrl }
+            gitHubCommitAvatarCache.set(`${repoKey}:${hash}`, avatar)
+            avatarsByHash.set(hash, avatar)
+          }
+        } catch {
+          // Avatar enrichment is best-effort; history should still render without network access.
+        }
+      }
+    })
+
+    await Promise.all(workers)
+  } finally {
+    clearTimeout(timeout)
+  }
+
+  return avatarsByHash
 }
 
 function parseHistoryStats(output: string): Map<string, Pick<GitHistoryCommit, 'additions' | 'deletions'>> {
@@ -640,6 +837,7 @@ export async function getCommitDiff(path: string, hash: string, file?: string): 
     '--find-renames',
     '--find-copies',
     '--unified=3',
+    ...mergeDiffArgs,
     hash
   ]
   if (file?.trim()) {

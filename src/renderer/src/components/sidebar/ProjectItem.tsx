@@ -7,6 +7,7 @@ import {
   getDirectMessageRoomId,
   type DirectMessageRoom
 } from '@/lib/direct-messages'
+import { formatGitDiffLineCount } from '@/lib/format'
 import { getAgentKeyForAgent, isAgentTyping, useAgentStore, type Agent } from '@/stores/agent-store'
 import { useGitStore, type GitSummary } from '@/stores/git-store'
 import { useProjectStore, type Project, type ProjectRoot } from '@/stores/project-store'
@@ -69,10 +70,10 @@ function ProjectMeta({
           </div>
           <div className="ml-auto flex shrink-0 items-center gap-1.5 tabular-nums">
             <span className="text-right text-[var(--pear-green)]">
-              +{gitSummary.additions}
+              +{formatGitDiffLineCount(gitSummary.additions)}
             </span>
             <span className="text-right text-[var(--pear-red)]">
-              -{gitSummary.deletions}
+              -{formatGitDiffLineCount(gitSummary.deletions)}
             </span>
           </div>
         </div>

@@ -2,6 +2,7 @@ import type React from 'react'
 import { useState } from 'react'
 import { MessageCircle, SmilePlus, User } from 'lucide-react'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
+import { renderChatMessageBody } from '@/lib/chat-formatting'
 import { useAgentStore } from '@/stores/agent-store'
 import type { ChatMessage as ChatMessageType } from '@/stores/agent-store'
 
@@ -213,9 +214,9 @@ export function ChatMessage({
             </span>
           )}
         </div>
-        <p className="mt-0.5 whitespace-pre-wrap break-words text-sm leading-5 text-[var(--pear-text)]">
-          {message.body}
-        </p>
+        <div className="mt-0.5 space-y-1 break-words text-sm leading-5 text-[var(--pear-text)]">
+          {renderChatMessageBody(message.body)}
+        </div>
 
         {(reactions.length > 0 || (showThreadSummary && replies.length > 0)) && (
           <div className="mt-2 flex flex-wrap items-center gap-2">

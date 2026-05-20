@@ -40,7 +40,7 @@ function tabSubtitle(tab: AppTab, projectNameById: Map<string, string>): string 
     case 'project-settings':
       return projectName ? `${projectName} settings` : 'Settings'
     case 'broker-details':
-      return 'Connection status'
+      return projectName ? `${projectName} relay` : 'Connection status'
     case 'source-control':
       return projectName ? `${projectName} changes` : 'File changes'
     case 'agents':
@@ -156,7 +156,7 @@ export function AppTopBar(): React.ReactNode {
           return (
             <div
               key={tab.id}
-              className={`titlebar-nodrag group flex h-9 min-w-[136px] max-w-[280px] shrink-0 items-center overflow-hidden rounded-lg transition-colors ${
+              className={`app-tab titlebar-nodrag group flex h-9 min-w-[136px] max-w-[280px] shrink-0 items-center overflow-hidden rounded-lg transition-colors ${
                 active
                   ? 'bg-[#2a2b38] text-white'
                   : 'text-[var(--pear-text-faint)] hover:bg-white/[0.06] hover:text-[var(--pear-text)]'
@@ -164,6 +164,7 @@ export function AppTopBar(): React.ReactNode {
             >
               <button
                 type="button"
+                data-focus-ring="none"
                 onClick={() => activateTab(tab.id)}
                 className="flex min-w-0 flex-1 items-center gap-2 px-3 py-2 text-left"
                 title={tab.title}
@@ -177,6 +178,7 @@ export function AppTopBar(): React.ReactNode {
               {canClose && (
                 <button
                   type="button"
+                  data-focus-ring="none"
                   onClick={(event) => {
                     event.stopPropagation()
                     closeTab(tab.id)

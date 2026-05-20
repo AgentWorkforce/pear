@@ -2,6 +2,22 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'broker-details' | 'source-control'
 
+type AuthUser = {
+  name?: string
+  email?: string
+  githubUsername?: string
+  username?: string
+  avatarUrl?: string
+  organizationName?: string
+  projectName?: string
+}
+
+type AuthStatus = {
+  loggedIn: boolean
+  apiUrl?: string
+  user?: AuthUser
+}
+
 const api = {
   project: {
     list: () => ipcRenderer.invoke('project:list'),
@@ -124,9 +140,9 @@ const api = {
     revealPath: (filePath: string) => ipcRenderer.invoke('fs:reveal-path', filePath)
   },
   auth: {
-    login: () => ipcRenderer.invoke('auth:login') as Promise<{ loggedIn: boolean; apiUrl?: string }>,
+    login: () => ipcRenderer.invoke('auth:login') as Promise<AuthStatus>,
     logout: () => ipcRenderer.invoke('auth:logout'),
-    status: () => ipcRenderer.invoke('auth:status') as Promise<{ loggedIn: boolean; apiUrl?: string }>
+    status: () => ipcRenderer.invoke('auth:status') as Promise<AuthStatus>
   },
   onMenu: (channel: string, callback: (...args: unknown[]) => void) => {
     const handler = (_: unknown, ...args: unknown[]): void => callback(...args)

@@ -252,6 +252,18 @@ function renderPendingCodeContent(fallback: string): React.ReactNode {
   )
 }
 
+function renderEmptyFileState(): React.ReactNode {
+  return (
+    <div className="flex h-full min-h-[240px] items-center justify-center px-4 text-[13px] font-medium text-[var(--pear-text)]">
+      The file is empty
+    </div>
+  )
+}
+
+function fileHasRenderableChanges(file: FileData): boolean {
+  return file.hunks.some((hunk) => hunk.changes.length > 0)
+}
+
 function fileHighlightKey(file: FileData, theme: 'dark' | 'light'): string {
   const filePath = getDiffFilePath(file)
   const changeSignature = file.hunks
@@ -367,6 +379,8 @@ export const DiffViewer = memo(function DiffViewer({
   onSetLines
 }: Props): React.ReactNode {
   const parsedFiles = useMemo(() => {
+    if (!diff.trim()) return []
+
     try {
       return parseDiff(diff)
     } catch {
@@ -607,6 +621,10 @@ export const DiffViewer = memo(function DiffViewer({
         </pre>
       </div>
     )
+  }
+
+  if (!displayFiles.some(fileHasRenderableChanges)) {
+    return renderEmptyFileState()
   }
 
   return (

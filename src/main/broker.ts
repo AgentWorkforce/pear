@@ -129,14 +129,16 @@ function compactEventText(value: unknown): unknown {
   return `${value.slice(0, MAX_EVENT_TEXT_CHARS)}...`
 }
 
-function compactBrokerEvent(event: BrokerEvent): BrokerEvent {
+type BrokerEventRecordPayload = Record<string, unknown> & { kind: string }
+
+function compactBrokerEvent(event: BrokerEventRecordPayload): BrokerEventRecordPayload {
   const compacted = { ...(event as Record<string, unknown>) }
   for (const key of ['body', 'chunk', 'message', 'reason', 'lastError']) {
     if (key in compacted) {
       compacted[key] = compactEventText(compacted[key])
     }
   }
-  return compacted as BrokerEvent
+  return compacted as BrokerEventRecordPayload
 }
 
 function isUnsupportedInputStreamError(err: unknown): boolean {
@@ -439,8 +441,24 @@ export interface BrokerDetails {
   session?: {
     brokerVersion: string
     protocolVersion: number
+    workspaceKey?: string
+    defaultWorkspaceId?: string
     mode: string
     uptimeSecs: number
+  }
+  relaycast?: {
+    workspaceKey?: string
+    defaultWorkspaceId?: string
+    authenticated?: boolean
+    workspaceCount?: number
+    workspaces: Array<{
+      workspaceId: string
+      workspaceAlias?: string | null
+      selfName: string
+      selfAgentId: string
+      authenticated: boolean
+      default: boolean
+    }>
   }
   agentCount: number
   pendingDeliveryCount: number
@@ -452,12 +470,13 @@ export interface BrokerEventRecord {
   id: string
   projectId: string
   timestamp: number
-  event: BrokerEvent
+  event: BrokerEventRecordPayload
 }
 
 interface BrokerStateSnapshot {
   agents: ListAgent[]
   pendingDeliveryCount: number
+  auth?: BrokerStatus['auth']
 }
 
 interface BrokerConnectionFileInfo {
@@ -546,6 +565,15 @@ export class BrokerManager {
         cloudSandboxId: null
       })
 
+      this.publishBrokerEvent(normalizedProjectId, win, {
+        kind: 'broker_initialized',
+        name,
+        cwd,
+        url: getClientBaseUrl(client),
+        brokerPid: client.brokerPid,
+        channels: nextChannels,
+        source: 'local'
+      })
       this.sendStatus(normalizedProjectId, 'connected')
     }
 
@@ -646,6 +674,13 @@ export class BrokerManager {
       })
       client.connectEvents()
 
+      this.publishBrokerEvent(normalizedProjectId, win, {
+        kind: 'broker_initialized',
+        name: `cloud-${normalizedProjectId}`,
+        url: getClientBaseUrl(client),
+        cloudSandboxId: sandboxId,
+        source: 'cloud'
+      })
       this.sendStatus(normalizedProjectId, 'connected')
       return sandboxId
     } catch (err) {
@@ -686,7 +721,7 @@ export class BrokerManager {
 
   private attachClient(projectId: string, client: AgentRelayClient, win: BrowserWindow): () => void {
     return client.onEvent((event: BrokerEvent) => {
-      const record = this.recordBrokerEvent(projectId, event)
+      this.publishBrokerEvent(projectId, win, event as unknown as BrokerEventRecordPayload)
 
       if (event.kind === 'agent_spawned' && event.name) {
         this.rememberAgentProject(event.name, projectId)
@@ -706,19 +741,27 @@ export class BrokerManager {
       } else if (event.from) {
         this.rememberAgentProject(event.from, projectId)
       }
-
-      if (win && !win.isDestroyed()) {
-        win.webContents.send('broker:event', {
-          ...event,
-          projectId,
-          observedAt: record.timestamp,
-          historyId: record.id
-        })
-      }
     })
   }
 
-  private recordBrokerEvent(projectId: string, event: BrokerEvent): BrokerEventRecord {
+  private publishBrokerEvent(
+    projectId: string,
+    win: BrowserWindow | undefined,
+    event: BrokerEventRecordPayload
+  ): BrokerEventRecord {
+    const record = this.recordBrokerEvent(projectId, event)
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('broker:event', {
+        ...event,
+        projectId,
+        observedAt: record.timestamp,
+        historyId: record.id
+      })
+    }
+    return record
+  }
+
+  private recordBrokerEvent(projectId: string, event: BrokerEventRecordPayload): BrokerEventRecord {
     const eventRecord = event as Record<string, unknown>
     const timestamp = normalizeEventTimestamp(eventRecord.timestamp) ?? Date.now()
     const record: BrokerEventRecord = {
@@ -1251,6 +1294,25 @@ export class BrokerManager {
         ])
         const [metadata, state] = sessionResult
         const agents = state.status === 'fulfilled' ? state.value.agents : []
+        const auth = state.status === 'fulfilled' ? state.value.auth : undefined
+        const workspaceKey = metadata.status === 'fulfilled' ? metadata.value.workspace_key : undefined
+        const defaultWorkspaceId = metadata.status === 'fulfilled' ? metadata.value.default_workspace_id : undefined
+        const relaycast = workspaceKey || defaultWorkspaceId || auth
+          ? {
+              workspaceKey,
+              defaultWorkspaceId,
+              authenticated: auth?.authenticated,
+              workspaceCount: auth?.workspace_count,
+              workspaces: (auth?.workspaces || []).map((workspace) => ({
+                workspaceId: workspace.workspace_id,
+                workspaceAlias: workspace.workspace_alias,
+                selfName: workspace.self_name,
+                selfAgentId: workspace.self_agent_id,
+                authenticated: workspace.authenticated,
+                default: workspace.default
+              }))
+            }
+          : undefined
         const errors = sessionResult
           .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
           .map((result) => toErrorMessage(result.reason))
@@ -1274,10 +1336,13 @@ export class BrokerManager {
             ? {
                 brokerVersion: metadata.value.broker_version,
                 protocolVersion: metadata.value.protocol_version,
+                workspaceKey: metadata.value.workspace_key,
+                defaultWorkspaceId: metadata.value.default_workspace_id,
                 mode: metadata.value.mode,
                 uptimeSecs: metadata.value.uptime_secs
               }
             : undefined,
+          relaycast,
           agentCount: agents.length,
           pendingDeliveryCount: state.status === 'fulfilled' ? state.value.pendingDeliveryCount : 0,
           agents: agents.map((agent) => ({
@@ -1302,7 +1367,7 @@ export class BrokerManager {
     this.pruneBrokerEventHistory()
     return this.eventHistory.map((entry) => ({
       ...entry,
-      event: { ...(entry.event as Record<string, unknown>) } as BrokerEvent
+      event: { ...(entry.event as Record<string, unknown>) } as BrokerEventRecordPayload
     }))
   }
 
@@ -1314,7 +1379,8 @@ export class BrokerManager {
       )
       return {
         agents: status.agents,
-        pendingDeliveryCount: status.pending_delivery_count
+        pendingDeliveryCount: status.pending_delivery_count,
+        auth: status.auth
       }
     } catch (statusErr) {
       try {

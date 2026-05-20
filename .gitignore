@@ -4,3 +4,4 @@ dist/
 .npm-cache/
 *.env
 .DS_Store
+/.agent-relay

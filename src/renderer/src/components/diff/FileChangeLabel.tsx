@@ -85,12 +85,12 @@ const pathToneClasses: Record<
     arrow: 'text-[var(--pear-text-secondary)]'
   },
   selectedActive: {
-    directory: 'text-white/85',
+    directory: 'text-white/65',
     fileName: 'text-white',
-    arrow: 'text-white/80'
+    arrow: 'text-white/65'
   },
   selectedInactive: {
-    directory: 'text-[var(--pear-text)]',
+    directory: 'text-[var(--pear-text-dim)]',
     fileName: 'text-white',
     arrow: 'text-[var(--pear-text-secondary)]'
   }
@@ -111,7 +111,7 @@ function FilePathSegment({
   return (
     <span className={`flex min-w-0 items-baseline overflow-hidden ${className}`}>
       {directory && <span className={`min-w-0 truncate ${toneClasses.directory}`}>{directory}</span>}
-      <span className={`max-w-full shrink-0 truncate font-semibold ${toneClasses.fileName}`}>{fileName}</span>
+      <span className={`max-w-full shrink-0 truncate ${toneClasses.fileName}`}>{fileName}</span>
     </span>
   )
 }
