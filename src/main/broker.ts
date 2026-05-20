@@ -79,6 +79,10 @@ function isPositiveInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 function toInboundDeliveryMode(mode?: TerminalAttachMode): InboundDeliveryMode {
   return mode === 'drive' ? 'manual_flush' : 'auto_inject'
 }
@@ -252,9 +256,11 @@ export class BrokerManager {
     // queue mode while human terminal input continues to go through sendInput.
     await client.setInboundDeliveryMode(name, mode)
 
+    let resizedBeforeSnapshot = false
     if (isPositiveInteger(input.rows) && isPositiveInteger(input.cols)) {
       try {
         await client.resizePty(name, input.rows, input.cols)
+        resizedBeforeSnapshot = true
       } catch (err) {
         console.warn(`[broker] Failed to sync PTY size for ${name}:`, err)
       }
@@ -265,6 +271,9 @@ export class BrokerManager {
       : 0
 
     try {
+      if (resizedBeforeSnapshot) {
+        await delay(80)
+      }
       const snapshot = await client.snapshot(name, 'ansi')
       return {
         name,

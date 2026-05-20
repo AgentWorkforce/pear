@@ -7,7 +7,7 @@ import { pear, type TerminalAttachMode } from '@/lib/ipc'
 import { type Agent, useAgentStore } from '@/stores/agent-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 import { useUIStore } from '@/stores/ui-store'
-import { PendingMessagesPane, type QueueDeliveryMode } from './PendingMessagesPane'
+import { PendingMessagesMenu, type QueueDeliveryMode } from './PendingMessagesPane'
 import { TerminalInstance } from './TerminalInstance'
 
 const SPLIT_PAGE_SIZE = 4
@@ -50,21 +50,19 @@ interface TerminalWorkspaceProps {
   visible: boolean
   active: boolean
   onActivate: () => void
-  onDeliveryModeChange: (agent: Agent, mode: QueueDeliveryMode) => void
 }
 
 function TerminalWorkspace({
   agent,
   visible,
   active,
-  onActivate,
-  onDeliveryModeChange
+  onActivate
 }: TerminalWorkspaceProps): React.ReactNode {
   const terminalMode = getTerminalMode(agent)
 
   return (
-    <div className="flex h-full min-w-0 bg-[var(--pear-bg)]">
-      <div className="min-w-0 flex-1">
+    <div className="flex h-full min-h-0 w-full min-w-0 flex-1 bg-[var(--pear-bg)]">
+      <div className="min-h-0 min-w-0 flex-1">
         <TerminalInstance
           agentName={agent.name}
           visible={visible}
@@ -73,14 +71,6 @@ function TerminalWorkspace({
           onActivate={onActivate}
         />
       </div>
-      {visible && (
-        <PendingMessagesPane
-          agentName={agent.name}
-          deliveryMode={getQueueDeliveryMode(agent)}
-          refreshToken={agent.pendingDeliveryIds.join('|')}
-          onDeliveryModeChange={(mode) => onDeliveryModeChange(agent, mode)}
-        />
-      )}
     </div>
   )
 }
@@ -112,7 +102,7 @@ function SplitTerminalTile({
       onPointerDown={onActivate}
     >
       <div
-        className={`flex h-9 shrink-0 items-center gap-2 border-b px-3 text-xs ${
+        className={`relative flex h-10 shrink-0 items-center gap-2 border-b px-3 text-xs ${
           active
             ? 'border-[var(--pear-accent-dim)] bg-[var(--pear-bg-surface)] text-[var(--pear-text)]'
             : 'border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] text-[var(--pear-text-dim)]'
@@ -125,19 +115,28 @@ function SplitTerminalTile({
               : 'bg-[var(--pear-text-faint)]'
           }`}
         />
-        <span className="min-w-0 flex-1 truncate">{agent.name}</span>
+        <div className="flex min-w-0 flex-1 items-baseline gap-2">
+          <span className="min-w-0 truncate font-medium">{agent.name}</span>
+          <span className="shrink-0 text-[11px] text-[var(--pear-text-faint)]">{agent.cli}</span>
+        </div>
         {agent.pendingDeliveryIds.length > 0 && (
           <span className="shrink-0 text-[10px] text-[var(--pear-text-faint)]">thinking</span>
         )}
-        <span className="shrink-0 text-[var(--pear-text-faint)]">{agent.cli}</span>
+        {visible && (
+          <PendingMessagesMenu
+            agentName={agent.name}
+            deliveryMode={getQueueDeliveryMode(agent)}
+            refreshToken={agent.pendingDeliveryIds.join('|')}
+            onDeliveryModeChange={(mode) => onDeliveryModeChange(agent, mode)}
+          />
+        )}
       </div>
-      <div className="min-h-0 flex-1">
+      <div className="min-h-0 min-w-0 flex-1">
         <TerminalWorkspace
           agent={agent}
           visible={visible}
           active={active}
           onActivate={onActivate}
-          onDeliveryModeChange={onDeliveryModeChange}
         />
       </div>
     </div>

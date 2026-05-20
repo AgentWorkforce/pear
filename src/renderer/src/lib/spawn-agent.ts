@@ -37,7 +37,7 @@ export async function spawnWorkspaceAgent(workspace: Workspace, cli: SpawnAgentC
 
   await pear.broker.attachTerminal({
     name,
-    mode: 'drive'
+    mode: 'passthrough'
   })
 
   const agentStore = useAgentStore.getState()

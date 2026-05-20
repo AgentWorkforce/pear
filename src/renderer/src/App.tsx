@@ -27,8 +27,6 @@ export default function App(): React.ReactNode {
         </div>
 
         <div className="flex min-w-0 flex-1 flex-col">
-          <div className="titlebar-drag h-[40px] shrink-0" />
-
           <div className="min-h-0 flex-1">
             <TerminalPane />
           </div>

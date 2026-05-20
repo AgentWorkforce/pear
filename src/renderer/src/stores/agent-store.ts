@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import type { TerminalAttachMode } from '@/lib/ipc'
+import { useWorkspaceStore } from '@/stores/workspace-store'
 
 export interface Agent {
   name: string
@@ -9,6 +10,7 @@ export interface Agent {
   workspaceId?: string
   worktreePath?: string
   worktreeId?: string
+  parent?: string
   terminalMode: TerminalAttachMode
   ptyBuffer: string[]
   pendingDeliveryIds: string[]
@@ -50,6 +52,7 @@ interface BrokerEvent {
   cli?: string
   model?: string
   runtime?: string
+  parent?: string
   from?: string
   target?: string
   body?: string
@@ -147,7 +150,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
               status: 'running',
               workspaceId,
               worktreeId,
-              terminalMode: 'drive',
+              terminalMode: 'passthrough',
               ptyBuffer: [],
               pendingDeliveryIds: []
             }
@@ -159,33 +162,51 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     const { kind } = event
 
     if (kind === 'agent_spawned' && event.name) {
-      set((state) => ({
-        agents: state.agents.some((a) => a.name === event.name)
-          ? state.agents.map((a) =>
-              a.name === event.name
-                ? {
-                    ...a,
-                    cli: event.cli || a.cli,
-                    model: event.model || a.model,
-                    status: 'running',
-                    terminalMode: a.terminalMode || 'drive'
-                  }
-                : a
-            )
-          : [
-              ...state.agents,
-              {
-                name: event.name!,
-                cli: event.cli || 'unknown',
-                model: event.model,
-                status: 'running',
-                terminalMode: 'drive',
-                ptyBuffer: [],
-                pendingDeliveryIds: []
-              }
-            ],
-        activeAgentName: state.activeAgentName || event.name!
-      }))
+      set((state) => {
+        const parentAgent = event.parent
+          ? state.agents.find((agent) => agent.name === event.parent)
+          : undefined
+        const { brokerWorkspaceId, activeWorkspaceId } = useWorkspaceStore.getState()
+        const workspaceId = parentAgent?.workspaceId || brokerWorkspaceId || activeWorkspaceId || undefined
+        const worktreeId = parentAgent?.worktreeId
+        const worktreePath = parentAgent?.worktreePath
+
+        return {
+          agents: state.agents.some((a) => a.name === event.name)
+            ? state.agents.map((a) =>
+                a.name === event.name
+                  ? {
+                      ...a,
+                      cli: event.cli || a.cli,
+                      model: event.model || a.model,
+                      status: 'running',
+                      workspaceId: a.workspaceId || workspaceId,
+                      worktreeId: a.worktreeId || worktreeId,
+                      worktreePath: a.worktreePath || worktreePath,
+                      parent: event.parent || a.parent,
+                      terminalMode: a.terminalMode || 'passthrough'
+                    }
+                  : a
+              )
+            : [
+                ...state.agents,
+                {
+                  name: event.name!,
+                  cli: event.cli || 'unknown',
+                  model: event.model,
+                  status: 'running',
+                  workspaceId,
+                  worktreeId,
+                  worktreePath,
+                  parent: event.parent,
+                  terminalMode: 'passthrough',
+                  ptyBuffer: [],
+                  pendingDeliveryIds: []
+                }
+              ],
+          activeAgentName: state.activeAgentName || event.name!
+        }
+      })
     } else if ((kind === 'agent_exited' || kind === 'agent_released') && event.name) {
       set((state) => {
         const remaining = state.agents.filter((a) => a.name !== event.name)
