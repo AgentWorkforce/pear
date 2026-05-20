@@ -270,14 +270,10 @@ function normalizeGithubUsername(value?: string): string {
     .replace(/[^A-Za-z0-9-]/g, '')
 }
 
-function isGithubAvatarUrl(value: string): boolean {
+function isRemoteAvatarUrl(value: string): boolean {
   try {
     const url = new URL(value)
-    return url.protocol === 'https:' && (
-      url.hostname === 'avatars.githubusercontent.com' ||
-      url.hostname === 'avatars.github.com' ||
-      url.hostname === 'github.com'
-    )
+    return url.protocol === 'https:'
   } catch {
     return false
   }
@@ -285,7 +281,7 @@ function isGithubAvatarUrl(value: string): boolean {
 
 function githubAvatarUrl(user: AuthUser | null): string | null {
   const providedAvatarUrl = user?.avatarUrl?.trim()
-  if (providedAvatarUrl && isGithubAvatarUrl(providedAvatarUrl)) {
+  if (providedAvatarUrl && isRemoteAvatarUrl(providedAvatarUrl)) {
     return providedAvatarUrl
   }
 

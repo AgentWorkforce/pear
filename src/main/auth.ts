@@ -118,22 +118,18 @@ function mergeUserInfo(previous: UserInfo | undefined, next: UserInfo | undefine
   return { ...(normalizedPrevious || {}), ...(normalizedNext || {}) }
 }
 
-function hasGithubAvatarIdentity(user: UserInfo | undefined): boolean {
+function hasAvatarIdentity(user: UserInfo | undefined): boolean {
   const normalized = normalizeUserInfo(user)
   return !!(
     normalized?.githubUsername ||
-    (normalized?.avatarUrl && isGithubAvatarUrl(normalized.avatarUrl))
+    (normalized?.avatarUrl && isRemoteAvatarUrl(normalized.avatarUrl))
   )
 }
 
-function isGithubAvatarUrl(value: string): boolean {
+function isRemoteAvatarUrl(value: string): boolean {
   try {
     const url = new URL(value)
-    return url.protocol === 'https:' && (
-      url.hostname === 'avatars.githubusercontent.com' ||
-      url.hostname === 'avatars.github.com' ||
-      url.hostname === 'github.com'
-    )
+    return url.protocol === 'https:'
   } catch {
     return false
   }
@@ -297,7 +293,7 @@ export async function getAuthStatus(): Promise<AuthStatus> {
   const tokens = loadTokens()
   if (tokens) {
     const cachedUser = normalizeUserInfo(tokens.user)
-    const freshUser = hasGithubAvatarIdentity(cachedUser)
+    const freshUser = hasAvatarIdentity(cachedUser)
       ? undefined
       : await fetchWhoami(tokens.apiUrl, tokens.accessToken)
     const user = mergeUserInfo(tokens.user, freshUser)
