@@ -1,6 +1,6 @@
 import type React from 'react'
 import { useMemo, useState } from 'react'
-import { AlertTriangle, Hash, LayoutGrid, Plug, Settings } from 'lucide-react'
+import { AlertTriangle, Hash, LayoutGrid, Settings } from 'lucide-react'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
 import { getAgentKeyForAgent, useAgentStore, type Agent } from '@/stores/agent-store'
 import { useProjectStore, type Project } from '@/stores/project-store'
@@ -94,6 +94,18 @@ export function ProjectItem({ project, isActive }: Props): React.ReactNode {
     })
   }
 
+  const handleSelectAgent = (agent: Agent): void => {
+    setActiveChannel(null)
+    setViewMode('terminal')
+    setActiveAgentKey(getAgentKeyForAgent(agent))
+  }
+
+  const handleSelectChannel = (channel: string): void => {
+    setActiveAgentKey(null)
+    setActiveChannel(channel)
+    setViewMode('chat')
+  }
+
   return (
     <div
       className={`group/project rounded-xl border transition-colors ${
@@ -143,7 +155,7 @@ export function ProjectItem({ project, isActive }: Props): React.ReactNode {
                   <button
                     key={getAgentKeyForAgent(agent)}
                     type="button"
-                    onClick={() => setActiveAgentKey(getAgentKeyForAgent(agent))}
+                    onClick={() => handleSelectAgent(agent)}
                     className="flex w-full min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-left text-[11px] text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
                   >
                     <AgentHarnessIcon
@@ -165,7 +177,7 @@ export function ProjectItem({ project, isActive }: Props): React.ReactNode {
                 <button
                   key={channel}
                   type="button"
-                  onClick={() => setActiveChannel(activeChannelName === channel ? null : channel)}
+                  onClick={() => handleSelectChannel(channel)}
                   className={`flex w-full min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-left text-[11px] ${
                     activeChannelName === channel
                       ? 'bg-[var(--pear-bg-overlay)] text-[var(--pear-text)]'
@@ -176,26 +188,6 @@ export function ProjectItem({ project, isActive }: Props): React.ReactNode {
                   <span className="min-w-0 flex-1 truncate">{channel}</span>
                 </button>
               ))}
-            </div>
-          </div>
-
-          <div>
-            <SectionHeader title="Integrations" count={project.integrations.length} />
-            <div className="space-y-0.5">
-              {project.integrations.length === 0 ? (
-                <div className="px-2 py-1 text-[11px] text-[var(--pear-text-faint)]">No integrations</div>
-              ) : (
-                project.integrations.map((integration) => (
-                  <div
-                    key={integration.id}
-                    className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-2 py-1 text-[11px] text-[var(--pear-text-dim)]"
-                  >
-                    <Plug size={11} className="shrink-0" />
-                    <span className="min-w-0 flex-1 truncate">{integration.name}</span>
-                    <span className="shrink-0 text-[10px] text-[var(--pear-text-faint)]">{integration.type}</span>
-                  </div>
-                ))
-              )}
             </div>
           </div>
         </div>

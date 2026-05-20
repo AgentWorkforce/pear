@@ -43,6 +43,8 @@ export interface BrokerErrorEntry {
 
 const MAX_PTY_BUFFER_CHUNKS = 10_000
 const MAX_BROKER_ERRORS = 12
+const HUMAN_SENDER_NAME = 'human'
+const HUMAN_MESSAGE_DEDUPE_WINDOW_MS = 10_000
 
 export function getAgentKey(projectId: string | undefined, name: string): string {
   return `${projectId || 'unknown'}:${name}`
@@ -112,6 +114,31 @@ function clearPendingDeliveries(agent: Agent, eventId?: string): Agent {
     ...agent,
     pendingDeliveryIds: nextPending
   }
+}
+
+function normalizeMessageTarget(target: string): string {
+  return target.trim().replace(/^#/, '')
+}
+
+function isHumanSender(sender: string): boolean {
+  return sender.trim().toLowerCase() === HUMAN_SENDER_NAME
+}
+
+function isHumanMessage(message: Pick<ChatMessage, 'from' | 'isHuman'>): boolean {
+  return message.isHuman || isHumanSender(message.from)
+}
+
+function isDuplicateHumanEcho(
+  messages: ChatMessage[],
+  candidate: Pick<ChatMessage, 'body' | 'projectId' | 'timestamp' | 'to'>
+): boolean {
+  return messages.some((message) =>
+    isHumanMessage(message) &&
+    message.body === candidate.body &&
+    (!message.projectId || !candidate.projectId || message.projectId === candidate.projectId) &&
+    normalizeMessageTarget(message.to) === normalizeMessageTarget(candidate.to) &&
+    Math.abs(message.timestamp - candidate.timestamp) < HUMAN_MESSAGE_DEDUPE_WINDOW_MS
+  )
 }
 
 interface AgentState {
@@ -305,27 +332,33 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     } else if (kind === 'relay_inbound' && event.from && event.target && event.body) {
       set((state) => {
         const projectId = event.projectId || state.agents.find((a) => a.name === event.from)?.projectId
+        const timestamp = Date.now()
+        const isHuman = isHumanSender(event.from)
         const msg: ChatMessage = {
           id: event.event_id || crypto.randomUUID(),
           from: event.from,
           to: event.target,
           body: event.body,
-          timestamp: Date.now(),
-          isHuman: false,
+          timestamp,
+          isHuman,
           projectId
         }
         const relay: RelayMessage = {
           from: event.from,
           target: event.target,
           body: event.body,
-          timestamp: Date.now(),
+          timestamp,
           projectId
         }
+        const messages = isHuman && isDuplicateHumanEcho(state.messages, msg)
+          ? state.messages
+          : [...state.messages, msg]
+
         return {
           agents: state.agents.map((a) =>
             matchesAgent(a, projectId, event.from!) ? clearPendingDeliveries(a) : a
           ),
-          messages: [...state.messages, msg],
+          messages,
           relayMessages: [...state.relayMessages, relay]
         }
       })
@@ -367,16 +400,21 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   },
 
   addHumanMessage: (to, body, projectId) => {
+    const timestamp = Date.now()
     const msg: ChatMessage = {
       id: crypto.randomUUID(),
-      from: 'human',
+      from: HUMAN_SENDER_NAME,
       to,
       body,
-      timestamp: Date.now(),
+      timestamp,
       isHuman: true,
       projectId
     }
-    set((state) => ({ messages: [...state.messages, msg] }))
+    set((state) => ({
+      messages: isDuplicateHumanEcho(state.messages, msg)
+        ? state.messages
+        : [...state.messages, msg]
+    }))
   },
 
   clearAll: () =>

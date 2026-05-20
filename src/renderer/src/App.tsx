@@ -3,6 +3,7 @@ import { useEffect } from 'react'
 import { ProjectSidebar } from '@/components/sidebar/ProjectSidebar'
 import { ProjectSettings } from '@/components/settings/ProjectSettings'
 import { TerminalPane } from '@/components/terminal/TerminalPane'
+import { ChatView } from '@/components/chat/ChatView'
 import { CommandMenu } from '@/components/common/CommandMenu'
 import { StatusBar } from '@/components/common/StatusBar'
 import { AddProjectDialog } from '@/components/sidebar/AddProjectDialog'
@@ -22,6 +23,12 @@ export default function App(): React.ReactNode {
     load()
   }, [load])
 
+  const mainView = viewMode === 'project-settings'
+    ? <ProjectSettings />
+    : viewMode === 'chat'
+      ? <ChatView />
+      : <TerminalPane />
+
   return (
     <div className="relative flex h-full flex-col">
       <div className="flex min-h-0 flex-1">
@@ -31,7 +38,7 @@ export default function App(): React.ReactNode {
 
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="min-h-0 flex-1">
-            {viewMode === 'project-settings' ? <ProjectSettings /> : <TerminalPane />}
+            {mainView}
           </div>
         </div>
       </div>

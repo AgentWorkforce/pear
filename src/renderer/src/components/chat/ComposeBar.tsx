@@ -199,7 +199,7 @@ export function ComposeBar(): React.ReactNode {
           text: body,
           from: 'human'
         })
-        addHumanMessage(`#${activeChannelName}`, body, activeProjectId || undefined)
+        addHumanMessage(`#${activeChannelNameTarget}`, body, activeProjectId || undefined)
       } else if (recipient === 'broadcast') {
         const targets = runningAgents.map((agent) => agent.name)
         if (targets.length === 0) {
@@ -276,7 +276,7 @@ export function ComposeBar(): React.ReactNode {
           {sendError}
         </div>
       )}
-      <div className="rounded-[22px] border border-[var(--pear-bg-overlay)] bg-[var(--pear-bg-surface)] px-4 py-3">
+      <div className="rounded-lg border border-[var(--pear-bg-overlay)] bg-[var(--pear-bg-surface)] px-4 py-3">
         <div className="flex flex-wrap items-center gap-0.5 border-b border-[var(--pear-bg-overlay)] pb-2">
           {CHANNEL_FORMAT_CONTROLS.map(({ label, icon: Icon }) => (
             <ComposerChromeButton key={label} label={label}>
@@ -287,7 +287,7 @@ export function ComposeBar(): React.ReactNode {
 
         <div className="relative mt-3">
           {showMentionSuggestions && (
-            <div className="absolute bottom-full left-0 z-20 mb-3 w-full max-w-[420px] overflow-hidden rounded-2xl border border-[var(--pear-bg-overlay)] bg-[var(--pear-bg-raised)] shadow-2xl">
+            <div className="absolute bottom-full left-0 z-20 mb-3 w-full max-w-[420px] overflow-hidden rounded-lg border border-[var(--pear-bg-overlay)] bg-[var(--pear-bg-raised)] shadow-2xl">
               <div className="border-b border-[var(--pear-bg-overlay)] px-4 py-2 text-[11px] font-medium uppercase tracking-[0.12em] text-[var(--pear-text-faint)]">
                 Mention An Agent
               </div>

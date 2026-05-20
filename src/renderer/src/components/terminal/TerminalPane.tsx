@@ -1,7 +1,7 @@
 import type React from 'react'
 import { useEffect, useState } from 'react'
 import { ChevronLeft, ChevronRight, Columns2, PanelTop, X, Plus } from 'lucide-react'
-import { ClaudeIcon, CodexIcon } from '@/components/common/AgentIcons'
+import { AgentHarnessIcon, ClaudeIcon, CodexIcon } from '@/components/common/AgentIcons'
 import { spawnProjectAgent, type SpawnAgentCli } from '@/lib/spawn-agent'
 import { pear, type TerminalAttachMode } from '@/lib/ipc'
 import { getAgentKeyForAgent, type Agent, useAgentStore } from '@/stores/agent-store'
@@ -109,16 +109,20 @@ function SplitTerminalTile({
             : 'border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] text-[var(--pear-text-dim)]'
         }`}
       >
-        <div
-          className={`h-2 w-2 rounded-full ${
-            agent.status === 'running'
-              ? 'bg-[var(--pear-accent-bright)]'
-              : 'bg-[var(--pear-text-faint)]'
-          }`}
-        />
+        <span
+          className="flex h-4 w-4 shrink-0 items-center justify-center"
+          title={agent.cli}
+          aria-label={agent.cli}
+        >
+          <AgentHarnessIcon
+            cli={agent.cli}
+            className={`h-4 w-4 ${
+              agent.status === 'running' ? 'text-[var(--pear-text-dim)]' : 'text-[var(--pear-text-faint)]'
+            }`}
+          />
+        </span>
         <div className="flex min-w-0 flex-1 items-baseline gap-2">
           <span className="min-w-0 truncate font-medium">{agent.name}</span>
-          <span className="shrink-0 text-[11px] text-[var(--pear-text-faint)]">{agent.cli}</span>
         </div>
         {agent.pendingDeliveryIds.length > 0 && (
           <span className="shrink-0 text-[10px] text-[var(--pear-text-faint)]">thinking</span>
@@ -357,18 +361,24 @@ export function TerminalPane(): React.ReactNode {
                   : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)]'
               }`}
             >
-              <div
-                className={`h-2 w-2 rounded-full ${
-                  agent.status === 'running' ? 'bg-[var(--pear-accent-bright)]' : 'bg-[var(--pear-text-faint)]'
-                }`}
-              />
+              <span
+                className="flex h-4 w-4 shrink-0 items-center justify-center"
+                title={agent.cli}
+                aria-label={agent.cli}
+              >
+                <AgentHarnessIcon
+                  cli={agent.cli}
+                  className={`h-4 w-4 ${
+                    agent.status === 'running' ? 'text-[var(--pear-text-dim)]' : 'text-[var(--pear-text-faint)]'
+                  }`}
+                />
+              </span>
               <div className="flex items-center gap-2">
                 <span className="max-w-[120px] truncate">{agent.name}</span>
                 {agent.pendingDeliveryIds.length > 0 && (
                   <span className="text-[10px] text-[var(--pear-text-faint)]">thinking</span>
                 )}
               </div>
-              <span className="text-xs text-[var(--pear-text-faint)]">{agent.cli}</span>
               {agent.status === 'running' && (
                 <button
                   onClick={(e) => {

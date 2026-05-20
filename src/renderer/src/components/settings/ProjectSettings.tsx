@@ -343,7 +343,10 @@ export function ProjectSettings(): React.ReactNode {
               >
                 <button
                   type="button"
-                  onClick={() => setActiveChannel(activeChannelName === channel ? null : channel)}
+                  onClick={() => {
+                    setActiveChannel(channel)
+                    setViewMode('chat')
+                  }}
                   className="flex items-center gap-1.5"
                 >
                   <Hash size={13} />
