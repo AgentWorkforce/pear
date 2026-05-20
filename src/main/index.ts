@@ -1,9 +1,21 @@
-import { app, BrowserWindow, shell, Menu } from 'electron'
+import { app, BrowserWindow, shell, Menu, protocol } from 'electron'
 import { join } from 'path'
 import { registerIpcHandlers } from './ipc-handlers'
 import { brokerManager } from './broker'
+import { registerAvatarCacheProtocol } from './avatar-cache'
 
 app.setName('Pear')
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'pear-avatar',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true
+    }
+  }
+])
 
 let mainWindow: BrowserWindow | null = null
 let shutdownPromise: Promise<void> | null = null
@@ -124,6 +136,7 @@ function createMenu(): void {
 }
 
 app.whenReady().then(() => {
+  registerAvatarCacheProtocol()
   registerIpcHandlers()
   createMenu()
   createWindow()

@@ -111,6 +111,7 @@ export interface GitHistoryCoAuthor {
   name: string
   email: string
   avatarUrl?: string
+  cachedAvatarUrl?: string
 }
 
 export interface GitHistoryCommit {
@@ -119,6 +120,7 @@ export interface GitHistoryCommit {
   author: string
   authorEmail: string
   authorAvatarUrl?: string
+  authorCachedAvatarUrl?: string
   coAuthors: GitHistoryCoAuthor[]
   date: string
   subject: string
@@ -168,6 +170,7 @@ export interface AuthUser {
   githubUsername?: string
   username?: string
   avatarUrl?: string
+  cachedAvatarUrl?: string
   organizationName?: string
   projectName?: string
 }

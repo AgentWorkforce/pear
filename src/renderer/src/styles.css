@@ -394,6 +394,7 @@ body,
 .diff-view .diff-fold-control:not(:disabled):hover {
   background: var(--pear-bg-surface-hover);
   color: var(--pear-text-secondary);
+  cursor: pointer;
 }
 
 .diff-view .diff-fold-control:disabled {
@@ -401,9 +402,11 @@ body,
 }
 
 .diff-view .diff-fold-marker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 119px;
   flex: 0 0 119px;
-  text-align: center;
   color: var(--pear-text-faint);
 }
 

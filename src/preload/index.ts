@@ -8,6 +8,7 @@ type AuthUser = {
   githubUsername?: string
   username?: string
   avatarUrl?: string
+  cachedAvatarUrl?: string
   organizationName?: string
   projectName?: string
 }

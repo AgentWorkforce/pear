@@ -3,6 +3,7 @@ import { createServer, type Server } from 'http'
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs'
 import { join } from 'path'
 import { URL } from 'url'
+import { cacheAvatarFromUrl, cachedAvatarUrl, isRemoteAvatarUrl } from './avatar-cache'
 
 const CLOUD_API_URL = process.env.RELAY_CLOUD_URL || 'https://agentrelay.dev/cloud'
 
@@ -19,6 +20,7 @@ interface UserInfo {
   email?: string
   githubUsername?: string
   avatarUrl?: string
+  cachedAvatarUrl?: string
   organizationName?: string
   projectName?: string
 }
@@ -73,6 +75,7 @@ function normalizeUserInfo(value: unknown): UserInfo | undefined {
     firstString(record, ['githubAvatarUrl', 'github_avatar_url']) ||
     firstString(githubRecord, ['avatarUrl', 'avatar_url', 'avatar', 'picture', 'image']) ||
     firstString(record, ['avatarUrl', 'avatar_url', 'avatar', 'picture', 'image'])
+  const cachedAvatarUrl = firstString(record, ['cachedAvatarUrl', 'cached_avatar_url'])
 
   const name = firstString(record, ['name', 'displayName', 'display_name'])
   const email = firstString(record, ['email'])
@@ -83,6 +86,7 @@ function normalizeUserInfo(value: unknown): UserInfo | undefined {
   if (email) user.email = email
   if (githubUsername) user.githubUsername = githubUsername
   if (avatarUrl) user.avatarUrl = avatarUrl
+  if (cachedAvatarUrl) user.cachedAvatarUrl = cachedAvatarUrl
   if (organizationName) user.organizationName = organizationName
   if (projectName) user.projectName = projectName
 
@@ -126,15 +130,6 @@ function hasAvatarIdentity(user: UserInfo | undefined): boolean {
   )
 }
 
-function isRemoteAvatarUrl(value: string): boolean {
-  try {
-    const url = new URL(value)
-    return url.protocol === 'https:'
-  } catch {
-    return false
-  }
-}
-
 function saveAuthMeta(tokens: Pick<StoredTokens, 'apiUrl' | 'user'>): void {
   const meta = {
     apiUrl: tokens.apiUrl,
@@ -153,6 +148,44 @@ function loadAuthMeta(): Pick<AuthStatus, 'apiUrl' | 'user'> {
   } catch {
     return { apiUrl: CLOUD_API_URL }
   }
+}
+
+function githubAvatarUrl(user: UserInfo | undefined): string | undefined {
+  const githubUsername = user?.githubUsername?.trim()
+  return githubUsername ? `https://github.com/${encodeURIComponent(githubUsername)}.png?size=96` : undefined
+}
+
+function avatarSourceUrl(user: UserInfo | undefined): string | undefined {
+  if (isRemoteAvatarUrl(user?.avatarUrl)) return user?.avatarUrl
+  return githubAvatarUrl(user)
+}
+
+async function withCachedAvatar(user: UserInfo | undefined, waitForMissing: boolean): Promise<UserInfo | undefined> {
+  const normalized = normalizeUserInfo(user)
+  if (!normalized) return undefined
+
+  const sourceUrl = avatarSourceUrl(normalized)
+  const cacheIdentity = {
+    sourceUrl,
+    githubUsername: normalized.githubUsername,
+    email: normalized.email,
+    name: normalized.name
+  }
+  const existingCachedAvatarUrl = cachedAvatarUrl(cacheIdentity) || normalized.cachedAvatarUrl
+
+  if (!sourceUrl) {
+    return existingCachedAvatarUrl ? { ...normalized, cachedAvatarUrl: existingCachedAvatarUrl } : normalized
+  }
+
+  if (existingCachedAvatarUrl) {
+    void cacheAvatarFromUrl(sourceUrl, cacheIdentity)
+    return { ...normalized, cachedAvatarUrl: existingCachedAvatarUrl }
+  }
+
+  if (!waitForMissing) return normalized
+
+  const nextCachedAvatarUrl = await cacheAvatarFromUrl(sourceUrl, cacheIdentity)
+  return nextCachedAvatarUrl ? { ...normalized, cachedAvatarUrl: nextCachedAvatarUrl } : normalized
 }
 
 function saveTokens(tokens: StoredTokens): void {
@@ -250,7 +283,7 @@ export async function login(): Promise<AuthStatus> {
       }
 
       // Fetch user info before resolving
-      const user = await fetchWhoami(apiUrl, accessToken)
+      const user = await withCachedAvatar(await fetchWhoami(apiUrl, accessToken), true)
       saveTokens({ accessToken, refreshToken, apiUrl, user })
 
       res.writeHead(200, { 'Content-Type': 'text/html' })
@@ -296,8 +329,8 @@ export async function getAuthStatus(): Promise<AuthStatus> {
     const freshUser = hasAvatarIdentity(cachedUser)
       ? undefined
       : await fetchWhoami(tokens.apiUrl, tokens.accessToken)
-    const user = mergeUserInfo(tokens.user, freshUser)
-    if (freshUser) {
+    const user = await withCachedAvatar(mergeUserInfo(tokens.user, freshUser), true)
+    if (freshUser || user?.cachedAvatarUrl !== tokens.user?.cachedAvatarUrl) {
       saveTokens({ ...tokens, user })
     }
     return { loggedIn: true, apiUrl: tokens.apiUrl, user }
