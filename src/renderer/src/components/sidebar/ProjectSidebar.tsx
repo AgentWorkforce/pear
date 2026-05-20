@@ -82,35 +82,50 @@ function isRemoteAvatarUrl(value: string): boolean {
 }
 
 function githubAvatarUrl(user?: AuthUser): string | null {
-  const providedAvatarUrl = user?.avatarUrl?.trim()
-  if (providedAvatarUrl && isRemoteAvatarUrl(providedAvatarUrl)) {
-    return providedAvatarUrl
-  }
-
   const username = normalizeGithubUsername(
     user?.githubUsername || user?.username || githubUsernameFromEmail(user?.email)
   )
   return username ? `https://github.com/${encodeURIComponent(username)}.png?size=96` : null
 }
 
-function UserAvatar({ user }: { user?: AuthUser }): React.ReactNode {
-  const label = user?.name || user?.email || 'User'
-  const avatarUrl = githubAvatarUrl(user)
-  const [imageFailed, setImageFailed] = useState(false)
+function providedAvatarUrl(user?: AuthUser): string | null {
+  const avatarUrl = user?.avatarUrl?.trim()
+  return avatarUrl && isRemoteAvatarUrl(avatarUrl) ? avatarUrl : null
+}
+
+function avatarUrls(user?: AuthUser): string[] {
+  return Array.from(new Set([githubAvatarUrl(user), providedAvatarUrl(user), user?.cachedAvatarUrl]
+    .map((url) => url?.trim())
+    .filter((url): url is string => !!url)))
+}
+
+function useAvatarUrl(urls: string[]): { src: string | undefined; onError: () => void } {
+  const key = urls.join('\0')
+  const [index, setIndex] = useState(0)
 
   useEffect(() => {
-    setImageFailed(false)
-  }, [avatarUrl])
+    setIndex(0)
+  }, [key])
 
-  if (avatarUrl && !imageFailed) {
+  return {
+    src: urls[index],
+    onError: () => setIndex((current) => current + 1)
+  }
+}
+
+function UserAvatar({ user }: { user?: AuthUser }): React.ReactNode {
+  const label = user?.name || user?.email || 'User'
+  const avatar = useAvatarUrl(avatarUrls(user))
+
+  if (avatar.src) {
     return (
       <img
-        src={avatarUrl}
+        src={avatar.src}
         alt={label}
         title={label}
         className="h-7 w-7 shrink-0 rounded-full bg-[var(--pear-bg-overlay)] object-cover"
         referrerPolicy="no-referrer"
-        onError={() => setImageFailed(true)}
+        onError={avatar.onError}
       />
     )
   }

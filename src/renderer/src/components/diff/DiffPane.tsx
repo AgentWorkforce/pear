@@ -280,15 +280,41 @@ function isRemoteAvatarUrl(value: string): boolean {
 }
 
 function githubAvatarUrl(user: AuthUser | null): string | null {
-  const providedAvatarUrl = user?.avatarUrl?.trim()
-  if (providedAvatarUrl && isRemoteAvatarUrl(providedAvatarUrl)) {
-    return providedAvatarUrl
-  }
-
   const username = normalizeGithubUsername(
     user?.githubUsername || user?.username || githubUsernameFromEmail(user?.email)
   )
   return username ? `https://github.com/${encodeURIComponent(username)}.png?size=96` : null
+}
+
+function providedAvatarUrl(user: AuthUser | null): string | null {
+  const avatarUrl = user?.avatarUrl?.trim()
+  return avatarUrl && isRemoteAvatarUrl(avatarUrl) ? avatarUrl : null
+}
+
+function uniqueAvatarUrls(urls: Array<string | null | undefined>): string[] {
+  return Array.from(new Set(urls.map((url) => url?.trim()).filter((url): url is string => !!url)))
+}
+
+function userAvatarUrls(user: AuthUser | null): string[] {
+  return uniqueAvatarUrls([
+    githubAvatarUrl(user),
+    providedAvatarUrl(user),
+    user?.cachedAvatarUrl
+  ])
+}
+
+function useAvatarUrl(urls: string[]): { src: string | undefined; onError: () => void } {
+  const key = urls.join('\0')
+  const [index, setIndex] = useState(0)
+
+  useEffect(() => {
+    setIndex(0)
+  }, [key])
+
+  return {
+    src: urls[index],
+    onError: () => setIndex((current) => current + 1)
+  }
 }
 
 function normalizeCoAuthorUsername(value: string): string {
@@ -637,29 +663,25 @@ function CommitAuthorTooltipTrigger({
 function CommitAvatar({
   author,
   email,
-  avatarUrl,
+  avatarUrls,
   active = false
 }: {
   author: string
   email?: string
-  avatarUrl?: string
+  avatarUrls: string[]
   active?: boolean
 }): React.ReactNode {
-  const [imageFailed, setImageFailed] = useState(false)
+  const avatar = useAvatarUrl(avatarUrls)
 
-  useEffect(() => {
-    setImageFailed(false)
-  }, [avatarUrl])
-
-  if (avatarUrl && !imageFailed) {
+  if (avatar.src) {
     return (
       <CommitAuthorTooltipTrigger name={author} email={email} className="commit-primary-author-wrap">
         <img
-          src={avatarUrl}
+          src={avatar.src}
           alt={author}
           className="h-[18px] w-[18px] shrink-0 rounded-full bg-[var(--pear-bg-overlay)] object-cover"
           referrerPolicy="no-referrer"
-          onError={() => setImageFailed(true)}
+          onError={avatar.onError}
         />
       </CommitAuthorTooltipTrigger>
     )
@@ -676,8 +698,8 @@ function CommitAvatar({
   )
 }
 
-function avatarUrlForCommit(commit: GitHistoryCommit, authUser: AuthUser | null): string | undefined {
-  const authAvatarUrl = githubAvatarUrl(authUser)?.trim()
+function avatarUrlsForCommit(commit: GitHistoryCommit, authUser: AuthUser | null): string[] {
+  const authAvatarUrls = userAvatarUrls(authUser)
   const commitEmail = commit.authorEmail.trim().toLowerCase()
   const authEmail = authUser?.email?.trim().toLowerCase()
   const commitAuthor = commit.author.trim().toLowerCase()
@@ -685,15 +707,15 @@ function avatarUrlForCommit(commit: GitHistoryCommit, authUser: AuthUser | null)
   const authUsername = (authUser?.githubUsername || authUser?.username)?.trim().toLowerCase()
 
   if (
-    authAvatarUrl &&
+    authAvatarUrls.length > 0 &&
     ((commitEmail && authEmail && commitEmail === authEmail) ||
       (commitAuthor && authName && commitAuthor === authName) ||
       (commitAuthor && authUsername && commitAuthor === authUsername))
   ) {
-    return authAvatarUrl
+    return authAvatarUrls
   }
 
-  return commit.authorAvatarUrl
+  return uniqueAvatarUrls([commit.authorAvatarUrl, commit.authorCachedAvatarUrl])
 }
 
 function coAuthorCli(coAuthor: GitHistoryCoAuthor): string | undefined {
@@ -724,11 +746,8 @@ function CommitCoAuthorBadge({
   coAuthor: GitHistoryCoAuthor
   active: boolean
 }): React.ReactNode {
-  const [imageFailed, setImageFailed] = useState(false)
   const cli = coAuthorCli(coAuthor)
-  useEffect(() => {
-    setImageFailed(false)
-  }, [coAuthor.avatarUrl])
+  const avatar = useAvatarUrl(uniqueAvatarUrls([coAuthor.avatarUrl, coAuthor.cachedAvatarUrl]))
 
   return (
     <CommitAuthorTooltipTrigger
@@ -736,13 +755,13 @@ function CommitCoAuthorBadge({
       email={coAuthor.email}
       className="commit-author-avatar-wrap"
     >
-      {coAuthor.avatarUrl && !imageFailed && !cli ? (
+      {avatar.src && !cli ? (
         <img
-          src={coAuthor.avatarUrl}
+          src={avatar.src}
           alt={coAuthor.name}
           className="commit-co-author-avatar object-cover"
           referrerPolicy="no-referrer"
-          onError={() => setImageFailed(true)}
+          onError={avatar.onError}
         />
       ) : cli ? (
         <span className="commit-co-author-avatar bg-[#b45f43] text-white">
@@ -761,11 +780,11 @@ function CommitCoAuthorBadge({
 
 function CommitAuthorStack({
   commit,
-  authorAvatarUrl,
+  authorAvatarUrls,
   active
 }: {
   commit: GitHistoryCommit
-  authorAvatarUrl?: string
+  authorAvatarUrls: string[]
   active: boolean
 }): React.ReactNode {
   const coAuthors = commitCoAuthors(commit)
@@ -775,7 +794,7 @@ function CommitAuthorStack({
       <CommitAvatar
         author={commit.author}
         email={commit.authorEmail}
-        avatarUrl={authorAvatarUrl}
+        avatarUrls={authorAvatarUrls}
         active={active}
       />
       {coAuthors.map((coAuthor) => (
@@ -787,22 +806,17 @@ function CommitAuthorStack({
 
 function CommitAuthorAvatar({ user }: { user: AuthUser | null }): React.ReactNode {
   const label = user?.name || user?.email || 'Commit author'
-  const avatarUrl = githubAvatarUrl(user)
-  const [imageFailed, setImageFailed] = useState(false)
+  const avatar = useAvatarUrl(userAvatarUrls(user))
 
-  useEffect(() => {
-    setImageFailed(false)
-  }, [avatarUrl])
-
-  if (avatarUrl && !imageFailed) {
+  if (avatar.src) {
     return (
       <img
-        src={avatarUrl}
+        src={avatar.src}
         alt={label}
         title={label}
         className="h-9 w-9 shrink-0 rounded-full border border-[var(--pear-border)] bg-[var(--pear-bg-overlay)] object-cover"
         referrerPolicy="no-referrer"
-        onError={() => setImageFailed(true)}
+        onError={avatar.onError}
       />
     )
   }
@@ -914,12 +928,12 @@ function CoAuthorPicker({
 function HistoryCommit({
   commit,
   active,
-  authorAvatarUrl,
+  authorAvatarUrls,
   onSelect
 }: {
   commit: GitHistoryCommit
   active: boolean
-  authorAvatarUrl?: string
+  authorAvatarUrls: string[]
   onSelect: () => void
 }): React.ReactNode {
   const tags = commit.tags.slice(0, 2)
@@ -951,7 +965,7 @@ function HistoryCommit({
         ))}
       </div>
       <div className={`mt-1 flex min-w-0 items-center gap-1.5 text-[12px] leading-4 ${active ? 'text-white/90' : 'text-[var(--pear-text-faint)]'}`}>
-        <CommitAuthorStack commit={commit} authorAvatarUrl={authorAvatarUrl} active={active} />
+        <CommitAuthorStack commit={commit} authorAvatarUrls={authorAvatarUrls} active={active} />
         <span className="min-w-0 truncate">{commitAuthorLabel(commit)}</span>
         <span className="shrink-0">•</span>
         <span className="shrink-0">{formatRelativeDate(commit.date)}</span>
@@ -962,13 +976,13 @@ function HistoryCommit({
 
 function HistoryCommitDetails({
   commit,
-  authorAvatarUrl,
+  authorAvatarUrls,
   expanded,
   onCopyHash,
   onToggleExpanded
 }: {
   commit: GitHistoryCommit
-  authorAvatarUrl?: string
+  authorAvatarUrls: string[]
   expanded: boolean
   onCopyHash: () => void
   onToggleExpanded: () => void
@@ -1022,7 +1036,7 @@ function HistoryCommitDetails({
         </pre>
       )}
       <div className={`${expanded && message ? 'mt-2' : 'mt-1'} flex min-w-0 items-center gap-2.5 text-[13px] leading-5 text-[var(--pear-text-dim)]`}>
-        <CommitAuthorStack commit={commit} authorAvatarUrl={authorAvatarUrl} active={false} />
+        <CommitAuthorStack commit={commit} authorAvatarUrls={authorAvatarUrls} active={false} />
         <span className="min-w-0 truncate font-semibold text-[var(--pear-text-secondary)]">
           {authorLabel}
         </span>
@@ -2851,7 +2865,7 @@ export function DiffPane(): React.ReactNode {
                       key={commit.hash}
                       commit={commit}
                       active={selectedCommit?.hash === commit.hash}
-                      authorAvatarUrl={avatarUrlForCommit(commit, authUser)}
+                      authorAvatarUrls={avatarUrlsForCommit(commit, authUser)}
                       onSelect={() => selectCommit(root.path, commit)}
                     />
                   ))}
@@ -2929,7 +2943,7 @@ export function DiffPane(): React.ReactNode {
             {selectedCommit ? (
               <HistoryCommitDetails
                 commit={selectedCommit}
-                authorAvatarUrl={avatarUrlForCommit(selectedCommit, authUser)}
+                authorAvatarUrls={avatarUrlsForCommit(selectedCommit, authUser)}
                 expanded={commitDetailsExpanded}
                 onCopyHash={() => void copySelectedCommitHash()}
                 onToggleExpanded={() => setCommitDetailsExpanded((expanded) => !expanded)}

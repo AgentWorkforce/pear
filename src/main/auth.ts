@@ -156,8 +156,7 @@ function githubAvatarUrl(user: UserInfo | undefined): string | undefined {
 }
 
 function avatarSourceUrl(user: UserInfo | undefined): string | undefined {
-  if (isRemoteAvatarUrl(user?.avatarUrl)) return user?.avatarUrl
-  return githubAvatarUrl(user)
+  return githubAvatarUrl(user) || (isRemoteAvatarUrl(user?.avatarUrl) ? user?.avatarUrl : undefined)
 }
 
 async function withCachedAvatar(user: UserInfo | undefined, waitForMissing: boolean): Promise<UserInfo | undefined> {
