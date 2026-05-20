@@ -2,5 +2,7 @@ node_modules/
 out/
 dist/
 .npm-cache/
+.sst
+*.tsbuildinfo
 *.env
 .DS_Store

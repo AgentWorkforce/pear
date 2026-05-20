@@ -1,0 +1,56 @@
+name: Release Installers
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS universal
+            os: macos-latest
+            command: npm run release -- --mac --universal
+            csc_link_secret: MACOS_CSC_LINK
+            csc_key_password_secret: MACOS_CSC_KEY_PASSWORD
+          - name: Windows x64
+            os: windows-latest
+            command: npm run release -- --win --x64
+            csc_link_secret: WINDOWS_CSC_LINK
+            csc_key_password_secret: WINDOWS_CSC_KEY_PASSWORD
+          - name: Linux x64
+            os: ubuntu-latest
+            command: npm run release -- --linux --x64
+            csc_link_secret: ''
+            csc_key_password_secret: ''
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build and publish installers
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CSC_LINK: ${{ matrix.csc_link_secret != '' && secrets[matrix.csc_link_secret] || '' }}
+          CSC_KEY_PASSWORD: ${{ matrix.csc_key_password_secret != '' && secrets[matrix.csc_key_password_secret] || '' }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: ${{ matrix.command }}

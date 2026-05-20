@@ -1,5 +1,6 @@
 import { basename, join } from 'path'
-import { BrowserWindow } from 'electron'
+import { accessSync, constants } from 'fs'
+import { app, BrowserWindow } from 'electron'
 import {
   AgentRelayClient,
   type AgentRelaySpawnOptions,
@@ -39,7 +40,7 @@ function resolveBundledBrokerBinary(): string {
   // Use local relay build if available (for development)
   const localBinary = join(__dirname, '..', '..', '..', 'relay', 'target', 'debug', 'agent-relay-broker')
   try {
-    require('fs').accessSync(localBinary, require('fs').constants.X_OK)
+    accessSync(localBinary, constants.X_OK)
     console.log('[broker] Using local relay binary:', localBinary)
     return localBinary
   } catch {
@@ -47,10 +48,14 @@ function resolveBundledBrokerBinary(): string {
   }
 
   const suffix = `${process.platform}-${process.arch}`
-  return join(
-    __dirname, '..', '..', 'node_modules', '@agent-relay', 'sdk', 'bin',
-    `agent-relay-broker-${suffix}`
-  )
+  const executable = process.platform === 'win32'
+    ? `agent-relay-broker-${suffix}.exe`
+    : `agent-relay-broker-${suffix}`
+  const relativeBinaryPath = join('node_modules', '@agent-relay', 'sdk', 'bin', executable)
+  const packagedBinary = join(process.resourcesPath, 'app.asar.unpacked', relativeBinaryPath)
+  const devBinary = join(__dirname, '..', '..', relativeBinaryPath)
+
+  return app.isPackaged ? packagedBinary : devBinary
 }
 
 type TerminalAttachMode = 'view' | 'drive' | 'passthrough'

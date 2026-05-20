@@ -2,8 +2,10 @@ import { app, BrowserWindow, shell, Menu } from 'electron'
 import { join } from 'path'
 import { registerIpcHandlers } from './ipc-handlers'
 import { brokerManager } from './broker'
+import { checkForUpdates, configureAutoUpdates } from './updater'
 
 app.setName('Pear')
+app.setAppUserModelId('com.agentrelay.pear')
 
 let mainWindow: BrowserWindow | null = null
 let shutdownPromise: Promise<void> | null = null
@@ -55,6 +57,12 @@ function createMenu(): void {
       label: app.name,
       submenu: [
         { role: 'about' },
+        {
+          label: 'Check for Updates...',
+          click: (): void => {
+            void checkForUpdates(true)
+          }
+        },
         { type: 'separator' },
         { role: 'services' },
         { type: 'separator' },
@@ -127,6 +135,7 @@ app.whenReady().then(() => {
   registerIpcHandlers()
   createMenu()
   createWindow()
+  if (mainWindow) configureAutoUpdates(mainWindow)
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
