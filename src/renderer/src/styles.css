@@ -248,6 +248,11 @@ body,
   background: rgba(148, 163, 184, 0.026);
 }
 
+.diff-view .diff-gutter.diff-gutter-selected {
+  background: var(--diff-gutter-selected-background-color);
+  color: #d9ecff;
+}
+
 .diff-view .diff-gutter-number:hover {
   color: var(--pear-text-secondary);
 }
