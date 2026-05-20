@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
-export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings'
+export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'broker-details'
 
 const api = {
   project: {
@@ -14,6 +14,8 @@ const api = {
       ipcRenderer.invoke('project:add-channel', projectId, name),
     removeChannel: (projectId: string, name: string) =>
       ipcRenderer.invoke('project:remove-channel', projectId, name),
+    setChannelPeople: (projectId: string, channelName: string, people: string[]) =>
+      ipcRenderer.invoke('project:set-channel-people', projectId, channelName, people),
     addRoot: (projectId: string, name?: string, rootPath?: string) =>
       ipcRenderer.invoke('project:add-root', projectId, name, rootPath),
     removeRoot: (projectId: string, rootId: string) =>
@@ -58,9 +60,14 @@ const api = {
       ipcRenderer.invoke('broker:resize-pty', projectId, name, rows, cols),
     sendMessage: (projectId: string | undefined, input: { to: string; text: string; from?: string }) =>
       ipcRenderer.invoke('broker:send-message', projectId, input),
+    subscribeAgentChannel: (projectId: string | undefined, name: string, channel: string) =>
+      ipcRenderer.invoke('broker:subscribe-agent-channel', projectId, name, channel),
+    unsubscribeAgentChannel: (projectId: string | undefined, name: string, channel: string) =>
+      ipcRenderer.invoke('broker:unsubscribe-agent-channel', projectId, name, channel),
     releaseAgent: (projectId: string | undefined, name: string) =>
       ipcRenderer.invoke('broker:release-agent', projectId, name),
     listAgents: (projectId?: string) => ipcRenderer.invoke('broker:list-agents', projectId),
+    listDetails: () => ipcRenderer.invoke('broker:list-details'),
     shutdown: () => ipcRenderer.invoke('broker:shutdown'),
     onEvent: (callback: (event: unknown) => void) => {
       const handler = (_: unknown, event: unknown): void => callback(event)
@@ -77,6 +84,7 @@ const api = {
   git: {
     status: (path: string) => ipcRenderer.invoke('git:status', path),
     diff: (path: string, file?: string) => ipcRenderer.invoke('git:diff', path, file),
+    summary: (path: string) => ipcRenderer.invoke('git:summary', path),
     branches: (root: string) => ipcRenderer.invoke('git:branches', root)
   },
   fs: {

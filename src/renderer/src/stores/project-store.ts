@@ -22,6 +22,7 @@ export interface Project {
   rootPathExists: boolean
   roots: ProjectRoot[]
   channels: string[]
+  channelPeople: Record<string, string[]>
   integrations: ProjectIntegration[]
 }
 
@@ -84,6 +85,32 @@ function normalizeChannels(value: unknown): string[] {
   return deduped.length > 0 ? deduped : ['general']
 }
 
+function normalizePeopleList(value: unknown): string[] {
+  const people = Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string')
+    : []
+  const names = people.map((entry) => entry.trim()).filter(Boolean)
+  return Array.from(new Map(names.map((name) => [name.toLowerCase(), name])).values())
+}
+
+function normalizeChannelPeople(value: unknown, channels: string[]): Record<string, string[]> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+
+  const channelSet = new Set(channels)
+  const result: Record<string, string[]> = {}
+  for (const [rawChannelName, rawPeople] of Object.entries(value as Record<string, unknown>)) {
+    const channelName = normalizeChannelName(rawChannelName)
+    if (!channelName || !channelSet.has(channelName)) continue
+
+    const people = normalizePeopleList(rawPeople)
+    if (people.length > 0) {
+      result[channelName] = people
+    }
+  }
+
+  return result
+}
+
 function dedupeRoots(roots: ProjectRoot[]): ProjectRoot[] {
   const seen = new Set<string>()
   const deduped: ProjectRoot[] = []
@@ -123,6 +150,8 @@ function normalizeProject(value: unknown): Project | null {
 
   if (!id || !name || !primaryRoot || roots.length === 0) return null
 
+  const channels = normalizeChannels(record.channels)
+
   return {
     id,
     name,
@@ -130,7 +159,8 @@ function normalizeProject(value: unknown): Project | null {
     rootPath: primaryRoot,
     rootPathExists: roots.some((root) => root.path === primaryRoot && root.pathExists),
     roots,
-    channels: normalizeChannels(record.channels),
+    channels,
+    channelPeople: normalizeChannelPeople(record.channelPeople, channels),
     integrations
   }
 }
@@ -157,6 +187,8 @@ interface ProjectState {
   removeRoot: (id: string) => Promise<void>
   addChannel: (name: string) => Promise<void>
   removeChannel: (name: string) => Promise<void>
+  renameChannel: (oldName: string, newName: string) => Promise<string | null>
+  setChannelPeople: (channelName: string, people: string[]) => Promise<string[]>
   addIntegration: (name: string, type?: string) => Promise<ProjectIntegration | null>
   removeIntegration: (id: string) => Promise<void>
   getActiveProject: () => Project | undefined
@@ -301,7 +333,8 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
               ...project,
               channels: project.channels.includes(channelName)
                 ? project.channels
-                : [...project.channels, channelName]
+                : [...project.channels, channelName],
+              channelPeople: project.channelPeople
             }
           : project
       )
@@ -323,12 +356,82 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
         project.id === activeProjectId
           ? {
               ...project,
-              channels: project.channels.filter((channel) => channel !== channelName)
+              channels: project.channels.filter((channel) => channel !== channelName),
+              channelPeople: Object.fromEntries(
+                Object.entries(project.channelPeople).filter(([channel]) => channel !== channelName)
+              )
             }
           : project
       )
     }))
     await get().syncBrokerChannels()
+  },
+
+  renameChannel: async (oldName, newName) => {
+    const { activeProjectId } = get()
+    const oldChannelName = normalizeChannelName(oldName)
+    const nextChannelName = normalizeChannelName(newName)
+    if (!activeProjectId || !oldChannelName || !nextChannelName || oldChannelName === nextChannelName) {
+      return null
+    }
+
+    const project = get().projects.find((candidate) => candidate.id === activeProjectId)
+    if (!project || !project.channels.includes(oldChannelName)) {
+      return null
+    }
+
+    const peopleForChannel = project.channelPeople[oldChannelName] || []
+
+    await pear.project.addChannel(activeProjectId, nextChannelName)
+    await pear.project.removeChannel(activeProjectId, oldChannelName)
+    if (peopleForChannel.length > 0) {
+      await pear.project.setChannelPeople(activeProjectId, nextChannelName, peopleForChannel)
+    }
+    set((state) => ({
+      activeChannelName: state.activeChannelName === oldChannelName ? nextChannelName : state.activeChannelName,
+      projects: state.projects.map((candidate) => {
+        if (candidate.id !== activeProjectId) return candidate
+
+        const channels = candidate.channels
+          .map((channel) => channel === oldChannelName ? nextChannelName : channel)
+          .filter((channel, index, all) => all.indexOf(channel) === index)
+        const { [oldChannelName]: oldPeople, ...remainingPeople } = candidate.channelPeople
+
+        return {
+          ...candidate,
+          channels,
+          channelPeople: {
+            ...remainingPeople,
+            ...(oldPeople?.length ? { [nextChannelName]: oldPeople } : {})
+          }
+        }
+      })
+    }))
+    await get().syncBrokerChannels()
+    return nextChannelName
+  },
+
+  setChannelPeople: async (channelName, people) => {
+    const { activeProjectId } = get()
+    const normalizedChannelName = normalizeChannelName(channelName)
+    if (!activeProjectId || !normalizedChannelName) return []
+
+    const nextPeople = await pear.project.setChannelPeople(activeProjectId, normalizedChannelName, people)
+    set((state) => ({
+      projects: state.projects.map((project) => {
+        if (project.id !== activeProjectId) return project
+
+        const channelPeople = { ...project.channelPeople }
+        if (nextPeople.length > 0) {
+          channelPeople[normalizedChannelName] = nextPeople
+        } else {
+          delete channelPeople[normalizedChannelName]
+        }
+
+        return { ...project, channelPeople }
+      })
+    }))
+    return nextPeople
   },
 
   addIntegration: async (name, type = 'custom') => {

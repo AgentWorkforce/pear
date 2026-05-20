@@ -115,6 +115,48 @@ function MessageActions({ message, onReply, onReact }: MessageActionsProps): Rea
   )
 }
 
+function InlineReactionButton({
+  messageId,
+  onReact
+}: {
+  messageId: string
+  onReact: (messageId: string, emoji: string) => void
+}): React.ReactNode {
+  const [pickerOpen, setPickerOpen] = useState(false)
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => setPickerOpen((open) => !open)}
+        className="flex h-7 w-9 items-center justify-center rounded-full border border-transparent bg-[var(--pear-bg-overlay)] text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]"
+        title="Add reaction"
+        aria-label="Add reaction"
+      >
+        <SmilePlus size={16} />
+      </button>
+      {pickerOpen && (
+        <div className="absolute left-0 top-8 z-20 flex gap-1 rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] p-1 shadow-2xl">
+          {QUICK_REACTIONS.map((emoji) => (
+            <button
+              key={emoji}
+              type="button"
+              onClick={() => {
+                onReact(messageId, emoji)
+                setPickerOpen(false)
+              }}
+              className="flex h-8 w-8 items-center justify-center rounded-md text-base hover:bg-[var(--pear-bg-overlay)]"
+              aria-label={`React with ${emoji}`}
+            >
+              {emoji}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function ChatMessage({
   message,
   showRoute = true,
@@ -193,6 +235,10 @@ export function ChatMessage({
                 <span>{reaction.count}</span>
               </button>
             ))}
+
+            {reactions.length > 0 && onReact && (
+              <InlineReactionButton messageId={message.id} onReact={onReact} />
+            )}
 
             {showThreadSummary && replies.length > 0 && (
               <button

@@ -1,9 +1,10 @@
 import type React from 'react'
 import { useMemo, useState } from 'react'
-import { AlertTriangle, Hash, LayoutGrid, Pause, Settings } from 'lucide-react'
+import { AlertTriangle, Folder, GitBranch, Hash, LayoutGrid, Pause, Settings } from 'lucide-react'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
 import { getAgentKeyForAgent, isAgentTyping, useAgentStore, type Agent } from '@/stores/agent-store'
-import { useProjectStore, type Project } from '@/stores/project-store'
+import { useGitStore, type GitSummary } from '@/stores/git-store'
+import { useProjectStore, type Project, type ProjectRoot } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 
 interface Props {
@@ -25,6 +26,50 @@ function SectionHeader({ title, count }: SectionHeaderProps): React.ReactNode {
       <span className="flex h-4 min-w-4 items-center justify-center rounded-full border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35 px-1 text-[9px] font-medium leading-none text-[var(--pear-text-faint)] opacity-55">
         {count}
       </span>
+    </div>
+  )
+}
+
+function formatPathTail(path: string): string {
+  const normalized = path.replace(/\\/g, '/')
+  const parts = normalized.split('/').filter(Boolean)
+  if (parts.length <= 2) return normalized
+  return `.../${parts.slice(-2).join('/')}`
+}
+
+function ProjectMeta({
+  root,
+  gitSummary
+}: {
+  root: ProjectRoot
+  gitSummary: GitSummary | null
+}): React.ReactNode {
+  return (
+    <div className="space-y-1 px-1.5 text-[11px]">
+      <div
+        className="flex min-w-0 items-center gap-1.5 text-[var(--pear-text-faint)]"
+        title={root.path}
+      >
+        <Folder size={11} className="shrink-0" />
+        <span className="min-w-0 truncate">{formatPathTail(root.path)}</span>
+      </div>
+      {gitSummary && (
+        <div className="flex min-w-0 items-center gap-2">
+          <div
+            className="flex min-w-0 items-center gap-1.5 text-[var(--pear-text-dim)]"
+            title={gitSummary.branch}
+          >
+            <GitBranch size={11} className="shrink-0 text-[var(--pear-text-faint)]" />
+            <span className="min-w-0 truncate">{gitSummary.branch}</span>
+          </div>
+          <span className="shrink-0 tabular-nums text-[var(--pear-green)]">
+            +{gitSummary.additions}
+          </span>
+          <span className="shrink-0 tabular-nums text-[var(--pear-red)]">
+            -{gitSummary.deletions}
+          </span>
+        </div>
+      )}
     </div>
   )
 }
@@ -79,6 +124,8 @@ export function ProjectItem({ project, isActive }: Props): React.ReactNode {
   const setActiveProject = useProjectStore((s) => s.setActiveProject)
   const activeChannelName = useProjectStore((s) => s.activeChannelName)
   const setActiveChannel = useProjectStore((s) => s.setActiveChannel)
+  const activeRootId = useProjectStore((s) => s.activeRootId)
+  const gitSummary = useGitStore((s) => s.summary)
   const allAgents = useAgentStore((s) => s.agents)
   const agents = useMemo(
     () => allAgents.filter((agent) => agent.projectId === project.id),
@@ -89,6 +136,10 @@ export function ProjectItem({ project, isActive }: Props): React.ReactNode {
   const setViewMode = useUIStore((s) => s.setViewMode)
   const hasAvailableRoot = project.roots.some((root) => root.pathExists)
   const settingsActive = isActive && viewMode === 'project-settings'
+  const activeRoot = project.roots.find((root) => root.id === activeRootId) ||
+    project.roots.find((root) => root.pathExists) ||
+    project.roots[0]
+  const activeRootGitSummary = gitSummary?.rootPath === activeRoot?.path ? gitSummary : null
 
   const handleSelect = (): void => {
     setError(null)
@@ -158,6 +209,10 @@ export function ProjectItem({ project, isActive }: Props): React.ReactNode {
 
       {isActive && (
         <div className="space-y-3 px-3 pb-3">
+          {activeRoot && (
+            <ProjectMeta root={activeRoot} gitSummary={activeRootGitSummary} />
+          )}
+
           <div>
             <SectionHeader title="Agents" count={agents.length} />
             <div className="space-y-0.5">

@@ -4,6 +4,7 @@ import { ProjectSidebar } from '@/components/sidebar/ProjectSidebar'
 import { ProjectSettings } from '@/components/settings/ProjectSettings'
 import { TerminalPane } from '@/components/terminal/TerminalPane'
 import { ChatView } from '@/components/chat/ChatView'
+import { BrokerDetailsPage } from '@/components/broker/BrokerDetailsPage'
 import { CommandMenu } from '@/components/common/CommandMenu'
 import { StatusBar } from '@/components/common/StatusBar'
 import { AddProjectDialog } from '@/components/sidebar/AddProjectDialog'
@@ -11,6 +12,7 @@ import { SpawnAgentDialog } from '@/components/sidebar/SpawnAgentDialog'
 import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 import { useBrokerEvents } from '@/hooks/use-broker-events'
+import { useGitStatus } from '@/hooks/use-git-status'
 
 export default function App(): React.ReactNode {
   const activeDialog = useUIStore((s) => s.activeDialog)
@@ -18,6 +20,7 @@ export default function App(): React.ReactNode {
   const load = useProjectStore((s) => s.load)
 
   useBrokerEvents()
+  useGitStatus()
 
   useEffect(() => {
     load()
@@ -25,6 +28,8 @@ export default function App(): React.ReactNode {
 
   const mainView = viewMode === 'project-settings'
     ? <ProjectSettings />
+    : viewMode === 'broker-details'
+      ? <BrokerDetailsPage />
     : viewMode === 'chat'
       ? <ChatView />
       : <TerminalPane />

@@ -11,6 +11,12 @@ export interface FileStatus {
   staged: boolean
 }
 
+export interface GitSummary {
+  branch: string
+  additions: number
+  deletions: number
+}
+
 async function git(args: string[], cwd: string): Promise<string> {
   assertDirectory(cwd, 'Git working directory')
   const { stdout } = await exec('git', args, { cwd, maxBuffer: 10 * 1024 * 1024 })
@@ -91,6 +97,82 @@ export async function getDiff(path: string, file?: string): Promise<string> {
   )
 
   return [diff, ...untrackedDiffs].filter(Boolean).join('\n')
+}
+
+function parseNumstat(output: string): Pick<GitSummary, 'additions' | 'deletions'> {
+  let additions = 0
+  let deletions = 0
+
+  for (const line of output.split('\n')) {
+    if (!line) continue
+    const [added, deleted] = line.split('\t')
+    const addedCount = Number(added)
+    const deletedCount = Number(deleted)
+    if (Number.isFinite(addedCount)) additions += addedCount
+    if (Number.isFinite(deletedCount)) deletions += deletedCount
+  }
+
+  return { additions, deletions }
+}
+
+async function getBranchName(path: string): Promise<string> {
+  try {
+    const branch = (await git(['branch', '--show-current'], path)).trim()
+    if (branch) return branch
+  } catch {
+    // Fall back to a detached/headless label below.
+  }
+
+  try {
+    const shortHash = (await git(['rev-parse', '--short', 'HEAD'], path)).trim()
+    if (shortHash) return `@${shortHash}`
+  } catch {
+    // New repositories can be inside a work tree before HEAD exists.
+  }
+
+  return 'detached'
+}
+
+async function getTrackedNumstat(path: string): Promise<string> {
+  try {
+    return await git(['diff', '--numstat', 'HEAD'], path)
+  } catch {
+    const [unstaged, staged] = await Promise.all([
+      gitAllowNonZeroExit(['diff', '--numstat'], path),
+      gitAllowNonZeroExit(['diff', '--cached', '--numstat'], path)
+    ])
+    return [unstaged, staged].filter(Boolean).join('\n')
+  }
+}
+
+export async function getSummary(path: string): Promise<GitSummary | null> {
+  try {
+    const insideWorkTree = (await git(['rev-parse', '--is-inside-work-tree'], path)).trim()
+    if (insideWorkTree !== 'true') return null
+  } catch {
+    return null
+  }
+
+  const [branch, trackedNumstat, status] = await Promise.all([
+    getBranchName(path),
+    getTrackedNumstat(path),
+    getStatus(path)
+  ])
+  const untrackedNumstats = await Promise.all(
+    status
+      .filter((entry) => entry.status === 'untracked')
+      .map((entry) =>
+        gitAllowNonZeroExit(['diff', '--no-index', '--numstat', '--', '/dev/null', entry.path], path)
+          .catch(() => '')
+      )
+  )
+  const totals = parseNumstat([trackedNumstat, ...untrackedNumstats].filter(Boolean).join('\n'))
+
+  return {
+    branch,
+    additions: totals.additions,
+    deletions: totals.deletions
+  }
 }
 
 export async function listBranches(root: string): Promise<string[]> {

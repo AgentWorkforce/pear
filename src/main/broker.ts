@@ -1,3 +1,4 @@
+import { existsSync, readFileSync } from 'fs'
 import { basename, join } from 'path'
 import { BrowserWindow } from 'electron'
 import {
@@ -6,6 +7,7 @@ import {
   type SpawnPtyInput,
   type SendMessageInput,
   type BrokerEvent,
+  type BrokerStatus,
   type ListAgent,
   type InboundDeliveryMode,
   type PendingRelayMessage
@@ -87,8 +89,93 @@ function isPositiveInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0
 }
 
+const BROKER_DETAILS_TIMEOUT_MS = 3_000
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function toErrorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err)
+}
+
+function withBrokerDetailsTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${BROKER_DETAILS_TIMEOUT_MS}ms`))
+    }, BROKER_DETAILS_TIMEOUT_MS)
+
+    promise.then(
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (err) => {
+        clearTimeout(timer)
+        reject(err)
+      }
+    )
+  })
+}
+
+function normalizeBaseUrl(url: string | undefined): string | undefined {
+  return url?.trim().replace(/\/+$/, '') || undefined
+}
+
+function parsePortFromUrl(url: string | undefined): number | undefined {
+  if (!url) return undefined
+  try {
+    const parsed = new URL(url)
+    if (parsed.port) {
+      return Number.parseInt(parsed.port, 10)
+    }
+    return parsed.protocol === 'https:' ? 443 : parsed.protocol === 'http:' ? 80 : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function getClientBaseUrl(client: AgentRelayClient): string | undefined {
+  return normalizeBaseUrl((client as unknown as BrokerClientInternals).transport?.baseUrl)
+}
+
+function getClientApiKey(client: AgentRelayClient): string | undefined {
+  return (client as unknown as BrokerClientInternals).transport?.apiKey
+}
+
+function getBrokerConnectionFileInfo(
+  cwd: string,
+  baseUrl: string | undefined,
+  brokerPid: number | undefined
+): BrokerConnectionFileInfo {
+  if (!cwd) {
+    return { hasApiKey: false }
+  }
+
+  const connectionPath = join(cwd, '.agent-relay', 'connection.json')
+  if (!existsSync(connectionPath)) {
+    return { path: connectionPath, status: 'missing', hasApiKey: false }
+  }
+
+  try {
+    const connection = JSON.parse(readFileSync(connectionPath, 'utf-8')) as Record<string, unknown>
+    const connectionUrl = normalizeBaseUrl(typeof connection.url === 'string' ? connection.url : undefined)
+    const connectionPid = typeof connection.pid === 'number' ? connection.pid : undefined
+    const connectionApiKey = typeof connection.api_key === 'string' && connection.api_key.trim().length > 0
+      ? connection.api_key.trim()
+      : undefined
+    const sameUrl = !!baseUrl && connectionUrl === baseUrl
+    const samePid = !brokerPid || !connectionPid || connectionPid === brokerPid
+
+    return {
+      path: connectionPath,
+      status: sameUrl && samePid ? 'matches' : 'different',
+      hasApiKey: !!connectionApiKey,
+      apiKey: connectionApiKey
+    }
+  } catch {
+    return { path: connectionPath, status: 'invalid', hasApiKey: false }
+  }
 }
 
 function toInboundDeliveryMode(mode?: TerminalAttachMode): InboundDeliveryMode {
@@ -130,6 +217,63 @@ interface BrokerSession {
   name: string
   channels: string[]
   cloudSandboxId: string | null
+}
+
+export interface BrokerAgentDetails {
+  name: string
+  runtime: string
+  cli?: string
+  model?: string
+  channels: string[]
+  parent?: string
+  pid?: number
+  currentState?: string
+}
+
+export interface BrokerDetails {
+  projectId: string
+  name: string
+  cwd: string
+  channels: string[]
+  kind: 'local' | 'cloud'
+  url?: string
+  port?: number
+  apiKey?: string
+  brokerPid?: number
+  cloudSandboxId?: string | null
+  connectionPath?: string
+  connectionFileStatus?: 'matches' | 'missing' | 'different' | 'invalid'
+  apiKeyAvailable: boolean
+  health: 'connected' | 'unreachable'
+  session?: {
+    brokerVersion: string
+    protocolVersion: number
+    mode: string
+    uptimeSecs: number
+  }
+  agentCount: number
+  pendingDeliveryCount: number
+  agents: BrokerAgentDetails[]
+  error?: string
+}
+
+interface BrokerStateSnapshot {
+  agents: ListAgent[]
+  pendingDeliveryCount: number
+}
+
+interface BrokerConnectionFileInfo {
+  path?: string
+  status?: BrokerDetails['connectionFileStatus']
+  hasApiKey: boolean
+  apiKey?: string
+}
+
+interface BrokerClientInternals {
+  transport?: {
+    baseUrl?: string
+    apiKey?: string
+  }
 }
 
 export class BrokerManager {
@@ -178,6 +322,7 @@ export class BrokerManager {
         cwd,
         brokerName: name,
         channels: nextChannels,
+        binaryArgs: { persist: true },
         binaryPath: resolveBundledBrokerBinary(),
         onStderr: (line: string) => {
           console.error(`[broker stderr:${normalizedProjectId}]`, line)
@@ -563,6 +708,34 @@ export class BrokerManager {
     await session.client.sendMessage(input)
   }
 
+  async subscribeAgentChannel(projectId: string | undefined, name: string, channel: string): Promise<void> {
+    const trimmedName = name.trim()
+    const [channelName] = normalizeChannels([channel])
+    if (!trimmedName) {
+      throw new Error('Agent name is required')
+    }
+    if (!channelName) {
+      throw new Error('Channel name is required')
+    }
+
+    const session = this.getSessionForAgent(trimmedName, projectId)
+    await session.client.subscribeChannels(trimmedName, [channelName])
+  }
+
+  async unsubscribeAgentChannel(projectId: string | undefined, name: string, channel: string): Promise<void> {
+    const trimmedName = name.trim()
+    const [channelName] = normalizeChannels([channel])
+    if (!trimmedName) {
+      throw new Error('Agent name is required')
+    }
+    if (!channelName) {
+      throw new Error('Channel name is required')
+    }
+
+    const session = this.getSessionForAgent(trimmedName, projectId)
+    await session.client.unsubscribeChannels(trimmedName, [channelName])
+  }
+
   async syncChannels(projectId: string, channels: string[]): Promise<void> {
     const session = this.sessions.get(projectId)
     if (!session) return
@@ -619,6 +792,92 @@ export class BrokerManager {
       })
     )
     return results.flat()
+  }
+
+  async listBrokerDetails(): Promise<BrokerDetails[]> {
+    const sessions = Array.from(this.sessions.values())
+
+    const details = await Promise.all(
+      sessions.map(async (session) => {
+        const baseUrl = getClientBaseUrl(session.client)
+        const apiKey = getClientApiKey(session.client)
+        const brokerPid = session.client.brokerPid
+        const connectionFile = getBrokerConnectionFileInfo(session.cwd, baseUrl, brokerPid)
+        const sessionResult = await Promise.allSettled([
+          withBrokerDetailsTimeout(session.client.getSession(), 'Broker metadata'),
+          this.getBrokerStateSnapshot(session)
+        ])
+        const [metadata, state] = sessionResult
+        const agents = state.status === 'fulfilled' ? state.value.agents : []
+        const errors = sessionResult
+          .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+          .map((result) => toErrorMessage(result.reason))
+
+        return {
+          projectId: session.projectId,
+          name: session.name,
+          cwd: session.cwd,
+          channels: session.channels,
+          kind: session.cloudSandboxId ? 'cloud' : 'local',
+          url: baseUrl,
+          port: parsePortFromUrl(baseUrl),
+          apiKey: apiKey || connectionFile.apiKey,
+          brokerPid,
+          cloudSandboxId: session.cloudSandboxId,
+          connectionPath: connectionFile.path,
+          connectionFileStatus: connectionFile.status,
+          apiKeyAvailable: !!apiKey || connectionFile.hasApiKey,
+          health: errors.length === 0 ? 'connected' : 'unreachable',
+          session: metadata.status === 'fulfilled'
+            ? {
+                brokerVersion: metadata.value.broker_version,
+                protocolVersion: metadata.value.protocol_version,
+                mode: metadata.value.mode,
+                uptimeSecs: metadata.value.uptime_secs
+              }
+            : undefined,
+          agentCount: agents.length,
+          pendingDeliveryCount: state.status === 'fulfilled' ? state.value.pendingDeliveryCount : 0,
+          agents: agents.map((agent) => ({
+            name: agent.name,
+            runtime: agent.runtime,
+            cli: agent.cli,
+            model: agent.model,
+            channels: agent.channels,
+            parent: agent.parent,
+            pid: agent.pid,
+            currentState: agent.current_state
+          })),
+          error: errors.length > 0 ? errors.join('\n') : undefined
+        } satisfies BrokerDetails
+      })
+    )
+
+    return details
+  }
+
+  private async getBrokerStateSnapshot(session: BrokerSession): Promise<BrokerStateSnapshot> {
+    try {
+      const status: BrokerStatus = await withBrokerDetailsTimeout(
+        session.client.getStatus(),
+        'Broker status'
+      )
+      return {
+        agents: status.agents,
+        pendingDeliveryCount: status.pending_delivery_count
+      }
+    } catch (statusErr) {
+      try {
+        return {
+          agents: await withBrokerDetailsTimeout(session.client.listAgents(), 'Agent list'),
+          pendingDeliveryCount: 0
+        }
+      } catch (listErr) {
+        throw new Error(
+          `Failed to read broker state: ${toErrorMessage(statusErr)}; ${toErrorMessage(listErr)}`
+        )
+      }
+    }
   }
 
   async shutdown(projectId?: string): Promise<void> {

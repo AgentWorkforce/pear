@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { pear } from '@/lib/ipc'
+import { pear, type GitSummary as IpcGitSummary } from '@/lib/ipc'
 
 export interface FileStatus {
   path: string
@@ -7,14 +7,20 @@ export interface FileStatus {
   staged: boolean
 }
 
+export interface GitSummary extends IpcGitSummary {
+  rootPath: string
+}
+
 interface GitState {
   files: FileStatus[]
   selectedFile: string | null
   diff: string
+  summary: GitSummary | null
   loading: boolean
   pollInterval: ReturnType<typeof setInterval> | null
 
   fetchStatus: (path: string) => Promise<void>
+  fetchSummary: (path: string) => Promise<void>
   fetchDiff: (rootPath: string, file?: string) => Promise<void>
   selectFile: (file: string | null, rootPath: string) => void
   startPolling: (rootPath: string) => void
@@ -25,6 +31,7 @@ export const useGitStore = create<GitState>((set, get) => ({
   files: [],
   selectedFile: null,
   diff: '',
+  summary: null,
   loading: false,
   pollInterval: null,
 
@@ -34,6 +41,15 @@ export const useGitStore = create<GitState>((set, get) => ({
       set({ files })
     } catch {
       set({ files: [] })
+    }
+  },
+
+  fetchSummary: async (path) => {
+    try {
+      const summary = await pear.git.summary(path)
+      set({ summary: summary ? { ...summary, rootPath: path } : null })
+    } catch {
+      set({ summary: null })
     }
   },
 
@@ -59,9 +75,11 @@ export const useGitStore = create<GitState>((set, get) => ({
   startPolling: (rootPath) => {
     get().stopPolling()
     get().fetchStatus(rootPath)
+    get().fetchSummary(rootPath)
     get().fetchDiff(rootPath)
     const interval = setInterval(() => {
       get().fetchStatus(rootPath)
+      get().fetchSummary(rootPath)
     }, 3000)
     set({ pollInterval: interval })
   },

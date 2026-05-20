@@ -7,6 +7,7 @@ import {
   Monitor,
   MoonStar,
   Search,
+  Server,
   Settings
 } from 'lucide-react'
 import { useProjectStore } from '@/stores/project-store'
@@ -69,6 +70,17 @@ export function CommandMenu(): React.ReactNode {
       keywords: ['spawn agent', 'new agent', 'claude', 'codex'],
       Icon: Bot,
       run: () => openDialog('spawn-agent')
+    },
+    {
+      id: 'broker-details',
+      label: 'Broker details',
+      description: 'Open broker connection details and CLI commands',
+      keywords: ['broker', 'connection', 'port', 'api key', 'cli'],
+      Icon: Server,
+      run: () => {
+        setViewMode('broker-details')
+        closeDialog()
+      }
     },
     {
       id: 'project-settings',

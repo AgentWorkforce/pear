@@ -15,6 +15,7 @@ export interface Agent {
   rootPath?: string
   rootId?: string
   parent?: string
+  channels?: string[]
   terminalMode: TerminalAttachMode
   ptyBuffer: string[]
   pendingDeliveryIds: string[]
@@ -120,6 +121,7 @@ interface TrackSpawnedAgentOptions {
   terminalMode?: TerminalAttachMode
   lastActivityAt?: string
   lastActivityMs?: number
+  channels?: string[]
 }
 
 function activityFromCurrentState(currentState: AgentCurrentState): Agent['activity'] {
@@ -242,6 +244,13 @@ interface AgentState {
   addHumanMessage: (to: string, body: string, projectId?: string) => void
   addThreadReply: (messageId: string, body: string) => void
   toggleMessageReaction: (messageId: string, emoji: string) => void
+  renameMessageChannel: (projectId: string | undefined, oldName: string, newName: string) => void
+  setAgentChannelMembership: (
+    projectId: string | undefined,
+    name: string,
+    channelName: string,
+    subscribed: boolean
+  ) => void
   clearAll: () => void
   getAgentBuffer: (projectId: string | undefined, name: string) => string[]
 }
@@ -315,6 +324,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                   activity,
                   lastActivityAtMs: lastActivityAtMs ?? a.lastActivityAtMs,
                   typingUntilMs,
+                  channels: options?.channels || a.channels,
                   terminalMode: options?.terminalMode || a.terminalMode
                 }
               : a
@@ -332,6 +342,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
               projectId,
               rootId,
               rootPath,
+              channels: options?.channels,
               terminalMode: options?.terminalMode || 'passthrough',
               ptyBuffer: [],
               pendingDeliveryIds: []
@@ -370,6 +381,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           activity: activityFromCurrentState(currentState),
           lastActivityAtMs: lastActivityAtMs ?? agent.lastActivityAtMs,
           typingUntilMs,
+          channels: liveAgent.channels,
           terminalMode: terminalMode || agent.terminalMode
         }
       })
@@ -392,6 +404,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           lastActivityAtMs,
           typingUntilMs,
           projectId: liveAgent.projectId,
+          channels: liveAgent.channels,
           terminalMode: terminalModeFromInboundDeliveryMode(liveAgent.inboundDeliveryMode) || 'passthrough',
           ptyBuffer: [],
           pendingDeliveryIds: []
@@ -429,6 +442,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                       activity: activityFromCurrentState(currentState),
                       currentState,
                       lastActivityAtMs: a.lastActivityAtMs,
+                      channels: a.channels,
                       projectId: a.projectId || projectId,
                       rootId: a.rootId || rootId,
                       rootPath: a.rootPath || rootPath,
@@ -447,6 +461,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                   activity: activityFromCurrentState(currentState),
                   currentState,
                   lastActivityAtMs: undefined,
+                  channels: undefined,
                   projectId,
                   rootId,
                   rootPath,
@@ -725,6 +740,51 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           ...message,
           reactions: nextReactions
         }
+      })
+    }))
+  },
+
+  renameMessageChannel: (projectId, oldName, newName) => {
+    const oldTarget = normalizeMessageTarget(oldName)
+    const nextTarget = normalizeMessageTarget(newName)
+    if (!oldTarget || !nextTarget || oldTarget === nextTarget) return
+
+    set((state) => ({
+      messages: state.messages.map((message) => {
+        if (projectId && message.projectId !== projectId) return message
+        if (normalizeMessageTarget(message.to) !== oldTarget) return message
+        return {
+          ...message,
+          to: message.to.startsWith('#') ? `#${nextTarget}` : nextTarget
+        }
+      }),
+      relayMessages: state.relayMessages.map((message) => {
+        if (projectId && message.projectId !== projectId) return message
+        if (normalizeMessageTarget(message.target) !== oldTarget) return message
+        return {
+          ...message,
+          target: message.target.startsWith('#') ? `#${nextTarget}` : nextTarget
+        }
+      })
+    }))
+  },
+
+  setAgentChannelMembership: (projectId, name, channelName, subscribed) => {
+    const nextChannelName = normalizeMessageTarget(channelName)
+    if (!nextChannelName) return
+
+    set((state) => ({
+      agents: state.agents.map((agent) => {
+        if (!matchesAgent(agent, projectId, name)) return agent
+
+        const channels = agent.channels || []
+        const nextChannels = subscribed
+          ? channels.includes(nextChannelName)
+            ? channels
+            : [...channels, nextChannelName]
+          : channels.filter((channel) => channel !== nextChannelName)
+
+        return { ...agent, channels: nextChannels }
       })
     }))
   },

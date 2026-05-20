@@ -9,6 +9,7 @@ import {
   updateProject,
   addProjectChannel,
   removeProjectChannel,
+  setProjectChannelPeople,
   addProjectRoot,
   removeProjectRoot,
   addProjectIntegration,
@@ -81,6 +82,10 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('project:remove-channel', (_, projectId: string, name: string) => {
     removeProjectChannel(projectId, name)
+  })
+
+  ipcMain.handle('project:set-channel-people', (_, projectId: string, channelName: string, people: string[]) => {
+    return setProjectChannelPeople(projectId, channelName, people)
   })
 
   ipcMain.handle('project:add-root', async (event, projectId: string, name?: string, rootPath?: string) => {
@@ -174,12 +179,24 @@ export function registerIpcHandlers(): void {
     await brokerManager.sendMessage(projectId, input)
   })
 
+  ipcMain.handle('broker:subscribe-agent-channel', async (_, projectId: string | undefined, name: string, channel: string) => {
+    await brokerManager.subscribeAgentChannel(projectId, name, channel)
+  })
+
+  ipcMain.handle('broker:unsubscribe-agent-channel', async (_, projectId: string | undefined, name: string, channel: string) => {
+    await brokerManager.unsubscribeAgentChannel(projectId, name, channel)
+  })
+
   ipcMain.handle('broker:release-agent', async (_, projectId: string | undefined, name: string) => {
     await brokerManager.releaseAgent(projectId, name)
   })
 
   ipcMain.handle('broker:list-agents', async (_, projectId?: string) => {
     return brokerManager.listAgents(projectId)
+  })
+
+  ipcMain.handle('broker:list-details', async () => {
+    return brokerManager.listBrokerDetails()
   })
 
   ipcMain.handle('broker:shutdown', async () => {
@@ -197,6 +214,12 @@ export function registerIpcHandlers(): void {
     assertPathWithinProjects(path)
     if (!isDirectory(path)) return ''
     return git.getDiff(path, file)
+  })
+
+  ipcMain.handle('git:summary', async (_, path: string) => {
+    assertPathWithinProjects(path)
+    if (!isDirectory(path)) return null
+    return git.getSummary(path)
   })
 
   ipcMain.handle('git:branches', async (_, root: string) => {
