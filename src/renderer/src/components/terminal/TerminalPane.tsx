@@ -45,6 +45,20 @@ function getSplitTileClass(count: number, index: number): string {
   return ''
 }
 
+function TypingDots({ className = '' }: { className?: string }): React.ReactNode {
+  return (
+    <span
+      className={`flex h-4 w-6 shrink-0 items-center justify-center gap-0.5 rounded-full border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35 opacity-70 ${className}`}
+      title="Thinking"
+      aria-label="Thinking"
+    >
+      <span className="h-1 w-1 rounded-full bg-[var(--pear-text-faint)] animate-pulse" />
+      <span className="h-1 w-1 rounded-full bg-[var(--pear-text-faint)] animate-pulse [animation-delay:120ms]" />
+      <span className="h-1 w-1 rounded-full bg-[var(--pear-text-faint)] animate-pulse [animation-delay:240ms]" />
+    </span>
+  )
+}
+
 interface TerminalProjectProps {
   agent: Agent
   visible: boolean
@@ -124,9 +138,7 @@ function SplitTerminalTile({
         <div className="flex min-w-0 flex-1 items-baseline gap-2">
           <span className="min-w-0 truncate font-medium">{agent.name}</span>
         </div>
-        {agent.pendingDeliveryIds.length > 0 && (
-          <span className="shrink-0 text-[10px] text-[var(--pear-text-faint)]">thinking</span>
-        )}
+        {agent.currentState === 'working' && <TypingDots />}
         {visible && (
           <PendingMessagesMenu
             projectId={agent.projectId}
@@ -375,9 +387,7 @@ export function TerminalPane(): React.ReactNode {
               </span>
               <div className="flex items-center gap-2">
                 <span className="max-w-[120px] truncate">{agent.name}</span>
-                {agent.pendingDeliveryIds.length > 0 && (
-                  <span className="text-[10px] text-[var(--pear-text-faint)]">thinking</span>
-                )}
+                {agent.currentState === 'working' && <TypingDots />}
               </div>
               {agent.status === 'running' && (
                 <button

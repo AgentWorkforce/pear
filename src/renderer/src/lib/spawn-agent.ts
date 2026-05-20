@@ -41,7 +41,11 @@ export async function spawnProjectAgent(project: Project, cli: SpawnAgentCli): P
       project.id,
       root.id,
       liveAgent.cli || cli,
-      root.path
+      root.path,
+      {
+        currentState: liveAgent.current_state,
+        terminalMode: liveAgent.inboundDeliveryMode === 'manual_flush' ? 'drive' : 'passthrough'
+      }
     )
   }
 

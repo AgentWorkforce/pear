@@ -1,6 +1,7 @@
 export type TerminalAttachMode = 'view' | 'drive' | 'passthrough'
 export type InboundDeliveryMode = 'auto_inject' | 'manual_flush'
 export type MessageInjectionMode = 'wait' | 'steer'
+export type AgentCurrentState = 'working' | 'idle' | 'blocked_on_send'
 
 export interface PendingRelayMessage {
   from: string
@@ -20,6 +21,8 @@ export interface BrokerListAgent {
   projectId: string
   cli?: string
   model?: string
+  current_state?: AgentCurrentState
+  inboundDeliveryMode?: InboundDeliveryMode
 }
 
 export interface PearAPI {

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { TerminalAttachMode } from '@/lib/ipc'
+import type { AgentCurrentState, InboundDeliveryMode, TerminalAttachMode } from '@/lib/ipc'
 import { useProjectStore } from '@/stores/project-store'
 
 export interface Agent {
@@ -8,6 +8,7 @@ export interface Agent {
   model?: string
   status: 'running' | 'exited'
   activity: 'idle' | 'active'
+  currentState: AgentCurrentState
   projectId?: string
   rootPath?: string
   rootId?: string
@@ -77,9 +78,21 @@ interface BrokerEvent {
   body?: string
   event_id?: string
   idle_secs?: number
+  blocked_secs?: number
+  pending_delivery_count?: number
+  mode?: InboundDeliveryMode
   code?: number
   signal?: string
   [key: string]: unknown
+}
+
+interface TrackSpawnedAgentOptions {
+  currentState?: AgentCurrentState
+  terminalMode?: TerminalAttachMode
+}
+
+function activityFromCurrentState(currentState: AgentCurrentState): Agent['activity'] {
+  return currentState === 'idle' ? 'idle' : 'active'
 }
 
 function addPendingDelivery(agent: Agent, eventId?: string): Agent {
@@ -152,7 +165,14 @@ interface AgentState {
 
   setActiveAgentKey: (key: string | null) => void
   setAgentTerminalMode: (projectId: string | undefined, name: string, mode: TerminalAttachMode) => void
-  trackSpawnedAgent: (name: string, projectId: string, rootId?: string, cli?: string, rootPath?: string) => void
+  trackSpawnedAgent: (
+    name: string,
+    projectId: string,
+    rootId?: string,
+    cli?: string,
+    rootPath?: string,
+    options?: TrackSpawnedAgentOptions
+  ) => void
   handleBrokerEvent: (event: BrokerEvent) => void
   handleBrokerStatus: (status: { projectId?: string; status: string; error?: string }) => void
   addHumanMessage: (to: string, body: string, projectId?: string) => void
@@ -180,12 +200,23 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   },
 
   // Called right after spawning to associate the agent with a project.
-  trackSpawnedAgent: (name, projectId, rootId, cli, rootPath) => {
+  trackSpawnedAgent: (name, projectId, rootId, cli, rootPath, options) => {
+    const currentState = options?.currentState || 'working'
+    const activity = activityFromCurrentState(currentState)
     set((state) => ({
       agents: state.agents.some((a) => matchesAgent(a, projectId, name))
         ? state.agents.map((a) =>
             matchesAgent(a, projectId, name)
-              ? { ...a, projectId, rootId, rootPath, cli: cli || a.cli, activity: 'active' }
+              ? {
+                  ...a,
+                  projectId,
+                  rootId,
+                  rootPath,
+                  cli: cli || a.cli,
+                  currentState,
+                  activity,
+                  terminalMode: options?.terminalMode || a.terminalMode
+                }
               : a
           )
         : [
@@ -194,11 +225,12 @@ export const useAgentStore = create<AgentState>((set, get) => ({
               name,
               cli: cli || 'unknown',
               status: 'running',
-              activity: 'active',
+              activity,
+              currentState,
               projectId,
               rootId,
               rootPath,
-              terminalMode: 'passthrough',
+              terminalMode: options?.terminalMode || 'passthrough',
               ptyBuffer: [],
               pendingDeliveryIds: []
             }
@@ -219,6 +251,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         const rootId = parentAgent?.rootId
         const rootPath = parentAgent?.rootPath
         const agentKey = getAgentKey(projectId, event.name)
+        const currentState: AgentCurrentState = 'working'
 
         return {
           agents: state.agents.some((a) => matchesAgent(a, projectId, event.name!))
@@ -229,7 +262,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                       cli: event.cli || a.cli,
                       model: event.model || a.model,
                       status: 'running',
-                      activity: 'active',
+                      activity: activityFromCurrentState(currentState),
+                      currentState,
                       projectId: a.projectId || projectId,
                       rootId: a.rootId || rootId,
                       rootPath: a.rootPath || rootPath,
@@ -245,7 +279,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                   cli: event.cli || 'unknown',
                   model: event.model,
                   status: 'running',
-                  activity: 'active',
+                  activity: activityFromCurrentState(currentState),
+                  currentState,
                   projectId,
                   rootId,
                   rootPath,
@@ -282,6 +317,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           return {
             ...a,
             activity: 'active',
+            currentState: 'working',
             ptyBuffer: buffer.length > MAX_PTY_BUFFER_CHUNKS
               ? buffer.slice(buffer.length - MAX_PTY_BUFFER_CHUNKS)
               : buffer
@@ -292,7 +328,11 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       set((state) => ({
         agents: state.agents.map((a) =>
           matchesAgent(a, event.projectId, event.name!)
-            ? { ...addPendingDelivery(a, event.event_id), activity: 'active' }
+            ? {
+                ...addPendingDelivery(a, event.event_id),
+                activity: a.terminalMode === 'drive' ? a.activity : 'active',
+                currentState: a.terminalMode === 'drive' ? a.currentState : 'working'
+              }
             : a
         )
       }))
@@ -300,7 +340,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       set((state) => ({
         agents: state.agents.map((a) =>
           matchesAgent(a, event.projectId, event.name!)
-            ? { ...addPendingDelivery(a, event.event_id), activity: 'active' }
+            ? { ...addPendingDelivery(a, event.event_id), activity: 'active', currentState: 'working' }
             : a
         )
       }))
@@ -309,9 +349,13 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       event.name
     ) {
       set((state) => ({
-        agents: state.agents.map((a) =>
-          matchesAgent(a, event.projectId, event.name!) ? clearPendingDeliveries(a, event.event_id) : a
-        )
+        agents: state.agents.map((a) => {
+          if (!matchesAgent(a, event.projectId, event.name!)) return a
+          const nextAgent = clearPendingDeliveries(a, event.event_id)
+          return ['delivery_injected', 'delivery_verified', 'message_delivery_confirmed'].includes(kind)
+            ? { ...nextAgent, activity: 'active', currentState: 'working' }
+            : nextAgent
+        })
       }))
     } else if (kind === 'agent_pending_drained' && event.name) {
       set((state) => ({
@@ -350,23 +394,36 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           timestamp,
           projectId
         }
+        const targetName = event.target.startsWith('#') ? null : normalizeMessageTarget(event.target)
         const messages = isHuman && isDuplicateHumanEcho(state.messages, msg)
           ? state.messages
           : [...state.messages, msg]
 
         return {
-          agents: state.agents.map((a) =>
-            matchesAgent(a, projectId, event.from!) ? clearPendingDeliveries(a) : a
-          ),
+          agents: state.agents.map((a) => {
+            const nextAgent = matchesAgent(a, projectId, event.from!) ? clearPendingDeliveries(a) : a
+            if (targetName && matchesAgent(nextAgent, projectId, targetName) && nextAgent.terminalMode !== 'drive') {
+              return { ...nextAgent, activity: 'active', currentState: 'working' }
+            }
+            return nextAgent
+          }),
           messages,
           relayMessages: [...state.relayMessages, relay]
         }
       })
+    } else if (kind === 'agent_blocked_on_send' && event.name) {
+      set((state) => ({
+        agents: state.agents.map((a) =>
+          matchesAgent(a, event.projectId, event.name!)
+            ? { ...a, activity: 'active', currentState: 'blocked_on_send' }
+            : a
+        )
+      }))
     } else if (kind === 'agent_idle' && event.name) {
       set((state) => ({
         agents: state.agents.map((a) =>
           matchesAgent(a, event.projectId, event.name!)
-            ? { ...clearPendingDeliveries(a), activity: 'idle' }
+            ? { ...clearPendingDeliveries(a), activity: 'idle', currentState: 'idle' }
             : a
         )
       }))

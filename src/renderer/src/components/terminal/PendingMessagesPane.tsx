@@ -109,23 +109,15 @@ export function PendingMessagesMenu({
 
   const modeIsHeld = deliveryMode === 'drive'
   const totalMessageCount = agentMessages.length + heldMessages.length
-  const countActive = modeIsHeld ? heldMessages.length > 0 : totalMessageCount > 0
+  const hasHeldMessages = heldMessages.length > 0
+  const visibleCount = hasHeldMessages ? heldMessages.length : totalMessageCount
+  const countActive = hasHeldMessages
   const emptyHeldCount = modeIsHeld && totalMessageCount === 0
-  const emptyLiveCount = !modeIsHeld && totalMessageCount === 0
-  const primaryCountLabel = modeIsHeld
-    ? emptyHeldCount
-      ? '0'
-      : `${heldMessages.length} held`
-    : emptyLiveCount
-      ? '0'
-      : `${totalMessageCount} total`
-  const secondaryCountLabel = modeIsHeld && !emptyHeldCount ? `${totalMessageCount} total` : null
   const dropdownCountLabel = modeIsHeld
     ? emptyHeldCount
       ? '0 messages'
       : `${heldMessages.length} held / ${totalMessageCount} total message${totalMessageCount === 1 ? '' : 's'}`
     : `${totalMessageCount} message${totalMessageCount === 1 ? '' : 's'}`
-  const hasHeldMessages = heldMessages.length > 0
   const hasRecentMessages = recentMessages.length > 0
   const showEmptyState = !loading && !hasHeldMessages && !hasRecentMessages
   const showLoadingState = loading && !hasHeldMessages && !hasRecentMessages
@@ -147,13 +139,13 @@ export function PendingMessagesMenu({
             ? 'border-[var(--pear-accent-dim)] bg-[var(--pear-bg-overlay)] text-[var(--pear-text)] hover:bg-[var(--pear-bg-surface-hover)]'
             : 'border-[var(--pear-border-subtle)] text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]'
         }`}
-        title="Show messages"
+        title={hasHeldMessages
+          ? `${heldMessages.length} held message${heldMessages.length === 1 ? '' : 's'}`
+          : `${totalMessageCount} message${totalMessageCount === 1 ? '' : 's'}`
+        }
       >
         <Inbox size={12} />
-        <span>{primaryCountLabel}</span>
-        {secondaryCountLabel && (
-          <span className="text-[var(--pear-text-faint)]">{secondaryCountLabel}</span>
-        )}
+        <span>{visibleCount}</span>
       </button>
 
       <div className="flex rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] p-0.5">
@@ -166,7 +158,8 @@ export function PendingMessagesMenu({
               ? 'bg-[var(--pear-bg-surface-hover)] text-[var(--pear-text)]'
               : 'text-[var(--pear-text-dim)] hover:text-[var(--pear-text)]'
           }`}
-          title="Hold incoming messages"
+          title="Hold messages until you trigger the message injection manually"
+          aria-label="Hold messages until you trigger the message injection manually"
         >
           <PauseCircle size={12} />
           <span>Hold</span>
@@ -180,7 +173,8 @@ export function PendingMessagesMenu({
               ? 'bg-[var(--pear-bg-surface-hover)] text-[var(--pear-text)]'
               : 'text-[var(--pear-text-dim)] hover:text-[var(--pear-text)]'
           }`}
-          title="Live incoming messages"
+          title="incoming messages are sent directly to agents as they arrive"
+          aria-label="incoming messages are sent directly to agents as they arrive"
         >
           <Radio size={12} />
           <span>Live</span>

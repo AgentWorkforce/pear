@@ -599,7 +599,10 @@ export class BrokerManager {
     await session.client.release(name)
   }
 
-  async listAgents(projectId?: string): Promise<Array<ListAgent & { projectId: string }>> {
+  async listAgents(projectId?: string): Promise<Array<ListAgent & {
+    projectId: string
+    inboundDeliveryMode?: InboundDeliveryMode
+  }>> {
     const sessions = projectId ? [this.getSessionForProject(projectId)] : Array.from(this.sessions.values())
     const results = await Promise.all(
       sessions.map(async (session) => {
@@ -607,7 +610,12 @@ export class BrokerManager {
         for (const agent of agents) {
           this.rememberAgentProject(agent.name, session.projectId)
         }
-        return agents.map((agent) => ({ ...agent, projectId: session.projectId }))
+        return Promise.all(
+          agents.map(async (agent) => {
+            const inboundDeliveryMode = await session.client.getInboundDeliveryMode(agent.name).catch(() => undefined)
+            return { ...agent, projectId: session.projectId, inboundDeliveryMode }
+          })
+        )
       })
     )
     return results.flat()
