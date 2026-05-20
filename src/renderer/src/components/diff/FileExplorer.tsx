@@ -85,7 +85,7 @@ export function FileExplorer({ rootPath }: Props): React.ReactNode {
         if (ignore) return
         setEntriesByDirectory({ [rootPath]: [] })
         setLoadingDirectories({})
-        setLoadError('Unable to load files for this worktree.')
+        setLoadError('Unable to load files for this root.')
       })
 
     return () => {

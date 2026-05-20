@@ -6,7 +6,7 @@ import { useGitStore } from '@/stores/git-store'
 interface Props {
   files: FileStatus[]
   selectedFile: string | null
-  worktreePath: string
+  rootPath: string
 }
 
 const statusIcons: Record<FileStatus['status'], typeof FileIcon> = {
@@ -25,7 +25,7 @@ const statusColors: Record<FileStatus['status'], string> = {
   untracked: 'var(--pear-text-faint)'
 }
 
-export function FileList({ files, selectedFile, worktreePath }: Props): React.ReactNode {
+export function FileList({ files, selectedFile, rootPath }: Props): React.ReactNode {
   const selectFile = useGitStore((s) => s.selectFile)
 
   if (files.length === 0) return <></>
@@ -40,7 +40,7 @@ export function FileList({ files, selectedFile, worktreePath }: Props): React.Re
         return (
           <button
             key={file.path}
-            onClick={() => selectFile(isSelected ? null : file.path, worktreePath)}
+            onClick={() => selectFile(isSelected ? null : file.path, rootPath)}
             className={`flex w-full items-center gap-2 px-4 py-1.5 text-left text-sm transition-colors ${
               isSelected
                 ? 'bg-[var(--pear-bg-surface)] text-[var(--pear-text)]'

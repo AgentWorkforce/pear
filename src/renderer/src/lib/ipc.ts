@@ -7,29 +7,40 @@ export interface PendingRelayMessage {
   body: string
   target: string
   thread_id?: string
-  workspace_id?: string
-  workspace_alias?: string
+  project_id?: string
+  project_alias?: string
   priority: number
   mode: MessageInjectionMode
   queued_at_ms: number
   event_id?: string
 }
 
+export interface BrokerListAgent {
+  name: string
+  projectId: string
+  cli?: string
+  model?: string
+}
+
 export interface PearAPI {
-  workspace: {
-    list: () => Promise<{ workspaces: unknown[]; activeId: string | null }>
+  project: {
+    list: () => Promise<{ projects: unknown[]; activeId: string | null }>
     add: (name: string, rootPath?: string) => Promise<unknown>
     remove: (id: string) => Promise<void>
     setActive: (id: string | null) => Promise<void>
     update: (id: string, update: Record<string, unknown>) => Promise<void>
-    addChannel: (workspaceId: string, name: string) => Promise<void>
-    removeChannel: (workspaceId: string, name: string) => Promise<void>
+    addChannel: (projectId: string, name: string) => Promise<void>
+    removeChannel: (projectId: string, name: string) => Promise<void>
+    addRoot: (projectId: string, name?: string, rootPath?: string) => Promise<unknown>
+    removeRoot: (projectId: string, rootId: string) => Promise<void>
+    addIntegration: (projectId: string, name: string, type?: string) => Promise<unknown>
+    removeIntegration: (projectId: string, integrationId: string) => Promise<void>
   }
   broker: {
-    start: (cwd: string, name: string, channels?: string[]) => Promise<boolean>
-    syncChannels: (channels: string[]) => Promise<void>
+    start: (projectId: string, cwd: string, name: string, channels?: string[]) => Promise<boolean>
+    syncChannels: (projectId: string, channels: string[]) => Promise<void>
     connectCloud: () => Promise<string>
-    spawnAgent: (input: {
+    spawnAgent: (projectId: string, input: {
       name: string
       cli: string
       model?: string
@@ -38,6 +49,7 @@ export interface PearAPI {
       cwd?: string
     }) => Promise<{ name: string; runtime: string }>
     attachTerminal: (input: {
+      projectId?: string
       name: string
       rows?: number
       cols?: number
@@ -54,27 +66,25 @@ export interface PearAPI {
         screen: string
       }
     }>
-    sendInput: (name: string, data: string) => Promise<{ name: string; bytes_written: number }>
-    setTerminalMode: (name: string, mode: TerminalAttachMode) => Promise<{
+    sendInput: (projectId: string | undefined, name: string, data: string) => Promise<{ name: string; bytes_written: number }>
+    sendInputFast: (projectId: string | undefined, name: string, data: string) => void
+    setTerminalMode: (projectId: string | undefined, name: string, mode: TerminalAttachMode) => Promise<{
       name: string
       mode: InboundDeliveryMode
       flushed: number
       pending: number
     }>
-    getPending: (name: string) => Promise<PendingRelayMessage[]>
-    flushPending: (name: string) => Promise<{ flushed: number }>
-    resizePty: (name: string, rows: number, cols: number) => Promise<void>
-    sendMessage: (input: { to: string; text: string; from?: string }) => Promise<void>
-    releaseAgent: (name: string) => Promise<void>
-    listAgents: () => Promise<string[]>
+    getPending: (projectId: string | undefined, name: string) => Promise<PendingRelayMessage[]>
+    flushPending: (projectId: string | undefined, name: string) => Promise<{ flushed: number }>
+    resizePty: (projectId: string | undefined, name: string, rows: number, cols: number) => Promise<void>
+    sendMessage: (projectId: string | undefined, input: { to: string; text: string; from?: string }) => Promise<void>
+    releaseAgent: (projectId: string | undefined, name: string) => Promise<void>
+    listAgents: (projectId?: string) => Promise<BrokerListAgent[]>
     shutdown: () => Promise<void>
     onEvent: (callback: (event: unknown) => void) => () => void
-    onStatus: (callback: (status: { status: string; error?: string }) => void) => () => void
+    onStatus: (callback: (status: { projectId?: string; status: string; error?: string }) => void) => () => void
   }
   git: {
-    listWorktrees: (root: string) => Promise<{ path: string; branch: string; head: string }[]>
-    addWorktree: (root: string, branch: string, baseBranch?: string) => Promise<string>
-    removeWorktree: (root: string, path: string) => Promise<void>
     status: (path: string) => Promise<{ path: string; status: string; staged: boolean }[]>
     diff: (path: string, file?: string) => Promise<string>
     branches: (root: string) => Promise<string[]>
@@ -90,9 +100,9 @@ export interface PearAPI {
     }>
   }
   auth: {
-    login: () => Promise<{ loggedIn: boolean; apiUrl?: string; user?: { name?: string; email?: string; organizationName?: string; workspaceName?: string } }>
+    login: () => Promise<{ loggedIn: boolean; apiUrl?: string; user?: { name?: string; email?: string; organizationName?: string; projectName?: string } }>
     logout: () => Promise<void>
-    status: () => Promise<{ loggedIn: boolean; apiUrl?: string; user?: { name?: string; email?: string; organizationName?: string; workspaceName?: string } }>
+    status: () => Promise<{ loggedIn: boolean; apiUrl?: string; user?: { name?: string; email?: string; organizationName?: string; projectName?: string } }>
   }
   onMenu: (channel: string, callback: (...args: unknown[]) => void) => () => void
 }

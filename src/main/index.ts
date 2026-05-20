@@ -69,10 +69,10 @@ function createMenu(): void {
       label: 'File',
       submenu: [
         {
-          label: 'New Workspace',
+          label: 'New Project',
           accelerator: 'CmdOrCtrl+N',
           click: (): void => {
-            mainWindow?.webContents.send('menu:new-workspace')
+            mainWindow?.webContents.send('menu:new-project')
           }
         },
         { type: 'separator' },

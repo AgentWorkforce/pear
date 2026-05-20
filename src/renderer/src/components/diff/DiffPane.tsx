@@ -1,6 +1,6 @@
 import type React from 'react'
 import { useState } from 'react'
-import { useWorkspaceStore } from '@/stores/workspace-store'
+import { useProjectStore } from '@/stores/project-store'
 import { useGitStore } from '@/stores/git-store'
 import { FileList } from './FileList'
 import { DiffViewer } from './DiffViewer'
@@ -10,15 +10,15 @@ type PaneTab = 'changes' | 'files'
 
 export function DiffPane(): React.ReactNode {
   const [activeTab, setActiveTab] = useState<PaneTab>('changes')
-  const worktree = useWorkspaceStore((s) => s.getActiveWorktree())
+  const root = useProjectStore((s) => s.getActiveRoot())
   const files = useGitStore((s) => s.files)
   const diff = useGitStore((s) => s.diff)
   const selectedFile = useGitStore((s) => s.selectedFile)
 
-  if (!worktree) {
+  if (!root) {
     return (
       <div className="flex h-full items-center justify-center border-l border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-8">
-        <p className="text-sm text-[var(--pear-text-faint)]">Select a worktree to see changes</p>
+        <p className="text-sm text-[var(--pear-text-faint)]">Select a root to see changes</p>
       </div>
     )
   }
@@ -66,7 +66,7 @@ export function DiffPane(): React.ReactNode {
           </div>
 
           {files.length > 0 && (
-            <FileList files={files} selectedFile={selectedFile} worktreePath={worktree.path} />
+            <FileList files={files} selectedFile={selectedFile} rootPath={root.path} />
           )}
 
           <div className="min-h-0 flex-1 overflow-auto">
@@ -80,7 +80,7 @@ export function DiffPane(): React.ReactNode {
           </div>
         </div>
       ) : (
-        <FileExplorer rootPath={worktree.path} />
+        <FileExplorer rootPath={root.path} />
       )}
     </div>
   )

@@ -120,6 +120,14 @@ function isEditableElement(target: EventTarget | null): boolean {
   return editable instanceof HTMLElement
 }
 
+function hasVisibleTerminalContent(screen: string): boolean {
+  const stripped = screen.replace(
+    /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-Z\\-_])/g,
+    ''
+  )
+  return /\S/.test(stripped)
+}
+
 interface TerminalSize {
   rows: number
   cols: number
@@ -128,6 +136,7 @@ interface TerminalSize {
 export function useTerminal(
   containerRef: React.RefObject<HTMLDivElement | null>,
   agentName: string | null,
+  projectId: string | undefined,
   visible: boolean,
   active: boolean = visible,
   terminalMode: TerminalAttachMode = 'drive'
@@ -150,10 +159,10 @@ export function useTerminal(
 
   useEffect(() => {
     if (!agentName) return
-    pear.broker.setTerminalMode(agentName, terminalMode).catch((err) => {
+    pear.broker.setTerminalMode(projectId, agentName, terminalMode).catch((err) => {
       console.error('[terminal] setTerminalMode failed:', err)
     })
-  }, [agentName, terminalMode])
+  }, [agentName, projectId, terminalMode])
 
   useEffect(() => {
     if (!containerRef.current || !agentName) return
@@ -165,11 +174,42 @@ export function useTerminal(
     let resizeObserver: ResizeObserver | null = null
     let disposed = false
     let cleanupBounce: (() => void) | null = null
+    let inputFlushTimer: ReturnType<typeof setTimeout> | null = null
+    let inputBuffer = ''
+    let inputFlushing = false
+
+    const flushInput = async (): Promise<void> => {
+      if (inputFlushing || inputBuffer.length === 0) return
+
+      inputFlushing = true
+      try {
+        while (inputBuffer.length > 0) {
+          const data = inputBuffer
+          inputBuffer = ''
+          await pear.broker.sendInput(projectId, agentName!, data)
+        }
+      } catch (err) {
+        console.error('[terminal] sendInput failed:', err)
+      } finally {
+        inputFlushing = false
+        if (inputBuffer.length > 0 && !inputFlushTimer) {
+          scheduleInputFlush()
+        }
+      }
+    }
+
+    const scheduleInputFlush = (): void => {
+      if (inputFlushTimer || inputFlushing) return
+      inputFlushTimer = setTimeout(() => {
+        inputFlushTimer = null
+        void flushInput()
+      }, 4)
+    }
+
     const sendInput = (data: string): void => {
       if (terminalModeRef.current === 'view') return
-      pear.broker.sendInput(agentName!, data).catch((err) => {
-        console.error('[terminal] sendInput failed:', err)
-      })
+      inputBuffer += data
+      scheduleInputFlush()
     }
 
     const focusTerminal = (requireActive = false): void => {
@@ -201,7 +241,7 @@ export function useTerminal(
     const safeFitAndSync = (): TerminalSize | null => {
       const size = fitTerminal()
       if (size) {
-        pear.broker.resizePty(agentName!, size.rows, size.cols).catch(() => {})
+        pear.broker.resizePty(projectId, agentName!, size.rows, size.cols).catch(() => {})
       }
       return size
     }
@@ -210,7 +250,7 @@ export function useTerminal(
       if (unsubStore) return
 
       const writeNewChunks = (state = useAgentStore.getState()): void => {
-        const agent = state.agents.find((a) => a.name === agentName)
+        const agent = state.agents.find((a) => a.name === agentName && a.projectId === projectId)
         if (!agent) return
         const newChunks = agent.ptyBuffer.slice(writtenChunksRef.current)
         if (newChunks.length > 0) {
@@ -233,6 +273,7 @@ export function useTerminal(
 
       try {
         const result = await pear.broker.attachTerminal({
+          projectId,
           name: agentName!,
           rows: initialSize?.rows,
           cols: initialSize?.cols,
@@ -241,9 +282,9 @@ export function useTerminal(
 
         if (disposed) return
 
-        if (result.snapshot?.screen) {
+        if (result.snapshot?.screen && hasVisibleTerminalContent(result.snapshot.screen)) {
           targetTerm.write(result.snapshot.screen)
-          writtenChunksRef.current = useAgentStore.getState().getAgentBuffer(agentName!).length
+          writtenChunksRef.current = useAgentStore.getState().getAgentBuffer(projectId, agentName!).length
           shouldReplayBuffer = false
         }
       } catch (err) {
@@ -314,8 +355,8 @@ export function useTerminal(
         }
         const { rows, cols } = term
         if (rows > 1 && cols > 0) {
-          pear.broker.resizePty(agentName!, rows - 1, cols).then(() => {
-            pear.broker.resizePty(agentName!, rows, cols)
+          pear.broker.resizePty(projectId, agentName!, rows - 1, cols).then(() => {
+            pear.broker.resizePty(projectId, agentName!, rows, cols)
           }).catch(() => {})
         }
       }, 200)
@@ -335,6 +376,10 @@ export function useTerminal(
     }
 
     const handleKeyDown = (event: KeyboardEvent): void => {
+      if (event.isComposing || event.target === term?.textarea) {
+        return
+      }
+
       const data = getKeyboardInput(event)
       if (!data) return
 
@@ -365,6 +410,9 @@ export function useTerminal(
     return () => {
       disposed = true
       cleanupBounce?.()
+      if (inputFlushTimer) {
+        clearTimeout(inputFlushTimer)
+      }
       unsubStore?.()
       container.removeEventListener('pointerdown', handlePointerDown)
       container.removeEventListener('keydown', handleKeyDown)
@@ -375,7 +423,7 @@ export function useTerminal(
       fitAddonRef.current = null
       writtenChunksRef.current = 0
     }
-  }, [containerRef, agentName])
+  }, [containerRef, agentName, projectId])
 
   useEffect(() => {
     if (termRef.current) {
@@ -391,7 +439,7 @@ export function useTerminal(
       fitAddonRef.current.fit()
       const { rows, cols } = termRef.current
       if (rows > 0 && cols > 0 && agentName) {
-        pear.broker.resizePty(agentName, rows, cols)
+        pear.broker.resizePty(projectId, agentName, rows, cols)
       }
     } catch {
       // ignore
@@ -399,7 +447,7 @@ export function useTerminal(
     if (!active) return
     const timer = setTimeout(() => termRef.current?.focus(), 50)
     return () => clearTimeout(timer)
-  }, [visible, active, agentName])
+  }, [visible, active, agentName, projectId])
 
   useEffect(() => {
     if (!visible || !active) return
@@ -416,7 +464,7 @@ export function useTerminal(
 
     const sendInput = (data: string): void => {
       if (terminalModeRef.current === 'view') return
-      pear.broker.sendInput(agentName, data).catch((err) => {
+      pear.broker.sendInput(projectId, agentName, data).catch((err) => {
         console.error('[terminal] sendInput failed:', err)
       })
     }
@@ -428,6 +476,10 @@ export function useTerminal(
       }
 
       const isTerminalEvent = event.target instanceof Node && !!container?.contains(event.target)
+      if (isTerminalEvent) {
+        return
+      }
+
       if (isEditableElement(event.target) && !isTerminalEvent) {
         return
       }
@@ -448,6 +500,10 @@ export function useTerminal(
       }
 
       const isTerminalEvent = event.target instanceof Node && !!container?.contains(event.target)
+      if (isTerminalEvent) {
+        return
+      }
+
       if (isEditableElement(event.target) && !isTerminalEvent) {
         return
       }
@@ -468,7 +524,7 @@ export function useTerminal(
       window.removeEventListener('keydown', handleGlobalKeyDown, true)
       window.removeEventListener('paste', handleGlobalPaste, true)
     }
-  }, [visible, active, terminalMode, agentName, activeDialog, containerRef])
+  }, [visible, active, terminalMode, agentName, projectId, activeDialog, containerRef])
 
   return termRef.current
 }

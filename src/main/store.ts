@@ -1,98 +1,151 @@
 import { app } from 'electron'
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'fs'
-import { join } from 'path'
+import { basename, join } from 'path'
 
-export interface Worktree {
+export interface ProjectRoot {
   id: string
-  branch: string
+  name: string
   path: string
 }
 
-export interface Workspace {
+export interface ProjectIntegration {
   id: string
   name: string
+  type: string
+}
+
+export interface Project {
+  id: string
+  name: string
+  relayWorkspaceId: string
   rootPath: string
+  roots: ProjectRoot[]
   channels: string[]
-  worktrees: Worktree[]
+  integrations: ProjectIntegration[]
 }
 
 interface StoreData {
-  workspaces: Workspace[]
-  activeWorkspaceId: string | null
+  projects: Project[]
+  activeProjectId: string | null
 }
 
 const getStorePath = (): string => {
   const dir = join(app.getPath('userData'), 'config')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
-  return join(dir, 'workspaces.json')
+  return join(dir, 'projects.json')
 }
 
-const defaultData: StoreData = { workspaces: [], activeWorkspaceId: null }
+const defaultData: StoreData = { projects: [], activeProjectId: null }
 
-function normalizeWorktree(value: unknown): Worktree | null {
+function defaultRootName(path: string): string {
+  return basename(path) || path
+}
+
+function normalizeRoot(value: unknown): ProjectRoot | null {
   if (!value || typeof value !== 'object') return null
   const record = value as Record<string, unknown>
-  const id = typeof record.id === 'string' ? record.id : typeof record.path === 'string' ? record.path : null
-  const branch = typeof record.branch === 'string' ? record.branch : null
   const path = typeof record.path === 'string' ? record.path : null
+  if (!path) return null
 
-  if (!id || !branch || !path) return null
-
-  return { id, branch, path }
+  return {
+    id: typeof record.id === 'string' ? record.id : path,
+    name: typeof record.name === 'string' && record.name.trim()
+      ? record.name.trim()
+      : defaultRootName(path),
+    path
+  }
 }
 
-function normalizeChannels(
-  workspaceChannels: unknown,
-  legacyWorktrees: Array<Record<string, unknown>>
-): string[] {
-  const workspaceList = Array.isArray(workspaceChannels)
-    ? workspaceChannels.filter((value): value is string => typeof value === 'string')
+function normalizeIntegration(value: unknown): ProjectIntegration | null {
+  if (!value || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  const name = typeof record.name === 'string' ? record.name.trim() : ''
+  if (!name) return null
+
+  return {
+    id: typeof record.id === 'string' ? record.id : crypto.randomUUID(),
+    name,
+    type: typeof record.type === 'string' && record.type.trim() ? record.type.trim() : 'custom'
+  }
+}
+
+function normalizeChannelName(value: string): string {
+  return value
+    .normalize('NFKD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+}
+
+function normalizeChannels(value: unknown): string[] {
+  const channels = Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string')
     : []
-  const legacyList = legacyWorktrees.flatMap((worktree) =>
-    Array.isArray(worktree.channels)
-      ? worktree.channels.filter((value): value is string => typeof value === 'string')
-      : []
-  )
-  const deduped = Array.from(new Set([...workspaceList, ...legacyList].map((channel) => channel.trim()).filter(Boolean)))
+  const deduped = Array.from(new Set(channels.map(normalizeChannelName).filter(Boolean)))
   return deduped.length > 0 ? deduped : ['general']
 }
 
-function normalizeWorkspace(value: unknown): Workspace | null {
+function dedupeRoots(roots: ProjectRoot[]): ProjectRoot[] {
+  const seen = new Set<string>()
+  const deduped: ProjectRoot[] = []
+
+  for (const root of roots) {
+    if (seen.has(root.path)) continue
+    seen.add(root.path)
+    deduped.push(root)
+  }
+
+  return deduped
+}
+
+function normalizeProject(value: unknown): Project | null {
   if (!value || typeof value !== 'object') return null
   const record = value as Record<string, unknown>
   const id = typeof record.id === 'string' ? record.id : null
   const name = typeof record.name === 'string' ? record.name : null
+  const relayWorkspaceId = typeof record.relayWorkspaceId === 'string' && record.relayWorkspaceId.trim()
+    ? record.relayWorkspaceId.trim()
+    : id || ''
   const rootPath = typeof record.rootPath === 'string' ? record.rootPath : null
-  const legacyWorktrees = Array.isArray(record.worktrees)
-    ? record.worktrees.filter((entry): entry is Record<string, unknown> => !!entry && typeof entry === 'object')
+  const roots = Array.isArray(record.roots)
+    ? dedupeRoots(record.roots.map(normalizeRoot).filter((entry): entry is ProjectRoot => entry !== null))
     : []
-  const worktrees = legacyWorktrees.map(normalizeWorktree).filter((entry): entry is Worktree => entry !== null)
+  const primaryRootPath = rootPath || roots[0]?.path || null
+  const integrations = Array.isArray(record.integrations)
+    ? record.integrations
+        .map(normalizeIntegration)
+        .filter((entry): entry is ProjectIntegration => entry !== null)
+    : []
 
-  if (!id || !name || !rootPath) return null
+  if (!id || !name || !primaryRootPath || roots.length === 0) return null
 
   return {
     id,
     name,
-    rootPath,
-    channels: normalizeChannels(record.channels, legacyWorktrees),
-    worktrees
+    relayWorkspaceId,
+    rootPath: primaryRootPath,
+    roots,
+    channels: normalizeChannels(record.channels),
+    integrations
   }
 }
 
 function normalizeStore(raw: unknown): StoreData {
   if (!raw || typeof raw !== 'object') return { ...defaultData }
   const record = raw as Record<string, unknown>
-  const workspaces = Array.isArray(record.workspaces)
-    ? record.workspaces.map(normalizeWorkspace).filter((entry): entry is Workspace => entry !== null)
+  const projects = Array.isArray(record.projects)
+    ? record.projects.map(normalizeProject).filter((entry): entry is Project => entry !== null)
     : []
-  const activeWorkspaceId =
-    typeof record.activeWorkspaceId === 'string' || record.activeWorkspaceId === null
-      ? record.activeWorkspaceId
+  const activeProjectId =
+    typeof record.activeProjectId === 'string' || record.activeProjectId === null
+      ? record.activeProjectId
       : null
 
   return {
-    workspaces,
-    activeWorkspaceId
+    projects,
+    activeProjectId
   }
 }
 
@@ -112,56 +165,143 @@ export function saveStore(data: StoreData): void {
   renameSync(tmpPath, storePath)
 }
 
-export function addWorkspace(name: string, rootPath: string): Workspace {
+export function addProject(name: string, rootPath: string): Project {
   const data = loadStore()
-  const ws: Workspace = {
+  const root: ProjectRoot = {
+    id: crypto.randomUUID(),
+    name: defaultRootName(rootPath),
+    path: rootPath
+  }
+  const project: Project = {
     id: crypto.randomUUID(),
     name,
+    relayWorkspaceId: crypto.randomUUID(),
     rootPath,
+    roots: [root],
     channels: ['general'],
-    worktrees: []
+    integrations: []
   }
-  data.workspaces.push(ws)
+  data.projects.push(project)
   saveStore(data)
-  return ws
+  return project
 }
 
-export function removeWorkspace(id: string): void {
+export function removeProject(id: string): void {
   const data = loadStore()
-  data.workspaces = data.workspaces.filter((w) => w.id !== id)
-  if (data.activeWorkspaceId === id) data.activeWorkspaceId = null
-  saveStore(data)
-}
-
-export function setActiveWorkspace(id: string | null): void {
-  const data = loadStore()
-  data.activeWorkspaceId = id
+  data.projects = data.projects.filter((project) => project.id !== id)
+  if (data.activeProjectId === id) data.activeProjectId = null
   saveStore(data)
 }
 
-export function addWorkspaceChannel(workspaceId: string, channelName: string): void {
+export function setActiveProject(id: string | null): void {
   const data = loadStore()
-  const ws = data.workspaces.find((w) => w.id === workspaceId)
-  if (ws && !ws.channels.includes(channelName)) {
-    ws.channels.push(channelName)
+  data.activeProjectId = id
+  saveStore(data)
+}
+
+export function addProjectChannel(projectId: string, channelName: string): void {
+  const data = loadStore()
+  const project = data.projects.find((entry) => entry.id === projectId)
+  const normalizedName = normalizeChannelName(channelName)
+  if (project && normalizedName && !project.channels.includes(normalizedName)) {
+    project.channels.push(normalizedName)
     saveStore(data)
   }
 }
 
-export function removeWorkspaceChannel(workspaceId: string, channelName: string): void {
+export function removeProjectChannel(projectId: string, channelName: string): void {
   const data = loadStore()
-  const ws = data.workspaces.find((w) => w.id === workspaceId)
-  if (ws) {
-    ws.channels = ws.channels.filter((c) => c !== channelName)
+  const project = data.projects.find((entry) => entry.id === projectId)
+  const normalizedName = normalizeChannelName(channelName)
+  if (project) {
+    project.channels = project.channels.filter((channel) => channel !== normalizedName)
     saveStore(data)
   }
 }
 
-export function updateWorkspace(id: string, update: Partial<Workspace>): void {
+export function addProjectRoot(projectId: string, rootPath: string, name?: string): ProjectRoot {
   const data = loadStore()
-  const idx = data.workspaces.findIndex((w) => w.id === id)
+  const project = data.projects.find((entry) => entry.id === projectId)
+  if (!project) {
+    throw new Error('Project not found')
+  }
+
+  const existing = project.roots.find((root) => root.path === rootPath)
+  if (existing) {
+    return existing
+  }
+
+  const root: ProjectRoot = {
+    id: crypto.randomUUID(),
+    name: name?.trim() || defaultRootName(rootPath),
+    path: rootPath
+  }
+
+  project.roots.push(root)
+  saveStore(data)
+  return root
+}
+
+export function removeProjectRoot(projectId: string, rootId: string): void {
+  const data = loadStore()
+  const project = data.projects.find((entry) => entry.id === projectId)
+  if (!project) return
+
+  if (project.roots.length <= 1) {
+    throw new Error('A project must have at least one root')
+  }
+
+  project.roots = project.roots.filter((root) => root.id !== rootId)
+  if (!project.roots.some((root) => root.path === project.rootPath)) {
+    project.rootPath = project.roots[0].path
+  }
+  saveStore(data)
+}
+
+export function addProjectIntegration(
+  projectId: string,
+  name: string,
+  type = 'custom'
+): ProjectIntegration {
+  const data = loadStore()
+  const project = data.projects.find((entry) => entry.id === projectId)
+  if (!project) {
+    throw new Error('Project not found')
+  }
+
+  const integration: ProjectIntegration = {
+    id: crypto.randomUUID(),
+    name: name.trim(),
+    type: type.trim() || 'custom'
+  }
+
+  if (!integration.name) {
+    throw new Error('Integration name is required')
+  }
+
+  project.integrations.push(integration)
+  saveStore(data)
+  return integration
+}
+
+export function removeProjectIntegration(projectId: string, integrationId: string): void {
+  const data = loadStore()
+  const project = data.projects.find((entry) => entry.id === projectId)
+  if (!project) return
+
+  project.integrations = project.integrations.filter((integration) => integration.id !== integrationId)
+  saveStore(data)
+}
+
+export function updateProject(id: string, update: Partial<Project>): void {
+  const data = loadStore()
+  const idx = data.projects.findIndex((project) => project.id === id)
   if (idx !== -1) {
-    data.workspaces[idx] = { ...data.workspaces[idx], ...update }
+    const next = { ...data.projects[idx] }
+    if (typeof update.name === 'string' && update.name.trim()) {
+      next.name = update.name.trim()
+    }
+    data.projects[idx] = next
     saveStore(data)
   }
 }

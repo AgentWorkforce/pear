@@ -2,21 +2,21 @@ import type React from 'react'
 import { useEffect, useRef } from 'react'
 import { Hash } from 'lucide-react'
 import { useAgentStore } from '@/stores/agent-store'
-import { useWorkspaceStore } from '@/stores/workspace-store'
+import { useProjectStore } from '@/stores/project-store'
 import { ChatMessage } from './ChatMessage'
 import { ComposeBar } from './ComposeBar'
 
 export function ChatView(): React.ReactNode {
-  const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId)
+  const activeProjectId = useProjectStore((s) => s.activeProjectId)
   const allMessages = useAgentStore((s) => s.messages)
   const allAgents = useAgentStore((s) => s.agents)
-  const activeChannelName = useWorkspaceStore((s) => s.activeChannelName)
+  const activeChannelName = useProjectStore((s) => s.activeChannelName)
   const scrollRef = useRef<HTMLDivElement>(null)
-  const messages = activeWorkspaceId
-    ? allMessages.filter((msg) => msg.workspaceId === activeWorkspaceId)
+  const messages = activeProjectId
+    ? allMessages.filter((msg) => msg.projectId === activeProjectId)
     : allMessages
-  const agents = activeWorkspaceId
-    ? allAgents.filter((agent) => agent.workspaceId === activeWorkspaceId)
+  const agents = activeProjectId
+    ? allAgents.filter((agent) => agent.projectId === activeProjectId)
     : allAgents
 
   useEffect(() => {

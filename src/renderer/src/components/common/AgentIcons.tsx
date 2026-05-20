@@ -1,7 +1,12 @@
 import type React from 'react'
+import { Bot } from 'lucide-react'
 
 export type AgentIconProps = {
   className?: string
+}
+
+export type AgentHarnessIconProps = AgentIconProps & {
+  cli?: string
 }
 
 export function ClaudeIcon({ className }: AgentIconProps): React.ReactNode {
@@ -63,4 +68,22 @@ export function GeminiIcon({ className }: AgentIconProps): React.ReactNode {
       </defs>
     </svg>
   )
+}
+
+const AGENT_ICON_COMPONENTS = {
+  claude: ClaudeIcon,
+  codex: CodexIcon,
+  copilot: CopilotIcon,
+  opencode: OpenCodeIcon,
+  gemini: GeminiIcon
+} satisfies Record<string, React.ComponentType<AgentIconProps>>
+
+export function getAgentIcon(cli?: string): React.ComponentType<AgentIconProps> | null {
+  if (!cli) return null
+  return AGENT_ICON_COMPONENTS[cli.toLowerCase() as keyof typeof AGENT_ICON_COMPONENTS] || null
+}
+
+export function AgentHarnessIcon({ cli, className }: AgentHarnessIconProps): React.ReactNode {
+  const Icon = getAgentIcon(cli)
+  return Icon ? <Icon className={className} /> : <Bot className={className} aria-hidden="true" />
 }

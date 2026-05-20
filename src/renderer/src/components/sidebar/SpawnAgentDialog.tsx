@@ -2,8 +2,8 @@ import type React from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { X } from 'lucide-react'
 import { ClaudeIcon, CodexIcon } from '@/components/common/AgentIcons'
-import { spawnWorkspaceAgent, type SpawnAgentCli } from '@/lib/spawn-agent'
-import { useWorkspaceStore } from '@/stores/workspace-store'
+import { spawnProjectAgent, type SpawnAgentCli } from '@/lib/spawn-agent'
+import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 
 const AGENT_OPTIONS: Array<{ cli: SpawnAgentCli; label: string; Icon: typeof ClaudeIcon }> = [
@@ -14,7 +14,8 @@ const AGENT_OPTIONS: Array<{ cli: SpawnAgentCli; label: string; Icon: typeof Cla
 export function SpawnAgentDialog(): React.ReactNode {
   const [spawningCli, setSpawningCli] = useState<SpawnAgentCli | null>(null)
   const [error, setError] = useState<string | null>(null)
-  const workspace = useWorkspaceStore((s) => s.getActiveWorkspace())
+  const project = useProjectStore((s) => s.getActiveProject())
+  const root = useProjectStore((s) => s.getActiveRoot())
   const closeDialog = useUIStore((s) => s.closeDialog)
   const openDialog = useUIStore((s) => s.openDialog)
   const dialogRef = useRef<HTMLDivElement>(null)
@@ -47,16 +48,16 @@ export function SpawnAgentDialog(): React.ReactNode {
   }, [])
 
   const handleSpawn = async (cli: SpawnAgentCli): Promise<void> => {
-    if (!workspace) {
+    if (!project) {
       closeDialog()
-      openDialog('add-workspace')
+      openDialog('add-project')
       return
     }
 
     setError(null)
     setSpawningCli(cli)
     try {
-      await spawnWorkspaceAgent(workspace, cli)
+      await spawnProjectAgent(project, cli)
       closeDialog()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -84,9 +85,9 @@ export function SpawnAgentDialog(): React.ReactNode {
         </div>
 
         <div className="px-5 py-5">
-          {workspace ? (
+          {project ? (
             <div className="space-y-3">
-              <div className="truncate text-xs text-[var(--pear-text-faint)]">{workspace.rootPath}</div>
+              <div className="truncate text-xs text-[var(--pear-text-faint)]">{root?.path || project.rootPath}</div>
               <div className="grid grid-cols-2 gap-3">
                 {AGENT_OPTIONS.map(({ cli, label, Icon }) => (
                   <button
@@ -94,9 +95,9 @@ export function SpawnAgentDialog(): React.ReactNode {
                     type="button"
                     autoFocus={cli === 'claude'}
                     onClick={() => handleSpawn(cli)}
-                    disabled={!workspace.rootPathExists || spawningCli !== null}
+                    disabled={!root?.pathExists || spawningCli !== null}
                     className="flex min-h-[92px] flex-col items-center justify-center gap-2 rounded-lg border border-[var(--pear-border)] text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:cursor-not-allowed disabled:opacity-40"
-                    title={workspace.rootPathExists ? `Spawn ${label}` : `Path not found: ${workspace.rootPath}`}
+                    title={root?.pathExists ? `Spawn ${label}` : `Path not found: ${root?.path || project.rootPath}`}
                   >
                     <Icon className="h-6 w-6" />
                     <span>{spawningCli === cli ? 'Starting' : label}</span>
@@ -110,11 +111,11 @@ export function SpawnAgentDialog(): React.ReactNode {
               autoFocus
               onClick={() => {
                 closeDialog()
-                openDialog('add-workspace')
+                openDialog('add-project')
               }}
               className="w-full rounded-lg border border-dashed border-[var(--pear-border)] px-4 py-6 text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]"
             >
-              Add workspace
+              Add project
             </button>
           )}
 

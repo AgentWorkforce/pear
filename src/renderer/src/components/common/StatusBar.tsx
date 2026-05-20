@@ -2,7 +2,7 @@ import type React from 'react'
 import { useEffect, useRef, useState } from 'react'
 import { AlertCircle, Sun, Moon, X } from 'lucide-react'
 import { useAgentStore } from '@/stores/agent-store'
-import { useWorkspaceStore } from '@/stores/workspace-store'
+import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 
 const errorTimeFormatter = new Intl.DateTimeFormat(undefined, {
@@ -22,7 +22,7 @@ export function StatusBar(): React.ReactNode {
   const brokerError = useAgentStore((s) => s.brokerError)
   const brokerErrors = useAgentStore((s) => s.brokerErrors)
   const agents = useAgentStore((s) => s.agents)
-  const workspace = useWorkspaceStore((s) => s.getActiveWorkspace())
+  const project = useProjectStore((s) => s.getActiveProject())
   const theme = useUIStore((s) => s.theme)
   const toggleTheme = useUIStore((s) => s.toggleTheme)
   const [isErrorPanelOpen, setIsErrorPanelOpen] = useState(false)
@@ -30,7 +30,7 @@ export function StatusBar(): React.ReactNode {
   const errorPanelRef = useRef<HTMLDivElement>(null)
 
   const runningAgents = agents.filter(
-    (a) => a.status === 'running' && (!workspace || a.workspaceId === workspace.id)
+    (a) => a.status === 'running' && (!project || a.projectId === project.id)
   ).length
   const canOpenErrorPanel = brokerStatus === 'error' || brokerErrors.length > 0
   const latestError = brokerError || brokerErrors[0]?.message || null
@@ -188,9 +188,9 @@ export function StatusBar(): React.ReactNode {
         <span>{runningAgents} agent{runningAgents !== 1 ? 's' : ''}</span>
       )}
 
-      {workspace && (
+      {project && (
         <div className="flex items-center gap-1.5">
-          <span className="text-[var(--pear-text-secondary)]">{workspace.name}</span>
+          <span className="text-[var(--pear-text-secondary)]">{project.name}</span>
         </div>
       )}
 

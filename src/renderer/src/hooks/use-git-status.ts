@@ -1,18 +1,18 @@
 import { useEffect } from 'react'
 import { useGitStore } from '@/stores/git-store'
-import { useWorkspaceStore } from '@/stores/workspace-store'
+import { useProjectStore } from '@/stores/project-store'
 
 export function useGitStatus(): void {
-  const activeWorktreePath = useWorkspaceStore((s) => s.getActiveWorktree()?.path ?? null)
+  const activeRootPath = useProjectStore((s) => s.getActiveRoot()?.path ?? null)
   const startPolling = useGitStore((s) => s.startPolling)
   const stopPolling = useGitStore((s) => s.stopPolling)
 
   useEffect(() => {
-    if (activeWorktreePath) {
-      startPolling(activeWorktreePath)
+    if (activeRootPath) {
+      startPolling(activeRootPath)
     } else {
       stopPolling()
     }
     return () => stopPolling()
-  }, [activeWorktreePath, startPolling, stopPolling])
+  }, [activeRootPath, startPolling, stopPolling])
 }

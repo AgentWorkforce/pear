@@ -2,10 +2,10 @@ import type React from 'react'
 import { useEffect, useState } from 'react'
 import { ChevronLeft, ChevronRight, Columns2, PanelTop, X, Plus } from 'lucide-react'
 import { ClaudeIcon, CodexIcon } from '@/components/common/AgentIcons'
-import { spawnWorkspaceAgent, type SpawnAgentCli } from '@/lib/spawn-agent'
+import { spawnProjectAgent, type SpawnAgentCli } from '@/lib/spawn-agent'
 import { pear, type TerminalAttachMode } from '@/lib/ipc'
-import { type Agent, useAgentStore } from '@/stores/agent-store'
-import { useWorkspaceStore } from '@/stores/workspace-store'
+import { getAgentKeyForAgent, type Agent, useAgentStore } from '@/stores/agent-store'
+import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 import { PendingMessagesMenu, type QueueDeliveryMode } from './PendingMessagesPane'
 import { TerminalInstance } from './TerminalInstance'
@@ -45,19 +45,19 @@ function getSplitTileClass(count: number, index: number): string {
   return ''
 }
 
-interface TerminalWorkspaceProps {
+interface TerminalProjectProps {
   agent: Agent
   visible: boolean
   active: boolean
   onActivate: () => void
 }
 
-function TerminalWorkspace({
+function TerminalProject({
   agent,
   visible,
   active,
   onActivate
-}: TerminalWorkspaceProps): React.ReactNode {
+}: TerminalProjectProps): React.ReactNode {
   const terminalMode = getTerminalMode(agent)
 
   return (
@@ -65,6 +65,7 @@ function TerminalWorkspace({
       <div className="min-h-0 min-w-0 flex-1">
         <TerminalInstance
           agentName={agent.name}
+          projectId={agent.projectId}
           visible={visible}
           active={active}
           mode={terminalMode}
@@ -124,6 +125,7 @@ function SplitTerminalTile({
         )}
         {visible && (
           <PendingMessagesMenu
+            projectId={agent.projectId}
             agentName={agent.name}
             deliveryMode={getQueueDeliveryMode(agent)}
             refreshToken={agent.pendingDeliveryIds.join('|')}
@@ -132,7 +134,7 @@ function SplitTerminalTile({
         )}
       </div>
       <div className="min-h-0 min-w-0 flex-1">
-        <TerminalWorkspace
+        <TerminalProject
           agent={agent}
           visible={visible}
           active={active}
@@ -146,30 +148,31 @@ function SplitTerminalTile({
 interface SplitTerminalPageProps {
   agents: Agent[]
   visible: boolean
-  activeAgentName: string | null
-  onActivateAgent: (name: string) => void
+  activeAgentKey: string | null
+  onActivateAgent: (key: string) => void
   onDeliveryModeChange: (agent: Agent, mode: QueueDeliveryMode) => void
 }
 
 function SplitTerminalPage({
   agents,
   visible,
-  activeAgentName,
+  activeAgentKey,
   onActivateAgent,
   onDeliveryModeChange
 }: SplitTerminalPageProps): React.ReactNode {
   return (
     <div className={`grid h-full gap-1 p-1 ${getSplitPageGridClass(agents.length)}`}>
       {agents.map((agent, index) => {
-        const active = visible && agent.name === activeAgentName
+        const agentKey = getAgentKeyForAgent(agent)
+        const active = visible && agentKey === activeAgentKey
         return (
           <SplitTerminalTile
-            key={agent.name}
+            key={agentKey}
             agent={agent}
             visible={visible}
             active={active}
             className={getSplitTileClass(agents.length, index)}
-            onActivate={() => onActivateAgent(agent.name)}
+            onActivate={() => onActivateAgent(agentKey)}
             onDeliveryModeChange={onDeliveryModeChange}
           />
         )
@@ -180,13 +183,14 @@ function SplitTerminalPage({
 
 export function TerminalPane(): React.ReactNode {
   const allAgents = useAgentStore((s) => s.agents)
-  const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId)
-  const activeWorkspace = useWorkspaceStore((s) => s.getActiveWorkspace())
-  const agents = activeWorkspaceId
-    ? allAgents.filter((a) => a.workspaceId === activeWorkspaceId)
+  const activeProjectId = useProjectStore((s) => s.activeProjectId)
+  const activeProject = useProjectStore((s) => s.getActiveProject())
+  const activeRoot = useProjectStore((s) => s.getActiveRoot())
+  const agents = activeProjectId
+    ? allAgents.filter((a) => a.projectId === activeProjectId)
     : allAgents
-  const activeAgentName = useAgentStore((s) => s.activeAgentName)
-  const setActiveAgent = useAgentStore((s) => s.setActiveAgent)
+  const activeAgentKey = useAgentStore((s) => s.activeAgentKey)
+  const setActiveAgentKey = useAgentStore((s) => s.setActiveAgentKey)
   const setAgentTerminalMode = useAgentStore((s) => s.setAgentTerminalMode)
   const openDialog = useUIStore((s) => s.openDialog)
   const terminalLayout = useUIStore((s) => s.terminalLayout)
@@ -204,15 +208,15 @@ export function TerminalPane(): React.ReactNode {
       : 'Start another agent to split terminals'
 
   const handleSpawn = async (cli: SpawnAgentCli): Promise<void> => {
-    if (!activeWorkspace) {
-      openDialog('add-workspace')
+    if (!activeProject) {
+      openDialog('add-project')
       return
     }
 
     setSpawnError(null)
     setSpawningCli(cli)
     try {
-      await spawnWorkspaceAgent(activeWorkspace, cli)
+      await spawnProjectAgent(activeProject, cli)
     } catch (err) {
       setSpawnError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -229,12 +233,12 @@ export function TerminalPane(): React.ReactNode {
 
     const previousMode = getTerminalMode(agent)
     setSpawnError(null)
-    setAgentTerminalMode(agent.name, terminalMode)
+    setAgentTerminalMode(agent.projectId, agent.name, terminalMode)
 
     try {
-      await pear.broker.setTerminalMode(agent.name, terminalMode)
+      await pear.broker.setTerminalMode(agent.projectId, agent.name, terminalMode)
     } catch (err) {
-      setAgentTerminalMode(agent.name, previousMode)
+      setAgentTerminalMode(agent.projectId, agent.name, previousMode)
       setSpawnError(err instanceof Error ? err.message : String(err))
     }
   }
@@ -245,22 +249,22 @@ export function TerminalPane(): React.ReactNode {
 
     const nextAgent = splitPages[clampedPage]?.[0]
     if (nextAgent) {
-      setActiveAgent(nextAgent.name)
+      setActiveAgentKey(getAgentKeyForAgent(nextAgent))
     }
   }
 
   useEffect(() => {
     if (agents.length === 0) {
-      if (activeAgentName) {
-        setActiveAgent(null)
+      if (activeAgentKey) {
+        setActiveAgentKey(null)
       }
       return
     }
 
-    if (!activeAgentName || !agents.some((agent) => agent.name === activeAgentName)) {
-      setActiveAgent(agents[0].name)
+    if (!activeAgentKey || !agents.some((agent) => getAgentKeyForAgent(agent) === activeAgentKey)) {
+      setActiveAgentKey(getAgentKeyForAgent(agents[0]))
     }
-  }, [activeAgentName, agents, setActiveAgent])
+  }, [activeAgentKey, agents, setActiveAgentKey])
 
   useEffect(() => {
     if (!splitEnabled) {
@@ -274,28 +278,28 @@ export function TerminalPane(): React.ReactNode {
   }, [splitEnabled, splitPageCount])
 
   useEffect(() => {
-    if (!splitEnabled || !activeAgentName) return
+    if (!splitEnabled || !activeAgentKey) return
 
-    const activeIndex = agents.findIndex((agent) => agent.name === activeAgentName)
+    const activeIndex = agents.findIndex((agent) => getAgentKeyForAgent(agent) === activeAgentKey)
     if (activeIndex >= 0) {
       setSplitPage(Math.floor(activeIndex / SPLIT_PAGE_SIZE))
     }
-  }, [activeAgentName, agents, splitEnabled])
+  }, [activeAgentKey, agents, splitEnabled])
 
   if (agents.length === 0) {
     return (
       <div className="flex h-full flex-col items-center justify-center bg-[var(--pear-bg)] px-8 text-[var(--pear-text-faint)]">
         <p className="text-sm text-[var(--pear-text-dim)]">
-          {activeWorkspace ? 'No agents running' : 'No workspace selected'}
+          {activeProject ? 'No agents running' : 'No project selected'}
         </p>
-        {activeWorkspace ? (
+        {activeProject ? (
           <div className="mt-4 grid w-full max-w-[340px] grid-cols-2 gap-3">
             <button
               type="button"
               onClick={() => handleSpawn('claude')}
-              disabled={!activeWorkspace.rootPathExists || spawningCli !== null}
+              disabled={!activeRoot?.pathExists || spawningCli !== null}
               className="flex items-center justify-center gap-2 rounded-lg border border-[var(--pear-border)] px-4 py-3 text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:cursor-not-allowed disabled:opacity-40"
-              title={activeWorkspace.rootPathExists ? 'Spawn Claude' : `Path not found: ${activeWorkspace.rootPath}`}
+              title={activeRoot?.pathExists ? 'Spawn Claude' : `Path not found: ${activeRoot?.path || activeProject.rootPath}`}
             >
               <ClaudeIcon className="h-4 w-4" />
               <span>{spawningCli === 'claude' ? 'Starting' : 'Claude'}</span>
@@ -303,9 +307,9 @@ export function TerminalPane(): React.ReactNode {
             <button
               type="button"
               onClick={() => handleSpawn('codex')}
-              disabled={!activeWorkspace.rootPathExists || spawningCli !== null}
+              disabled={!activeRoot?.pathExists || spawningCli !== null}
               className="flex items-center justify-center gap-2 rounded-lg border border-[var(--pear-border)] px-4 py-3 text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:cursor-not-allowed disabled:opacity-40"
-              title={activeWorkspace.rootPathExists ? 'Spawn Codex' : `Path not found: ${activeWorkspace.rootPath}`}
+              title={activeRoot?.pathExists ? 'Spawn Codex' : `Path not found: ${activeRoot?.path || activeProject.rootPath}`}
             >
               <CodexIcon className="h-4 w-4" />
               <span>{spawningCli === 'codex' ? 'Starting' : 'Codex'}</span>
@@ -314,10 +318,10 @@ export function TerminalPane(): React.ReactNode {
         ) : (
           <button
             type="button"
-            onClick={() => openDialog('add-workspace')}
+            onClick={() => openDialog('add-project')}
             className="mt-4 rounded-lg border border-dashed border-[var(--pear-border)] px-6 py-3 text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]"
           >
-            + Add workspace
+            + Add project
           </button>
         )}
         {spawnError && (
@@ -336,14 +340,19 @@ export function TerminalPane(): React.ReactNode {
         <div className="flex flex-1 overflow-x-auto">
           {agents.map((agent) => (
             <div
-              key={agent.name}
+              key={getAgentKeyForAgent(agent)}
               role="tab"
               tabIndex={0}
-              aria-selected={activeAgentName === agent.name}
-              onClick={() => setActiveAgent(agent.name)}
-              onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setActiveAgent(agent.name) } }}
+              aria-selected={activeAgentKey === getAgentKeyForAgent(agent)}
+              onClick={() => setActiveAgentKey(getAgentKeyForAgent(agent))}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  setActiveAgentKey(getAgentKeyForAgent(agent))
+                }
+              }}
               className={`group my-1 flex cursor-pointer items-center gap-2.5 rounded-xl border border-transparent px-4 py-3 text-sm transition-colors ${
-                activeAgentName === agent.name
+                activeAgentKey === getAgentKeyForAgent(agent)
                   ? 'bg-[var(--pear-bg)] text-[var(--pear-text)] shadow-sm'
                   : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)]'
               }`}
@@ -364,7 +373,7 @@ export function TerminalPane(): React.ReactNode {
                 <button
                   onClick={(e) => {
                     e.stopPropagation()
-                    pear.broker.releaseAgent(agent.name)
+                    pear.broker.releaseAgent(agent.projectId, agent.name)
                   }}
                   className="ml-1 rounded-md p-1 opacity-0 hover:bg-[var(--pear-bg-overlay)] group-hover:opacity-100"
                   title="Release agent"
@@ -414,7 +423,7 @@ export function TerminalPane(): React.ReactNode {
             const visible = pageIndex === splitPage
             return (
               <div
-                key={pageAgents.map((agent) => agent.name).join('|')}
+                key={pageAgents.map(getAgentKeyForAgent).join('|')}
                 className="absolute inset-0 transition-transform duration-300 ease-out"
                 style={{ transform: `translateX(${(pageIndex - splitPage) * 100}%)` }}
                 aria-hidden={!visible}
@@ -422,8 +431,8 @@ export function TerminalPane(): React.ReactNode {
                 <SplitTerminalPage
                   agents={pageAgents}
                   visible={visible}
-                  activeAgentName={activeAgentName}
-                  onActivateAgent={setActiveAgent}
+                  activeAgentKey={activeAgentKey}
+                  onActivateAgent={setActiveAgentKey}
                   onDeliveryModeChange={(agent, mode) => void handleDeliveryModeChange(agent, mode)}
                 />
               </div>
@@ -458,7 +467,7 @@ export function TerminalPane(): React.ReactNode {
             <div className="absolute bottom-2 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1 rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-2 py-1">
               {splitPages.map((pageAgents, pageIndex) => (
                 <button
-                  key={pageAgents.map((agent) => agent.name).join('|')}
+                  key={pageAgents.map(getAgentKeyForAgent).join('|')}
                   type="button"
                   onClick={() => goToSplitPage(pageIndex)}
                   className={`h-1.5 rounded-full transition-all ${
@@ -476,11 +485,12 @@ export function TerminalPane(): React.ReactNode {
       ) : (
         <div className="relative min-h-0 flex-1">
           {agents.map((agent) => {
-            const active = agent.name === activeAgentName
+            const agentKey = getAgentKeyForAgent(agent)
+            const active = agentKey === activeAgentKey
 
             return (
               <div
-                key={agent.name}
+                key={agentKey}
                 className="absolute inset-0"
                 style={{ display: active ? 'block' : 'none' }}
               >
@@ -488,7 +498,7 @@ export function TerminalPane(): React.ReactNode {
                   agent={agent}
                   visible={active}
                   active={active}
-                  onActivate={() => setActiveAgent(agent.name)}
+                  onActivate={() => setActiveAgentKey(agentKey)}
                   onDeliveryModeChange={(targetAgent, mode) => void handleDeliveryModeChange(targetAgent, mode)}
                 />
               </div>

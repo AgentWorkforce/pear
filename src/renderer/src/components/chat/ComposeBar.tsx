@@ -2,7 +2,6 @@ import type React from 'react'
 import { useEffect, useRef, useState } from 'react'
 import {
   AtSign,
-  Bot,
   Bold,
   Code,
   Italic,
@@ -17,9 +16,10 @@ import {
   Underline,
   Video
 } from 'lucide-react'
+import { AgentHarnessIcon } from '@/components/common/AgentIcons'
 import { pear } from '@/lib/ipc'
 import { useAgentStore } from '@/stores/agent-store'
-import { useWorkspaceStore } from '@/stores/workspace-store'
+import { useProjectStore } from '@/stores/project-store'
 
 interface ComposerChromeButtonProps {
   label: string
@@ -112,13 +112,13 @@ export function ComposeBar(): React.ReactNode {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const agents = useAgentStore((s) => s.agents)
   const addHumanMessage = useAgentStore((s) => s.addHumanMessage)
-  const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId)
-  const activeChannelName = useWorkspaceStore((s) => s.activeChannelName)
-  const activeChannelPrefixed = useWorkspaceStore((s) => s.getActiveChannelPrefixed())
+  const activeProjectId = useProjectStore((s) => s.activeProjectId)
+  const activeChannelName = useProjectStore((s) => s.activeChannelName)
+  const activeChannelNameTarget = useProjectStore((s) => s.getActiveChannelName())
   const runningAgents = agents.filter(
-    (a) => a.status === 'running' && (!activeWorkspaceId || a.workspaceId === activeWorkspaceId)
+    (a) => a.status === 'running' && (!activeProjectId || a.projectId === activeProjectId)
   )
-  const isChannelComposer = Boolean(activeChannelName && activeChannelPrefixed)
+  const isChannelComposer = Boolean(activeChannelName && activeChannelNameTarget)
   const mentionMatch = getMentionMatch(text, cursorPosition)
   const mentionToken = mentionMatch ? `${mentionMatch.start}:${mentionMatch.query}` : null
   const mentionSuggestions = mentionMatch
@@ -156,7 +156,7 @@ export function ComposeBar(): React.ReactNode {
 
   useEffect(() => {
     setSelectedMentionIndex(0)
-  }, [mentionToken, activeWorkspaceId])
+  }, [mentionToken, activeProjectId])
 
   useEffect(() => {
     if (mentionToken !== dismissedMentionToken) return
@@ -190,13 +190,16 @@ export function ComposeBar(): React.ReactNode {
     setSending(true)
     setSendError(null)
     try {
-      if (isChannelComposer && activeChannelPrefixed) {
-        await pear.broker.sendMessage({
-          to: `#${activeChannelPrefixed}`,
+      if (!activeProjectId) {
+        throw new Error('No project selected')
+      }
+      if (isChannelComposer && activeChannelNameTarget) {
+        await pear.broker.sendMessage(activeProjectId, {
+          to: `#${activeChannelNameTarget}`,
           text: body,
           from: 'human'
         })
-        addHumanMessage(`#${activeChannelName}`, body, activeWorkspaceId || undefined)
+        addHumanMessage(`#${activeChannelName}`, body, activeProjectId || undefined)
       } else if (recipient === 'broadcast') {
         const targets = runningAgents.map((agent) => agent.name)
         if (targets.length === 0) {
@@ -204,13 +207,13 @@ export function ComposeBar(): React.ReactNode {
         }
         await Promise.all(
           targets.map((target) =>
-            pear.broker.sendMessage({ to: target, text: body, from: 'human' })
+            pear.broker.sendMessage(activeProjectId, { to: target, text: body, from: 'human' })
           )
         )
-        addHumanMessage('*', body, activeWorkspaceId || undefined)
+        addHumanMessage('*', body, activeProjectId || undefined)
       } else {
-        await pear.broker.sendMessage({ to: recipient, text: body, from: 'human' })
-        addHumanMessage(recipient, body, activeWorkspaceId || undefined)
+        await pear.broker.sendMessage(activeProjectId, { to: recipient, text: body, from: 'human' })
+        addHumanMessage(recipient, body, activeProjectId || undefined)
       }
       setText('')
       setCursorPosition(0)
@@ -316,7 +319,10 @@ export function ComposeBar(): React.ReactNode {
                           )}
                         </div>
                         <div className="mt-0.5 flex items-center gap-2 text-xs text-[var(--pear-text-faint)]">
-                          <Bot size={11} />
+                          <AgentHarnessIcon
+                            cli={agent.cli}
+                            className="h-3 w-3 shrink-0 text-[var(--pear-text-faint)]"
+                          />
                           <span>{agent.cli}</span>
                         </div>
                       </div>

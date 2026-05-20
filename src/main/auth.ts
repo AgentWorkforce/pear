@@ -18,7 +18,7 @@ interface UserInfo {
   name?: string
   email?: string
   organizationName?: string
-  workspaceName?: string
+  projectName?: string
 }
 
 interface AuthStatus {
@@ -58,7 +58,7 @@ function normalizeUserInfo(value: unknown): UserInfo | undefined {
   if (typeof record.name === 'string') user.name = record.name
   if (typeof record.email === 'string') user.email = record.email
   if (typeof record.organizationName === 'string') user.organizationName = record.organizationName
-  if (typeof record.workspaceName === 'string') user.workspaceName = record.workspaceName
+  if (typeof record.projectName === 'string') user.projectName = record.projectName
 
   return Object.keys(user).length > 0 ? user : undefined
 }
@@ -121,7 +121,7 @@ async function fetchWhoami(apiUrl: string, accessToken: string): Promise<UserInf
       name: data.user?.name,
       email: data.user?.email,
       organizationName: data.organization?.name,
-      workspaceName: data.workspace?.name
+      projectName: data.project?.name
     }
   } catch {
     return undefined

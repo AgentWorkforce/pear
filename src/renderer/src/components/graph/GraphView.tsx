@@ -11,8 +11,8 @@ import {
   BackgroundVariant
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { useAgentStore } from '@/stores/agent-store'
-import { useWorkspaceStore } from '@/stores/workspace-store'
+import { getAgentKey, getAgentKeyForAgent, useAgentStore } from '@/stores/agent-store'
+import { useProjectStore } from '@/stores/project-store'
 import { AgentNode } from './AgentNode'
 import { MessageEdge } from './MessageEdge'
 import { Network } from 'lucide-react'
@@ -21,20 +21,20 @@ const nodeTypes = { agent: AgentNode }
 const edgeTypes = { message: MessageEdge }
 
 export function GraphView(): React.ReactNode {
-  const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId)
+  const activeProjectId = useProjectStore((s) => s.activeProjectId)
   const allAgents = useAgentStore((s) => s.agents)
   const allRelayMessages = useAgentStore((s) => s.relayMessages)
-  const agents = activeWorkspaceId
-    ? allAgents.filter((agent) => agent.workspaceId === activeWorkspaceId)
+  const agents = activeProjectId
+    ? allAgents.filter((agent) => agent.projectId === activeProjectId)
     : allAgents
-  const relayMessages = activeWorkspaceId
-    ? allRelayMessages.filter((message) => message.workspaceId === activeWorkspaceId)
+  const relayMessages = activeProjectId
+    ? allRelayMessages.filter((message) => message.projectId === activeProjectId)
     : allRelayMessages
 
   const initialNodes: Node[] = useMemo(() => {
     const cols = Math.ceil(Math.sqrt(agents.length))
     return agents.map((agent, i) => ({
-      id: agent.name,
+      id: getAgentKeyForAgent(agent),
       type: 'agent',
       position: { x: (i % cols) * 220 + 50, y: Math.floor(i / cols) * 160 + 50 },
       data: { agent }
@@ -44,7 +44,9 @@ export function GraphView(): React.ReactNode {
   const initialEdges: Edge[] = useMemo(() => {
     const edgeMap = new Map<string, { count: number; lastBody: string }>()
     for (const msg of relayMessages) {
-      const key = `${msg.from}->${msg.target}`
+      const source = getAgentKey(msg.projectId || activeProjectId || undefined, msg.from)
+      const target = getAgentKey(msg.projectId || activeProjectId || undefined, msg.target)
+      const key = `${source}->${target}`
       const existing = edgeMap.get(key)
       edgeMap.set(key, {
         count: (existing?.count || 0) + 1,
@@ -59,7 +61,7 @@ export function GraphView(): React.ReactNode {
       data: { count: val.count, lastBody: val.lastBody },
       animated: true
     }))
-  }, [relayMessages])
+  }, [activeProjectId, relayMessages])
 
   const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes)
   const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges)
@@ -72,12 +74,12 @@ export function GraphView(): React.ReactNode {
     setEdges(initialEdges)
   }, [initialEdges, setEdges])
 
-  const setActiveAgent = useAgentStore((s) => s.setActiveAgent)
+  const setActiveAgentKey = useAgentStore((s) => s.setActiveAgentKey)
   const onNodeClick = useCallback(
     (_: React.MouseEvent, node: Node) => {
-      setActiveAgent(node.id)
+      setActiveAgentKey(node.id)
     },
-    [setActiveAgent]
+    [setActiveAgentKey]
   )
 
   if (agents.length === 0) {

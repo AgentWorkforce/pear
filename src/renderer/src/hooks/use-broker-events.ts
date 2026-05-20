@@ -1,6 +1,6 @@
 import { useEffect } from 'react'
 import { pear } from '@/lib/ipc'
-import { useAgentStore } from '@/stores/agent-store'
+import { getAgentKeyForAgent, useAgentStore } from '@/stores/agent-store'
 import { useUIStore } from '@/stores/ui-store'
 
 export function useBrokerEvents(): void {
@@ -18,11 +18,12 @@ export function useBrokerEvents(): void {
     })
 
     // Menu handlers
-    const unsubNewWs = pear.onMenu('menu:new-workspace', () => openDialog('add-workspace'))
+    const unsubNewWs = pear.onMenu('menu:new-project', () => openDialog('add-project'))
     const unsubSpawn = pear.onMenu('menu:spawn-agent', () => openDialog('spawn-agent'))
     const unsubRelease = pear.onMenu('menu:release-agent', () => {
-      const activeAgent = useAgentStore.getState().activeAgentName
-      if (activeAgent) pear.broker.releaseAgent(activeAgent)
+      const activeAgentKey = useAgentStore.getState().activeAgentKey
+      const agent = useAgentStore.getState().agents.find((entry) => getAgentKeyForAgent(entry) === activeAgentKey)
+      if (agent) pear.broker.releaseAgent(agent.projectId, agent.name)
     })
 
     return () => {

@@ -1,9 +1,11 @@
 import type React from 'react'
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Inbox, PauseCircle, Radio, Send } from 'lucide-react'
 import { pear, type PendingRelayMessage } from '@/lib/ipc'
+import { useAgentStore, type ChatMessage } from '@/stores/agent-store'
 
 interface PendingMessagesMenuProps {
+  projectId?: string
   agentName: string
   deliveryMode: QueueDeliveryMode
   refreshToken?: string
@@ -23,30 +25,49 @@ function formatQueuedTime(value: number): string {
   }).format(date)
 }
 
+function isIncomingAgentMessage(message: ChatMessage, agentName: string): boolean {
+  return message.to === agentName || (message.to === '*' && message.from !== agentName)
+}
+
+function formatMessageRoute(message: ChatMessage): string {
+  if (message.to === '*') return 'broadcast'
+  return `to ${message.to}`
+}
+
 export function PendingMessagesMenu({
+  projectId,
   agentName,
   deliveryMode,
   refreshToken,
   onDeliveryModeChange
 }: PendingMessagesMenuProps): React.ReactNode {
-  const [messages, setMessages] = useState<PendingRelayMessage[]>([])
+  const allMessages = useAgentStore((s) => s.messages)
+  const [heldMessages, setHeldMessages] = useState<PendingRelayMessage[]>([])
   const [loading, setLoading] = useState(false)
   const [flushing, setFlushing] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [open, setOpen] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
+  const agentMessages = useMemo(
+    () => allMessages.filter((message) => isIncomingAgentMessage(message, agentName)),
+    [agentName, allMessages]
+  )
+  const recentMessages = useMemo(
+    () => agentMessages.slice(-8).reverse(),
+    [agentMessages]
+  )
 
   const loadPending = useCallback(async (): Promise<void> => {
     setLoading(true)
     setError(null)
     try {
-      setMessages(await pear.broker.getPending(agentName))
+      setHeldMessages(await pear.broker.getPending(projectId, agentName))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load held messages')
     } finally {
       setLoading(false)
     }
-  }, [agentName])
+  }, [agentName, projectId])
 
   useEffect(() => {
     void loadPending()
@@ -67,11 +88,11 @@ export function PendingMessagesMenu({
   }, [open])
 
   const handleFlush = async (): Promise<void> => {
-    if (!messages.length || flushing) return
+    if (!heldMessages.length || flushing) return
     setFlushing(true)
     setError(null)
     try {
-      await pear.broker.flushPending(agentName)
+      await pear.broker.flushPending(projectId, agentName)
       await loadPending()
       setOpen(false)
     } catch (err) {
@@ -84,13 +105,32 @@ export function PendingMessagesMenu({
   const handleModeChange = (mode: QueueDeliveryMode): void => {
     if (mode === deliveryMode) return
     onDeliveryModeChange(mode)
-    if (mode === 'auto') {
-      setOpen(false)
-    }
   }
 
   const modeIsHeld = deliveryMode === 'drive'
-  const countLabel = `${messages.length} held`
+  const totalMessageCount = agentMessages.length + heldMessages.length
+  const countActive = modeIsHeld ? heldMessages.length > 0 : totalMessageCount > 0
+  const emptyHeldCount = modeIsHeld && totalMessageCount === 0
+  const emptyLiveCount = !modeIsHeld && totalMessageCount === 0
+  const primaryCountLabel = modeIsHeld
+    ? emptyHeldCount
+      ? '0'
+      : `${heldMessages.length} held`
+    : emptyLiveCount
+      ? '0'
+      : `${totalMessageCount} total`
+  const secondaryCountLabel = modeIsHeld && !emptyHeldCount ? `${totalMessageCount} total` : null
+  const dropdownCountLabel = modeIsHeld
+    ? emptyHeldCount
+      ? '0 messages'
+      : `${heldMessages.length} held / ${totalMessageCount} total message${totalMessageCount === 1 ? '' : 's'}`
+    : `${totalMessageCount} message${totalMessageCount === 1 ? '' : 's'}`
+  const hasHeldMessages = heldMessages.length > 0
+  const hasRecentMessages = recentMessages.length > 0
+  const showEmptyState = !loading && !hasHeldMessages && !hasRecentMessages
+  const showLoadingState = loading && !hasHeldMessages && !hasRecentMessages
+  const showHeldSection = hasHeldMessages
+  const showRecentSection = hasRecentMessages
 
   return (
     <div
@@ -98,22 +138,23 @@ export function PendingMessagesMenu({
       className="titlebar-nodrag relative ml-auto flex shrink-0 items-center gap-1.5"
       onPointerDown={(event) => event.stopPropagation()}
     >
-      {modeIsHeld && (
-        <button
-          type="button"
-          onClick={() => setOpen((current) => !current)}
-          aria-expanded={open}
-          className={`flex h-8 cursor-pointer items-center gap-1.5 rounded-md border px-2 text-[11px] font-medium transition-colors ${
-            messages.length > 0
-              ? 'border-[var(--pear-accent-dim)] bg-[var(--pear-bg-overlay)] text-[var(--pear-text)] hover:bg-[var(--pear-bg-surface-hover)]'
-              : 'border-[var(--pear-border-subtle)] text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]'
-          }`}
-          title="Show held messages"
-        >
-          <Inbox size={12} />
-          <span>{countLabel}</span>
-        </button>
-      )}
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        aria-expanded={open}
+        className={`flex h-8 cursor-pointer items-center gap-1.5 rounded-md border px-2 text-[11px] font-medium transition-colors ${
+          countActive
+            ? 'border-[var(--pear-accent-dim)] bg-[var(--pear-bg-overlay)] text-[var(--pear-text)] hover:bg-[var(--pear-bg-surface-hover)]'
+            : 'border-[var(--pear-border-subtle)] text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]'
+        }`}
+        title="Show messages"
+      >
+        <Inbox size={12} />
+        <span>{primaryCountLabel}</span>
+        {secondaryCountLabel && (
+          <span className="text-[var(--pear-text-faint)]">{secondaryCountLabel}</span>
+        )}
+      </button>
 
       <div className="flex rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] p-0.5">
         <button
@@ -154,22 +195,24 @@ export function PendingMessagesMenu({
         />
       )}
 
-      {open && modeIsHeld && (
+      {open && (
         <div className="absolute right-0 top-[calc(100%+6px)] z-30 w-[340px] max-w-[calc(100vw-24px)] overflow-hidden rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] shadow-2xl">
           <div className="flex h-10 items-center gap-2 border-b border-[var(--pear-border-subtle)] px-3">
             <div className="min-w-0 flex-1 truncate text-xs font-semibold text-[var(--pear-text)]">
-              {messages.length} held message{messages.length === 1 ? '' : 's'}
+              {dropdownCountLabel}
             </div>
-            <button
-              type="button"
-              onClick={() => void handleFlush()}
-              disabled={!messages.length || flushing}
-              className="flex h-7 cursor-pointer items-center gap-1.5 rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-2 text-[11px] text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)] disabled:cursor-not-allowed disabled:opacity-45"
-              title="Inject held messages"
-            >
-              <Send size={12} />
-              <span>{flushing ? 'Injecting' : 'Inject'}</span>
-            </button>
+            {hasHeldMessages && (
+              <button
+                type="button"
+                onClick={() => void handleFlush()}
+                disabled={!heldMessages.length || flushing}
+                className="flex h-7 cursor-pointer items-center gap-1.5 rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-2 text-[11px] text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)] disabled:cursor-not-allowed disabled:opacity-45"
+                title="Inject held messages"
+              >
+                <Send size={12} />
+                <span>{flushing ? 'Injecting' : 'Inject'}</span>
+              </button>
+            )}
           </div>
 
           {error && (
@@ -179,33 +222,80 @@ export function PendingMessagesMenu({
           )}
 
           <div className="max-h-[320px] overflow-y-auto p-3">
-            {!messages.length && !loading ? (
-              <div className="flex h-24 items-center justify-center text-center text-xs text-[var(--pear-text-faint)]">
-                No held messages
+            {showEmptyState ? (
+              <div className="rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 py-6 text-center text-xs text-[var(--pear-text-faint)]">
+                No messages
+              </div>
+            ) : showLoadingState ? (
+              <div className="rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 py-6 text-center text-xs text-[var(--pear-text-faint)]">
+                Loading messages
               </div>
             ) : (
-              <div className="space-y-2">
-                {messages.map((message, index) => {
-                  const queuedAt = formatQueuedTime(message.queued_at_ms)
-                  return (
-                    <article
-                      key={message.event_id || `${message.from}-${message.queued_at_ms}-${index}`}
-                      className="rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-surface)] p-3"
-                    >
-                      <div className="mb-2 flex items-center gap-2 text-[11px] text-[var(--pear-text-faint)]">
-                        <span className="min-w-0 flex-1 truncate text-[var(--pear-text-secondary)]">
-                          {message.from}
-                        </span>
-                        <span className="shrink-0">{message.mode}</span>
-                        {queuedAt && <span className="shrink-0">{queuedAt}</span>}
-                      </div>
-                      <div className="whitespace-pre-wrap break-words text-xs leading-5 text-[var(--pear-text)]">
-                        {message.body}
-                      </div>
-                    </article>
-                  )
-                })}
-              </div>
+              <>
+                {showHeldSection && (
+                  <section>
+                    <div className="mb-2 flex items-center justify-between text-[11px] font-medium uppercase tracking-wide text-[var(--pear-text-faint)]">
+                      <span>Held</span>
+                      <span>{heldMessages.length}</span>
+                    </div>
+                    <div className="space-y-2">
+                      {heldMessages.map((message, index) => {
+                        const queuedAt = formatQueuedTime(message.queued_at_ms)
+                        return (
+                          <article
+                            key={message.event_id || `${message.from}-${message.queued_at_ms}-${index}`}
+                            className="rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-surface)] p-3"
+                          >
+                            <div className="mb-2 flex items-center gap-2 text-[11px] text-[var(--pear-text-faint)]">
+                              <span className="min-w-0 flex-1 truncate text-[var(--pear-text-secondary)]">
+                                {message.from}
+                              </span>
+                              <span className="shrink-0">{message.mode}</span>
+                              {queuedAt && <span className="shrink-0">{queuedAt}</span>}
+                            </div>
+                            <div className="whitespace-pre-wrap break-words text-xs leading-5 text-[var(--pear-text)]">
+                              {message.body}
+                            </div>
+                          </article>
+                        )
+                      })}
+                    </div>
+                  </section>
+                )}
+
+                {showRecentSection && (
+                  <section
+                    className={showHeldSection ? 'mt-3 border-t border-[var(--pear-border-subtle)] pt-3' : ''}
+                  >
+                    <div className="mb-2 flex items-center justify-between text-[11px] font-medium uppercase tracking-wide text-[var(--pear-text-faint)]">
+                      <span>Recent</span>
+                      <span>{agentMessages.length}</span>
+                    </div>
+                    <div className="space-y-2">
+                      {recentMessages.map((message) => {
+                        const sentAt = formatQueuedTime(message.timestamp)
+                        return (
+                          <article
+                            key={message.id}
+                            className="rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-surface)] p-3"
+                          >
+                            <div className="mb-2 flex items-center gap-2 text-[11px] text-[var(--pear-text-faint)]">
+                              <span className="min-w-0 flex-1 truncate text-[var(--pear-text-secondary)]">
+                                {message.isHuman ? 'You' : message.from}
+                              </span>
+                              <span className="shrink-0">{formatMessageRoute(message)}</span>
+                              {sentAt && <span className="shrink-0">{sentAt}</span>}
+                            </div>
+                            <div className="whitespace-pre-wrap break-words text-xs leading-5 text-[var(--pear-text)]">
+                              {message.body}
+                            </div>
+                          </article>
+                        )
+                      })}
+                    </div>
+                  </section>
+                )}
+              </>
             )}
           </div>
         </div>

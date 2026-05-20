@@ -15,9 +15,9 @@ interface GitState {
   pollInterval: ReturnType<typeof setInterval> | null
 
   fetchStatus: (path: string) => Promise<void>
-  fetchDiff: (worktreePath: string, file?: string) => Promise<void>
-  selectFile: (file: string | null, worktreePath: string) => void
-  startPolling: (worktreePath: string) => void
+  fetchDiff: (rootPath: string, file?: string) => Promise<void>
+  selectFile: (file: string | null, rootPath: string) => void
+  startPolling: (rootPath: string) => void
   stopPolling: () => void
 }
 
@@ -37,31 +37,31 @@ export const useGitStore = create<GitState>((set, get) => ({
     }
   },
 
-  fetchDiff: async (worktreePath, file?) => {
+  fetchDiff: async (rootPath, file?) => {
     set({ loading: true })
     try {
-      const diff = await pear.git.diff(worktreePath, file)
+      const diff = await pear.git.diff(rootPath, file)
       set({ diff, loading: false })
     } catch {
       set({ diff: '', loading: false })
     }
   },
 
-  selectFile: (file, worktreePath) => {
+  selectFile: (file, rootPath) => {
     set({ selectedFile: file })
     if (file) {
-      get().fetchDiff(worktreePath, file)
+      get().fetchDiff(rootPath, file)
     } else {
-      get().fetchDiff(worktreePath)
+      get().fetchDiff(rootPath)
     }
   },
 
-  startPolling: (worktreePath) => {
+  startPolling: (rootPath) => {
     get().stopPolling()
-    get().fetchStatus(worktreePath)
-    get().fetchDiff(worktreePath)
+    get().fetchStatus(rootPath)
+    get().fetchDiff(rootPath)
     const interval = setInterval(() => {
-      get().fetchStatus(worktreePath)
+      get().fetchStatus(rootPath)
     }, 3000)
     set({ pollInterval: interval })
   },

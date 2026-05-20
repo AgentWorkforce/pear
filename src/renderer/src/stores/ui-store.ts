@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 
-export type ViewMode = 'terminal' | 'chat' | 'graph'
-export type DialogType = 'add-workspace' | 'add-worktree' | 'spawn-agent' | null
+export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings'
+export type DialogType = 'add-project' | 'spawn-agent' | 'command-menu' | null
 export type Theme = 'dark' | 'light'
 export type TerminalLayout = 'tabs' | 'horizontal-split'
 

@@ -5,13 +5,6 @@ import { assertDirectory } from './path-utils'
 
 const exec = promisify(execFile)
 
-export interface WorktreeInfo {
-  path: string
-  branch: string
-  head: string
-  isBare: boolean
-}
-
 export interface FileStatus {
   path: string
   status: 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked'
@@ -34,47 +27,6 @@ async function gitAllowNonZeroExit(args: string[], cwd: string): Promise<string>
     if (typeof stdout === 'string') return stdout
     throw error
   }
-}
-
-export async function listWorktrees(root: string): Promise<WorktreeInfo[]> {
-  const output = await git(['worktree', 'list', '--porcelain'], root)
-  const worktrees: WorktreeInfo[] = []
-  let current: Partial<WorktreeInfo> = {}
-
-  for (const line of output.split('\n')) {
-    if (line.startsWith('worktree ')) {
-      current.path = line.slice(9)
-    } else if (line.startsWith('HEAD ')) {
-      current.head = line.slice(5)
-    } else if (line.startsWith('branch ')) {
-      current.branch = line.slice(7).replace('refs/heads/', '')
-    } else if (line === 'bare') {
-      current.isBare = true
-    } else if (line === '') {
-      if (current.path) {
-        worktrees.push({
-          path: current.path,
-          branch: current.branch || '(detached)',
-          head: current.head || '',
-          isBare: current.isBare || false
-        })
-      }
-      current = {}
-    }
-  }
-  return worktrees
-}
-
-export async function addWorktree(root: string, branch: string, baseBranch?: string): Promise<string> {
-  const worktreePath = `.worktrees/${branch}`
-  const args = ['worktree', 'add', worktreePath, '-b', branch]
-  if (baseBranch) args.push(baseBranch)
-  await git(args, root)
-  return `${root}/${worktreePath}`
-}
-
-export async function removeWorktree(root: string, path: string): Promise<void> {
-  await git(['worktree', 'remove', path, '--force'], root)
 }
 
 export async function getStatus(path: string): Promise<FileStatus[]> {

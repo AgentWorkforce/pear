@@ -1,11 +1,16 @@
 import { pear } from '@/lib/ipc'
-import { useAgentStore } from '@/stores/agent-store'
-import { useWorkspaceStore, type Workspace } from '@/stores/workspace-store'
+import { getAgentKey, useAgentStore } from '@/stores/agent-store'
+import { useProjectStore, type Project } from '@/stores/project-store'
 
 export type SpawnAgentCli = 'claude' | 'codex'
 
-function nextAgentName(cli: SpawnAgentCli): string {
-  const existingNames = new Set(useAgentStore.getState().agents.map((agent) => agent.name))
+function nextAgentName(cli: SpawnAgentCli, projectId: string, liveNames: string[]): string {
+  const existingNames = new Set([
+    ...liveNames,
+    ...useAgentStore.getState().agents
+      .filter((agent) => agent.projectId === projectId)
+      .map((agent) => agent.name)
+  ])
   let index = 1
 
   while (existingNames.has(`${cli}-${index}`)) {
@@ -15,34 +20,47 @@ function nextAgentName(cli: SpawnAgentCli): string {
   return `${cli}-${index}`
 }
 
-export async function spawnWorkspaceAgent(workspace: Workspace, cli: SpawnAgentCli): Promise<string> {
-  if (!workspace.rootPathExists) {
-    throw new Error(`Workspace path not found: ${workspace.rootPath}`)
-  }
-
-  const workspaceStore = useWorkspaceStore.getState()
-  if (workspaceStore.activeWorkspaceId !== workspace.id) {
-    await workspaceStore.setActiveWorkspace(workspace.id)
+export async function spawnProjectAgent(project: Project, cli: SpawnAgentCli): Promise<string> {
+  const projectStore = useProjectStore.getState()
+  if (projectStore.activeProjectId !== project.id) {
+    await projectStore.setActiveProject(project.id)
   } else {
-    await workspaceStore.ensureBroker()
+    await projectStore.ensureBroker()
   }
 
-  const requestedName = nextAgentName(cli)
-  const spawned = await pear.broker.spawnAgent({
+  const root = useProjectStore.getState().getActiveRoot()
+  if (!root?.pathExists) {
+    throw new Error(`Project root not found: ${root?.path || project.rootPath}`)
+  }
+
+  const liveAgents = await pear.broker.listAgents(project.id)
+  const agentStore = useAgentStore.getState()
+  for (const liveAgent of liveAgents) {
+    agentStore.trackSpawnedAgent(
+      liveAgent.name,
+      project.id,
+      root.id,
+      liveAgent.cli || cli,
+      root.path
+    )
+  }
+
+  const requestedName = nextAgentName(cli, project.id, liveAgents.map((agent) => agent.name))
+  const spawned = await pear.broker.spawnAgent(project.id, {
     name: requestedName,
     cli,
-    cwd: workspace.rootPath
+    cwd: root.path
   })
   const name = spawned.name || requestedName
 
   await pear.broker.attachTerminal({
+    projectId: project.id,
     name,
     mode: 'passthrough'
   })
 
-  const agentStore = useAgentStore.getState()
-  agentStore.trackSpawnedAgent(name, workspace.id, undefined, cli)
-  agentStore.setActiveAgent(name)
+  agentStore.trackSpawnedAgent(name, project.id, root.id, cli, root.path)
+  agentStore.setActiveAgentKey(getAgentKey(project.id, name))
 
   return name
 }

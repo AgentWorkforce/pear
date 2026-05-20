@@ -1,10 +1,10 @@
 import type React from 'react'
 import { useState, useEffect, useCallback } from 'react'
-import { Plus, LogOut } from 'lucide-react'
-import { useWorkspaceStore } from '@/stores/workspace-store'
+import { LogOut } from 'lucide-react'
+import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 import { pear } from '@/lib/ipc'
-import { WorkspaceItem } from './WorkspaceItem'
+import { ProjectItem } from './ProjectItem'
 
 function AgentRelayLogo(): React.ReactNode {
   return (
@@ -135,10 +135,10 @@ function AccountMenu(): React.ReactNode {
   )
 }
 
-export function WorkspaceSidebar(): React.ReactNode {
-  const workspaces = useWorkspaceStore((s) => s.workspaces)
-  const activeWorkspaceId = useWorkspaceStore((s) => s.activeWorkspaceId)
-  const openDialog = useUIStore((s) => s.openDialog)
+export function ProjectSidebar(): React.ReactNode {
+  const projects = useProjectStore((s) => s.projects)
+  const activeProjectId = useProjectStore((s) => s.activeProjectId)
+  const setViewMode = useUIStore((s) => s.setViewMode)
 
   return (
     <div className="flex h-full flex-col border-r border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)]/95 backdrop-blur-xl">
@@ -154,29 +154,21 @@ export function WorkspaceSidebar(): React.ReactNode {
         </div>
       </div>
 
-      <div className="titlebar-nodrag flex items-center justify-between px-5 pb-2 pt-4">
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-[var(--pear-text-faint)]">Workspaces</span>
-        <button
-          onClick={() => openDialog('add-workspace')}
-          className="rounded-md p-1.5 text-[var(--pear-text-faint)] hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text)]"
-          title="Add workspace"
-          aria-label="Add workspace"
-        >
-          <Plus size={14} />
-        </button>
+      <div className="titlebar-nodrag px-6 pb-3 pt-5">
+        <span className="text-[11px] font-semibold uppercase tracking-wider text-[var(--pear-text-faint)]">Projects</span>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-4 pb-4">
-        {workspaces.length === 0 ? (
+      <div className="flex-1 space-y-2 overflow-y-auto px-5 pb-5">
+        {projects.length === 0 ? (
           <button
-            onClick={() => openDialog('add-workspace')}
+            onClick={() => setViewMode('project-settings')}
             className="mt-1 w-full rounded-xl border border-dashed border-[var(--pear-border)] px-4 py-6 text-center text-xs text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text-dim)]"
           >
-            + Add workspace
+            Open project settings
           </button>
         ) : (
-          workspaces.map((ws) => (
-            <WorkspaceItem key={ws.id} workspace={ws} isActive={ws.id === activeWorkspaceId} />
+          projects.map((project) => (
+            <ProjectItem key={project.id} project={project} isActive={project.id === activeProjectId} />
           ))
         )}
       </div>
