@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { AgentCurrentState, InboundDeliveryMode, TerminalAttachMode } from '@/lib/ipc'
+import type { AgentCurrentState, BrokerListAgent, InboundDeliveryMode, TerminalAttachMode } from '@/lib/ipc'
 import { useProjectStore } from '@/stores/project-store'
 
 export interface Agent {
@@ -9,6 +9,8 @@ export interface Agent {
   status: 'running' | 'exited'
   activity: 'idle' | 'active'
   currentState: AgentCurrentState
+  lastActivityAtMs?: number
+  typingUntilMs?: number
   projectId?: string
   rootPath?: string
   rootId?: string
@@ -22,6 +24,23 @@ export interface ChatMessage {
   id: string
   from: string
   to: string
+  body: string
+  timestamp: number
+  isHuman: boolean
+  projectId?: string
+  reactions?: ChatReaction[]
+  threadReplies?: ChatThreadReply[]
+}
+
+export interface ChatReaction {
+  emoji: string
+  count: number
+  reactedByHuman: boolean
+}
+
+export interface ChatThreadReply {
+  id: string
+  from: string
   body: string
   timestamp: number
   isHuman: boolean
@@ -46,6 +65,7 @@ const MAX_PTY_BUFFER_CHUNKS = 10_000
 const MAX_BROKER_ERRORS = 12
 const HUMAN_SENDER_NAME = 'human'
 const HUMAN_MESSAGE_DEDUPE_WINDOW_MS = 10_000
+const TYPING_ACTIVITY_WINDOW_MS = 12_000
 
 export function getAgentKey(projectId: string | undefined, name: string): string {
   return `${projectId || 'unknown'}:${name}`
@@ -53,6 +73,15 @@ export function getAgentKey(projectId: string | undefined, name: string): string
 
 export function getAgentKeyForAgent(agent: Pick<Agent, 'projectId' | 'name'>): string {
   return getAgentKey(agent.projectId, agent.name)
+}
+
+export function isAgentTyping(
+  agent: Pick<Agent, 'currentState' | 'typingUntilMs'>,
+  now = Date.now()
+): boolean {
+  return agent.currentState === 'working' &&
+    typeof agent.typingUntilMs === 'number' &&
+    now < agent.typingUntilMs
 }
 
 function matchesAgent(agent: Agent, projectId: string | undefined, name: string): boolean {
@@ -89,11 +118,45 @@ interface BrokerEvent {
 interface TrackSpawnedAgentOptions {
   currentState?: AgentCurrentState
   terminalMode?: TerminalAttachMode
+  lastActivityAt?: string
+  lastActivityMs?: number
 }
 
 function activityFromCurrentState(currentState: AgentCurrentState): Agent['activity'] {
   return currentState === 'idle' ? 'idle' : 'active'
 }
+
+function terminalModeFromInboundDeliveryMode(mode?: InboundDeliveryMode): TerminalAttachMode | undefined {
+  if (!mode) return undefined
+  return mode === 'manual_flush' ? 'drive' : 'passthrough'
+}
+
+function getActivityTimestampMs(
+  lastActivityAt?: string,
+  lastActivityMs?: number,
+  now = Date.now()
+): number | undefined {
+  if (lastActivityAt) {
+    const timestamp = Date.parse(lastActivityAt)
+    if (Number.isFinite(timestamp)) return timestamp
+  }
+
+  if (typeof lastActivityMs !== 'number' || !Number.isFinite(lastActivityMs) || lastActivityMs < 0) {
+    return undefined
+  }
+
+  return lastActivityMs > 1_000_000_000_000 ? lastActivityMs : now - lastActivityMs
+}
+
+function getTypingUntilMs(currentState: AgentCurrentState, lastActivityAtMs?: number): number | undefined {
+  if (currentState !== 'working' || typeof lastActivityAtMs !== 'number') {
+    return undefined
+  }
+  const typingUntilMs = lastActivityAtMs + TYPING_ACTIVITY_WINDOW_MS
+  return typingUntilMs > Date.now() ? typingUntilMs : undefined
+}
+
+const typingExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 function addPendingDelivery(agent: Agent, eventId?: string): Agent {
   if (!eventId || agent.pendingDeliveryIds.includes(eventId)) {
@@ -173,11 +236,44 @@ interface AgentState {
     rootPath?: string,
     options?: TrackSpawnedAgentOptions
   ) => void
+  syncBrokerAgents: (agents: BrokerListAgent[]) => void
   handleBrokerEvent: (event: BrokerEvent) => void
   handleBrokerStatus: (status: { projectId?: string; status: string; error?: string }) => void
   addHumanMessage: (to: string, body: string, projectId?: string) => void
+  addThreadReply: (messageId: string, body: string) => void
+  toggleMessageReaction: (messageId: string, emoji: string) => void
   clearAll: () => void
   getAgentBuffer: (projectId: string | undefined, name: string) => string[]
+}
+
+function scheduleTypingExpiry(
+  key: string,
+  typingUntilMs: number | undefined,
+  set: (updater: (state: AgentState) => Partial<AgentState>) => void
+): void {
+  const existingTimer = typingExpiryTimers.get(key)
+  if (existingTimer) {
+    window.clearTimeout(existingTimer)
+    typingExpiryTimers.delete(key)
+  }
+
+  if (!typingUntilMs) return
+
+  const delay = typingUntilMs - Date.now()
+  if (delay <= 0) return
+
+  const timer = window.setTimeout(() => {
+    typingExpiryTimers.delete(key)
+    set((state) => ({
+      agents: state.agents.map((agent) =>
+        getAgentKeyForAgent(agent) === key && agent.typingUntilMs === typingUntilMs
+          ? { ...agent, typingUntilMs: undefined }
+          : agent
+      )
+    }))
+  }, delay + 50)
+
+  typingExpiryTimers.set(key, timer)
 }
 
 export const useAgentStore = create<AgentState>((set, get) => ({
@@ -201,8 +297,10 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
   // Called right after spawning to associate the agent with a project.
   trackSpawnedAgent: (name, projectId, rootId, cli, rootPath, options) => {
-    const currentState = options?.currentState || 'working'
+    const currentState = options?.currentState || 'idle'
     const activity = activityFromCurrentState(currentState)
+    const lastActivityAtMs = getActivityTimestampMs(options?.lastActivityAt, options?.lastActivityMs)
+    const typingUntilMs = getTypingUntilMs(currentState, lastActivityAtMs)
     set((state) => ({
       agents: state.agents.some((a) => matchesAgent(a, projectId, name))
         ? state.agents.map((a) =>
@@ -215,6 +313,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                   cli: cli || a.cli,
                   currentState,
                   activity,
+                  lastActivityAtMs: lastActivityAtMs ?? a.lastActivityAtMs,
+                  typingUntilMs,
                   terminalMode: options?.terminalMode || a.terminalMode
                 }
               : a
@@ -227,6 +327,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
               status: 'running',
               activity,
               currentState,
+              lastActivityAtMs,
+              typingUntilMs,
               projectId,
               rootId,
               rootPath,
@@ -236,6 +338,68 @@ export const useAgentStore = create<AgentState>((set, get) => ({
             }
           ]
     }))
+    scheduleTypingExpiry(getAgentKey(projectId, name), typingUntilMs, set)
+  },
+
+  syncBrokerAgents: (liveAgents) => {
+    const now = Date.now()
+    set((state) => {
+      const liveByKey = new Map(
+        liveAgents.map((agent) => [getAgentKey(agent.projectId, agent.name), agent])
+      )
+      const existingKeys = new Set(state.agents.map(getAgentKeyForAgent))
+      const nextAgents = state.agents.map((agent) => {
+        const liveAgent = liveByKey.get(getAgentKeyForAgent(agent))
+        if (!liveAgent) return agent
+
+        const currentState = liveAgent.current_state || 'idle'
+        const lastActivityAtMs = getActivityTimestampMs(
+          liveAgent.last_activity_at,
+          liveAgent.last_activity_ms,
+          now
+        )
+        const typingUntilMs = getTypingUntilMs(currentState, lastActivityAtMs)
+        const terminalMode = terminalModeFromInboundDeliveryMode(liveAgent.inboundDeliveryMode)
+        scheduleTypingExpiry(getAgentKeyForAgent(agent), typingUntilMs, set)
+
+        return {
+          ...agent,
+          cli: liveAgent.cli || agent.cli,
+          model: liveAgent.model || agent.model,
+          currentState,
+          activity: activityFromCurrentState(currentState),
+          lastActivityAtMs: lastActivityAtMs ?? agent.lastActivityAtMs,
+          typingUntilMs,
+          terminalMode: terminalMode || agent.terminalMode
+        }
+      })
+
+      for (const liveAgent of liveAgents) {
+        const key = getAgentKey(liveAgent.projectId, liveAgent.name)
+        if (existingKeys.has(key)) continue
+
+        const currentState = liveAgent.current_state || 'idle'
+        const lastActivityAtMs = getActivityTimestampMs(liveAgent.last_activity_at, liveAgent.last_activity_ms, now)
+        const typingUntilMs = getTypingUntilMs(currentState, lastActivityAtMs)
+        scheduleTypingExpiry(key, typingUntilMs, set)
+        nextAgents.push({
+          name: liveAgent.name,
+          cli: liveAgent.cli || 'unknown',
+          model: liveAgent.model,
+          status: 'running',
+          activity: activityFromCurrentState(currentState),
+          currentState,
+          lastActivityAtMs,
+          typingUntilMs,
+          projectId: liveAgent.projectId,
+          terminalMode: terminalModeFromInboundDeliveryMode(liveAgent.inboundDeliveryMode) || 'passthrough',
+          ptyBuffer: [],
+          pendingDeliveryIds: []
+        })
+      }
+
+      return { agents: nextAgents }
+    })
   },
 
   handleBrokerEvent: (event) => {
@@ -251,7 +415,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         const rootId = parentAgent?.rootId
         const rootPath = parentAgent?.rootPath
         const agentKey = getAgentKey(projectId, event.name)
-        const currentState: AgentCurrentState = 'working'
+        const currentState: AgentCurrentState = 'idle'
 
         return {
           agents: state.agents.some((a) => matchesAgent(a, projectId, event.name!))
@@ -264,6 +428,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                       status: 'running',
                       activity: activityFromCurrentState(currentState),
                       currentState,
+                      lastActivityAtMs: a.lastActivityAtMs,
                       projectId: a.projectId || projectId,
                       rootId: a.rootId || rootId,
                       rootPath: a.rootPath || rootPath,
@@ -281,6 +446,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                   status: 'running',
                   activity: activityFromCurrentState(currentState),
                   currentState,
+                  lastActivityAtMs: undefined,
                   projectId,
                   rootId,
                   rootPath,
@@ -300,6 +466,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         const remaining = state.agents.filter((a) => !matchesAgent(a, event.projectId, event.name!))
         const needNewActive = state.activeAgentKey === removedKey
         const nextActiveAgent = remaining.find((a) => a.status === 'running') || remaining[0]
+        scheduleTypingExpiry(removedKey, undefined, set)
         return {
           agents: remaining,
           activeAgentKey: needNewActive && nextActiveAgent
@@ -313,11 +480,16 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       set((state) => ({
         agents: state.agents.map((a) => {
           if (!matchesAgent(a, event.projectId, event.name!)) return a
+          const lastActivityAtMs = Date.now()
+          const typingUntilMs = lastActivityAtMs + TYPING_ACTIVITY_WINDOW_MS
+          scheduleTypingExpiry(getAgentKeyForAgent(a), typingUntilMs, set)
           const buffer = [...a.ptyBuffer, event.chunk!]
           return {
             ...a,
             activity: 'active',
             currentState: 'working',
+            lastActivityAtMs,
+            typingUntilMs,
             ptyBuffer: buffer.length > MAX_PTY_BUFFER_CHUNKS
               ? buffer.slice(buffer.length - MAX_PTY_BUFFER_CHUNKS)
               : buffer
@@ -338,11 +510,19 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       }))
     } else if (kind === 'delivery_active' && event.name) {
       set((state) => ({
-        agents: state.agents.map((a) =>
-          matchesAgent(a, event.projectId, event.name!)
-            ? { ...addPendingDelivery(a, event.event_id), activity: 'active', currentState: 'working' }
-            : a
-        )
+        agents: state.agents.map((a) => {
+          if (!matchesAgent(a, event.projectId, event.name!)) return a
+          const lastActivityAtMs = Date.now()
+          const typingUntilMs = lastActivityAtMs + TYPING_ACTIVITY_WINDOW_MS
+          scheduleTypingExpiry(getAgentKeyForAgent(a), typingUntilMs, set)
+          return {
+            ...addPendingDelivery(a, event.event_id),
+            activity: 'active',
+            currentState: 'working',
+            lastActivityAtMs,
+            typingUntilMs
+          }
+        })
       }))
     } else if (
       ['delivery_injected', 'delivery_verified', 'delivery_ack', 'delivery_failed', 'message_delivery_confirmed', 'message_delivery_failed'].includes(kind) &&
@@ -352,9 +532,13 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         agents: state.agents.map((a) => {
           if (!matchesAgent(a, event.projectId, event.name!)) return a
           const nextAgent = clearPendingDeliveries(a, event.event_id)
-          return ['delivery_injected', 'delivery_verified', 'message_delivery_confirmed'].includes(kind)
-            ? { ...nextAgent, activity: 'active', currentState: 'working' }
-            : nextAgent
+          if (!['delivery_injected', 'delivery_verified', 'message_delivery_confirmed'].includes(kind)) {
+            return nextAgent
+          }
+          const lastActivityAtMs = Date.now()
+          const typingUntilMs = lastActivityAtMs + TYPING_ACTIVITY_WINDOW_MS
+          scheduleTypingExpiry(getAgentKeyForAgent(a), typingUntilMs, set)
+          return { ...nextAgent, activity: 'active', currentState: 'working', lastActivityAtMs, typingUntilMs }
         })
       }))
     } else if (kind === 'agent_pending_drained' && event.name) {
@@ -403,7 +587,10 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           agents: state.agents.map((a) => {
             const nextAgent = matchesAgent(a, projectId, event.from!) ? clearPendingDeliveries(a) : a
             if (targetName && matchesAgent(nextAgent, projectId, targetName) && nextAgent.terminalMode !== 'drive') {
-              return { ...nextAgent, activity: 'active', currentState: 'working' }
+              const lastActivityAtMs = Date.now()
+              const typingUntilMs = lastActivityAtMs + TYPING_ACTIVITY_WINDOW_MS
+              scheduleTypingExpiry(getAgentKeyForAgent(nextAgent), typingUntilMs, set)
+              return { ...nextAgent, activity: 'active', currentState: 'working', lastActivityAtMs, typingUntilMs }
             }
             return nextAgent
           }),
@@ -413,19 +600,19 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       })
     } else if (kind === 'agent_blocked_on_send' && event.name) {
       set((state) => ({
-        agents: state.agents.map((a) =>
-          matchesAgent(a, event.projectId, event.name!)
-            ? { ...a, activity: 'active', currentState: 'blocked_on_send' }
-            : a
-        )
+        agents: state.agents.map((a) => {
+          if (!matchesAgent(a, event.projectId, event.name!)) return a
+          scheduleTypingExpiry(getAgentKeyForAgent(a), undefined, set)
+          return { ...a, activity: 'active', currentState: 'blocked_on_send', lastActivityAtMs: Date.now(), typingUntilMs: undefined }
+        })
       }))
     } else if (kind === 'agent_idle' && event.name) {
       set((state) => ({
-        agents: state.agents.map((a) =>
-          matchesAgent(a, event.projectId, event.name!)
-            ? { ...clearPendingDeliveries(a), activity: 'idle', currentState: 'idle' }
-            : a
-        )
+        agents: state.agents.map((a) => {
+          if (!matchesAgent(a, event.projectId, event.name!)) return a
+          scheduleTypingExpiry(getAgentKeyForAgent(a), undefined, set)
+          return { ...clearPendingDeliveries(a), activity: 'idle', currentState: 'idle', typingUntilMs: undefined }
+        })
       }))
     }
   },
@@ -471,6 +658,74 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       messages: isDuplicateHumanEcho(state.messages, msg)
         ? state.messages
         : [...state.messages, msg]
+    }))
+  },
+
+  addThreadReply: (messageId, body) => {
+    const trimmedBody = body.trim()
+    if (!trimmedBody) return
+
+    set((state) => ({
+      messages: state.messages.map((message) => {
+        if (message.id !== messageId) return message
+
+        const reply: ChatThreadReply = {
+          id: crypto.randomUUID(),
+          from: HUMAN_SENDER_NAME,
+          body: trimmedBody,
+          timestamp: Date.now(),
+          isHuman: true,
+          projectId: message.projectId
+        }
+
+        return {
+          ...message,
+          threadReplies: [...(message.threadReplies || []), reply]
+        }
+      })
+    }))
+  },
+
+  toggleMessageReaction: (messageId, emoji) => {
+    set((state) => ({
+      messages: state.messages.map((message) => {
+        if (message.id !== messageId) return message
+
+        const reactions = message.reactions || []
+        const existingReaction = reactions.find((reaction) => reaction.emoji === emoji)
+
+        if (!existingReaction) {
+          return {
+            ...message,
+            reactions: [...reactions, { emoji, count: 1, reactedByHuman: true }]
+          }
+        }
+
+        if (!existingReaction.reactedByHuman) {
+          return {
+            ...message,
+            reactions: reactions.map((reaction) =>
+              reaction.emoji === emoji
+                ? { ...reaction, count: reaction.count + 1, reactedByHuman: true }
+                : reaction
+            )
+          }
+        }
+
+        const nextCount = existingReaction.count - 1
+        const nextReactions = nextCount <= 0
+          ? reactions.filter((reaction) => reaction.emoji !== emoji)
+          : reactions.map((reaction) =>
+              reaction.emoji === emoji
+                ? { ...reaction, count: nextCount, reactedByHuman: false }
+                : reaction
+            )
+
+        return {
+          ...message,
+          reactions: nextReactions
+        }
+      })
     }))
   },
 

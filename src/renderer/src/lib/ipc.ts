@@ -21,6 +21,8 @@ export interface BrokerListAgent {
   projectId: string
   cli?: string
   model?: string
+  last_activity_at?: string
+  last_activity_ms?: number
   current_state?: AgentCurrentState
   inboundDeliveryMode?: InboundDeliveryMode
 }

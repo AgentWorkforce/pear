@@ -1,10 +1,11 @@
 import type React from 'react'
-import { Fragment, useEffect, useMemo, useRef } from 'react'
+import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import { Hash } from 'lucide-react'
 import { useAgentStore, type ChatMessage as ChatMessageType } from '@/stores/agent-store'
 import { useProjectStore } from '@/stores/project-store'
 import { ChatMessage } from './ChatMessage'
 import { ComposeBar } from './ComposeBar'
+import { ThreadPanel } from './ThreadPanel'
 
 function normalizeMessageChannel(target: string): string {
   return target.trim().replace(/^#/, '')
@@ -91,8 +92,11 @@ export function ChatView(): React.ReactNode {
   const activeProjectId = useProjectStore((s) => s.activeProjectId)
   const allMessages = useAgentStore((s) => s.messages)
   const allAgents = useAgentStore((s) => s.agents)
+  const addThreadReply = useAgentStore((s) => s.addThreadReply)
+  const toggleMessageReaction = useAgentStore((s) => s.toggleMessageReaction)
   const activeChannelName = useProjectStore((s) => s.activeChannelName)
   const scrollRef = useRef<HTMLDivElement>(null)
+  const [activeThreadMessageId, setActiveThreadMessageId] = useState<string | null>(null)
 
   const projectMessages = useMemo(
     () => activeProjectId
@@ -115,12 +119,20 @@ export function ChatView(): React.ReactNode {
       : allAgents,
     [activeProjectId, allAgents]
   )
+  const activeThreadMessage = activeThreadMessageId
+    ? messages.find((message) => message.id === activeThreadMessageId) || null
+    : null
 
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
   }, [activeChannelName, messages.length])
+
+  useEffect(() => {
+    if (!activeThreadMessageId || activeThreadMessage) return
+    setActiveThreadMessageId(null)
+  }, [activeThreadMessage, activeThreadMessageId])
 
   if (agents.length === 0 && !activeChannelName) {
     return (
@@ -150,31 +162,49 @@ export function ChatView(): React.ReactNode {
         </span>
       </div>
 
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-5">
-        {messages.length === 0 ? (
-          <div className="flex h-full items-center justify-center text-sm text-[var(--pear-text-faint)]">
-            {activeChannelName
-              ? `No messages in #${activeChannelName} yet.`
-              : 'No messages yet.'}
-          </div>
-        ) : (
-          <div className="space-y-0.5">
-            {messages.map((message, index) => {
-              const previousMessage = messages[index - 1]
-              const showDateDivider = !previousMessage || !isSameDay(previousMessage.timestamp, message.timestamp)
+      <div className="flex min-h-0 flex-1">
+        <div className="flex min-w-0 flex-1 flex-col">
+          <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-5">
+            {messages.length === 0 ? (
+              <div className="flex h-full items-center justify-center text-sm text-[var(--pear-text-faint)]">
+                {activeChannelName
+                  ? `No messages in #${activeChannelName} yet.`
+                  : 'No messages yet.'}
+              </div>
+            ) : (
+              <div className="space-y-0.5">
+                {messages.map((message, index) => {
+                  const previousMessage = messages[index - 1]
+                  const showDateDivider = !previousMessage || !isSameDay(previousMessage.timestamp, message.timestamp)
 
-              return (
-                <Fragment key={message.id}>
-                  {showDateDivider && <DateDivider timestamp={message.timestamp} />}
-                  <ChatMessage message={message} showRoute={!activeChannelName} />
-                </Fragment>
-              )
-            })}
+                  return (
+                    <Fragment key={message.id}>
+                      {showDateDivider && <DateDivider timestamp={message.timestamp} />}
+                      <ChatMessage
+                        message={message}
+                        showRoute={!activeChannelName}
+                        activeThread={activeThreadMessageId === message.id}
+                        onReply={(nextMessage) => setActiveThreadMessageId(nextMessage.id)}
+                        onReact={toggleMessageReaction}
+                      />
+                    </Fragment>
+                  )
+                })}
+              </div>
+            )}
           </div>
+
+          <ComposeBar />
+        </div>
+
+        {activeThreadMessage && (
+          <ThreadPanel
+            message={activeThreadMessage}
+            onClose={() => setActiveThreadMessageId(null)}
+            onReply={addThreadReply}
+          />
         )}
       </div>
-
-      <ComposeBar />
     </div>
   )
 }

@@ -4,7 +4,7 @@ import { ChevronLeft, ChevronRight, Columns2, PanelTop, X, Plus } from 'lucide-r
 import { AgentHarnessIcon, ClaudeIcon, CodexIcon } from '@/components/common/AgentIcons'
 import { spawnProjectAgent, type SpawnAgentCli } from '@/lib/spawn-agent'
 import { pear, type TerminalAttachMode } from '@/lib/ipc'
-import { getAgentKeyForAgent, type Agent, useAgentStore } from '@/stores/agent-store'
+import { getAgentKeyForAgent, isAgentTyping, type Agent, useAgentStore } from '@/stores/agent-store'
 import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 import { PendingMessagesMenu, type QueueDeliveryMode } from './PendingMessagesPane'
@@ -138,7 +138,7 @@ function SplitTerminalTile({
         <div className="flex min-w-0 flex-1 items-baseline gap-2">
           <span className="min-w-0 truncate font-medium">{agent.name}</span>
         </div>
-        {agent.currentState === 'working' && <TypingDots />}
+        {isAgentTyping(agent) && <TypingDots />}
         {visible && (
           <PendingMessagesMenu
             projectId={agent.projectId}
@@ -387,7 +387,7 @@ export function TerminalPane(): React.ReactNode {
               </span>
               <div className="flex items-center gap-2">
                 <span className="max-w-[120px] truncate">{agent.name}</span>
-                {agent.currentState === 'working' && <TypingDots />}
+                {isAgentTyping(agent) && <TypingDots />}
               </div>
               {agent.status === 'running' && (
                 <button

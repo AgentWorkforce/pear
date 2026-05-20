@@ -2,7 +2,7 @@ import type React from 'react'
 import { useMemo, useState } from 'react'
 import { AlertTriangle, Hash, LayoutGrid, Pause, Settings } from 'lucide-react'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
-import { getAgentKeyForAgent, useAgentStore, type Agent } from '@/stores/agent-store'
+import { getAgentKeyForAgent, isAgentTyping, useAgentStore, type Agent } from '@/stores/agent-store'
 import { useProjectStore, type Project } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 
@@ -30,20 +30,6 @@ function SectionHeader({ title, count }: SectionHeaderProps): React.ReactNode {
 }
 
 function AgentActivityIndicator({ agent }: { agent: Agent }): React.ReactNode {
-  if (agent.currentState === 'working') {
-    return (
-      <span
-        className="flex h-4 w-6 shrink-0 items-center justify-center gap-0.5 rounded-full border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35 opacity-70"
-        title="Thinking"
-        aria-label="Thinking"
-      >
-        <span className="h-1 w-1 rounded-full bg-[var(--pear-text-faint)] animate-pulse" />
-        <span className="h-1 w-1 rounded-full bg-[var(--pear-text-faint)] animate-pulse [animation-delay:120ms]" />
-        <span className="h-1 w-1 rounded-full bg-[var(--pear-text-faint)] animate-pulse [animation-delay:240ms]" />
-      </span>
-    )
-  }
-
   if (agent.terminalMode === 'drive' || agent.currentState === 'blocked_on_send') {
     const label = agent.currentState === 'blocked_on_send' ? 'Blocked on send' : 'Holding messages'
     return (
@@ -53,6 +39,20 @@ function AgentActivityIndicator({ agent }: { agent: Agent }): React.ReactNode {
         aria-label={label}
       >
         <Pause size={9} strokeWidth={2.4} />
+      </span>
+    )
+  }
+
+  if (isAgentTyping(agent)) {
+    return (
+      <span
+        className="flex h-4 w-6 shrink-0 items-center justify-center gap-0.5 rounded-full border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35 opacity-70"
+        title="Thinking"
+        aria-label="Thinking"
+      >
+        <span className="h-1 w-1 rounded-full bg-[var(--pear-text-faint)] animate-pulse" />
+        <span className="h-1 w-1 rounded-full bg-[var(--pear-text-faint)] animate-pulse [animation-delay:120ms]" />
+        <span className="h-1 w-1 rounded-full bg-[var(--pear-text-faint)] animate-pulse [animation-delay:240ms]" />
       </span>
     )
   }

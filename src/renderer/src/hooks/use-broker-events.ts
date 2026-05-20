@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useCallback, useEffect } from 'react'
 import { pear } from '@/lib/ipc'
 import { getAgentKeyForAgent, useAgentStore } from '@/stores/agent-store'
 import { useUIStore } from '@/stores/ui-store'
@@ -6,7 +6,16 @@ import { useUIStore } from '@/stores/ui-store'
 export function useBrokerEvents(): void {
   const handleBrokerEvent = useAgentStore((s) => s.handleBrokerEvent)
   const handleBrokerStatus = useAgentStore((s) => s.handleBrokerStatus)
+  const syncBrokerAgents = useAgentStore((s) => s.syncBrokerAgents)
   const openDialog = useUIStore((s) => s.openDialog)
+
+  const syncBrokerSnapshot = useCallback(async (projectId?: string): Promise<void> => {
+    try {
+      syncBrokerAgents(await pear.broker.listAgents(projectId))
+    } catch {
+      // The broker is not guaranteed to be running for every app state.
+    }
+  }, [syncBrokerAgents])
 
   useEffect(() => {
     const unsubEvent = pear.broker.onEvent((event) => {
@@ -15,6 +24,9 @@ export function useBrokerEvents(): void {
 
     const unsubStatus = pear.broker.onStatus((status) => {
       handleBrokerStatus(status)
+      if (status.status === 'connected') {
+        void syncBrokerSnapshot(status.projectId)
+      }
     })
 
     // Menu handlers
@@ -33,5 +45,9 @@ export function useBrokerEvents(): void {
       unsubSpawn()
       unsubRelease()
     }
-  }, [handleBrokerEvent, handleBrokerStatus, openDialog])
+  }, [handleBrokerEvent, handleBrokerStatus, openDialog, syncBrokerSnapshot])
+
+  useEffect(() => {
+    void syncBrokerSnapshot()
+  }, [syncBrokerSnapshot])
 }
