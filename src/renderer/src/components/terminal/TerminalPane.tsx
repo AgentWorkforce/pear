@@ -7,19 +7,23 @@ import { pear, type TerminalAttachMode } from '@/lib/ipc'
 import { type Agent, useAgentStore } from '@/stores/agent-store'
 import { useWorkspaceStore } from '@/stores/workspace-store'
 import { useUIStore } from '@/stores/ui-store'
-import { PendingMessagesPane } from './PendingMessagesPane'
+import { PendingMessagesPane, type QueueDeliveryMode } from './PendingMessagesPane'
 import { TerminalInstance } from './TerminalInstance'
-
-const TERMINAL_MODES: Array<{ mode: TerminalAttachMode; label: string; title: string }> = [
-  { mode: 'drive', label: 'Drive', title: 'Queue inbound relay messages' },
-  { mode: 'view', label: 'View', title: 'Read-only terminal with relay auto-inject' },
-  { mode: 'passthrough', label: 'Passthrough', title: 'Type directly with relay auto-inject' }
-]
 
 const SPLIT_PAGE_SIZE = 4
 
 function getTerminalMode(agent: Agent): TerminalAttachMode {
-  return agent.terminalMode || 'passthrough'
+  return agent.terminalMode === 'passthrough' || agent.terminalMode === 'view'
+    ? 'passthrough'
+    : 'drive'
+}
+
+function getQueueDeliveryMode(agent: Agent): QueueDeliveryMode {
+  return getTerminalMode(agent) === 'drive' ? 'drive' : 'auto'
+}
+
+function toTerminalMode(mode: QueueDeliveryMode): TerminalAttachMode {
+  return mode === 'drive' ? 'drive' : 'passthrough'
 }
 
 function chunkAgents(agents: Agent[]): Agent[][] {
@@ -46,13 +50,15 @@ interface TerminalWorkspaceProps {
   visible: boolean
   active: boolean
   onActivate: () => void
+  onDeliveryModeChange: (agent: Agent, mode: QueueDeliveryMode) => void
 }
 
 function TerminalWorkspace({
   agent,
   visible,
   active,
-  onActivate
+  onActivate,
+  onDeliveryModeChange
 }: TerminalWorkspaceProps): React.ReactNode {
   const terminalMode = getTerminalMode(agent)
 
@@ -67,10 +73,12 @@ function TerminalWorkspace({
           onActivate={onActivate}
         />
       </div>
-      {terminalMode === 'drive' && visible && (
+      {visible && (
         <PendingMessagesPane
           agentName={agent.name}
+          deliveryMode={getQueueDeliveryMode(agent)}
           refreshToken={agent.pendingDeliveryIds.join('|')}
+          onDeliveryModeChange={(mode) => onDeliveryModeChange(agent, mode)}
         />
       )}
     </div>
@@ -83,6 +91,7 @@ interface SplitTerminalTileProps {
   active: boolean
   className?: string
   onActivate: () => void
+  onDeliveryModeChange: (agent: Agent, mode: QueueDeliveryMode) => void
 }
 
 function SplitTerminalTile({
@@ -90,7 +99,8 @@ function SplitTerminalTile({
   visible,
   active,
   className = '',
-  onActivate
+  onActivate,
+  onDeliveryModeChange
 }: SplitTerminalTileProps): React.ReactNode {
   return (
     <div
@@ -119,7 +129,6 @@ function SplitTerminalTile({
         {agent.pendingDeliveryIds.length > 0 && (
           <span className="shrink-0 text-[10px] text-[var(--pear-text-faint)]">thinking</span>
         )}
-        <span className="shrink-0 text-[var(--pear-text-faint)]">{getTerminalMode(agent)}</span>
         <span className="shrink-0 text-[var(--pear-text-faint)]">{agent.cli}</span>
       </div>
       <div className="min-h-0 flex-1">
@@ -128,6 +137,7 @@ function SplitTerminalTile({
           visible={visible}
           active={active}
           onActivate={onActivate}
+          onDeliveryModeChange={onDeliveryModeChange}
         />
       </div>
     </div>
@@ -139,13 +149,15 @@ interface SplitTerminalPageProps {
   visible: boolean
   activeAgentName: string | null
   onActivateAgent: (name: string) => void
+  onDeliveryModeChange: (agent: Agent, mode: QueueDeliveryMode) => void
 }
 
 function SplitTerminalPage({
   agents,
   visible,
   activeAgentName,
-  onActivateAgent
+  onActivateAgent,
+  onDeliveryModeChange
 }: SplitTerminalPageProps): React.ReactNode {
   return (
     <div className={`grid h-full gap-1 p-1 ${getSplitPageGridClass(agents.length)}`}>
@@ -159,6 +171,7 @@ function SplitTerminalPage({
             active={active}
             className={getSplitTileClass(agents.length, index)}
             onActivate={() => onActivateAgent(agent.name)}
+            onDeliveryModeChange={onDeliveryModeChange}
           />
         )
       })}
@@ -190,7 +203,6 @@ export function TerminalPane(): React.ReactNode {
     : agents.length > 1
       ? 'Show split terminal pages'
       : 'Start another agent to split terminals'
-  const activeAgent = agents.find((agent) => agent.name === activeAgentName) || null
 
   const handleSpawn = async (cli: SpawnAgentCli): Promise<void> => {
     if (!activeWorkspace) {
@@ -209,18 +221,19 @@ export function TerminalPane(): React.ReactNode {
     }
   }
 
-  const handleTerminalModeChange = async (
+  const handleDeliveryModeChange = async (
     agent: Agent,
-    mode: TerminalAttachMode
+    mode: QueueDeliveryMode
   ): Promise<void> => {
-    if (getTerminalMode(agent) === mode) return
+    const terminalMode = toTerminalMode(mode)
+    if (getTerminalMode(agent) === terminalMode) return
 
     const previousMode = getTerminalMode(agent)
     setSpawnError(null)
-    setAgentTerminalMode(agent.name, mode)
+    setAgentTerminalMode(agent.name, terminalMode)
 
     try {
-      await pear.broker.setTerminalMode(agent.name, mode)
+      await pear.broker.setTerminalMode(agent.name, terminalMode)
     } catch (err) {
       setAgentTerminalMode(agent.name, previousMode)
       setSpawnError(err instanceof Error ? err.message : String(err))
@@ -364,29 +377,6 @@ export function TerminalPane(): React.ReactNode {
             </div>
           ))}
         </div>
-        {activeAgent && (
-          <div className="mx-1 flex shrink-0 rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-surface)] p-0.5">
-            {TERMINAL_MODES.map((option) => {
-              const selected = getTerminalMode(activeAgent) === option.mode
-              return (
-                <button
-                  key={option.mode}
-                  type="button"
-                  onClick={() => void handleTerminalModeChange(activeAgent, option.mode)}
-                  aria-pressed={selected}
-                  className={`h-8 min-w-[84px] rounded-md px-2 text-xs transition-colors ${
-                    selected
-                      ? 'bg-[var(--pear-bg)] text-[var(--pear-text)] shadow-sm'
-                      : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]'
-                  }`}
-                  title={option.title}
-                >
-                  {option.label}
-                </button>
-              )
-            })}
-          </div>
-        )}
         <button
           type="button"
           onClick={() => setTerminalLayout(splitEnabled ? 'tabs' : 'horizontal-split')}
@@ -435,6 +425,7 @@ export function TerminalPane(): React.ReactNode {
                   visible={visible}
                   activeAgentName={activeAgentName}
                   onActivateAgent={setActiveAgent}
+                  onDeliveryModeChange={(agent, mode) => void handleDeliveryModeChange(agent, mode)}
                 />
               </div>
             )
@@ -494,11 +485,12 @@ export function TerminalPane(): React.ReactNode {
                 className="absolute inset-0"
                 style={{ display: active ? 'block' : 'none' }}
               >
-                <TerminalWorkspace
+                <SplitTerminalTile
                   agent={agent}
                   visible={active}
                   active={active}
                   onActivate={() => setActiveAgent(agent.name)}
+                  onDeliveryModeChange={(targetAgent, mode) => void handleDeliveryModeChange(targetAgent, mode)}
                 />
               </div>
             )

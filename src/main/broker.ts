@@ -248,8 +248,8 @@ export class BrokerManager {
       console.warn(`[broker] Failed to read delivery mode for ${name}:`, err)
     }
 
-    // Pear's terminal behaves like Relay CLI passthrough by default: the human
-    // can type while broker-managed inbound messages continue to auto-inject.
+    // Keep the broker's inbound delivery policy aligned with the renderer's
+    // queue mode while human terminal input continues to go through sendInput.
     await client.setInboundDeliveryMode(name, mode)
 
     if (isPositiveInteger(input.rows) && isPositiveInteger(input.cols)) {

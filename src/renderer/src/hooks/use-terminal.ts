@@ -130,7 +130,7 @@ export function useTerminal(
   agentName: string | null,
   visible: boolean,
   active: boolean = visible,
-  terminalMode: TerminalAttachMode = 'passthrough'
+  terminalMode: TerminalAttachMode = 'drive'
 ): Terminal | null {
   const termRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)

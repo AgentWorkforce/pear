@@ -147,7 +147,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
               status: 'running',
               workspaceId,
               worktreeId,
-              terminalMode: 'passthrough',
+              terminalMode: 'drive',
               ptyBuffer: [],
               pendingDeliveryIds: []
             }
@@ -168,7 +168,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                     cli: event.cli || a.cli,
                     model: event.model || a.model,
                     status: 'running',
-                    terminalMode: a.terminalMode || 'passthrough'
+                    terminalMode: a.terminalMode || 'drive'
                   }
                 : a
             )
@@ -179,7 +179,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                 cli: event.cli || 'unknown',
                 model: event.model,
                 status: 'running',
-                terminalMode: 'passthrough',
+                terminalMode: 'drive',
                 ptyBuffer: [],
                 pendingDeliveryIds: []
               }
@@ -244,10 +244,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           if (event.mode === 'manual_flush') {
             return { ...a, terminalMode: 'drive' }
           }
-          return {
-            ...a,
-            terminalMode: a.terminalMode === 'drive' ? 'passthrough' : a.terminalMode
-          }
+          return { ...a, terminalMode: 'passthrough' }
         })
       }))
     } else if (kind === 'relay_inbound' && event.from && event.target && event.body) {
