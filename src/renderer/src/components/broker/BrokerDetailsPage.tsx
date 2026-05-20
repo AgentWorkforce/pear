@@ -2,7 +2,7 @@ import type React from 'react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AlertCircle, Check, Cloud, Copy, KeyRound, RefreshCw, Server, TerminalSquare } from 'lucide-react'
 import { pear, type BrokerDetails, type BrokerListAgent } from '@/lib/ipc'
-import { useAgentStore } from '@/stores/agent-store'
+import { type BrokerErrorEntry, useAgentStore } from '@/stores/agent-store'
 import { useProjectStore, type Project } from '@/stores/project-store'
 
 const errorTimeFormatter = new Intl.DateTimeFormat(undefined, {
@@ -97,6 +97,98 @@ function buildAgentFallbackDetails(
       }))
     }
   })
+}
+
+function getIssueLabel(entry: BrokerErrorEntry, index: number, currentErrorId: string | undefined): string {
+  if (entry.id === currentErrorId) return 'Current issue'
+  return index === 0 ? 'Latest issue' : 'Broker error'
+}
+
+function BrokerErrorRows({
+  entries,
+  currentErrorId
+}: {
+  entries: BrokerErrorEntry[]
+  currentErrorId?: string
+}): React.ReactNode {
+  return (
+    <div className="space-y-2">
+      {entries.map((entry, index) => (
+        <div
+          key={entry.id}
+          className="rounded-lg border border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 px-3 py-2.5"
+        >
+          <div className="flex items-center justify-between gap-3 text-[11px] text-[var(--pear-red)]">
+            <span className="font-medium uppercase tracking-[0.12em]">
+              {getIssueLabel(entry, index, currentErrorId)}
+            </span>
+            <span className="shrink-0 text-[var(--pear-text-faint)]">
+              {formatErrorTimestamp(entry.timestamp)}
+            </span>
+          </div>
+          <p className="mt-1 whitespace-pre-wrap text-sm text-[var(--pear-text)]">
+            {entry.message}
+          </p>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function BrokerIssueBlock({
+  entries,
+  currentErrorId
+}: {
+  entries: BrokerErrorEntry[]
+  currentErrorId?: string
+}): React.ReactNode {
+  if (entries.length === 0) return null
+
+  return (
+    <div>
+      <div className="mb-3 flex items-center gap-2">
+        <AlertCircle size={15} className="text-[var(--pear-red)]" />
+        <h3 className="text-sm font-semibold text-[var(--pear-text)]">Broker issues</h3>
+      </div>
+      <BrokerErrorRows entries={entries} currentErrorId={currentErrorId} />
+    </div>
+  )
+}
+
+function ProjectBrokerIssueSection({
+  projectName,
+  entries,
+  currentErrorId
+}: {
+  projectName: string
+  entries: BrokerErrorEntry[]
+  currentErrorId?: string
+}): React.ReactNode {
+  return (
+    <section className="rounded-lg border border-[var(--pear-red)]/25 bg-[var(--pear-bg-surface)]">
+      <div className="flex flex-wrap items-start justify-between gap-4 border-b border-[var(--pear-red)]/15 px-5 py-4">
+        <div className="flex min-w-0 items-start gap-3">
+          <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 text-[var(--pear-red)]">
+            <AlertCircle size={17} />
+          </span>
+          <div className="min-w-0">
+            <div className="flex min-w-0 flex-wrap items-center gap-2">
+              <h2 className="truncate text-lg font-semibold text-[var(--pear-text)]">{projectName}</h2>
+              <span className="rounded-full bg-[var(--pear-red)]/10 px-2 py-0.5 text-[11px] text-[var(--pear-red)]">
+                issue
+              </span>
+            </div>
+            <p className="mt-1 text-sm text-[var(--pear-text-faint)]">
+              Broker did not start or is not currently managed by this window.
+            </p>
+          </div>
+        </div>
+      </div>
+      <div className="p-5">
+        <BrokerErrorRows entries={entries} currentErrorId={currentErrorId} />
+      </div>
+    </section>
+  )
 }
 
 function CopyButton({ value, label = 'Copy' }: { value: string; label?: string }): React.ReactNode {
@@ -245,10 +337,14 @@ function BrokerCommands({ broker }: { broker: BrokerDetails }): React.ReactNode 
 
 function BrokerCard({
   broker,
-  projectName
+  projectName,
+  statusErrors,
+  currentErrorId
 }: {
   broker: BrokerDetails
   projectName: string
+  statusErrors: BrokerErrorEntry[]
+  currentErrorId?: string
 }): React.ReactNode {
   const Icon = broker.kind === 'cloud' ? Cloud : Server
   const apiKey = broker.apiKey || (broker.apiKeyAvailable ? 'stored in connection file' : 'n/a')
@@ -358,6 +454,8 @@ function BrokerCard({
             {broker.error}
           </div>
         )}
+
+        <BrokerIssueBlock entries={statusErrors} currentErrorId={currentErrorId} />
       </div>
     </section>
   )
@@ -372,11 +470,28 @@ export function BrokerDetailsPage(): React.ReactNode {
   const [detailsLoading, setDetailsLoading] = useState(false)
   const [detailsError, setDetailsError] = useState<string | null>(null)
 
-  const latestError = brokerError || brokerErrors[0]?.message || null
-  const historicalErrors = useMemo(
-    () => latestError && brokerErrors[0]?.message === latestError ? brokerErrors.slice(1) : brokerErrors,
-    [brokerErrors, latestError]
+  const currentErrorId = brokerStatus === 'error' && brokerError && brokerErrors[0]?.message === brokerError
+    ? brokerErrors[0].id
+    : undefined
+  const brokerErrorsByProject = useMemo(() => {
+    const grouped = new Map<string, BrokerErrorEntry[]>()
+    for (const entry of brokerErrors) {
+      if (!entry.projectId) continue
+      const entries = grouped.get(entry.projectId) || []
+      entries.push(entry)
+      grouped.set(entry.projectId, entries)
+    }
+    return grouped
+  }, [brokerErrors])
+  const unmatchedProjectErrorGroups = useMemo(() => {
+    const brokerProjectIds = new Set(brokerDetails.map((broker) => broker.projectId))
+    return Array.from(brokerErrorsByProject.entries()).filter(([projectId]) => !brokerProjectIds.has(projectId))
+  }, [brokerDetails, brokerErrorsByProject])
+  const unattributedBrokerErrors = useMemo(
+    () => brokerErrors.filter((entry) => !entry.projectId),
+    [brokerErrors]
   )
+  const hasBrokerSections = brokerDetails.length > 0 || unmatchedProjectErrorGroups.length > 0
 
   const loadBrokerDetails = useCallback(async (): Promise<void> => {
     setDetailsLoading(true)
@@ -432,17 +547,27 @@ export function BrokerDetailsPage(): React.ReactNode {
           </div>
         )}
 
-        {detailsLoading && brokerDetails.length === 0 ? (
+        {detailsLoading && !hasBrokerSections ? (
           <div className="rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-surface)] px-3 py-12 text-center text-sm text-[var(--pear-text-faint)]">
             Loading broker details...
           </div>
-        ) : brokerDetails.length > 0 ? (
+        ) : hasBrokerSections ? (
           <div className="space-y-5">
             {brokerDetails.map((broker) => (
               <BrokerCard
                 key={broker.projectId}
                 broker={broker}
                 projectName={getProjectName(projects, broker.projectId)}
+                statusErrors={brokerErrorsByProject.get(broker.projectId) || []}
+                currentErrorId={currentErrorId}
+              />
+            ))}
+            {unmatchedProjectErrorGroups.map(([projectId, entries]) => (
+              <ProjectBrokerIssueSection
+                key={projectId}
+                projectName={getProjectName(projects, projectId)}
+                entries={entries}
+                currentErrorId={currentErrorId}
               />
             ))}
           </div>
@@ -452,46 +577,12 @@ export function BrokerDetailsPage(): React.ReactNode {
           </div>
         )}
 
-        {latestError && (
-          <div className="mt-5 rounded-lg border border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 px-4 py-3">
-            <div className="flex items-start gap-2">
-              <AlertCircle size={15} className="mt-0.5 shrink-0 text-[var(--pear-red)]" />
-              <div className="min-w-0">
-                <p className="text-[11px] font-medium uppercase tracking-[0.12em] text-[var(--pear-red)]">
-                  {brokerStatus === 'error' ? 'Current issue' : 'Latest issue'}
-                </p>
-                <p className="mt-1 whitespace-pre-wrap text-sm text-[var(--pear-text)]">{latestError}</p>
-                {brokerErrors[0] && (
-                  <p className="mt-2 text-[11px] text-[var(--pear-text-faint)]">
-                    {formatErrorTimestamp(brokerErrors[0].timestamp)}
-                  </p>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-
-        {historicalErrors.length > 0 && (
+        {unattributedBrokerErrors.length > 0 && (
           <div className="mt-5">
             <p className="mb-2 text-[11px] font-medium uppercase tracking-[0.12em] text-[var(--pear-text-faint)]">
-              Recent errors
+              Unattributed broker errors
             </p>
-            <div className="space-y-2">
-              {historicalErrors.map((entry) => (
-                <div
-                  key={entry.id}
-                  className="rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-surface)] px-3 py-2.5"
-                >
-                  <div className="flex items-center justify-between gap-3 text-[11px] text-[var(--pear-text-faint)]">
-                    <span>Broker error</span>
-                    <span>{formatErrorTimestamp(entry.timestamp)}</span>
-                  </div>
-                  <p className="mt-1 whitespace-pre-wrap text-sm text-[var(--pear-text-secondary)]">
-                    {entry.message}
-                  </p>
-                </div>
-              ))}
-            </div>
+            <BrokerErrorRows entries={unattributedBrokerErrors} currentErrorId={currentErrorId} />
           </div>
         )}
       </div>

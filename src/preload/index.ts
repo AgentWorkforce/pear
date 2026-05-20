@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
-export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'broker-details'
+export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'broker-details' | 'source-control'
 
 const api = {
   project: {
@@ -84,8 +84,27 @@ const api = {
   git: {
     status: (path: string) => ipcRenderer.invoke('git:status', path),
     diff: (path: string, file?: string) => ipcRenderer.invoke('git:diff', path, file),
+    fileContent: (path: string, file: string, revision?: string) =>
+      ipcRenderer.invoke('git:file-content', path, file, revision),
     summary: (path: string) => ipcRenderer.invoke('git:summary', path),
-    branches: (root: string) => ipcRenderer.invoke('git:branches', root)
+    branches: (root: string) => ipcRenderer.invoke('git:branches', root),
+    branchDetails: (root: string) => ipcRenderer.invoke('git:branch-details', root),
+    checkoutBranch: (root: string, branch: string, options?: { stashChanges?: boolean }) =>
+      ipcRenderer.invoke('git:checkout-branch', root, branch, options),
+    branchSyncStatus: (root: string) => ipcRenderer.invoke('git:branch-sync-status', root),
+    fetchRemote: (root: string) => ipcRenderer.invoke('git:fetch-remote', root),
+    pullCurrentBranch: (root: string) => ipcRenderer.invoke('git:pull-current-branch', root),
+    pushCurrentBranch: (root: string) => ipcRenderer.invoke('git:push-current-branch', root),
+    history: (path: string, limit?: number) => ipcRenderer.invoke('git:history', path, limit),
+    show: (path: string, hash: string, file?: string) => ipcRenderer.invoke('git:show', path, hash, file),
+    commitSelection: (path: string, input: {
+      title: string
+      body?: string
+      wholeFiles: string[]
+      patch?: string
+    }) => ipcRenderer.invoke('git:commit-selection', path, input),
+    generateCommitMessage: (path: string, input: { wholeFiles: string[]; patch?: string }) =>
+      ipcRenderer.invoke('git:generate-commit-message', path, input)
   },
   fs: {
     listDir: (dirPath: string) => ipcRenderer.invoke('fs:list-dir', dirPath),

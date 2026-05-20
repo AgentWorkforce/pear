@@ -10,7 +10,8 @@ import {
   type BrokerStatus,
   type ListAgent,
   type InboundDeliveryMode,
-  type PendingRelayMessage
+  type PendingRelayMessage,
+  type PtyInputStream
 } from '@agent-relay/sdk'
 import { getAccessToken, getApiUrl } from './auth'
 import { assertDirectory } from './path-utils'
@@ -85,11 +86,18 @@ export interface AttachTerminalResult {
   }
 }
 
+export interface GeneratedCommitDraft {
+  title: string
+  body: string
+}
+
 function isPositiveInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isInteger(value) && value > 0
 }
 
 const BROKER_DETAILS_TIMEOUT_MS = 3_000
+const COMMIT_DRAFT_MAX_DIFF_CHARS = 80_000
+const COMMIT_DRAFT_TIMEOUT_MS = 180_000
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -97,6 +105,13 @@ function delay(ms: number): Promise<void> {
 
 function toErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+function isUnsupportedInputStreamError(err: unknown): boolean {
+  const status = typeof err === 'object' && err !== null && 'status' in err
+    ? (err as { status?: unknown }).status
+    : undefined
+  return status === 404 || /\b404\b|not found|unsupported/i.test(toErrorMessage(err))
 }
 
 function withBrokerDetailsTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
@@ -184,6 +199,97 @@ function toInboundDeliveryMode(mode?: TerminalAttachMode): InboundDeliveryMode {
 
 function normalizeChannels(channels: string[]): string[] {
   return Array.from(new Set(channels.map((channel) => channel.trim()).filter(Boolean)))
+}
+
+function parsePositiveIntegerEnv(name: string, fallback: number): number {
+  const value = Number.parseInt(process.env[name] || '', 10)
+  return Number.isFinite(value) && value > 0 ? value : fallback
+}
+
+function compactCommitDiff(diff: string): string {
+  if (diff.length <= COMMIT_DRAFT_MAX_DIFF_CHARS) return diff
+  return `${diff.slice(0, COMMIT_DRAFT_MAX_DIFF_CHARS)}\n\n[diff truncated at ${COMMIT_DRAFT_MAX_DIFF_CHARS} characters]`
+}
+
+function buildCommitDraftTask(diff: string): string {
+  return [
+    'Generate a commit message for the selected git diff below.',
+    'Use only the diff. Do not inspect files, edit files, run commands, or create commits.',
+    'Return exactly one JSON object and no markdown, code fence, commentary, or surrounding text.',
+    'The JSON schema is: {"title":"string","body":"string"}',
+    'Rules:',
+    '- title: imperative Git commit summary, under 72 characters, no trailing period.',
+    '- body: concise commit body, or an empty string if the title is enough.',
+    '',
+    'Selected diff:',
+    '--- DIFF START ---',
+    compactCommitDiff(diff),
+    '--- DIFF END ---'
+  ].join('\n')
+}
+
+function getJsonObjectCandidates(text: string): string[] {
+  const candidates: string[] = []
+
+  for (let start = text.indexOf('{'); start !== -1; start = text.indexOf('{', start + 1)) {
+    let depth = 0
+    let inString = false
+    let escaped = false
+
+    for (let index = start; index < text.length; index += 1) {
+      const char = text[index]
+
+      if (inString) {
+        if (escaped) {
+          escaped = false
+        } else if (char === '\\') {
+          escaped = true
+        } else if (char === '"') {
+          inString = false
+        }
+        continue
+      }
+
+      if (char === '"') {
+        inString = true
+      } else if (char === '{') {
+        depth += 1
+      } else if (char === '}') {
+        depth -= 1
+        if (depth === 0) {
+          candidates.push(text.slice(start, index + 1))
+          break
+        }
+      }
+    }
+  }
+
+  return candidates
+}
+
+function normalizeGeneratedCommitDraft(value: unknown): GeneratedCommitDraft | null {
+  if (!value || typeof value !== 'object') return null
+  const record = value as Record<string, unknown>
+  const title = typeof record.title === 'string' ? record.title.trim() : ''
+  if (!title) return null
+
+  return {
+    title,
+    body: typeof record.body === 'string' ? record.body.trim() : ''
+  }
+}
+
+function parseGeneratedCommitDraft(text: string): GeneratedCommitDraft {
+  const candidates = getJsonObjectCandidates(text)
+  for (const candidate of candidates.reverse()) {
+    try {
+      const draft = normalizeGeneratedCommitDraft(JSON.parse(candidate))
+      if (draft) return draft
+    } catch {
+      // Keep scanning terminal output; diffs can contain unrelated braces.
+    }
+  }
+  throw new Error('Commit message agent did not return a usable JSON draft')
 }
 
 function getAvailableAgentName(requestedName: string, existingNames: Set<string>): string {
@@ -280,6 +386,8 @@ export class BrokerManager {
   private sessions = new Map<string, BrokerSession>()
   private agentProjects = new Map<string, Set<string>>()
   private inputQueues = new Map<string, QueuedInput>()
+  private inputStreams = new Map<string, PtyInputStream>()
+  private inputStreamFallbacks = new Set<string>()
 
   get cwd(): string | null {
     return this.sessions.values().next().value?.cwd || null
@@ -451,7 +559,8 @@ export class BrokerManager {
     return client.onEvent((event: BrokerEvent) => {
       if (event.kind === 'agent_spawned' && event.name) {
         this.rememberAgentProject(event.name, projectId)
-      } else if ((event.kind === 'agent_exited' || event.kind === 'agent_released') && event.name) {
+      } else if ((event.kind === 'agent_exit' || event.kind === 'agent_exited' || event.kind === 'agent_released') && event.name) {
+        this.closeInputStream(this.getInputStreamKey(projectId, event.name), 1000, 'agent closed')
         this.forgetAgentProject(event.name, projectId)
       } else if (event.name) {
         this.rememberAgentProject(event.name, projectId)
@@ -477,6 +586,49 @@ export class BrokerManager {
     projects.delete(projectId)
     if (projects.size === 0) {
       this.agentProjects.delete(name)
+    }
+  }
+
+  private getInputStreamKey(projectId: string, name: string): string {
+    return `${projectId}:${name}`
+  }
+
+  private getOrOpenInputStream(session: BrokerSession, name: string): PtyInputStream {
+    const key = this.getInputStreamKey(session.projectId, name)
+    const existing = this.inputStreams.get(key)
+    if (existing && !existing.closed) {
+      return existing
+    }
+
+    const stream = session.client.openInputStream(name)
+    this.inputStreams.set(key, stream)
+    stream.waitUntilOpen().catch(() => {
+      if (this.inputStreams.get(key) === stream) {
+        this.inputStreams.delete(key)
+      }
+    })
+    return stream
+  }
+
+  private closeInputStream(key: string, code = 1000, reason = 'closed'): void {
+    const stream = this.inputStreams.get(key)
+    this.inputStreams.delete(key)
+    this.inputStreamFallbacks.delete(key)
+    if (stream) {
+      stream.close(code, reason)
+    }
+  }
+
+  private closeInputStreamsForProject(projectId: string): void {
+    for (const key of Array.from(this.inputStreams.keys())) {
+      if (key.startsWith(`${projectId}:`)) {
+        this.closeInputStream(key, 1000, 'project closed')
+      }
+    }
+    for (const key of Array.from(this.inputStreamFallbacks.keys())) {
+      if (key.startsWith(`${projectId}:`)) {
+        this.inputStreamFallbacks.delete(key)
+      }
     }
   }
 
@@ -520,6 +672,92 @@ export class BrokerManager {
     }
 
     throw new Error(`Unable to allocate an agent name for ${relayAwareInput.name}`)
+  }
+
+  async generateCommitDraft(projectId: string, diff: string): Promise<GeneratedCommitDraft> {
+    const session = this.getSessionForProject(projectId)
+    const selectedDiff = diff.trim()
+    if (!selectedDiff) {
+      throw new Error('Select changes before generating a message')
+    }
+
+    const task = buildCommitDraftTask(selectedDiff)
+    const cli = process.env.PEAR_COMMIT_AGENT_CLI?.trim() || 'codex'
+    const model = process.env.PEAR_COMMIT_AGENT_MODEL?.trim()
+    const timeoutMs = parsePositiveIntegerEnv('PEAR_COMMIT_AGENT_TIMEOUT_MS', COMMIT_DRAFT_TIMEOUT_MS)
+    const spawned = await this.spawnAgent(projectId, {
+      name: 'commit-draft',
+      cli,
+      cwd: session.cwd || undefined,
+      channels: session.channels,
+      task,
+      idleThresholdSecs: 1,
+      ...(model ? { model } : {})
+    })
+
+    const chunks: string[] = []
+    const unsubscribe = session.client.onEvent((event) => {
+      if (event.kind === 'worker_stream' && event.name === spawned.name) {
+        chunks.push(event.chunk)
+      }
+    })
+
+    try {
+      await this.waitForAgentIdle(session, spawned.name, timeoutMs)
+      const output = await this.readAgentOutput(session, spawned.name, chunks)
+      return parseGeneratedCommitDraft(output)
+    } finally {
+      unsubscribe()
+      try {
+        await session.client.release(spawned.name, 'commit draft generated')
+      } catch (err) {
+        console.warn(`[broker] Failed to release commit draft agent ${spawned.name}:`, err)
+      }
+      this.forgetAgentProject(spawned.name, session.projectId)
+    }
+  }
+
+  private async waitForAgentIdle(session: BrokerSession, name: string, timeoutMs: number): Promise<void> {
+    const startedAt = Date.now()
+    let idleSince: number | null = null
+
+    while (Date.now() - startedAt < timeoutMs) {
+      const agent = await session.client.getStatus()
+        .then((status) => status.agents.find((entry) => entry.name === name))
+        .catch(() => undefined)
+
+      if (!agent) {
+        return
+      }
+
+      if (agent.current_state === 'idle') {
+        idleSince ??= Date.now()
+        if (Date.now() - startedAt >= 5_000 && Date.now() - idleSince >= 1_000) {
+          return
+        }
+      } else {
+        idleSince = null
+      }
+
+      await delay(1_000)
+    }
+
+    throw new Error(`Commit message agent timed out after ${Math.round(timeoutMs / 1000)} seconds`)
+  }
+
+  private async readAgentOutput(session: BrokerSession, name: string, chunks: string[]): Promise<string> {
+    const eventText = session.client.queryEvents({ kind: 'worker_stream', name, limit: 5000 })
+      .flatMap((event) => event.kind === 'worker_stream' ? [event.chunk] : [])
+      .join('')
+
+    let snapshotText = ''
+    try {
+      snapshotText = (await session.client.snapshot(name, 'plain')).screen
+    } catch (err) {
+      console.warn(`[broker] Failed to snapshot commit draft agent ${name}:`, err)
+    }
+
+    return [eventText, chunks.join(''), snapshotText].filter(Boolean).join('\n')
   }
 
   async attachTerminal(projectId: string | undefined, input: AttachTerminalInput): Promise<AttachTerminalResult> {
@@ -590,8 +828,31 @@ export class BrokerManager {
     name: string,
     data: string
   ): Promise<{ name: string; bytes_written: number }> {
-    const session = this.getSessionForAgent(name, projectId)
-    return session.client.sendInput(name, data)
+    const trimmedName = name.trim()
+    if (!trimmedName) {
+      throw new Error('Agent name is required')
+    }
+    if (!data) {
+      return { name: trimmedName, bytes_written: 0 }
+    }
+
+    const session = this.getSessionForAgent(trimmedName, projectId)
+    const key = this.getInputStreamKey(session.projectId, trimmedName)
+    if (!this.inputStreamFallbacks.has(key)) {
+      const stream = this.getOrOpenInputStream(session, trimmedName)
+      try {
+        return await stream.send(data)
+      } catch (err) {
+        if (this.inputStreams.get(key) === stream) {
+          this.closeInputStream(key, 1011, 'stream send failed')
+        }
+        if (isUnsupportedInputStreamError(err)) {
+          this.inputStreamFallbacks.add(key)
+        }
+        console.warn(`[broker] PTY input stream failed for ${trimmedName}; falling back to HTTP input:`, err)
+      }
+    }
+    return session.client.sendInput(trimmedName, data)
   }
 
   queueInput(projectId: string | undefined, name: string, data: string): void {
@@ -768,8 +1029,13 @@ export class BrokerManager {
   }
 
   async releaseAgent(projectId: string | undefined, name: string): Promise<void> {
-    const session = this.getSessionForAgent(name, projectId)
-    await session.client.release(name)
+    const trimmedName = name.trim()
+    if (!trimmedName) {
+      throw new Error('Agent name is required')
+    }
+    const session = this.getSessionForAgent(trimmedName, projectId)
+    await session.client.release(trimmedName)
+    this.closeInputStream(this.getInputStreamKey(session.projectId, trimmedName), 1000, 'agent released')
   }
 
   async listAgents(projectId?: string): Promise<Array<ListAgent & {
@@ -890,6 +1156,7 @@ export class BrokerManager {
         }
         this.inputQueues.delete(key)
       }
+      this.closeInputStreamsForProject(targetProjectId)
 
       const session = this.sessions.get(targetProjectId)
       if (!session) continue

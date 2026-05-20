@@ -17,6 +17,10 @@ import {
   Video
 } from 'lucide-react'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
+import {
+  getDirectMessageRecipientTargets,
+  getDirectMessageRoomTitle
+} from '@/lib/direct-messages'
 import { pear } from '@/lib/ipc'
 import { useAgentStore } from '@/stores/agent-store'
 import { useProjectStore } from '@/stores/project-store'
@@ -68,6 +72,10 @@ interface MentionMatch {
   query: string
 }
 
+interface ComposeBarProps {
+  directMessageParticipants?: string[]
+}
+
 function getMentionMatch(value: string, cursorPosition: number): MentionMatch | null {
   const clampedCursor = Math.max(0, Math.min(cursorPosition, value.length))
   const beforeCursor = value.slice(0, clampedCursor)
@@ -101,7 +109,7 @@ function getMentionInitials(name: string): string {
     .toUpperCase()
 }
 
-export function ComposeBar(): React.ReactNode {
+export function ComposeBar({ directMessageParticipants }: ComposeBarProps = {}): React.ReactNode {
   const [text, setText] = useState('')
   const [recipient, setRecipient] = useState('broadcast')
   const [sending, setSending] = useState(false)
@@ -115,10 +123,17 @@ export function ComposeBar(): React.ReactNode {
   const activeProjectId = useProjectStore((s) => s.activeProjectId)
   const activeChannelName = useProjectStore((s) => s.activeChannelName)
   const activeChannelNameTarget = useProjectStore((s) => s.getActiveChannelName())
+  const directMessageTargets = directMessageParticipants
+    ? getDirectMessageRecipientTargets(directMessageParticipants)
+    : []
+  const directMessageTitle = directMessageParticipants
+    ? getDirectMessageRoomTitle(directMessageParticipants)
+    : null
   const runningAgents = agents.filter(
     (a) => a.status === 'running' && (!activeProjectId || a.projectId === activeProjectId)
   )
-  const isChannelComposer = Boolean(activeChannelName && activeChannelNameTarget)
+  const isDirectMessageComposer = directMessageTargets.length > 0
+  const isChannelComposer = Boolean(!isDirectMessageComposer && activeChannelName && activeChannelNameTarget)
   const mentionMatch = getMentionMatch(text, cursorPosition)
   const mentionToken = mentionMatch ? `${mentionMatch.start}:${mentionMatch.query}` : null
   const mentionSuggestions = mentionMatch
@@ -148,11 +163,11 @@ export function ComposeBar(): React.ReactNode {
   }, [text])
 
   useEffect(() => {
-    if (isChannelComposer) return
+    if (isChannelComposer || isDirectMessageComposer) return
     if (recipient !== 'broadcast' && !runningAgents.some((agent) => agent.name === recipient)) {
       setRecipient('broadcast')
     }
-  }, [isChannelComposer, recipient, runningAgents])
+  }, [isChannelComposer, isDirectMessageComposer, recipient, runningAgents])
 
   useEffect(() => {
     setSelectedMentionIndex(0)
@@ -193,7 +208,14 @@ export function ComposeBar(): React.ReactNode {
       if (!activeProjectId) {
         throw new Error('No project selected')
       }
-      if (isChannelComposer && activeChannelNameTarget) {
+      if (isDirectMessageComposer) {
+        await Promise.all(
+          directMessageTargets.map((target) =>
+            pear.broker.sendMessage(activeProjectId, { to: target, text: body, from: 'human' })
+          )
+        )
+        addHumanMessage(directMessageTargets.join(', '), body, activeProjectId || undefined)
+      } else if (isChannelComposer && activeChannelNameTarget) {
         await pear.broker.sendMessage(activeProjectId, {
           to: `#${activeChannelNameTarget}`,
           text: body,
@@ -265,6 +287,8 @@ export function ComposeBar(): React.ReactNode {
   const canSend = Boolean(text.trim()) && !sending
   const placeholder = isChannelComposer
     ? `Message #${activeChannelName}`
+    : directMessageTitle
+      ? `Message ${directMessageTitle}`
     : recipient === 'broadcast'
       ? 'Send a message...'
       : `Message @${recipient}`
@@ -365,7 +389,7 @@ export function ComposeBar(): React.ReactNode {
 
         <div className="mt-3 flex items-center justify-between border-t border-[var(--pear-bg-overlay)] pt-3">
           <div className="flex flex-wrap items-center gap-1">
-            {!isChannelComposer && (
+            {!isChannelComposer && !isDirectMessageComposer && (
               <>
                 <select
                   value={recipient}
@@ -400,7 +424,11 @@ export function ComposeBar(): React.ReactNode {
           <button
             onClick={handleSend}
             disabled={!canSend}
-            aria-label={isChannelComposer ? `Send message to #${activeChannelName}` : 'Send message'}
+            aria-label={isChannelComposer
+              ? `Send message to #${activeChannelName}`
+              : directMessageTitle
+                ? `Send message to ${directMessageTitle}`
+                : 'Send message'}
             className={`flex h-9 w-9 items-center justify-center rounded-full transition-colors ${
               canSend
                 ? 'bg-[var(--pear-accent)] text-[var(--pear-bg)] hover:opacity-90'

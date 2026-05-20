@@ -21,13 +21,21 @@ import * as filesystem from './filesystem'
 import * as auth from './auth'
 import { assertDirectory, isDirectory } from './path-utils'
 
-function assertPathWithinProjects(targetPath: string): void {
+function getProjectIdForPath(targetPath: string): string | null {
   const resolved = resolve(targetPath)
   const { projects } = loadStore()
-  const allowed = projects.some((project) =>
-    project.roots.some((root) => resolved.startsWith(root.path + '/') || resolved === root.path)
+  const project = projects.find((candidate) =>
+    candidate.roots.some((root) => {
+      const rootPath = resolve(root.path)
+      return resolved.startsWith(rootPath + '/') || resolved === rootPath
+    })
   )
-  if (!allowed) {
+  return project?.id || null
+}
+
+function assertPathWithinProjects(targetPath: string): void {
+  const resolved = resolve(targetPath)
+  if (!getProjectIdForPath(resolved)) {
     throw new Error(`Path is outside all known project roots: ${resolved}`)
   }
 }
@@ -216,6 +224,12 @@ export function registerIpcHandlers(): void {
     return git.getDiff(path, file)
   })
 
+  ipcMain.handle('git:file-content', async (_, path: string, file: string, revision?: string) => {
+    assertPathWithinProjects(path)
+    if (!isDirectory(path)) return ''
+    return git.getFileContent(path, file, revision)
+  })
+
   ipcMain.handle('git:summary', async (_, path: string) => {
     assertPathWithinProjects(path)
     if (!isDirectory(path)) return null
@@ -226,6 +240,69 @@ export function registerIpcHandlers(): void {
     assertPathWithinProjects(root)
     if (!isDirectory(root)) return []
     return git.listBranches(root)
+  })
+
+  ipcMain.handle('git:branch-details', async (_, root: string) => {
+    assertPathWithinProjects(root)
+    if (!isDirectory(root)) return []
+    return git.listBranchDetails(root)
+  })
+
+  ipcMain.handle('git:checkout-branch', async (_, root: string, branch: string, options?: git.GitCheckoutBranchOptions) => {
+    assertPathWithinProjects(root)
+    if (!isDirectory(root)) throw new Error('Git working directory is unavailable')
+    return git.checkoutBranch(root, branch, options)
+  })
+
+  ipcMain.handle('git:branch-sync-status', async (_, root: string) => {
+    assertPathWithinProjects(root)
+    if (!isDirectory(root)) throw new Error('Git working directory is unavailable')
+    return git.getBranchSyncStatus(root)
+  })
+
+  ipcMain.handle('git:fetch-remote', async (_, root: string) => {
+    assertPathWithinProjects(root)
+    if (!isDirectory(root)) throw new Error('Git working directory is unavailable')
+    return git.fetchRemote(root)
+  })
+
+  ipcMain.handle('git:pull-current-branch', async (_, root: string) => {
+    assertPathWithinProjects(root)
+    if (!isDirectory(root)) throw new Error('Git working directory is unavailable')
+    return git.pullCurrentBranch(root)
+  })
+
+  ipcMain.handle('git:push-current-branch', async (_, root: string) => {
+    assertPathWithinProjects(root)
+    if (!isDirectory(root)) throw new Error('Git working directory is unavailable')
+    return git.pushCurrentBranch(root)
+  })
+
+  ipcMain.handle('git:history', async (_, path: string, limit?: number) => {
+    assertPathWithinProjects(path)
+    if (!isDirectory(path)) return []
+    return git.getHistory(path, limit)
+  })
+
+  ipcMain.handle('git:show', async (_, path: string, hash: string, file?: string) => {
+    assertPathWithinProjects(path)
+    if (!isDirectory(path)) return ''
+    return git.getCommitDiff(path, hash, file)
+  })
+
+  ipcMain.handle('git:commit-selection', async (_, path: string, input: git.GitCommitSelectionInput) => {
+    assertPathWithinProjects(path)
+    if (!isDirectory(path)) throw new Error('Git working directory is unavailable')
+    return git.commitSelection(path, input)
+  })
+
+  ipcMain.handle('git:generate-commit-message', async (_, path: string, input: { wholeFiles: string[]; patch?: string }) => {
+    assertPathWithinProjects(path)
+    if (!isDirectory(path)) throw new Error('Git working directory is unavailable')
+    const projectId = getProjectIdForPath(path)
+    if (!projectId) throw new Error('No project is configured for this Git working directory')
+    const diff = await git.getSelectedDiff(path, input)
+    return brokerManager.generateCommitDraft(projectId, diff)
   })
 
   // --- Files ---

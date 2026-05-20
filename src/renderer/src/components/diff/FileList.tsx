@@ -1,28 +1,17 @@
 import type React from 'react'
-import { FileIcon, FilePlus, FileMinus, FileEdit, ArrowRightLeft, FileQuestion } from 'lucide-react'
 import type { FileStatus } from '@/stores/git-store'
 import { useGitStore } from '@/stores/git-store'
+import {
+  FileChangeStatusIcon,
+  FilePathLabel,
+  fileChangeKindFromStatus,
+  fileChangeStatusLabel
+} from './FileChangeLabel'
 
 interface Props {
   files: FileStatus[]
   selectedFile: string | null
   rootPath: string
-}
-
-const statusIcons: Record<FileStatus['status'], typeof FileIcon> = {
-  added: FilePlus,
-  modified: FileEdit,
-  deleted: FileMinus,
-  renamed: ArrowRightLeft,
-  untracked: FileQuestion
-}
-
-const statusColors: Record<FileStatus['status'], string> = {
-  added: 'var(--pear-accent-bright)',
-  modified: 'var(--pear-yellow)',
-  deleted: 'var(--pear-red)',
-  renamed: 'var(--pear-accent)',
-  untracked: 'var(--pear-text-faint)'
 }
 
 export function FileList({ files, selectedFile, rootPath }: Props): React.ReactNode {
@@ -33,25 +22,25 @@ export function FileList({ files, selectedFile, rootPath }: Props): React.ReactN
   return (
     <div className="max-h-[200px] shrink-0 overflow-y-auto border-b border-[var(--pear-bg-surface)]">
       {files.map((file) => {
-        const Icon = statusIcons[file.status]
-        const color = statusColors[file.status]
         const isSelected = selectedFile === file.path
+        const kind = fileChangeKindFromStatus(file.status)
+        const statusLabel = fileChangeStatusLabel(kind)
 
         return (
           <button
             key={file.path}
-            onClick={() => selectFile(isSelected ? null : file.path, rootPath)}
-            className={`flex w-full items-center gap-2 px-4 py-1.5 text-left text-sm transition-colors ${
+            onClick={() => selectFile(file.path, rootPath)}
+            className={`flex w-full min-w-0 items-center gap-3 px-4 py-2 text-left transition-colors ${
               isSelected
-                ? 'bg-[var(--pear-bg-surface)] text-[var(--pear-text)]'
-                : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface)]/50'
+                ? 'bg-[var(--pear-bg-surface)]'
+                : 'hover:bg-[var(--pear-bg-surface)]/50'
             }`}
           >
-            <Icon size={13} style={{ color }} />
-            <span className="flex-1 truncate">{file.path}</span>
+            <FilePathLabel path={file.path} oldPath={file.oldPath} className="flex-1 text-[15px]" />
             {file.staged && (
               <span className="text-[10px] text-[var(--pear-accent-bright)]">staged</span>
             )}
+            <FileChangeStatusIcon kind={kind} label={statusLabel} />
           </button>
         )
       })}

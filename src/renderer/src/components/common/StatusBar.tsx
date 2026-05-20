@@ -1,6 +1,7 @@
 import type React from 'react'
-import { Sun, Moon } from 'lucide-react'
+import { FileDiff, Moon, Sun } from 'lucide-react'
 import { useAgentStore } from '@/stores/agent-store'
+import { useGitStore } from '@/stores/git-store'
 import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 
@@ -9,9 +10,12 @@ export function StatusBar(): React.ReactNode {
   const brokerErrors = useAgentStore((s) => s.brokerErrors)
   const agents = useAgentStore((s) => s.agents)
   const project = useProjectStore((s) => s.getActiveProject())
+  const root = useProjectStore((s) => s.getActiveRoot())
+  const changedFiles = useGitStore((s) => s.files)
+  const summary = useGitStore((s) => s.summary)
   const theme = useUIStore((s) => s.theme)
   const toggleTheme = useUIStore((s) => s.toggleTheme)
-  const setViewMode = useUIStore((s) => s.setViewMode)
+  const openTab = useUIStore((s) => s.openTab)
 
   const runningAgents = agents.filter(
     (a) => a.status === 'running' && (!project || a.projectId === project.id)
@@ -30,7 +34,7 @@ export function StatusBar(): React.ReactNode {
         type="button"
         title="Open broker details"
         aria-label={`Broker status ${brokerStatus}. Open broker details.`}
-        onClick={() => setViewMode('broker-details')}
+        onClick={() => openTab({ kind: 'broker-details' })}
         className={`flex items-center gap-2 rounded-full px-2.5 py-1 transition-colors ${
           brokerStatus === 'error'
             ? 'border border-[var(--pear-red)]/25 bg-[var(--pear-red)]/10 text-[var(--pear-text)] hover:bg-[var(--pear-red)]/15'
@@ -54,6 +58,26 @@ export function StatusBar(): React.ReactNode {
         <div className="flex items-center gap-1.5">
           <span className="text-[var(--pear-text-secondary)]">{project.name}</span>
         </div>
+      )}
+
+      {project && root?.pathExists && summary?.rootPath === root.path && (
+        <button
+          type="button"
+          onClick={() => openTab({ kind: 'source-control', projectId: project.id })}
+          className="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[var(--pear-text-dim)] transition-colors hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text)]"
+          title="Open source control"
+          aria-label={`Open source control. ${changedFiles.length} changed files.`}
+        >
+          <FileDiff size={12} className="text-[var(--pear-text-faint)]" />
+          <span>{changedFiles.length} changed file{changedFiles.length === 1 ? '' : 's'}</span>
+          {(summary.additions > 0 || summary.deletions > 0) && (
+            <span className="tabular-nums">
+              <span className="text-[var(--pear-green)]">+{summary.additions}</span>
+              <span className="mx-1 text-[var(--pear-text-faint)]">/</span>
+              <span className="text-[var(--pear-red)]">-{summary.deletions}</span>
+            </span>
+          )}
+        </button>
       )}
 
       <div className="flex-1" />

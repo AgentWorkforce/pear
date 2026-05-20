@@ -1,7 +1,12 @@
 import type React from 'react'
 import { useMemo, useState } from 'react'
-import { AlertTriangle, Folder, GitBranch, Hash, LayoutGrid, Pause, Settings } from 'lucide-react'
+import { AlertTriangle, Folder, GitBranch, Hash, LayoutGrid, MessageCircle, Pause, Settings } from 'lucide-react'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
+import {
+  deriveDirectMessageRooms,
+  getDirectMessageRoomId,
+  type DirectMessageRoom
+} from '@/lib/direct-messages'
 import { getAgentKeyForAgent, isAgentTyping, useAgentStore, type Agent } from '@/stores/agent-store'
 import { useGitStore, type GitSummary } from '@/stores/git-store'
 import { useProjectStore, type Project, type ProjectRoot } from '@/stores/project-store'
@@ -56,18 +61,20 @@ function ProjectMeta({
       {gitSummary && (
         <div className="flex min-w-0 items-center gap-2">
           <div
-            className="flex min-w-0 items-center gap-1.5 text-[var(--pear-text-dim)]"
+            className="flex min-w-0 flex-1 items-center gap-1.5 text-[var(--pear-text-dim)]"
             title={gitSummary.branch}
           >
             <GitBranch size={11} className="shrink-0 text-[var(--pear-text-faint)]" />
             <span className="min-w-0 truncate">{gitSummary.branch}</span>
           </div>
-          <span className="shrink-0 tabular-nums text-[var(--pear-green)]">
-            +{gitSummary.additions}
-          </span>
-          <span className="shrink-0 tabular-nums text-[var(--pear-red)]">
-            -{gitSummary.deletions}
-          </span>
+          <div className="ml-auto flex shrink-0 items-center gap-1.5 tabular-nums">
+            <span className="text-right text-[var(--pear-green)]">
+              +{gitSummary.additions}
+            </span>
+            <span className="text-right text-[var(--pear-red)]">
+              -{gitSummary.deletions}
+            </span>
+          </div>
         </div>
       )}
     </div>
@@ -127,23 +134,33 @@ export function ProjectItem({ project, isActive }: Props): React.ReactNode {
   const activeRootId = useProjectStore((s) => s.activeRootId)
   const gitSummary = useGitStore((s) => s.summary)
   const allAgents = useAgentStore((s) => s.agents)
+  const allMessages = useAgentStore((s) => s.messages)
   const agents = useMemo(
     () => allAgents.filter((agent) => agent.projectId === project.id),
     [allAgents, project.id]
   )
+  const directMessageRooms = useMemo(
+    () => deriveDirectMessageRooms(allMessages, project.id, project.channels),
+    [allMessages, project.channels, project.id]
+  )
   const setActiveAgentKey = useAgentStore((s) => s.setActiveAgentKey)
-  const viewMode = useUIStore((s) => s.viewMode)
-  const setViewMode = useUIStore((s) => s.setViewMode)
+  const activeTab = useUIStore((s) => s.tabs.find((tab) => tab.id === s.activeTabId))
+  const openTab = useUIStore((s) => s.openTab)
   const hasAvailableRoot = project.roots.some((root) => root.pathExists)
-  const settingsActive = isActive && viewMode === 'project-settings'
+  const settingsActive = isActive &&
+    activeTab?.kind === 'project-settings' &&
+    activeTab.projectId === project.id
   const activeRoot = project.roots.find((root) => root.id === activeRootId) ||
     project.roots.find((root) => root.pathExists) ||
     project.roots[0]
   const activeRootGitSummary = gitSummary?.rootPath === activeRoot?.path ? gitSummary : null
+  const activeDirectMessageRoomId = activeTab?.kind === 'dm' && activeTab.projectId === project.id
+    ? getDirectMessageRoomId(activeTab.dmParticipants || [])
+    : null
 
   const handleSelect = (): void => {
     setError(null)
-    setViewMode('terminal')
+    openTab({ kind: 'agents', projectId: project.id })
     setActiveProject(project.id).catch((err) => {
       setError(err instanceof Error ? err.message : String(err))
     })
@@ -152,7 +169,7 @@ export function ProjectItem({ project, isActive }: Props): React.ReactNode {
   const handleOpenSettings = (event: React.MouseEvent<HTMLButtonElement>): void => {
     event.stopPropagation()
     setError(null)
-    setViewMode('project-settings')
+    openTab({ kind: 'project-settings', projectId: project.id })
     setActiveProject(project.id).catch((err) => {
       setError(err instanceof Error ? err.message : String(err))
     })
@@ -160,14 +177,25 @@ export function ProjectItem({ project, isActive }: Props): React.ReactNode {
 
   const handleSelectAgent = (agent: Agent): void => {
     setActiveChannel(null)
-    setViewMode('terminal')
+    openTab({ kind: 'agents', projectId: project.id })
     setActiveAgentKey(getAgentKeyForAgent(agent))
   }
 
   const handleSelectChannel = (channel: string): void => {
     setActiveAgentKey(null)
     setActiveChannel(channel)
-    setViewMode('chat')
+    openTab({ kind: 'channel', projectId: project.id, channelName: channel })
+  }
+
+  const handleSelectDirectMessage = (room: DirectMessageRoom): void => {
+    setActiveAgentKey(null)
+    setActiveChannel(null)
+    openTab({
+      kind: 'dm',
+      projectId: project.id,
+      dmParticipants: room.participants,
+      title: room.title
+    })
   }
 
   return (
@@ -247,7 +275,7 @@ export function ProjectItem({ project, isActive }: Props): React.ReactNode {
                   type="button"
                   onClick={() => handleSelectChannel(channel)}
                   className={`flex w-full min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-left text-[11px] ${
-                    activeChannelName === channel
+                    (activeChannelName === channel && activeTab?.kind === 'channel')
                       ? 'bg-[var(--pear-bg-overlay)] text-[var(--pear-text)]'
                       : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]'
                   }`}
@@ -258,6 +286,29 @@ export function ProjectItem({ project, isActive }: Props): React.ReactNode {
               ))}
             </div>
           </div>
+
+          {directMessageRooms.length > 0 && (
+            <div>
+              <SectionHeader title="DMs" count={directMessageRooms.length} />
+              <div className="space-y-0.5">
+                {directMessageRooms.map((room) => (
+                  <button
+                    key={room.id}
+                    type="button"
+                    onClick={() => handleSelectDirectMessage(room)}
+                    className={`flex w-full min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-left text-[11px] ${
+                      activeDirectMessageRoomId === room.id
+                        ? 'bg-[var(--pear-bg-overlay)] text-[var(--pear-text)]'
+                        : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]'
+                    }`}
+                  >
+                    <MessageCircle size={11} className="shrink-0" />
+                    <span className="min-w-0 flex-1 truncate">{room.title}</span>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

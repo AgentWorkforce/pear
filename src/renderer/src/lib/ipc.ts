@@ -75,6 +75,57 @@ export interface GitSummary {
   deletions: number
 }
 
+export interface GitHistoryFile {
+  path: string
+  oldPath?: string
+  status: string
+}
+
+export interface GitHistoryCommit {
+  hash: string
+  shortHash: string
+  author: string
+  date: string
+  subject: string
+  body: string
+  additions: number
+  deletions: number
+  files: GitHistoryFile[]
+}
+
+export interface GitCommitDraft {
+  title: string
+  body: string
+}
+
+export interface GitCommitSelectionInput {
+  title: string
+  body?: string
+  wholeFiles: string[]
+  patch?: string
+}
+
+export interface GitBranchInfo {
+  name: string
+  current: boolean
+  remote: boolean
+  lastCommitDate: string
+  defaultBranch: boolean
+}
+
+export interface GitBranchSyncStatus {
+  branch: string
+  remote: string | null
+  upstream: string | null
+  ahead: number
+  behind: number
+  hasRemote: boolean
+}
+
+export interface GitCheckoutBranchOptions {
+  stashChanges?: boolean
+}
+
 export interface PearAPI {
   project: {
     list: () => Promise<{ projects: unknown[]; activeId: string | null }>
@@ -142,10 +193,24 @@ export interface PearAPI {
     onStatus: (callback: (status: { projectId?: string; status: string; error?: string }) => void) => () => void
   }
   git: {
-    status: (path: string) => Promise<{ path: string; status: string; staged: boolean }[]>
+    status: (path: string) => Promise<{ path: string; oldPath?: string; status: string; staged: boolean }[]>
     diff: (path: string, file?: string) => Promise<string>
+    fileContent: (path: string, file: string, revision?: string) => Promise<string>
     summary: (path: string) => Promise<GitSummary | null>
     branches: (root: string) => Promise<string[]>
+    branchDetails: (root: string) => Promise<GitBranchInfo[]>
+    checkoutBranch: (root: string, branch: string, options?: GitCheckoutBranchOptions) => Promise<GitBranchSyncStatus>
+    branchSyncStatus: (root: string) => Promise<GitBranchSyncStatus>
+    fetchRemote: (root: string) => Promise<GitBranchSyncStatus>
+    pullCurrentBranch: (root: string) => Promise<GitBranchSyncStatus>
+    pushCurrentBranch: (root: string) => Promise<GitBranchSyncStatus>
+    history: (path: string, limit?: number) => Promise<GitHistoryCommit[]>
+    show: (path: string, hash: string, file?: string) => Promise<string>
+    commitSelection: (path: string, input: GitCommitSelectionInput) => Promise<{ hash: string }>
+    generateCommitMessage: (
+      path: string,
+      input: { wholeFiles: string[]; patch?: string }
+    ) => Promise<GitCommitDraft>
   }
   fs: {
     listDir: (dirPath: string) => Promise<

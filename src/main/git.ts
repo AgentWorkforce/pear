@@ -1,5 +1,8 @@
-import { execFile } from 'child_process'
+import { execFile, spawn } from 'child_process'
 import { existsSync } from 'fs'
+import { mkdtemp, rm } from 'fs/promises'
+import { join } from 'path'
+import { tmpdir } from 'os'
 import { promisify } from 'util'
 import { assertDirectory } from './path-utils'
 
@@ -7,6 +10,7 @@ const exec = promisify(execFile)
 
 export interface FileStatus {
   path: string
+  oldPath?: string
   status: 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked'
   staged: boolean
 }
@@ -17,10 +21,94 @@ export interface GitSummary {
   deletions: number
 }
 
+export interface GitHistoryFile {
+  path: string
+  oldPath?: string
+  status: string
+}
+
+export interface GitHistoryCommit {
+  hash: string
+  shortHash: string
+  author: string
+  date: string
+  subject: string
+  body: string
+  additions: number
+  deletions: number
+  files: GitHistoryFile[]
+}
+
+export interface GitCommitSelectionInput {
+  title: string
+  body?: string
+  wholeFiles: string[]
+  patch?: string
+}
+
+export interface GitBranchInfo {
+  name: string
+  current: boolean
+  remote: boolean
+  lastCommitDate: string
+  defaultBranch: boolean
+}
+
+export interface GitBranchSyncStatus {
+  branch: string
+  remote: string | null
+  upstream: string | null
+  ahead: number
+  behind: number
+  hasRemote: boolean
+}
+
+export interface GitCheckoutBranchOptions {
+  stashChanges?: boolean
+}
+
 async function git(args: string[], cwd: string): Promise<string> {
   assertDirectory(cwd, 'Git working directory')
   const { stdout } = await exec('git', args, { cwd, maxBuffer: 10 * 1024 * 1024 })
   return stdout
+}
+
+async function gitWithEnv(args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
+  assertDirectory(cwd, 'Git working directory')
+  const { stdout } = await exec('git', args, { cwd, env, maxBuffer: 10 * 1024 * 1024 })
+  return stdout
+}
+
+async function gitWithInput(
+  args: string[],
+  cwd: string,
+  input: string,
+  env: NodeJS.ProcessEnv = process.env
+): Promise<string> {
+  assertDirectory(cwd, 'Git working directory')
+
+  return new Promise((resolve, reject) => {
+    const child = spawn('git', args, { cwd, env })
+    let stdout = ''
+    let stderr = ''
+
+    child.stdout.on('data', (chunk) => {
+      stdout += String(chunk)
+    })
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk)
+    })
+    child.on('error', reject)
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolve(stdout)
+        return
+      }
+      reject(new Error(stderr || `git ${args.join(' ')} exited with code ${code}`))
+    })
+
+    child.stdin.end(input)
+  })
 }
 
 async function gitAllowNonZeroExit(args: string[], cwd: string): Promise<string> {
@@ -54,8 +142,16 @@ export async function getStatus(path: string): Promise<FileStatus[]> {
         staged
       })
     } else if (line.startsWith('2 ')) {
-      const parts = line.split('\t')
-      files.push({ path: parts[parts.length - 1], status: 'renamed', staged: true })
+      const [metadata, oldPath] = line.split('\t')
+      const parts = metadata.split(' ')
+      const xy = parts[1]
+      const filePath = parts.slice(9).join(' ')
+      files.push({
+        path: filePath,
+        oldPath,
+        status: 'renamed',
+        staged: xy[0] !== '.'
+      })
     } else if (line.startsWith('? ')) {
       files.push({ path: line.slice(2), status: 'untracked', staged: false })
     }
@@ -97,6 +193,14 @@ export async function getDiff(path: string, file?: string): Promise<string> {
   )
 
   return [diff, ...untrackedDiffs].filter(Boolean).join('\n')
+}
+
+export async function getFileContent(path: string, file: string, revision = 'HEAD'): Promise<string> {
+  const normalizedFile = file.trim()
+  const normalizedRevision = revision.trim() || 'HEAD'
+  if (!normalizedFile) return ''
+
+  return gitAllowNonZeroExit(['show', `${normalizedRevision}:${normalizedFile}`], path)
 }
 
 function parseNumstat(output: string): Pick<GitSummary, 'additions' | 'deletions'> {
@@ -178,4 +282,389 @@ export async function getSummary(path: string): Promise<GitSummary | null> {
 export async function listBranches(root: string): Promise<string[]> {
   const output = await git(['branch', '--list', '--format=%(refname:short)'], root)
   return output.split('\n').filter(Boolean)
+}
+
+async function getRemotes(path: string): Promise<string[]> {
+  try {
+    return (await git(['remote'], path)).split('\n').map((line) => line.trim()).filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+async function getPreferredRemote(path: string): Promise<string | null> {
+  const remotes = await getRemotes(path)
+  return remotes.includes('origin') ? 'origin' : remotes[0] || null
+}
+
+async function getDefaultRemoteBranch(path: string, remote: string | null): Promise<string | null> {
+  if (!remote) return null
+  try {
+    const ref = (await git(['symbolic-ref', `refs/remotes/${remote}/HEAD`], path)).trim()
+    const prefix = `refs/remotes/${remote}/`
+    if (ref.startsWith(prefix)) return ref.slice(prefix.length)
+  } catch {
+    // Some remotes do not have an origin/HEAD symbolic ref.
+  }
+  return null
+}
+
+async function getCurrentBranch(path: string): Promise<string | null> {
+  const branch = (await getBranchName(path)).trim()
+  return branch && !branch.startsWith('@') && branch !== 'detached' ? branch : null
+}
+
+async function getUpstreamBranch(path: string): Promise<string | null> {
+  try {
+    const upstream = (await git(['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], path)).trim()
+    return upstream || null
+  } catch {
+    return null
+  }
+}
+
+async function remoteRefExists(path: string, ref: string): Promise<boolean> {
+  try {
+    await git(['rev-parse', '--verify', '--quiet', `refs/remotes/${ref}`], path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+export async function listBranchDetails(path: string): Promise<GitBranchInfo[]> {
+  const remote = await getPreferredRemote(path)
+  const defaultRemoteBranch = await getDefaultRemoteBranch(path, remote)
+  const output = await git([
+    'for-each-ref',
+    '--sort=-committerdate',
+    '--format=%(refname:short)%x1f%(committerdate:iso-strict)%x1f%(HEAD)',
+    'refs/heads',
+    'refs/remotes'
+  ], path)
+
+  return output
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      const [name, lastCommitDate = '', head = ''] = line.split('\x1f')
+      const remotePrefix = remote ? `${remote}/` : ''
+      const isRemote = !!remotePrefix && name.startsWith(remotePrefix)
+      const comparableName = isRemote ? name.slice(remotePrefix.length) : name
+      return {
+        name,
+        current: head === '*',
+        remote: isRemote,
+        lastCommitDate,
+        defaultBranch: !!defaultRemoteBranch && comparableName === defaultRemoteBranch
+      }
+    })
+    .filter((branch) => branch.name !== `${remote}/HEAD`)
+}
+
+export async function checkoutBranch(
+  path: string,
+  branch: string,
+  options: GitCheckoutBranchOptions = {}
+): Promise<GitBranchSyncStatus> {
+  const branchName = branch.trim()
+  if (!branchName || branchName.startsWith('-') || branchName.includes('..') || branchName.includes('\0')) {
+    throw new Error('Invalid branch name')
+  }
+
+  const remote = await getPreferredRemote(path)
+  const remotePrefix = remote ? `${remote}/` : ''
+
+  if (options.stashChanges && (await getStatus(path)).length > 0) {
+    const currentBranch = await getBranchName(path)
+    await git(['stash', 'push', '-u', '-m', `Pear: changes on ${currentBranch} before switching to ${branchName}`], path)
+  }
+
+  if (remotePrefix && branchName.startsWith(remotePrefix)) {
+    const localBranchName = branchName.slice(remotePrefix.length)
+    const localBranches = await listBranches(path)
+    if (localBranches.includes(localBranchName)) {
+      await git(['switch', localBranchName], path)
+    } else {
+      await git(['switch', '--track', branchName], path)
+    }
+  } else {
+    await git(['switch', branchName], path)
+  }
+
+  return getBranchSyncStatus(path)
+}
+
+export async function getBranchSyncStatus(path: string): Promise<GitBranchSyncStatus> {
+  const [branch, remote] = await Promise.all([
+    getCurrentBranch(path),
+    getPreferredRemote(path)
+  ])
+
+  if (!branch || !remote) {
+    return {
+      branch: branch || (await getBranchName(path)),
+      remote,
+      upstream: null,
+      ahead: 0,
+      behind: 0,
+      hasRemote: !!remote
+    }
+  }
+
+  const upstream = await getUpstreamBranch(path)
+  const fallbackUpstream = `${remote}/${branch}`
+  const compareRef = upstream || (await remoteRefExists(path, fallbackUpstream) ? fallbackUpstream : null)
+
+  if (!compareRef) {
+    return {
+      branch,
+      remote,
+      upstream: null,
+      ahead: 0,
+      behind: 0,
+      hasRemote: true
+    }
+  }
+
+  const output = (await git(['rev-list', '--left-right', '--count', `HEAD...${compareRef}`], path)).trim()
+  const [aheadText, behindText] = output.split(/\s+/)
+  const ahead = Number.parseInt(aheadText || '0', 10)
+  const behind = Number.parseInt(behindText || '0', 10)
+
+  return {
+    branch,
+    remote,
+    upstream: compareRef,
+    ahead: Number.isFinite(ahead) ? ahead : 0,
+    behind: Number.isFinite(behind) ? behind : 0,
+    hasRemote: true
+  }
+}
+
+export async function fetchRemote(path: string): Promise<GitBranchSyncStatus> {
+  const remote = await getPreferredRemote(path)
+  if (!remote) throw new Error('No Git remote is configured')
+  await git(['fetch', remote, '--prune'], path)
+  return getBranchSyncStatus(path)
+}
+
+export async function pullCurrentBranch(path: string): Promise<GitBranchSyncStatus> {
+  const status = await getBranchSyncStatus(path)
+  if (!status.branch || status.branch === 'detached' || status.branch.startsWith('@')) {
+    throw new Error('Cannot pull while detached from a branch')
+  }
+  if (!status.remote) throw new Error('No Git remote is configured')
+
+  if (status.upstream) {
+    await git(['pull', '--ff-only'], path)
+  } else {
+    await git(['pull', '--ff-only', status.remote, status.branch], path)
+  }
+
+  return getBranchSyncStatus(path)
+}
+
+export async function pushCurrentBranch(path: string): Promise<GitBranchSyncStatus> {
+  const status = await getBranchSyncStatus(path)
+  if (!status.branch || status.branch === 'detached' || status.branch.startsWith('@')) {
+    throw new Error('Cannot push while detached from a branch')
+  }
+  if (!status.remote) throw new Error('No Git remote is configured')
+
+  if (status.upstream) {
+    await git(['push'], path)
+  } else {
+    await git(['push', '-u', status.remote, status.branch], path)
+  }
+
+  return getBranchSyncStatus(path)
+}
+
+export async function getHistory(path: string, limit = 30): Promise<GitHistoryCommit[]> {
+  const boundedLimit = Math.max(1, Math.min(100, Math.trunc(limit)))
+  const [output, statsOutput] = await Promise.all([
+    git([
+      'log',
+      `--max-count=${boundedLimit}`,
+      '--date=iso-strict',
+      '--format=%x1e%H%x1f%h%x1f%an%x1f%ad%x1f%s%x1f%b%x1c',
+      '--name-status'
+    ], path),
+    git([
+      'log',
+      `--max-count=${boundedLimit}`,
+      '--format=%x1e%H%x1c',
+      '--numstat'
+    ], path)
+  ])
+  const statsByHash = parseHistoryStats(statsOutput)
+
+  return output
+    .split('\x1e')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+    .map((entry) => {
+      const [header, fileBlock = ''] = entry.split('\x1c')
+      const [hash, shortHash, author, date, subject, body = ''] = header.split('\x1f')
+      const files = fileBlock
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .map((line) => {
+          const [status, ...paths] = line.split('\t')
+          return {
+            status,
+            path: paths[paths.length - 1] || '',
+            oldPath: paths.length > 1 ? paths[0] : undefined
+          }
+        })
+        .filter((file) => file.path)
+      const stats = statsByHash.get(hash) || { additions: 0, deletions: 0 }
+
+      return {
+        hash,
+        shortHash,
+        author,
+        date,
+        subject,
+        body: body.trim(),
+        additions: stats.additions,
+        deletions: stats.deletions,
+        files
+      }
+    })
+}
+
+function parseHistoryStats(output: string): Map<string, Pick<GitHistoryCommit, 'additions' | 'deletions'>> {
+  const statsByHash = new Map<string, Pick<GitHistoryCommit, 'additions' | 'deletions'>>()
+
+  for (const entry of output.split('\x1e')) {
+    const trimmed = entry.trim()
+    if (!trimmed) continue
+    const [hash, statBlock = ''] = trimmed.split('\x1c')
+    const stats = parseNumstat(statBlock)
+    statsByHash.set(hash.trim(), stats)
+  }
+
+  return statsByHash
+}
+
+export async function getCommitDiff(path: string, hash: string, file?: string): Promise<string> {
+  if (!/^[0-9a-f]{4,40}$/i.test(hash)) {
+    throw new Error('Invalid commit hash')
+  }
+  const args = [
+    'show',
+    '--format=',
+    '--find-renames',
+    '--find-copies',
+    '--unified=3',
+    hash
+  ]
+  if (file?.trim()) {
+    args.push('--', file.trim())
+  }
+  return git(args, path)
+}
+
+async function hasHead(path: string): Promise<boolean> {
+  try {
+    await git(['rev-parse', '--verify', 'HEAD'], path)
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function hasStagedChanges(path: string): Promise<boolean> {
+  const status = await getStatus(path)
+  return status.some((file) => file.staged)
+}
+
+function normalizeCommitMessage(input: GitCommitSelectionInput): { title: string; body: string } {
+  const title = input.title.trim()
+  if (!title) throw new Error('Commit summary is required')
+
+  return {
+    title,
+    body: input.body?.trim() || ''
+  }
+}
+
+function createCommitArgs(message: { title: string; body: string }, parentHash: string | null, treeHash: string): string[] {
+  const args = ['commit-tree', treeHash]
+  if (parentHash) args.push('-p', parentHash)
+  args.push('-m', message.title)
+  if (message.body) args.push('-m', message.body)
+  return args
+}
+
+export async function commitSelection(path: string, input: GitCommitSelectionInput): Promise<{ hash: string }> {
+  const message = normalizeCommitMessage(input)
+  const wholeFiles = Array.from(new Set(input.wholeFiles.map((file) => file.trim()).filter(Boolean)))
+  const patch = input.patch?.trim() ? `${input.patch.trimEnd()}\n` : ''
+
+  if (wholeFiles.length === 0 && !patch) {
+    throw new Error('Select at least one file or changed line to commit')
+  }
+
+  if (await hasStagedChanges(path)) {
+    throw new Error('Unstage existing changes before committing a line selection')
+  }
+
+  const tempDir = await mkdtemp(join(tmpdir(), 'pear-git-index-'))
+  const tempIndex = join(tempDir, 'index')
+  const env = { ...process.env, GIT_INDEX_FILE: tempIndex }
+
+  try {
+    const parentExists = await hasHead(path)
+    const parentHash = parentExists ? (await git(['rev-parse', 'HEAD'], path)).trim() : null
+
+    if (parentExists) {
+      await gitWithEnv(['read-tree', 'HEAD'], path, env)
+    } else {
+      await gitWithEnv(['read-tree', '--empty'], path, env)
+    }
+
+    if (wholeFiles.length > 0) {
+      await gitWithEnv(['add', '-A', '--', ...wholeFiles], path, env)
+    }
+
+    if (patch) {
+      await gitWithInput(
+        ['apply', '--cached', '--unidiff-zero', '--recount', '--whitespace=nowarn', '-'],
+        path,
+        patch,
+        env
+      )
+    }
+
+    const stagedFiles = (await gitWithEnv(['diff', '--cached', '--name-only'], path, env))
+      .split('\n')
+      .filter(Boolean)
+
+    if (stagedFiles.length === 0) {
+      throw new Error('Selected changes are already committed')
+    }
+
+    const treeHash = (await gitWithEnv(['write-tree'], path, env)).trim()
+    const commitHash = (await gitWithEnv(createCommitArgs(message, parentHash, treeHash), path, env)).trim()
+    await git(['update-ref', 'HEAD', commitHash], path)
+    await git(['reset', '--mixed', '--quiet', 'HEAD'], path)
+
+    return { hash: commitHash }
+  } finally {
+    await rm(tempDir, { recursive: true, force: true })
+  }
+}
+
+export async function getSelectedDiff(path: string, input: { wholeFiles: string[]; patch?: string }): Promise<string> {
+  const diffs = await Promise.all(
+    Array.from(new Set(input.wholeFiles.map((file) => file.trim()).filter(Boolean)))
+      .map((file) => getDiff(path, file).catch(() => ''))
+  )
+  const patch = input.patch?.trim() ? input.patch.trim() : ''
+  return [...diffs, patch].filter(Boolean).join('\n')
 }

@@ -1,25 +1,52 @@
 import type React from 'react'
-import { useEffect, useMemo, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import {
   parseDiff,
-  Diff,
-  Hunk,
+  expandCollapsedBlockBy,
+  getChangeKey,
+  getCollapsedLinesCountBetween,
   type HunkData,
   type FileData,
   type HunkTokens,
-  type TokenNode
+  type TokenNode,
+  type ChangeData
 } from 'react-diff-view'
+import { pear } from '@/lib/ipc'
+import { getDiffFilePath, getLineSelectionId } from '@/lib/diff-selection'
 import { highlightCode } from '@/lib/syntax-highlighter'
 import { useUIStore } from '@/stores/ui-store'
 
 interface Props {
   diff: string
+  rootPath?: string
+  focusedFilePath?: string | null
+  selectable?: boolean
+  selectedLineIds?: Set<string>
+  selectedFiles?: Set<string>
+  onToggleLine?: (filePath: string, lineId: string) => void
+  onSetLines?: (filePath: string, lineIds: string[], selected: boolean) => void
 }
+
+const EMPTY_SELECTION = new Set<string>()
 
 interface SyntaxTokenNode extends TokenNode {
   type: 'syntax'
   value: string
   style?: React.CSSProperties
+}
+
+interface SelectionMaps {
+  lineIdsByChangeKey: Map<string, string>
+  blockLineIdsByChangeKey: Map<string, string[]>
+  blockIdByChangeKey: Map<string, string>
+}
+
+interface DragSelection {
+  filePath: string
+  lineId: string
+  wasSelected: boolean
+  changed: boolean
+  appliedLineIds: Set<string>
 }
 
 function isSyntaxToken(token: TokenNode): token is SyntaxTokenNode {
@@ -73,41 +100,422 @@ async function buildHighlightedTokens(file: FileData, theme: 'dark' | 'light'): 
   return { old, new: next }
 }
 
-export function DiffViewer({ diff }: Props): React.ReactNode {
-  const files = useMemo(() => {
+function isSelectableChange(change: ChangeData | null): change is ChangeData {
+  return !!change && change.type !== 'normal'
+}
+
+function buildSelectionMaps(filePath: string, hunks: HunkData[]): SelectionMaps {
+  const lineIdsByChangeKey = new Map<string, string>()
+  const blockLineIdsByChangeKey = new Map<string, string[]>()
+  const blockIdByChangeKey = new Map<string, string>()
+  let blockIndex = 0
+
+  for (const hunk of hunks) {
+    let blockChanges: ChangeData[] = []
+
+    const flushBlock = (): void => {
+      if (blockChanges.length === 0) return
+
+      const blockLineIds = blockChanges.map((change) => getLineSelectionId(filePath, change))
+      const blockId = `block-${blockIndex}`
+      blockIndex += 1
+
+      for (const change of blockChanges) {
+        const changeKey = getChangeKey(change)
+        blockLineIdsByChangeKey.set(changeKey, blockLineIds)
+        blockIdByChangeKey.set(changeKey, blockId)
+      }
+      blockChanges = []
+    }
+
+    for (const change of hunk.changes) {
+      if (change.type === 'normal') {
+        flushBlock()
+        continue
+      }
+
+      const lineId = getLineSelectionId(filePath, change)
+      lineIdsByChangeKey.set(getChangeKey(change), lineId)
+      blockChanges.push(change)
+    }
+
+    flushBlock()
+  }
+
+  return { lineIdsByChangeKey, blockLineIdsByChangeKey, blockIdByChangeKey }
+}
+
+function sourcePathForFile(file: FileData): string | null {
+  if (file.type === 'add') return null
+  return file.oldPath && file.oldPath !== '/dev/null' ? file.oldPath : null
+}
+
+function sourceLineCount(source: string): number {
+  const lines = source.split('\n')
+  return lines[lines.length - 1] === '' ? Math.max(lines.length - 1, 0) : lines.length
+}
+
+function oldLineNumber(change: ChangeData): number | undefined {
+  if (change.type === 'insert') return undefined
+  if (change.type === 'normal') return change.oldLineNumber
+  return change.lineNumber
+}
+
+function newLineNumber(change: ChangeData): number | undefined {
+  if (change.type === 'delete') return undefined
+  if (change.type === 'normal') return change.newLineNumber
+  return change.lineNumber
+}
+
+function lineSign(change: ChangeData): string {
+  if (change.type === 'insert') return '+'
+  if (change.type === 'delete') return '-'
+  return ' '
+}
+
+function tokensForChange(tokens: HunkTokens | null | undefined, change: ChangeData): TokenNode[] | null {
+  if (!tokens) return null
+
+  if (change.type === 'delete' && change.lineNumber > 0) {
+    return tokens.old[change.lineNumber - 1] || null
+  }
+
+  if (change.type === 'insert' && change.lineNumber > 0) {
+    return tokens.new[change.lineNumber - 1] || null
+  }
+
+  if (change.type === 'normal') {
+    return tokens.new[change.newLineNumber - 1] || tokens.old[change.oldLineNumber - 1] || null
+  }
+
+  return null
+}
+
+function renderTokenNode(token: TokenNode, tokenIndex: number): React.ReactNode {
+  if (isSyntaxToken(token)) {
+    return (
+      <span key={tokenIndex} style={token.style}>
+        {token.value}
+      </span>
+    )
+  }
+
+  if (token.type === 'text') {
+    return token.value
+  }
+
+  if (typeof token.value === 'string') {
+    return (
+      <span key={tokenIndex} className={token.className}>
+        {token.value}
+      </span>
+    )
+  }
+
+  if (token.children) {
+    return (
+      <span key={tokenIndex} className={token.className}>
+        {token.children.map(renderTokenNode)}
+      </span>
+    )
+  }
+
+  return null
+}
+
+function renderCodeContent(tokens: TokenNode[] | null, fallback: string): React.ReactNode {
+  if (!tokens || tokens.length === 0) return fallback || ' '
+  if (tokens.length === 1 && tokens[0].type === 'text' && !tokens[0].value) return ' '
+  return tokens.map(renderTokenNode)
+}
+
+function renderFoldRow({
+  key,
+  content,
+  hiddenLines,
+  expandable,
+  expanded,
+  onToggle
+}: {
+  key: string
+  content: string
+  hiddenLines: number
+  expandable: boolean
+  expanded: boolean
+  onToggle: () => void
+}): React.ReactElement {
+  return (
+    <tr key={key} className="diff-decoration diff-hunk-decoration">
+      <td className="diff-decoration-content diff-hunk-decoration-content" colSpan={4}>
+        <button
+          type="button"
+          onClick={expandable ? onToggle : undefined}
+          disabled={!expandable}
+          className="diff-fold-control"
+          title={expandable ? (expanded ? 'Fold unchanged lines' : 'Expand unchanged lines') : content}
+        >
+          <span className="diff-fold-marker">{hiddenLines > 0 && !expanded ? '...' : '@@'}</span>
+          <span className="diff-fold-content">{content}</span>
+          {hiddenLines > 0 && !expanded && (
+            <span className="diff-fold-count">{hiddenLines} hidden</span>
+          )}
+        </button>
+      </td>
+    </tr>
+  )
+}
+
+function renderHunkRows({
+  hunks,
+  source,
+  expanded,
+  onToggleExpanded,
+  renderChange
+}: {
+  hunks: HunkData[]
+  source: string | null | undefined
+  expanded: boolean
+  onToggleExpanded: () => void
+  renderChange: (change: ChangeData, key: string) => React.ReactElement
+}): React.ReactElement[] {
+  const rows: React.ReactElement[] = []
+  const expandable = !!source && hunks.length > 0
+  const lineCount = source ? sourceLineCount(source) : 0
+
+  hunks.forEach((hunk, index) => {
+    const previousHunk = index > 0 ? hunks[index - 1] : null
+    const hiddenLines = expandable && !expanded
+      ? Math.max(0, getCollapsedLinesCountBetween(previousHunk, hunk))
+      : 0
+
+    rows.push(renderFoldRow({
+      key: `decoration-${hunk.content}-${index}`,
+      content: hunk.content,
+      hiddenLines,
+      expandable,
+      expanded,
+      onToggle: onToggleExpanded
+    }))
+
+    hunk.changes.forEach((change) => {
+      rows.push(renderChange(change, `change-${hunk.content}-${getChangeKey(change)}`))
+    })
+  })
+
+  if (expandable && !expanded) {
+    const lastHunk = hunks[hunks.length - 1]
+    const hiddenLines = Math.max(0, lineCount - (lastHunk.oldStart + lastHunk.oldLines) + 1)
+    if (hiddenLines > 0) {
+      rows.push(renderFoldRow({
+        key: 'decoration-tail',
+        content: 'End of file',
+        hiddenLines,
+        expandable,
+        expanded,
+        onToggle: onToggleExpanded
+      }))
+    }
+  }
+
+  return rows
+}
+
+export const DiffViewer = memo(function DiffViewer({
+  diff,
+  rootPath,
+  focusedFilePath,
+  selectable = false,
+  selectedLineIds = EMPTY_SELECTION,
+  selectedFiles = EMPTY_SELECTION,
+  onToggleLine,
+  onSetLines
+}: Props): React.ReactNode {
+  const parsedFiles = useMemo(() => {
     try {
       return parseDiff(diff)
     } catch {
       return []
     }
   }, [diff])
+  const files = useMemo(() => {
+    if (!focusedFilePath) return parsedFiles
+    return parsedFiles.filter((file) =>
+      getDiffFilePath(file) === focusedFilePath || file.oldPath === focusedFilePath
+    )
+  }, [focusedFilePath, parsedFiles])
   const theme = useUIStore((s) => s.theme)
   const [highlightedFiles, setHighlightedFiles] = useState<(HunkTokens | null)[]>([])
+  const [fileSources, setFileSources] = useState<Record<string, string | null>>({})
+  const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set())
+  const dragSelectionRef = useRef<DragSelection | null>(null)
 
   useEffect(() => {
-    if (files.length === 0) {
+    const finishDragSelection = (): void => {
+      const dragSelection = dragSelectionRef.current
+      if (!dragSelection) return
+
+      dragSelectionRef.current = null
+
+      if (!dragSelection.changed) {
+        if (dragSelection.wasSelected) {
+          onSetLines?.(dragSelection.filePath, [dragSelection.lineId], false)
+        }
+        return
+      }
+
+      if (!dragSelection.appliedLineIds.has(dragSelection.lineId)) {
+        onSetLines?.(dragSelection.filePath, [dragSelection.lineId], true)
+      }
+    }
+
+    window.addEventListener('mouseup', finishDragSelection)
+    return () => window.removeEventListener('mouseup', finishDragSelection)
+  }, [onSetLines])
+
+  useEffect(() => {
+    setExpandedFiles(new Set())
+  }, [diff, rootPath])
+
+  useEffect(() => {
+    if (!rootPath || files.length === 0) {
+      setFileSources({})
+      return
+    }
+
+    let ignore = false
+
+    Promise.all(
+      files.map(async (file) => {
+        const filePath = getDiffFilePath(file)
+        const sourcePath = sourcePathForFile(file)
+
+        if (!sourcePath) return [filePath, null] as const
+
+        try {
+          return [filePath, await pear.git.fileContent(rootPath, sourcePath, 'HEAD')] as const
+        } catch {
+          return [filePath, null] as const
+        }
+      })
+    ).then((entries) => {
+      if (ignore) return
+      setFileSources(Object.fromEntries(entries))
+    })
+
+    return () => {
+      ignore = true
+    }
+  }, [files, rootPath])
+
+  const displayFiles = useMemo(() => {
+    return files.map((file) => {
+      const filePath = getDiffFilePath(file)
+      const source = fileSources[filePath]
+      if (!source || !expandedFiles.has(filePath) || file.hunks.length === 0) return file
+
+      return {
+        ...file,
+        hunks: expandCollapsedBlockBy(file.hunks, source, () => true)
+      }
+    })
+  }, [expandedFiles, fileSources, files])
+
+  function setLines(filePath: string, lineIds: string[], selected: boolean): void {
+    if (onSetLines) {
+      onSetLines(filePath, lineIds, selected)
+      return
+    }
+
+    if (selected) {
+      lineIds.forEach((lineId) => onToggleLine?.(filePath, lineId))
+    }
+  }
+
+  function isLineSelected(filePath: string, lineId: string): boolean {
+    return selectedFiles.has(filePath) || selectedLineIds.has(lineId)
+  }
+
+  function stopSelectionEvent(event: Pick<React.MouseEvent<HTMLElement>, 'preventDefault' | 'stopPropagation'>): void {
+    event.preventDefault()
+    event.stopPropagation()
+  }
+
+  function beginLineSelection(
+    filePath: string,
+    lineId: string,
+    selected: boolean,
+    event: Pick<React.MouseEvent<HTMLElement>, 'preventDefault' | 'stopPropagation'>
+  ): void {
+    stopSelectionEvent(event)
+
+    const appliedLineIds = new Set<string>()
+    if (!selected) {
+      setLines(filePath, [lineId], true)
+      appliedLineIds.add(lineId)
+    }
+
+    dragSelectionRef.current = {
+      filePath,
+      lineId,
+      wasSelected: selected,
+      changed: false,
+      appliedLineIds
+    }
+  }
+
+  function dragAcrossLine(filePath: string, lineId: string): void {
+    const dragSelection = dragSelectionRef.current
+    if (!dragSelection || dragSelection.filePath !== filePath) return
+
+    if (dragSelection.lineId !== lineId) {
+      dragSelection.changed = true
+    }
+
+    if (dragSelection.appliedLineIds.has(lineId)) return
+
+    setLines(filePath, [lineId], true)
+    dragSelection.appliedLineIds.add(lineId)
+  }
+
+  function setBlockHover(
+    event: React.MouseEvent<HTMLElement>,
+    blockId: string | undefined,
+    hovered: boolean
+  ): void {
+    if (!blockId) return
+
+    const table = event.currentTarget.closest('table')
+    if (!table) return
+
+    table
+      .querySelectorAll<HTMLElement>(`[data-diff-block="${blockId}"]`)
+      .forEach((row) => row.classList.toggle('diff-line-block-hover', hovered))
+  }
+
+  useEffect(() => {
+    if (displayFiles.length === 0) {
       setHighlightedFiles([])
       return
     }
 
     let ignore = false
 
-    Promise.all(files.map((file) => buildHighlightedTokens(file, theme)))
+    Promise.all(displayFiles.map((file) => buildHighlightedTokens(file, theme)))
       .then((tokens) => {
         if (ignore) return
         setHighlightedFiles(tokens)
       })
       .catch(() => {
         if (ignore) return
-        setHighlightedFiles(files.map(() => null))
+        setHighlightedFiles(displayFiles.map(() => null))
       })
 
     return () => {
       ignore = true
     }
-  }, [files, theme])
+  }, [displayFiles, theme])
 
-  if (files.length === 0) {
+  if (displayFiles.length === 0) {
     return (
       <div className="p-0">
         <pre className="whitespace-pre-wrap text-xs text-[var(--pear-text-dim)]">
@@ -119,34 +527,131 @@ export function DiffViewer({ diff }: Props): React.ReactNode {
 
   return (
     <div className="diff-view">
-      {files.map((file: FileData, index) => (
-        <div key={file.oldPath + file.newPath} className="mb-2">
-          <div className="sticky top-0 z-10 border-b border-[var(--pear-bg-surface)] bg-[var(--pear-bg)] px-3 py-1.5 text-xs font-medium text-[var(--pear-accent)]">
-            {file.newPath === '/dev/null' ? file.oldPath : file.newPath}
-          </div>
-          <Diff
-            viewType="unified"
-            diffType={file.type}
-            hunks={file.hunks}
-            tokens={highlightedFiles[index]}
-            renderToken={(token, defaultRender, tokenIndex) => {
-              if (isSyntaxToken(token)) {
-                return (
-                  <span key={tokenIndex} style={token.style}>
-                    {token.value}
-                  </span>
-                )
-              }
-
-              return defaultRender(token, tokenIndex)
-            }}
-          >
-            {(hunks: HunkData[]) =>
-              hunks.map((hunk) => <Hunk key={hunk.content} hunk={hunk} />)
+      {displayFiles.map((file: FileData, index) => {
+        const filePath = getDiffFilePath(file)
+        const source = fileSources[filePath]
+        const expanded = expandedFiles.has(filePath)
+        const selectionMaps = buildSelectionMaps(filePath, file.hunks)
+        const highlightedTokens = highlightedFiles[index]
+        const toggleExpanded = (): void => {
+          setExpandedFiles((current) => {
+            const next = new Set(current)
+            if (next.has(filePath)) {
+              next.delete(filePath)
+            } else {
+              next.add(filePath)
             }
-          </Diff>
-        </div>
-      ))}
+            return next
+          })
+        }
+        const renderChange = (change: ChangeData, key: string): React.ReactElement => {
+          const changeKey = getChangeKey(change)
+          const lineId = selectable && isSelectableChange(change)
+            ? selectionMaps.lineIdsByChangeKey.get(changeKey)
+            : undefined
+          const blockLineIds = selectable && isSelectableChange(change)
+            ? selectionMaps.blockLineIdsByChangeKey.get(changeKey) || []
+            : []
+          const blockId = selectable && isSelectableChange(change)
+            ? selectionMaps.blockIdByChangeKey.get(changeKey)
+            : undefined
+          const selected = !!lineId && isLineSelected(filePath, lineId)
+          const blockSelected = blockLineIds.length > 0 &&
+            blockLineIds.every((id) => isLineSelected(filePath, id))
+          const blockActive = blockLineIds.length > 0 &&
+            blockLineIds.some((id) => isLineSelected(filePath, id))
+          const gutterClassName = `diff-gutter diff-gutter-${change.type} ${selected ? 'diff-gutter-selected' : ''}`
+          const selectableClassName = lineId ? 'is-selectable' : ''
+          const lineSelectEvents = lineId
+            ? {
+                onMouseDown: (event: React.MouseEvent<HTMLElement>) => {
+                  beginLineSelection(filePath, lineId, selected, event)
+                },
+                onMouseEnter: () => {
+                  dragAcrossLine(filePath, lineId)
+                }
+              }
+            : {}
+
+          return (
+            <tr
+              key={key}
+              className="diff-line"
+              data-diff-block={blockId}
+            >
+              <td className={`diff-block-gutter diff-gutter-${change.type} ${blockActive ? 'is-active' : ''} ${blockSelected ? 'is-selected' : ''}`}>
+                <button
+                  type="button"
+                  disabled={blockLineIds.length === 0}
+                  className={`diff-block-selector ${blockActive ? 'is-active' : ''} ${blockSelected ? 'is-selected' : ''}`}
+                  title={blockSelected ? 'Unselect block' : 'Select block'}
+                  aria-label={blockSelected ? 'Unselect diff block' : 'Select diff block'}
+                  onMouseDown={stopSelectionEvent}
+                  onClick={(event) => {
+                    stopSelectionEvent(event)
+                    if (blockLineIds.length === 0) return
+                    setLines(filePath, blockLineIds, !blockSelected)
+                  }}
+                  onMouseEnter={(event) => {
+                    setBlockHover(event, blockId, true)
+                  }}
+                  onMouseLeave={(event) => {
+                    setBlockHover(event, blockId, false)
+                  }}
+                />
+              </td>
+              <td
+                className={`${gutterClassName} diff-gutter-old-cell ${selectableClassName}`}
+                {...lineSelectEvents}
+              >
+                <span className={`diff-gutter-number diff-gutter-number-old ${selected ? 'is-selected' : ''}`}>
+                  {oldLineNumber(change)}
+                </span>
+              </td>
+              <td
+                className={`${gutterClassName} diff-gutter-new-cell ${selectableClassName}`}
+                {...lineSelectEvents}
+              >
+                <span className={`diff-gutter-number diff-gutter-number-new ${selected ? 'is-selected' : ''}`}>
+                  {newLineNumber(change)}
+                </span>
+              </td>
+              <td
+                className={`diff-code diff-code-${change.type} ${selected ? 'diff-code-selected' : ''} ${selectableClassName}`}
+                data-change-key={changeKey}
+                {...lineSelectEvents}
+              >
+                <span className="diff-code-prefix">{lineSign(change)}</span>
+                <span className="diff-code-content">
+                  {renderCodeContent(tokensForChange(highlightedTokens, change), change.content)}
+                </span>
+              </td>
+            </tr>
+          )
+        }
+
+        return (
+          <div key={file.oldPath + file.newPath} className="mb-2">
+            <table className="diff diff-unified diff-three-column-gutter">
+              <colgroup>
+                <col className="diff-block-col" />
+                <col className="diff-gutter-col diff-gutter-old-col" />
+                <col className="diff-gutter-col diff-gutter-new-col" />
+                <col />
+              </colgroup>
+              <tbody className="diff-hunk">
+                {renderHunkRows({
+                  hunks: file.hunks,
+                  source,
+                  expanded,
+                  onToggleExpanded: toggleExpanded,
+                  renderChange
+                })}
+              </tbody>
+            </table>
+          </div>
+        )
+      })}
     </div>
   )
-}
+})

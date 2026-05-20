@@ -1,6 +1,6 @@
 import type React from 'react'
 import { useState, useEffect, useCallback } from 'react'
-import { LogOut } from 'lucide-react'
+import { LogOut, PanelLeftClose, PanelLeftOpen } from 'lucide-react'
 import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 import { pear } from '@/lib/ipc'
@@ -42,12 +42,8 @@ function AgentRelayWordmark(): React.ReactNode {
   )
 }
 
-function PearMark(): React.ReactNode {
-  return (
-    <div className="shrink-0 text-[19px] leading-none" aria-label="Pear" title="Pear">
-      🍐
-    </div>
-  )
+function projectInitial(name: string): string {
+  return name.trim().charAt(0).toUpperCase() || '?'
 }
 
 function UserAvatar({ name, email }: { name?: string; email?: string }): React.ReactNode {
@@ -138,19 +134,77 @@ function AccountMenu(): React.ReactNode {
 export function ProjectSidebar(): React.ReactNode {
   const projects = useProjectStore((s) => s.projects)
   const activeProjectId = useProjectStore((s) => s.activeProjectId)
-  const setViewMode = useUIStore((s) => s.setViewMode)
+  const setActiveProject = useProjectStore((s) => s.setActiveProject)
+  const openTab = useUIStore((s) => s.openTab)
+  const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
+  const toggleSidebar = useUIStore((s) => s.toggleSidebar)
+
+  const handleSelectProject = (projectId: string): void => {
+    openTab({ kind: 'agents', projectId })
+    setActiveProject(projectId).catch((err) => {
+      console.error('[sidebar] Failed to set active project:', err)
+    })
+  }
+
+  if (sidebarCollapsed) {
+    return (
+      <div className="flex h-full flex-col items-center border-r border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)]/95 py-2 backdrop-blur-xl">
+        <div className="mb-2 flex h-9 w-9 items-center justify-center">
+          <AgentRelayLogo />
+        </div>
+
+        <button
+          type="button"
+          onClick={toggleSidebar}
+          className="mb-3 flex h-9 w-9 items-center justify-center rounded-md text-[var(--pear-text-faint)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
+          title="Expand sidebar"
+          aria-label="Expand sidebar"
+        >
+          <PanelLeftOpen size={17} />
+        </button>
+
+        <div className="flex min-h-0 flex-1 flex-col items-center gap-2 overflow-y-auto px-2">
+          {projects.map((project) => {
+            const active = project.id === activeProjectId
+            return (
+              <button
+                key={project.id}
+                type="button"
+                onClick={() => handleSelectProject(project.id)}
+                className={`flex h-9 w-9 items-center justify-center rounded-lg text-sm font-semibold ${
+                  active
+                    ? 'bg-[var(--pear-bg-overlay)] text-[var(--pear-text)] ring-1 ring-[var(--pear-border)]'
+                    : 'text-[var(--pear-text-faint)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]'
+                }`}
+                title={project.name}
+                aria-label={project.name}
+              >
+                {projectInitial(project.name)}
+              </button>
+            )
+          })}
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="flex h-full flex-col border-r border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)]/95 backdrop-blur-xl">
-      <div className="titlebar-drag h-[40px] shrink-0" />
-
-      <div className="titlebar-nodrag border-b border-[var(--pear-border-subtle)] px-5 pb-4 pt-3">
-        <div className="flex items-center justify-between gap-3">
+      <div className="titlebar-nodrag flex h-16 shrink-0 items-center border-b border-[var(--pear-border-subtle)] px-5">
+        <div className="flex w-full items-center justify-between gap-3">
           <div className="flex min-w-0 items-center gap-2.5">
             <AgentRelayLogo />
             <AgentRelayWordmark />
           </div>
-          <PearMark />
+          <button
+            type="button"
+            onClick={toggleSidebar}
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-[var(--pear-text-faint)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
+            title="Collapse sidebar"
+            aria-label="Collapse sidebar"
+          >
+            <PanelLeftClose size={16} />
+          </button>
         </div>
       </div>
 
@@ -161,7 +215,7 @@ export function ProjectSidebar(): React.ReactNode {
       <div className="flex-1 space-y-2 overflow-y-auto px-5 pb-5">
         {projects.length === 0 ? (
           <button
-            onClick={() => setViewMode('project-settings')}
+            onClick={() => openTab({ kind: 'project-settings' })}
             className="mt-1 w-full rounded-xl border border-dashed border-[var(--pear-border)] px-4 py-6 text-center text-xs text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text-dim)]"
           >
             Open project settings

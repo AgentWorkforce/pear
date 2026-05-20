@@ -9,7 +9,7 @@
     "preview": "electron-vite preview"
   },
   "dependencies": {
-    "@agent-relay/sdk": "^6.2.5",
+    "@agent-relay/sdk": "^6.3.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",

@@ -1,6 +1,7 @@
 import { pear } from '@/lib/ipc'
 import { getAgentKey, useAgentStore } from '@/stores/agent-store'
 import { useProjectStore, type Project } from '@/stores/project-store'
+import { useUIStore } from '@/stores/ui-store'
 
 export type SpawnAgentCli = 'claude' | 'codex'
 
@@ -68,6 +69,7 @@ export async function spawnProjectAgent(project: Project, cli: SpawnAgentCli): P
 
   agentStore.trackSpawnedAgent(name, project.id, root.id, cli, root.path)
   agentStore.setActiveAgentKey(getAgentKey(project.id, name))
+  useUIStore.getState().openTab({ kind: 'agents', projectId: project.id })
 
   return name
 }

@@ -60,6 +60,7 @@ export interface BrokerErrorEntry {
   id: string
   message: string
   timestamp: number
+  projectId?: string
 }
 
 const MAX_PTY_BUFFER_CHUNKS = 10_000
@@ -639,7 +640,11 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       const shouldRecord =
         nextStatus === 'error' &&
         !!nextError &&
-        (state.brokerStatus !== 'error' || state.brokerErrors[0]?.message !== nextError)
+        (
+          state.brokerStatus !== 'error' ||
+          state.brokerErrors[0]?.message !== nextError ||
+          state.brokerErrors[0]?.projectId !== status.projectId
+        )
 
       return {
         brokerStatus: nextStatus,
@@ -649,7 +654,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
               {
                 id: crypto.randomUUID(),
                 message: nextError,
-                timestamp: Date.now()
+                timestamp: Date.now(),
+                projectId: status.projectId
               },
               ...state.brokerErrors
             ].slice(0, MAX_BROKER_ERRORS)

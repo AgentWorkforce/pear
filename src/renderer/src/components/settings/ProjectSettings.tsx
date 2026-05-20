@@ -150,7 +150,8 @@ export function ProjectSettings(): React.ReactNode {
   const removeIntegration = useProjectStore((s) => s.removeIntegration)
   const allAgents = useAgentStore((s) => s.agents)
   const openDialog = useUIStore((s) => s.openDialog)
-  const setViewMode = useUIStore((s) => s.setViewMode)
+  const openTab = useUIStore((s) => s.openTab)
+  const closeActiveTab = useUIStore((s) => s.closeActiveTab)
   const project = useMemo(
     () => projects.find((candidate) => candidate.id === activeProjectId),
     [activeProjectId, projects]
@@ -229,7 +230,7 @@ export function ProjectSettings(): React.ReactNode {
               <Plus size={14} />
               Add project
             </button>
-            <IconButton label="Close settings" onClick={() => setViewMode('terminal')}>
+            <IconButton label="Close settings" onClick={closeActiveTab}>
               <X size={16} />
             </IconButton>
           </div>
@@ -312,6 +313,7 @@ export function ProjectSettings(): React.ReactNode {
               void run(async () => {
                 await addChannel(name)
                 setActiveChannel(name)
+                openTab({ kind: 'channel', projectId: project.id, channelName: name })
                 setChannelName('')
               })
             }}
@@ -345,7 +347,7 @@ export function ProjectSettings(): React.ReactNode {
                   type="button"
                   onClick={() => {
                     setActiveChannel(channel)
-                    setViewMode('chat')
+                    openTab({ kind: 'channel', projectId: project.id, channelName: channel })
                   }}
                   className="flex items-center gap-1.5"
                 >
@@ -467,7 +469,7 @@ export function ProjectSettings(): React.ReactNode {
               if (!window.confirm(`Delete project "${project.name}"? This won't delete any files.`)) return
               void run(async () => {
                 await removeProject(project.id)
-                setViewMode('terminal')
+                closeActiveTab()
               })
             }}
             className="flex items-center gap-2 rounded-lg border border-[var(--pear-red)]/30 px-4 py-2.5 text-sm text-[var(--pear-red)] hover:bg-[var(--pear-red)]/10"

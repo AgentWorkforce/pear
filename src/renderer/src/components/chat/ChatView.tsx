@@ -10,6 +10,13 @@ import {
   UserPlus,
   X
 } from 'lucide-react'
+import {
+  getDirectMessageAgentNames,
+  getDirectMessageRoomTitle,
+  isDirectMessageRoomHumanIncluded,
+  messageMatchesDirectMessageRoom,
+  sortDirectMessageParticipants
+} from '@/lib/direct-messages'
 import { pear } from '@/lib/ipc'
 import {
   useAgentStore,
@@ -17,6 +24,7 @@ import {
   type ChatMessage as ChatMessageType
 } from '@/stores/agent-store'
 import { normalizeChannelName, useProjectStore } from '@/stores/project-store'
+import { useUIStore } from '@/stores/ui-store'
 import { ChatMessage } from './ChatMessage'
 import { ComposeBar } from './ComposeBar'
 import { ThreadPanel } from './ThreadPanel'
@@ -326,6 +334,7 @@ function ChannelSettingsView({
 
 export function ChatView(): React.ReactNode {
   const activeProjectId = useProjectStore((s) => s.activeProjectId)
+  const currentAppTab = useUIStore((s) => s.tabs.find((tab) => tab.id === s.activeTabId))
   const allMessages = useAgentStore((s) => s.messages)
   const allAgents = useAgentStore((s) => s.agents)
   const addThreadReply = useAgentStore((s) => s.addThreadReply)
@@ -336,6 +345,23 @@ export function ChatView(): React.ReactNode {
   const activeProject = useProjectStore((s) => s.projects.find((project) => project.id === s.activeProjectId))
   const renameChannel = useProjectStore((s) => s.renameChannel)
   const setChannelPeople = useProjectStore((s) => s.setChannelPeople)
+  const directMessageParticipants = useMemo(
+    () => currentAppTab?.kind === 'dm'
+      ? sortDirectMessageParticipants(currentAppTab.dmParticipants || [])
+      : null,
+    [currentAppTab]
+  )
+  const directMessageTitle = directMessageParticipants
+    ? getDirectMessageRoomTitle(directMessageParticipants)
+    : null
+  const directMessageAgentNames = useMemo(
+    () => directMessageParticipants ? getDirectMessageAgentNames(directMessageParticipants) : [],
+    [directMessageParticipants]
+  )
+  const directMessageHumanIncluded = directMessageParticipants
+    ? isDirectMessageRoomHumanIncluded(directMessageParticipants)
+    : false
+  const directMessageReadOnly = Boolean(directMessageParticipants && !directMessageHumanIncluded)
   const scrollRef = useRef<HTMLDivElement>(null)
   const preserveSettingsAfterRenameRef = useRef(false)
   const [activeThreadMessageId, setActiveThreadMessageId] = useState<string | null>(null)
@@ -354,12 +380,14 @@ export function ChatView(): React.ReactNode {
   )
   const messages = useMemo(
     () => {
-      const scopedMessages = activeChannelName
+      const scopedMessages = directMessageParticipants
+        ? projectMessages.filter((message) => messageMatchesDirectMessageRoom(message, directMessageParticipants))
+        : activeChannelName
         ? projectMessages.filter((message) => isChannelMessage(message, activeChannelName))
         : projectMessages
       return dedupeHumanMessages(scopedMessages)
     },
-    [activeChannelName, projectMessages]
+    [activeChannelName, directMessageParticipants, projectMessages]
   )
   const agents = useMemo(
     () => activeProjectId
@@ -368,13 +396,19 @@ export function ChatView(): React.ReactNode {
     [activeProjectId, allAgents]
   )
   const agentsInRoom = useMemo(
-    () => agents.filter((agent) => isAgentInChannel(agent, activeChannelName)),
-    [activeChannelName, agents]
+    () => directMessageParticipants
+      ? agents.filter((agent) =>
+          directMessageAgentNames.some((name) => name.toLowerCase() === agent.name.toLowerCase())
+        )
+      : agents.filter((agent) => isAgentInChannel(agent, activeChannelName)),
+    [activeChannelName, agents, directMessageAgentNames, directMessageParticipants]
   )
   const invitedHumans = activeChannelName
     ? activeProject?.channelPeople[activeChannelName] || []
     : []
-  const humanCount = 1 + invitedHumans.length
+  const humanCount = directMessageParticipants
+    ? directMessageHumanIncluded ? 1 : 0
+    : 1 + invitedHumans.length
   const activeThreadMessage = activeThreadMessageId
     ? messages.find((message) => message.id === activeThreadMessageId) || null
     : null
@@ -385,13 +419,13 @@ export function ChatView(): React.ReactNode {
     setRenameDraft(activeChannelName || '')
     setHumanInviteDraft('')
     setSettingsError(null)
-  }, [activeChannelName])
+  }, [activeChannelName, directMessageParticipants])
 
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight
     }
-  }, [activeChannelName, messages.length])
+  }, [activeChannelName, directMessageParticipants, messages.length])
 
   useEffect(() => {
     if (!activeThreadMessageId || activeThreadMessage) return
@@ -399,9 +433,9 @@ export function ChatView(): React.ReactNode {
   }, [activeThreadMessage, activeThreadMessageId])
 
   useEffect(() => {
-    if (activeTab === 'messages') return
+    if (activeTab === 'messages' && !directMessageReadOnly) return
     setActiveThreadMessageId(null)
-  }, [activeTab])
+  }, [activeTab, directMessageReadOnly])
 
   const handleRenameChannel = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault()
@@ -481,7 +515,17 @@ export function ChatView(): React.ReactNode {
     }
   }
 
-  if (agents.length === 0 && !activeChannelName) {
+  const showChannelSettings = Boolean(activeChannelName && !directMessageParticipants)
+  const roomTitle = directMessageTitle || (activeChannelName ? `# ${activeChannelName}` : 'Messages')
+  const emptyMessage = directMessageTitle
+    ? `No messages in ${directMessageTitle} yet.`
+    : activeChannelName
+      ? `No messages in #${activeChannelName} yet.`
+      : 'No messages yet.'
+  const agentCount = directMessageParticipants ? directMessageAgentNames.length : agentsInRoom.length
+  const canInteractWithMessages = !directMessageReadOnly
+
+  if (agents.length === 0 && !activeChannelName && !directMessageParticipants) {
     return (
       <div className="flex h-full items-center justify-center bg-[var(--pear-bg)]">
         <p className="text-xs text-[var(--pear-text-faint)]">Spawn an agent to start messaging</p>
@@ -495,21 +539,17 @@ export function ChatView(): React.ReactNode {
         <div className="flex min-h-[72px] items-center justify-between gap-4 px-5">
           <div className="flex min-w-0 items-center gap-3">
             <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35 text-[var(--pear-text-faint)]">
-              <Hash size={25} />
+              {directMessageParticipants ? <MessageCircle size={25} /> : <Hash size={25} />}
             </div>
             <div className="min-w-0">
-              {activeChannelName ? (
-                <h1 className="truncate text-2xl font-semibold text-[var(--pear-text)]">
-                  # {activeChannelName}
-                </h1>
-              ) : (
-                <h1 className="truncate text-2xl font-semibold text-[var(--pear-text)]">Messages</h1>
-              )}
+              <h1 className="truncate text-2xl font-semibold text-[var(--pear-text)]">
+                {roomTitle}
+              </h1>
             </div>
           </div>
           <div className="flex shrink-0 items-center gap-2">
             <CountPill icon={User} count={humanCount} label="people" />
-            <CountPill icon={Bot} count={agentsInRoom.length} label="agents" />
+            <CountPill icon={Bot} count={agentCount} label="agents" />
           </div>
         </div>
 
@@ -520,7 +560,7 @@ export function ChatView(): React.ReactNode {
             label="Messages"
             onClick={() => setActiveTab('messages')}
           />
-          {activeChannelName ? (
+          {showChannelSettings ? (
             <ChannelNavButton
               active={activeTab === 'settings'}
               icon={Settings}
@@ -538,9 +578,7 @@ export function ChatView(): React.ReactNode {
               <div ref={scrollRef} className="flex-1 overflow-y-auto px-5 py-5">
                 {messages.length === 0 ? (
                   <div className="flex h-full items-center justify-center text-sm text-[var(--pear-text-faint)]">
-                    {activeChannelName
-                      ? `No messages in #${activeChannelName} yet.`
-                      : 'No messages yet.'}
+                    {emptyMessage}
                   </div>
                 ) : (
                   <div className="space-y-0.5">
@@ -553,10 +591,14 @@ export function ChatView(): React.ReactNode {
                           {showDateDivider && <DateDivider timestamp={message.timestamp} />}
                           <ChatMessage
                             message={message}
-                            showRoute={!activeChannelName}
+                            showRoute={!activeChannelName && !directMessageParticipants}
+                            showActions={canInteractWithMessages}
+                            showThreadSummary={canInteractWithMessages}
                             activeThread={activeThreadMessageId === message.id}
-                            onReply={(nextMessage) => setActiveThreadMessageId(nextMessage.id)}
-                            onReact={toggleMessageReaction}
+                            onReply={canInteractWithMessages
+                              ? (nextMessage) => setActiveThreadMessageId(nextMessage.id)
+                              : undefined}
+                            onReact={canInteractWithMessages ? toggleMessageReaction : undefined}
                           />
                         </Fragment>
                       )
@@ -565,9 +607,15 @@ export function ChatView(): React.ReactNode {
                 )}
               </div>
 
-              <ComposeBar />
+              {directMessageReadOnly ? (
+                <div className="shrink-0 border-t border-[var(--pear-bg-surface)] bg-[var(--pear-bg-raised)] px-5 py-4 text-sm text-[var(--pear-text-faint)]">
+                  View only
+                </div>
+              ) : (
+                <ComposeBar directMessageParticipants={directMessageParticipants || undefined} />
+              )}
             </>
-          ) : activeChannelName ? (
+          ) : showChannelSettings && activeChannelName ? (
             <ChannelSettingsView
               activeChannelName={activeChannelName}
               agents={agents}
@@ -588,7 +636,7 @@ export function ChatView(): React.ReactNode {
           ) : null}
         </div>
 
-        {activeTab === 'messages' && activeThreadMessage && (
+        {activeTab === 'messages' && activeThreadMessage && canInteractWithMessages && (
           <ThreadPanel
             message={activeThreadMessage}
             onClose={() => setActiveThreadMessageId(null)}
