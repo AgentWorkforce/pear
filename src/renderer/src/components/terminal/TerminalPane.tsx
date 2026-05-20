@@ -1,7 +1,6 @@
 import type React from 'react'
 import { useEffect, useState } from 'react'
-import { Allotment } from 'allotment'
-import { Columns2, PanelTop, X, Plus } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Columns2, PanelTop, X, Plus } from 'lucide-react'
 import { ClaudeIcon, CodexIcon } from '@/components/common/AgentIcons'
 import { spawnWorkspaceAgent, type SpawnAgentCli } from '@/lib/spawn-agent'
 import { pear, type TerminalAttachMode } from '@/lib/ipc'
@@ -17,8 +16,29 @@ const TERMINAL_MODES: Array<{ mode: TerminalAttachMode; label: string; title: st
   { mode: 'passthrough', label: 'Passthrough', title: 'Type directly with relay auto-inject' }
 ]
 
+const SPLIT_PAGE_SIZE = 4
+
 function getTerminalMode(agent: Agent): TerminalAttachMode {
   return agent.terminalMode || 'passthrough'
+}
+
+function chunkAgents(agents: Agent[]): Agent[][] {
+  const pages: Agent[][] = []
+  for (let index = 0; index < agents.length; index += SPLIT_PAGE_SIZE) {
+    pages.push(agents.slice(index, index + SPLIT_PAGE_SIZE))
+  }
+  return pages
+}
+
+function getSplitPageGridClass(count: number): string {
+  if (count === 1) return 'grid-cols-1 grid-rows-1'
+  if (count === 2) return 'grid-cols-2 grid-rows-1'
+  return 'grid-cols-2 grid-rows-2'
+}
+
+function getSplitTileClass(count: number, index: number): string {
+  if (count === 3 && index === 0) return 'row-span-2'
+  return ''
 }
 
 interface TerminalWorkspaceProps {
@@ -47,12 +67,101 @@ function TerminalWorkspace({
           onActivate={onActivate}
         />
       </div>
-      {terminalMode === 'drive' && (
+      {terminalMode === 'drive' && visible && (
         <PendingMessagesPane
           agentName={agent.name}
           refreshToken={agent.pendingDeliveryIds.join('|')}
         />
       )}
+    </div>
+  )
+}
+
+interface SplitTerminalTileProps {
+  agent: Agent
+  visible: boolean
+  active: boolean
+  className?: string
+  onActivate: () => void
+}
+
+function SplitTerminalTile({
+  agent,
+  visible,
+  active,
+  className = '',
+  onActivate
+}: SplitTerminalTileProps): React.ReactNode {
+  return (
+    <div
+      className={`flex min-h-0 min-w-0 flex-col overflow-hidden border bg-[var(--pear-bg)] ${
+        active
+          ? 'border-[var(--pear-accent-dim)]'
+          : 'border-[var(--pear-border-subtle)]'
+      } ${className}`}
+      onPointerDown={onActivate}
+    >
+      <div
+        className={`flex h-9 shrink-0 items-center gap-2 border-b px-3 text-xs ${
+          active
+            ? 'border-[var(--pear-accent-dim)] bg-[var(--pear-bg-surface)] text-[var(--pear-text)]'
+            : 'border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] text-[var(--pear-text-dim)]'
+        }`}
+      >
+        <div
+          className={`h-2 w-2 rounded-full ${
+            agent.status === 'running'
+              ? 'bg-[var(--pear-accent-bright)]'
+              : 'bg-[var(--pear-text-faint)]'
+          }`}
+        />
+        <span className="min-w-0 flex-1 truncate">{agent.name}</span>
+        {agent.pendingDeliveryIds.length > 0 && (
+          <span className="shrink-0 text-[10px] text-[var(--pear-text-faint)]">thinking</span>
+        )}
+        <span className="shrink-0 text-[var(--pear-text-faint)]">{getTerminalMode(agent)}</span>
+        <span className="shrink-0 text-[var(--pear-text-faint)]">{agent.cli}</span>
+      </div>
+      <div className="min-h-0 flex-1">
+        <TerminalWorkspace
+          agent={agent}
+          visible={visible}
+          active={active}
+          onActivate={onActivate}
+        />
+      </div>
+    </div>
+  )
+}
+
+interface SplitTerminalPageProps {
+  agents: Agent[]
+  visible: boolean
+  activeAgentName: string | null
+  onActivateAgent: (name: string) => void
+}
+
+function SplitTerminalPage({
+  agents,
+  visible,
+  activeAgentName,
+  onActivateAgent
+}: SplitTerminalPageProps): React.ReactNode {
+  return (
+    <div className={`grid h-full gap-1 p-1 ${getSplitPageGridClass(agents.length)}`}>
+      {agents.map((agent, index) => {
+        const active = visible && agent.name === activeAgentName
+        return (
+          <SplitTerminalTile
+            key={agent.name}
+            agent={agent}
+            visible={visible}
+            active={active}
+            className={getSplitTileClass(agents.length, index)}
+            onActivate={() => onActivateAgent(agent.name)}
+          />
+        )
+      })}
     </div>
   )
 }
@@ -72,11 +181,14 @@ export function TerminalPane(): React.ReactNode {
   const setTerminalLayout = useUIStore((s) => s.setTerminalLayout)
   const [spawningCli, setSpawningCli] = useState<SpawnAgentCli | null>(null)
   const [spawnError, setSpawnError] = useState<string | null>(null)
+  const [splitPage, setSplitPage] = useState(0)
   const splitEnabled = terminalLayout === 'horizontal-split' && agents.length > 1
+  const splitPages = splitEnabled ? chunkAgents(agents) : []
+  const splitPageCount = splitPages.length
   const splitButtonTitle = splitEnabled
     ? 'Move terminals back to tabs'
     : agents.length > 1
-      ? 'Split terminals horizontally'
+      ? 'Show split terminal pages'
       : 'Start another agent to split terminals'
   const activeAgent = agents.find((agent) => agent.name === activeAgentName) || null
 
@@ -115,6 +227,16 @@ export function TerminalPane(): React.ReactNode {
     }
   }
 
+  const goToSplitPage = (page: number): void => {
+    const clampedPage = Math.max(0, Math.min(page, splitPageCount - 1))
+    setSplitPage(clampedPage)
+
+    const nextAgent = splitPages[clampedPage]?.[0]
+    if (nextAgent) {
+      setActiveAgent(nextAgent.name)
+    }
+  }
+
   useEffect(() => {
     if (agents.length === 0) {
       if (activeAgentName) {
@@ -127,6 +249,26 @@ export function TerminalPane(): React.ReactNode {
       setActiveAgent(agents[0].name)
     }
   }, [activeAgentName, agents, setActiveAgent])
+
+  useEffect(() => {
+    if (!splitEnabled) {
+      setSplitPage(0)
+      return
+    }
+
+    setSplitPage((currentPage) =>
+      Math.min(currentPage, Math.max(0, splitPageCount - 1))
+    )
+  }, [splitEnabled, splitPageCount])
+
+  useEffect(() => {
+    if (!splitEnabled || !activeAgentName) return
+
+    const activeIndex = agents.findIndex((agent) => agent.name === activeAgentName)
+    if (activeIndex >= 0) {
+      setSplitPage(Math.floor(activeIndex / SPLIT_PAGE_SIZE))
+    }
+  }, [activeAgentName, agents, splitEnabled])
 
   if (agents.length === 0) {
     return (
@@ -278,56 +420,68 @@ export function TerminalPane(): React.ReactNode {
 
       {/* Terminal instances stay mounted in tabbed mode to preserve scroll. */}
       {splitEnabled ? (
-        <div className="min-h-0 flex-1">
-          <Allotment
-            key={agents.map((agent) => agent.name).join('|')}
-            className="h-full w-full pear-terminal-split"
-            minSize={220}
-            separator
-          >
-            {agents.map((agent) => {
-              const active = agent.name === activeAgentName
+        <div className="relative min-h-0 flex-1 overflow-hidden bg-[var(--pear-bg)]">
+          {splitPages.map((pageAgents, pageIndex) => {
+            const visible = pageIndex === splitPage
+            return (
+              <div
+                key={pageAgents.map((agent) => agent.name).join('|')}
+                className="absolute inset-0 transition-transform duration-300 ease-out"
+                style={{ transform: `translateX(${(pageIndex - splitPage) * 100}%)` }}
+                aria-hidden={!visible}
+              >
+                <SplitTerminalPage
+                  agents={pageAgents}
+                  visible={visible}
+                  activeAgentName={activeAgentName}
+                  onActivateAgent={setActiveAgent}
+                />
+              </div>
+            )
+          })}
 
-              return (
-                <Allotment.Pane key={agent.name} minSize={220}>
-                  <div
-                    className="flex h-full min-w-0 flex-col bg-[var(--pear-bg)]"
-                    onPointerDown={() => setActiveAgent(agent.name)}
-                  >
-                    <div
-                      className={`flex h-9 shrink-0 items-center gap-2 border-b px-3 text-xs ${
-                        active
-                          ? 'border-[var(--pear-accent-dim)] bg-[var(--pear-bg-surface)] text-[var(--pear-text)]'
-                          : 'border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] text-[var(--pear-text-dim)]'
-                      }`}
-                    >
-                      <div
-                        className={`h-2 w-2 rounded-full ${
-                          agent.status === 'running'
-                            ? 'bg-[var(--pear-accent-bright)]'
-                            : 'bg-[var(--pear-text-faint)]'
-                        }`}
-                      />
-                      <span className="min-w-0 flex-1 truncate">{agent.name}</span>
-                      {agent.pendingDeliveryIds.length > 0 && (
-                        <span className="text-[10px] text-[var(--pear-text-faint)]">thinking</span>
-                      )}
-                      <span className="shrink-0 text-[var(--pear-text-faint)]">{getTerminalMode(agent)}</span>
-                      <span className="shrink-0 text-[var(--pear-text-faint)]">{agent.cli}</span>
-                    </div>
-                    <div className="min-h-0 flex-1">
-                      <TerminalWorkspace
-                        agent={agent}
-                        visible
-                        active={active}
-                        onActivate={() => setActiveAgent(agent.name)}
-                      />
-                    </div>
-                  </div>
-                </Allotment.Pane>
-              )
-            })}
-          </Allotment>
+          {splitPageCount > 1 && splitPage > 0 && (
+            <button
+              type="button"
+              onClick={() => goToSplitPage(splitPage - 1)}
+              className="absolute left-2 top-1/2 z-10 flex h-12 w-9 -translate-y-1/2 items-center justify-center rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] text-[var(--pear-text-dim)] shadow-lg hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
+              title="Previous terminal page"
+              aria-label="Previous terminal page"
+            >
+              <ChevronLeft size={18} />
+            </button>
+          )}
+
+          {splitPageCount > 1 && splitPage < splitPageCount - 1 && (
+            <button
+              type="button"
+              onClick={() => goToSplitPage(splitPage + 1)}
+              className="absolute right-2 top-1/2 z-10 flex h-12 w-9 -translate-y-1/2 items-center justify-center rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] text-[var(--pear-text-dim)] shadow-lg hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
+              title="Next terminal page"
+              aria-label="Next terminal page"
+            >
+              <ChevronRight size={18} />
+            </button>
+          )}
+
+          {splitPageCount > 1 && (
+            <div className="absolute bottom-2 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1 rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-2 py-1">
+              {splitPages.map((pageAgents, pageIndex) => (
+                <button
+                  key={pageAgents.map((agent) => agent.name).join('|')}
+                  type="button"
+                  onClick={() => goToSplitPage(pageIndex)}
+                  className={`h-1.5 rounded-full transition-all ${
+                    pageIndex === splitPage
+                      ? 'w-5 bg-[var(--pear-accent-bright)]'
+                      : 'w-1.5 bg-[var(--pear-text-faint)] hover:bg-[var(--pear-text-dim)]'
+                  }`}
+                  title={`Show terminal page ${pageIndex + 1}`}
+                  aria-label={`Show terminal page ${pageIndex + 1}`}
+                />
+              ))}
+            </div>
+          )}
         </div>
       ) : (
         <div className="relative min-h-0 flex-1">
