@@ -42,7 +42,7 @@ function tabSubtitle(tab: AppTab, projectNameById: Map<string, string>): string 
     case 'broker-details':
       return 'Connection status'
     case 'source-control':
-      return projectName ? `${projectName} changes` : 'Source control'
+      return projectName ? `${projectName} changes` : 'File changes'
     case 'agents':
       return projectName ? `${projectName} agents` : 'Agent quadrants'
   }

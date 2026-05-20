@@ -6,6 +6,7 @@ import { useUIStore } from '@/stores/ui-store'
 export function useBrokerEvents(): void {
   const handleBrokerEvent = useAgentStore((s) => s.handleBrokerEvent)
   const handleBrokerStatus = useAgentStore((s) => s.handleBrokerStatus)
+  const recordBrokerEvent = useAgentStore((s) => s.recordBrokerEvent)
   const syncBrokerAgents = useAgentStore((s) => s.syncBrokerAgents)
   const openDialog = useUIStore((s) => s.openDialog)
 
@@ -19,7 +20,9 @@ export function useBrokerEvents(): void {
 
   useEffect(() => {
     const unsubEvent = pear.broker.onEvent((event) => {
-      handleBrokerEvent(event as Parameters<typeof handleBrokerEvent>[0])
+      const brokerEvent = event as Parameters<typeof handleBrokerEvent>[0]
+      recordBrokerEvent(brokerEvent)
+      handleBrokerEvent(brokerEvent)
     })
 
     const unsubStatus = pear.broker.onStatus((status) => {
@@ -45,7 +48,7 @@ export function useBrokerEvents(): void {
       unsubSpawn()
       unsubRelease()
     }
-  }, [handleBrokerEvent, handleBrokerStatus, openDialog, syncBrokerSnapshot])
+  }, [handleBrokerEvent, handleBrokerStatus, openDialog, recordBrokerEvent, syncBrokerSnapshot])
 
   useEffect(() => {
     void syncBrokerSnapshot()

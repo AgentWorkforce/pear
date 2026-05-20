@@ -17,6 +17,8 @@ interface StoredTokens {
 interface UserInfo {
   name?: string
   email?: string
+  githubUsername?: string
+  avatarUrl?: string
   organizationName?: string
   projectName?: string
 }
@@ -54,13 +56,27 @@ function normalizeUserInfo(value: unknown): UserInfo | undefined {
 
   const record = value as Record<string, unknown>
   const user: UserInfo = {}
+  const githubUsername =
+    firstString(record, ['githubUsername', 'github_username', 'username', 'login'])
+  const avatarUrl =
+    firstString(record, ['avatarUrl', 'avatar_url', 'avatar', 'picture', 'image'])
 
   if (typeof record.name === 'string') user.name = record.name
   if (typeof record.email === 'string') user.email = record.email
+  if (githubUsername) user.githubUsername = githubUsername
+  if (avatarUrl) user.avatarUrl = avatarUrl
   if (typeof record.organizationName === 'string') user.organizationName = record.organizationName
   if (typeof record.projectName === 'string') user.projectName = record.projectName
 
   return Object.keys(user).length > 0 ? user : undefined
+}
+
+function firstString(record: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return undefined
 }
 
 function saveAuthMeta(tokens: Pick<StoredTokens, 'apiUrl' | 'user'>): void {
@@ -117,12 +133,16 @@ async function fetchWhoami(apiUrl: string, accessToken: string): Promise<UserInf
     })
     if (!res.ok) return undefined
     const data = await res.json()
-    return {
+    return normalizeUserInfo({
       name: data.user?.name,
       email: data.user?.email,
+      githubUsername:
+        data.user?.githubUsername || data.user?.github_username || data.user?.username || data.user?.login,
+      avatarUrl:
+        data.user?.avatarUrl || data.user?.avatar_url || data.user?.avatar || data.user?.picture || data.user?.image,
       organizationName: data.organization?.name,
       projectName: data.project?.name
-    }
+    })
   } catch {
     return undefined
   }

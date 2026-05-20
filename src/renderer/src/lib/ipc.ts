@@ -69,6 +69,16 @@ export interface BrokerDetails {
   error?: string
 }
 
+export interface BrokerEventRecord {
+  id: string
+  projectId: string
+  timestamp: number
+  event: Record<string, unknown> & {
+    kind?: string
+    projectId?: string
+  }
+}
+
 export interface GitSummary {
   branch: string
   additions: number
@@ -195,6 +205,7 @@ export interface PearAPI {
     releaseAgent: (projectId: string | undefined, name: string) => Promise<void>
     listAgents: (projectId?: string) => Promise<BrokerListAgent[]>
     listDetails: () => Promise<BrokerDetails[]>
+    listEvents: () => Promise<BrokerEventRecord[]>
     shutdown: () => Promise<void>
     onEvent: (callback: (event: unknown) => void) => () => void
     onStatus: (callback: (status: { projectId?: string; status: string; error?: string }) => void) => () => void
@@ -213,6 +224,8 @@ export interface PearAPI {
     pushCurrentBranch: (root: string) => Promise<GitBranchSyncStatus>
     history: (path: string, limit?: number) => Promise<GitHistoryCommit[]>
     show: (path: string, hash: string, file?: string) => Promise<string>
+    discardFiles: (path: string, files: string[]) => Promise<void>
+    addGitignorePatterns: (path: string, patterns: string[]) => Promise<void>
     commitSelection: (path: string, input: GitCommitSelectionInput) => Promise<{ hash: string }>
     generateCommitMessage: (
       path: string,
@@ -228,6 +241,7 @@ export interface PearAPI {
       content: string
       size: number
     }>
+    revealPath: (filePath: string) => Promise<void>
   }
   auth: {
     login: () => Promise<{ loggedIn: boolean; apiUrl?: string; user?: { name?: string; email?: string; organizationName?: string; projectName?: string } }>

@@ -1,6 +1,6 @@
 import { execFile, spawn } from 'child_process'
 import { existsSync } from 'fs'
-import { mkdtemp, rm } from 'fs/promises'
+import { appendFile, mkdtemp, readFile, rm } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { promisify } from 'util'
@@ -157,6 +157,85 @@ export async function getStatus(path: string): Promise<FileStatus[]> {
     }
   }
   return files
+}
+
+function normalizeRelativeFilePath(file: string): string | null {
+  const normalized = file.trim().replace(/\\/g, '/').replace(/^\/+/, '')
+  if (!normalized || normalized.includes('\0')) return null
+  if (normalized === '..' || normalized.startsWith('../') || normalized.includes('/../')) return null
+  return normalized
+}
+
+function normalizeRelativeFilePaths(files: string[]): string[] {
+  return Array.from(
+    new Set(files.map(normalizeRelativeFilePath).filter((file): file is string => file !== null))
+  )
+}
+
+export async function discardFiles(path: string, files: string[]): Promise<void> {
+  const targets = normalizeRelativeFilePaths(files)
+  if (targets.length === 0) return
+
+  const currentStatus = await getStatus(path)
+  const statusByPath = new Map(currentStatus.map((file) => [file.path, file]))
+  const trackedTargets = new Set<string>()
+  const untrackedTargets = new Set<string>()
+
+  for (const target of targets) {
+    const status = statusByPath.get(target)
+    if (status?.status === 'untracked') {
+      untrackedTargets.add(target)
+      continue
+    }
+
+    trackedTargets.add(target)
+    if (status?.oldPath) {
+      trackedTargets.add(status.oldPath)
+    }
+  }
+
+  if (trackedTargets.size > 0) {
+    if (await hasHead(path)) {
+      await git(['restore', '--source=HEAD', '--staged', '--worktree', '--', ...trackedTargets], path)
+    } else {
+      await gitAllowNonZeroExit(['rm', '--cached', '-r', '--', ...trackedTargets], path).catch(() => '')
+      trackedTargets.forEach((target) => untrackedTargets.add(target))
+    }
+  }
+
+  if (untrackedTargets.size > 0) {
+    await git(['clean', '-f', '-d', '--', ...untrackedTargets], path)
+  }
+}
+
+function normalizeGitignorePatterns(patterns: string[]): string[] {
+  return Array.from(
+    new Set(
+      patterns
+        .map((pattern) => pattern.trim())
+        .filter((pattern) => pattern && !pattern.includes('\0'))
+    )
+  )
+}
+
+export async function addGitignorePatterns(path: string, patterns: string[]): Promise<void> {
+  const nextPatterns = normalizeGitignorePatterns(patterns)
+  if (nextPatterns.length === 0) return
+
+  const gitignorePath = join(path, '.gitignore')
+  let current = ''
+  try {
+    current = await readFile(gitignorePath, 'utf8')
+  } catch {
+    current = ''
+  }
+
+  const existing = new Set(current.split(/\r?\n/).map((line) => line.trim()).filter(Boolean))
+  const missing = nextPatterns.filter((pattern) => !existing.has(pattern))
+  if (missing.length === 0) return
+
+  const prefix = current && !current.endsWith('\n') ? '\n' : ''
+  await appendFile(gitignorePath, `${prefix}${missing.join('\n')}\n`, 'utf8')
 }
 
 export async function getDiff(path: string, file?: string): Promise<string> {

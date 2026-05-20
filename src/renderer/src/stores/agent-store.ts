@@ -1,5 +1,12 @@
 import { create } from 'zustand'
-import type { AgentCurrentState, BrokerListAgent, InboundDeliveryMode, TerminalAttachMode } from '@/lib/ipc'
+import type {
+  AgentCurrentState,
+  BrokerDetails,
+  BrokerEventRecord,
+  BrokerListAgent,
+  InboundDeliveryMode,
+  TerminalAttachMode
+} from '@/lib/ipc'
 import { useProjectStore } from '@/stores/project-store'
 
 export interface Agent {
@@ -65,6 +72,9 @@ export interface BrokerErrorEntry {
 
 const MAX_PTY_BUFFER_CHUNKS = 10_000
 const MAX_BROKER_ERRORS = 12
+const MAX_BROKER_EVENTS = 3_000
+const BROKER_EVENT_RETENTION_MS = 12 * 60 * 60 * 1_000
+const MAX_BROKER_EVENT_TEXT_CHARS = 1_200
 const HUMAN_SENDER_NAME = 'human'
 const HUMAN_MESSAGE_DEDUPE_WINDOW_MS = 10_000
 const TYPING_ACTIVITY_WINDOW_MS = 12_000
@@ -97,6 +107,10 @@ function matchesAgent(agent: Agent, projectId: string | undefined, name: string)
 interface BrokerEvent {
   kind: string
   projectId?: string
+  historyId?: string
+  observedAt?: number
+  timestamp?: number
+  seq?: number
   name?: string
   chunk?: string
   stream?: string
@@ -114,6 +128,9 @@ interface BrokerEvent {
   mode?: InboundDeliveryMode
   code?: number
   signal?: string
+  reason?: string
+  message?: string
+  lastError?: string
   [key: string]: unknown
 }
 
@@ -195,6 +212,59 @@ function clearPendingDeliveries(agent: Agent, eventId?: string): Agent {
   }
 }
 
+function normalizeEventTimestamp(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
+    return undefined
+  }
+  return value < 1_000_000_000_000 ? value * 1_000 : value
+}
+
+function compactBrokerEventText(value: unknown): unknown {
+  if (typeof value !== 'string' || value.length <= MAX_BROKER_EVENT_TEXT_CHARS) {
+    return value
+  }
+  return `${value.slice(0, MAX_BROKER_EVENT_TEXT_CHARS)}...`
+}
+
+function compactBrokerEvent(event: Record<string, unknown>): BrokerEventRecord['event'] {
+  const compacted = { ...event }
+  for (const key of ['body', 'chunk', 'message', 'reason', 'lastError']) {
+    if (key in compacted) {
+      compacted[key] = compactBrokerEventText(compacted[key])
+    }
+  }
+  return compacted as BrokerEventRecord['event']
+}
+
+function pruneBrokerEvents(events: BrokerEventRecord[], now = Date.now()): BrokerEventRecord[] {
+  const cutoff = now - BROKER_EVENT_RETENTION_MS
+  return events
+    .filter((entry) => entry.timestamp >= cutoff)
+    .slice(-MAX_BROKER_EVENTS)
+}
+
+function toBrokerEventRecord(event: BrokerEvent): BrokerEventRecord {
+  const timestamp =
+    normalizeEventTimestamp(event.observedAt) ??
+    normalizeEventTimestamp(event.timestamp) ??
+    Date.now()
+  const projectId = event.projectId || 'unknown'
+  const seq = typeof event.seq === 'number' ? event.seq : undefined
+  const eventId = typeof event.event_id === 'string' || typeof event.event_id === 'number'
+    ? String(event.event_id)
+    : undefined
+  const id = typeof event.historyId === 'string' && event.historyId
+    ? event.historyId
+    : `${projectId}:${seq ?? eventId ?? crypto.randomUUID()}`
+
+  return {
+    id,
+    projectId,
+    timestamp,
+    event: compactBrokerEvent(event as Record<string, unknown>)
+  }
+}
+
 function normalizeMessageTarget(target: string): string {
   return target.trim().replace(/^#/, '')
 }
@@ -228,6 +298,7 @@ interface AgentState {
   brokerStatus: 'disconnected' | 'connected' | 'error'
   brokerError: string | null
   brokerErrors: BrokerErrorEntry[]
+  brokerEvents: BrokerEventRecord[]
 
   setActiveAgentKey: (key: string | null) => void
   setAgentTerminalMode: (projectId: string | undefined, name: string, mode: TerminalAttachMode) => void
@@ -240,6 +311,9 @@ interface AgentState {
     options?: TrackSpawnedAgentOptions
   ) => void
   syncBrokerAgents: (agents: BrokerListAgent[]) => void
+  syncBrokerDetailsStatus: (details: Pick<BrokerDetails, 'projectId' | 'health'>[]) => void
+  hydrateBrokerEvents: (events: BrokerEventRecord[]) => void
+  recordBrokerEvent: (event: BrokerEvent) => void
   handleBrokerEvent: (event: BrokerEvent) => void
   handleBrokerStatus: (status: { projectId?: string; status: string; error?: string }) => void
   addHumanMessage: (to: string, body: string, projectId?: string) => void
@@ -294,6 +368,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   brokerStatus: 'disconnected',
   brokerError: null,
   brokerErrors: [],
+  brokerEvents: [],
 
   setActiveAgentKey: (key) => set({ activeAgentKey: key }),
 
@@ -413,6 +488,60 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       }
 
       return { agents: nextAgents }
+    })
+  },
+
+  syncBrokerDetailsStatus: (details) => {
+    set((state) => {
+      const connectedProjectIds = new Set(
+        details
+          .filter((detail) => detail.health === 'connected')
+          .map((detail) => detail.projectId)
+      )
+      const brokerErrors = connectedProjectIds.size > 0
+        ? state.brokerErrors.filter((entry) => !entry.projectId || !connectedProjectIds.has(entry.projectId))
+        : state.brokerErrors
+
+      return {
+        brokerStatus: connectedProjectIds.size > 0
+          ? 'connected'
+          : brokerErrors.length > 0
+            ? 'error'
+            : 'disconnected',
+        brokerError: brokerErrors.length > 0 ? brokerErrors[0].message : null,
+        brokerErrors
+      }
+    })
+  },
+
+  hydrateBrokerEvents: (events) => {
+    set((state) => {
+      const byId = new Map(state.brokerEvents.map((entry) => [entry.id, entry]))
+      for (const entry of events) {
+        byId.set(entry.id, {
+          ...entry,
+          event: compactBrokerEvent(entry.event)
+        })
+      }
+      return {
+        brokerEvents: pruneBrokerEvents(
+          Array.from(byId.values()).sort((left, right) => left.timestamp - right.timestamp)
+        )
+      }
+    })
+  },
+
+  recordBrokerEvent: (event) => {
+    const entry = toBrokerEventRecord(event)
+    set((state) => {
+      if (state.brokerEvents.some((candidate) => candidate.id === entry.id)) {
+        return {}
+      }
+      return {
+        brokerEvents: pruneBrokerEvents(
+          [...state.brokerEvents, entry].sort((left, right) => left.timestamp - right.timestamp)
+        )
+      }
     })
   },
 
@@ -637,6 +766,16 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     set((state) => {
       const nextStatus = status.status as 'connected' | 'disconnected' | 'error'
       const nextError = status.error || null
+      if (nextStatus === 'connected') {
+        return {
+          brokerStatus: nextStatus,
+          brokerError: null,
+          brokerErrors: status.projectId
+            ? state.brokerErrors.filter((entry) => entry.projectId !== status.projectId)
+            : []
+        }
+      }
+
       const shouldRecord =
         nextStatus === 'error' &&
         !!nextError &&
@@ -803,7 +942,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       relayMessages: [],
       brokerStatus: 'disconnected',
       brokerError: null,
-      brokerErrors: []
+      brokerErrors: [],
+      brokerEvents: []
     }),
 
   getAgentBuffer: (projectId, name) => {

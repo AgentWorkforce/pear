@@ -5,7 +5,6 @@ import {
   Check,
   ChevronDown,
   ChevronUp,
-  CheckSquare2,
   FileDiff,
   Filter,
   GitBranch,
@@ -17,28 +16,36 @@ import {
   Plus,
   RefreshCw,
   Search,
-  Square,
   UserPlus,
   WandSparkles,
   X
 } from 'lucide-react'
-import { buildSelectedPatch, getFilePathFromLineSelectionId } from '@/lib/diff-selection'
+import { buildSelectedPatch, getFilePathFromLineSelectionId, getSelectableLineIds } from '@/lib/diff-selection'
 import { pear, type GitBranchInfo, type GitBranchSyncStatus, type GitHistoryCommit } from '@/lib/ipc'
-import { useProjectStore, type Project } from '@/stores/project-store'
+import { normalizeChannelName, useProjectStore, type Project } from '@/stores/project-store'
 import { useGitStore } from '@/stores/git-store'
 import { useUIStore } from '@/stores/ui-store'
 import {
   FileChangeStatusIcon,
   FilePathLabel,
+  type FilePathLabelTone,
   fileChangeKindFromStatus,
   fileChangeStatusLabel
 } from './FileChangeLabel'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
 import { DiffViewer } from './DiffViewer'
-import { useAgentStore, type Agent } from '@/stores/agent-store'
+import { getAgentKey, useAgentStore, type Agent } from '@/stores/agent-store'
 
 type PaneTab = 'changes' | 'history'
-type AuthUser = { name?: string; email?: string; organizationName?: string; projectName?: string }
+type AuthUser = {
+  name?: string
+  email?: string
+  githubUsername?: string
+  username?: string
+  avatarUrl?: string
+  organizationName?: string
+  projectName?: string
+}
 type CoAuthor = { username: string; name?: string; cli?: string }
 
 const LEFT_SIDEBAR_MIN_WIDTH = 300
@@ -48,6 +55,15 @@ const HISTORY_FILES_MAX_WIDTH = 620
 const HISTORY_DETAILS_MIN_HEIGHT = 88
 const HISTORY_DETAILS_MAX_HEIGHT = 280
 const SOURCE_HEADER_HEIGHT = 54
+const FILE_CONTEXT_MENU_WIDTH = 360
+const FILE_CONTEXT_MENU_MAX_HEIGHT = 430
+const REVIEW_DIFF_MAX_CHARS = 24_000
+
+type FileContextMenuState = {
+  x: number
+  y: number
+  paths: string[]
+}
 
 function projectRootPath(project: Project): string {
   return project.roots.find((root) => root.pathExists)?.path || project.roots[0]?.path || project.rootPath
@@ -75,6 +91,86 @@ function groupProjects(projects: Project[]): Array<{ label: string; projects: Pr
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
+}
+
+function useWindowFocused(): boolean {
+  const [focused, setFocused] = useState(() => {
+    if (typeof document === 'undefined') return true
+    return document.hasFocus()
+  })
+
+  useEffect(() => {
+    function handleFocus(): void {
+      setFocused(true)
+    }
+
+    function handleBlur(): void {
+      setFocused(false)
+    }
+
+    window.addEventListener('focus', handleFocus)
+    window.addEventListener('blur', handleBlur)
+
+    return () => {
+      window.removeEventListener('focus', handleFocus)
+      window.removeEventListener('blur', handleBlur)
+    }
+  }, [])
+
+  return focused
+}
+
+function selectedFileRowClass(active: boolean, windowFocused: boolean): string {
+  if (active && windowFocused) return 'bg-[#0b73d9] text-white'
+  if (active) return 'bg-[#46515c] text-[var(--pear-text)]'
+  return 'text-[var(--pear-text)] hover:bg-[var(--pear-bg-surface-hover)]'
+}
+
+function selectedFilePathTone(active: boolean, windowFocused: boolean): FilePathLabelTone {
+  if (!active) return 'default'
+  return windowFocused ? 'selectedActive' : 'selectedInactive'
+}
+
+function selectionCheckboxClass(
+  state: 'checked' | 'mixed' | 'unchecked',
+  active = false,
+  windowFocused = false
+): string {
+  const base = 'flex h-[15px] w-[15px] shrink-0 items-center justify-center rounded-[3px] border transition-colors'
+
+  if (state === 'checked') {
+    return `${base} ${
+      active && windowFocused
+        ? 'border-[#9bd4ff] bg-[#9bd4ff] text-[#05345f]'
+        : 'border-[#1683e8] bg-[#1683e8] text-white'
+    }`
+  }
+
+  if (state === 'mixed') {
+    return `${base} border-[#b8c7d8] bg-[#b8c7d8] text-[#263443]`
+  }
+
+  return `${base} border-[var(--pear-text-faint)] bg-transparent text-transparent group-hover:border-[var(--pear-text)]`
+}
+
+function SelectionCheckbox({
+  state,
+  active = false,
+  windowFocused = false
+}: {
+  state: 'checked' | 'mixed' | 'unchecked'
+  active?: boolean
+  windowFocused?: boolean
+}): React.ReactNode {
+  return (
+    <span className={selectionCheckboxClass(state, active, windowFocused)} aria-hidden="true">
+      {state === 'checked' ? (
+        <Check size={11} strokeWidth={3} />
+      ) : state === 'mixed' ? (
+        <span className="h-[2px] w-[8px] rounded-full bg-current" />
+      ) : null}
+    </span>
+  )
 }
 
 function startPanelResize(
@@ -113,6 +209,15 @@ function startPanelResize(
   document.addEventListener('pointerup', handlePointerUp, { once: true })
 }
 
+function scrollFileRowIntoView(container: HTMLElement | null, path: string | null): void {
+  if (!container || !path) return
+
+  const row = Array.from(container.querySelectorAll<HTMLElement>('[data-file-list-path]'))
+    .find((element) => element.dataset.fileListPath === path)
+
+  row?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+}
+
 function formatRelativeDate(value: string): string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
@@ -143,6 +248,43 @@ function userInitials(user: AuthUser | null): string {
       .toUpperCase()
   }
   return user?.email?.trim().charAt(0).toUpperCase() || '?'
+}
+
+function githubUsernameFromEmail(email?: string): string {
+  const match = email?.trim().match(/^(?:\d+\+)?([^@]+)@users\.noreply\.github\.com$/i)
+  return match?.[1] || ''
+}
+
+function normalizeGithubUsername(value?: string): string {
+  return (value || '')
+    .trim()
+    .replace(/^@+/, '')
+    .replace(/[^A-Za-z0-9-]/g, '')
+}
+
+function isGithubAvatarUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && (
+      url.hostname === 'avatars.githubusercontent.com' ||
+      url.hostname === 'avatars.github.com' ||
+      url.hostname === 'github.com'
+    )
+  } catch {
+    return false
+  }
+}
+
+function githubAvatarUrl(user: AuthUser | null): string | null {
+  const providedAvatarUrl = user?.avatarUrl?.trim()
+  if (providedAvatarUrl && isGithubAvatarUrl(providedAvatarUrl)) {
+    return providedAvatarUrl
+  }
+
+  const username = normalizeGithubUsername(
+    user?.githubUsername || user?.username || githubUsernameFromEmail(user?.email)
+  )
+  return username ? `https://github.com/${encodeURIComponent(username)}.png?size=96` : null
 }
 
 function normalizeCoAuthorUsername(value: string): string {
@@ -289,10 +431,29 @@ function CommitAvatar({ author }: { author: string }): React.ReactNode {
 
 function CommitAuthorAvatar({ user }: { user: AuthUser | null }): React.ReactNode {
   const label = user?.name || user?.email || 'Commit author'
+  const avatarUrl = githubAvatarUrl(user)
+  const [imageFailed, setImageFailed] = useState(false)
+
+  useEffect(() => {
+    setImageFailed(false)
+  }, [avatarUrl])
+
+  if (avatarUrl && !imageFailed) {
+    return (
+      <img
+        src={avatarUrl}
+        alt={label}
+        title={label}
+        className="h-[48px] w-[48px] shrink-0 rounded-full border border-[var(--pear-border)] bg-[var(--pear-bg-overlay)] object-cover"
+        referrerPolicy="no-referrer"
+        onError={() => setImageFailed(true)}
+      />
+    )
+  }
 
   return (
     <span
-      className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--pear-accent)] text-[9px] font-semibold text-[var(--pear-bg)]"
+      className="flex h-[48px] w-[48px] shrink-0 items-center justify-center rounded-full border border-[var(--pear-border)] bg-[var(--pear-accent)] text-[15px] font-semibold text-[var(--pear-bg)]"
       title={label}
       aria-label={label}
     >
@@ -997,6 +1158,9 @@ export function DiffPane(): React.ReactNode {
   const [lastFetchedByRoot, setLastFetchedByRoot] = useState<Record<string, number>>({})
   const [authUser, setAuthUser] = useState<AuthUser | null>(null)
   const coAuthorInputRef = useRef<HTMLInputElement>(null)
+  const changedFilesListRef = useRef<HTMLDivElement>(null)
+  const historyFilesListRef = useRef<HTMLDivElement>(null)
+  const windowFocused = useWindowFocused()
   const root = useProjectStore((s) => s.getActiveRoot())
   const activeProjectId = useProjectStore((s) => s.activeProjectId)
   const agents = useAgentStore((s) => s.agents)
@@ -1058,10 +1222,41 @@ export function DiffPane(): React.ReactNode {
     () => selectedChangeFiles(selectedFiles, selectedLineIds),
     [selectedFiles, selectedLineIds]
   )
-  const toggleFile = useCallback((path: string): void => {
+  const filteredFilePaths = useMemo(() => filteredFiles.map((file) => file.path), [filteredFiles])
+  const selectedCommitFilePaths = useMemo(
+    () => selectedCommit?.files.map((file) => file.path) || [],
+    [selectedCommit]
+  )
+  const selectableLineIdsByFilePath = useMemo(() => {
+    const lineIdsByFilePath = new Map<string, string[]>()
+
+    getSelectableLineIds(diff).forEach((lineId) => {
+      const filePath = getFilePathFromLineSelectionId(lineId)
+      if (!filePath) return
+      lineIdsByFilePath.set(filePath, [...(lineIdsByFilePath.get(filePath) || []), lineId])
+    })
+
+    return lineIdsByFilePath
+  }, [diff])
+  const fullySelectedLineFilePaths = useMemo(() => {
+    const filePaths = new Set<string>()
+
+    selectableLineIdsByFilePath.forEach((lineIds, filePath) => {
+      if (lineIds.length > 0 && lineIds.every((lineId) => selectedLineIds.has(lineId))) {
+        filePaths.add(filePath)
+      }
+    })
+
+    return filePaths
+  }, [selectableLineIdsByFilePath, selectedLineIds])
+  const partiallySelectedFilePaths = useMemo(
+    () => new Set(Array.from(selectedLineIds).map(getFilePathFromLineSelectionId).filter(Boolean)),
+    [selectedLineIds]
+  )
+  const toggleFile = useCallback((path: string, currentlySelected = false): void => {
     setSelectedFiles((current) => {
       const next = new Set(current)
-      if (next.has(path)) {
+      if (currentlySelected || next.has(path)) {
         next.delete(path)
       } else {
         next.add(path)
@@ -1181,6 +1376,16 @@ export function DiffPane(): React.ReactNode {
   }, [activeTab, files, root?.path, root?.pathExists, selectFile, selectedFile])
 
   useEffect(() => {
+    if (activeTab !== 'changes') return
+    scrollFileRowIntoView(changedFilesListRef.current, selectedFile)
+  }, [activeTab, filteredFilePaths, selectedFile])
+
+  useEffect(() => {
+    if (activeTab !== 'history') return
+    scrollFileRowIntoView(historyFilesListRef.current, selectedCommitFile)
+  }, [activeTab, selectedCommitFile, selectedCommitFilePaths])
+
+  useEffect(() => {
     if (activeTab !== 'history' || !root?.pathExists) return
     void fetchHistory(root.path)
   }, [activeTab, fetchHistory, root?.path, root?.pathExists])
@@ -1222,7 +1427,12 @@ export function DiffPane(): React.ReactNode {
   }
 
   const allVisibleSelected = filteredFiles.length > 0 &&
-    filteredFiles.every((file) => selectedFiles.has(file.path))
+    filteredFiles.every((file) => selectedFiles.has(file.path) || fullySelectedLineFilePaths.has(file.path))
+  const someVisibleSelected = filteredFiles.some((file) =>
+    selectedFiles.has(file.path) ||
+    partiallySelectedFilePaths.has(file.path) ||
+    fullySelectedLineFilePaths.has(file.path)
+  ) && !allVisibleSelected
   const selectedCommitFileCount = selectedChangeFileList.length
   const commitTarget = summary?.branch || 'HEAD'
   const canCommit = selectedChangeFileList.length > 0 && title.trim().length > 0 && !actionLoading
@@ -1233,8 +1443,6 @@ export function DiffPane(): React.ReactNode {
     (coAuthorInput.trim().length > 0 || coAuthors.length === 0)
   const selectedFileEntry = files.find((file) => file.path === selectedFile)
   const selectedCommitFileEntry = selectedCommit?.files.find((file) => file.path === selectedCommitFile)
-  const filteredFilePaths = filteredFiles.map((file) => file.path)
-  const selectedCommitFilePaths = selectedCommit?.files.map((file) => file.path) || []
   const lastFetchedAt = root?.path ? lastFetchedByRoot[root.path] || null : null
 
   function toggleAllVisible(): void {
@@ -1296,18 +1504,38 @@ export function DiffPane(): React.ReactNode {
   }
 
   function handleChangedFilesKeyDown(event: React.KeyboardEvent): void {
-    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
-    event.preventDefault()
-    const path = nextFilePath(filteredFilePaths, selectedFile, event.key === 'ArrowDown' ? 1 : -1)
-    if (path) selectFile(path, root.path)
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      const path = nextFilePath(filteredFilePaths, selectedFile, event.key === 'ArrowDown' ? 1 : -1)
+      if (path) selectFile(path, root.path)
+      return
+    }
+
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      event.stopPropagation()
+      if (selectedFile && filteredFilePaths.includes(selectedFile)) {
+        selectFile(selectedFile, root.path)
+      }
+    }
   }
 
   function handleHistoryFilesKeyDown(event: React.KeyboardEvent): void {
-    if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
-    event.preventDefault()
-    const path = nextFilePath(selectedCommitFilePaths, selectedCommitFile, event.key === 'ArrowDown' ? 1 : -1)
-    if (path) {
-      void selectCommitFile(root.path, path)
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      const path = nextFilePath(selectedCommitFilePaths, selectedCommitFile, event.key === 'ArrowDown' ? 1 : -1)
+      if (path) {
+        void selectCommitFile(root.path, path)
+      }
+      return
+    }
+
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      event.stopPropagation()
+      if (selectedCommitFile && selectedCommitFilePaths.includes(selectedCommitFile)) {
+        void selectCommitFile(root.path, selectedCommitFile)
+      }
     }
   }
 
@@ -1476,9 +1704,9 @@ export function DiffPane(): React.ReactNode {
 
         {activeTab === 'changes' ? (
           <>
-            <div className="shrink-0 border-b border-[var(--pear-border-subtle)] px-1.5 py-1">
-              <label className="flex h-6 items-center gap-1.5 rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-2 text-[12px] text-[var(--pear-text-secondary)]">
-                <Filter size={12} className="text-[var(--pear-text-faint)]" />
+            <div className="shrink-0 border-b border-[var(--pear-border-subtle)] px-2 py-2">
+              <label className="flex h-8 items-center gap-2 rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-2.5 text-[13px] text-[var(--pear-text-secondary)]">
+                <Filter size={14} className="text-[var(--pear-text-faint)]" />
                 <input
                   value={filter}
                   onChange={(event) => setFilter(event.target.value)}
@@ -1489,6 +1717,7 @@ export function DiffPane(): React.ReactNode {
             </div>
 
             <div
+              ref={changedFilesListRef}
               className="min-h-0 flex-1 overflow-y-auto border-b border-[var(--pear-border-subtle)] focus:outline-none"
               tabIndex={0}
               onKeyDown={handleChangedFilesKeyDown}
@@ -1497,9 +1726,13 @@ export function DiffPane(): React.ReactNode {
               <button
                 type="button"
                 onClick={toggleAllVisible}
-                className="flex h-7 w-full items-center gap-1.5 border-b border-[var(--pear-border-subtle)] px-2 text-left text-[13px] text-[var(--pear-text)] hover:bg-[var(--pear-bg-surface-hover)]"
+                role="checkbox"
+                aria-checked={someVisibleSelected ? 'mixed' : allVisibleSelected}
+                className="group flex h-9 w-full items-center gap-2 border-b border-[var(--pear-border-subtle)] px-3 text-left text-[14px] text-[var(--pear-text)] outline-none hover:bg-[var(--pear-bg-surface-hover)] focus:outline-none focus-visible:outline-none"
               >
-                {allVisibleSelected ? <CheckSquare2 size={13} /> : <Square size={13} />}
+                <SelectionCheckbox
+                  state={allVisibleSelected ? 'checked' : someVisibleSelected ? 'mixed' : 'unchecked'}
+                />
                 <span className="flex-1">{files.length} changed file{files.length === 1 ? '' : 's'}</span>
               </button>
 
@@ -1509,38 +1742,59 @@ export function DiffPane(): React.ReactNode {
                 </div>
               ) : (
                 filteredFiles.map((file) => {
-                  const selected = selectedFiles.has(file.path)
+                  const wholeFileSelected = selectedFiles.has(file.path)
+                  const fullySelectedByLines = !wholeFileSelected && fullySelectedLineFilePaths.has(file.path)
+                  const selected = wholeFileSelected || fullySelectedByLines
+                  const partiallySelected = !selected && partiallySelectedFilePaths.has(file.path)
                   const active = selectedFile === file.path
                   const kind = fileChangeKindFromStatus(file.status)
                   const statusLabel = fileChangeStatusLabel(kind)
                   return (
                     <div
                       key={file.path}
-                      className={`group flex h-7 items-center gap-1.5 border-b border-[var(--pear-border-subtle)] pr-2.5 ${
-                        active ? 'bg-[var(--pear-bg-overlay)]' : 'hover:bg-[var(--pear-bg-surface-hover)]'
+                      data-file-list-path={file.path}
+                      className={`group flex h-9 items-center gap-2 border-b border-[var(--pear-border-subtle)] pr-3 ${
+                        selectedFileRowClass(active, windowFocused)
                       }`}
                     >
                       <button
                         type="button"
-                        onClick={() => toggleFile(file.path)}
-                        className="flex h-7 w-7 shrink-0 items-center justify-center text-[var(--pear-text-faint)] hover:text-[var(--pear-text)]"
-                        title={selected ? 'Unselect file' : 'Select file'}
-                        aria-label={selected ? `Unselect ${file.path}` : `Select ${file.path}`}
+                        onClick={() => toggleFile(file.path, selected)}
+                        role="checkbox"
+                        aria-checked={partiallySelected ? 'mixed' : selected}
+                        className="group flex h-9 w-10 shrink-0 items-center justify-center outline-none transition-colors focus:outline-none focus-visible:outline-none"
+                        title={selected ? 'Unselect file' : 'Select entire file'}
+                        aria-label={selected ? `Unselect ${file.path}` : `Select entire ${file.path}`}
                       >
-                        {selected ? <CheckSquare2 size={13} /> : <Square size={13} />}
+                        <SelectionCheckbox
+                          state={selected ? 'checked' : partiallySelected ? 'mixed' : 'unchecked'}
+                          active={active}
+                          windowFocused={windowFocused}
+                        />
                       </button>
                       <button
                         type="button"
                         onClick={() => selectFile(file.path, root.path)}
-                        className="flex h-full min-w-0 flex-1 items-center gap-2 text-left"
+                        className="flex h-full min-w-0 flex-1 items-center gap-2 text-left outline-none focus:outline-none focus-visible:outline-none"
                       >
-                        <FilePathLabel path={file.path} oldPath={file.oldPath} className="flex-1 text-[13px]" />
+                        <FilePathLabel
+                          path={file.path}
+                          oldPath={file.oldPath}
+                          className="flex-1 text-[14px]"
+                          tone={selectedFilePathTone(active, windowFocused)}
+                        />
                         {file.staged && (
-                          <span className="rounded bg-[var(--pear-bg-overlay)] px-1.5 py-0.5 text-[10px] text-[var(--pear-accent-bright)]">
+                          <span
+                            className={`rounded px-1.5 py-0.5 text-[10px] ${
+                              active && windowFocused
+                                ? 'bg-white/20 text-white'
+                                : 'bg-[var(--pear-bg-overlay)] text-[var(--pear-accent-bright)]'
+                            }`}
+                          >
                             staged
                           </span>
                         )}
-                        <FileChangeStatusIcon kind={kind} label={statusLabel} />
+                        <FileChangeStatusIcon kind={kind} label={statusLabel} active={active && windowFocused} />
                       </button>
                     </div>
                   )
@@ -1548,14 +1802,14 @@ export function DiffPane(): React.ReactNode {
               )}
             </div>
 
-            <div className="shrink-0 space-y-1.5 p-1.5">
-              <div className="flex items-center gap-1.5">
+            <div className="shrink-0 space-y-[12px] p-[16px]">
+              <div className="flex items-center gap-[12px]">
                 <CommitAuthorAvatar user={authUser} />
                 <input
                   value={title}
                   onChange={(event) => setTitle(event.target.value)}
                   placeholder="Summary (required)"
-                  className="h-6 min-w-0 flex-1 rounded-md border border-[var(--pear-border)] bg-[var(--pear-bg)] px-2 text-[12px] text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent)] focus:ring-1 focus:ring-[var(--pear-accent)]/30"
+                  className="h-[48px] min-w-0 flex-1 rounded-lg border border-[var(--pear-border)] bg-[var(--pear-bg)] px-[12px] text-[16px] text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent)] focus:ring-1 focus:ring-[var(--pear-accent)]/30"
                 />
               </div>
               <div className="rounded-lg border border-[var(--pear-border)] bg-[var(--pear-bg)] focus-within:border-[var(--pear-accent)] focus-within:ring-1 focus-within:ring-[var(--pear-accent)]/30">
@@ -1564,13 +1818,13 @@ export function DiffPane(): React.ReactNode {
                   onChange={(event) => setBody(event.target.value)}
                   placeholder="Description"
                   rows={5}
-                  className="h-28 w-full resize-none border-0 bg-transparent px-2 py-1.5 text-[13px] text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)]"
+                  className="h-[184px] w-full resize-none border-0 bg-transparent px-[12px] py-[12px] text-[16px] text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)]"
                 />
-                <div className="flex h-7 items-center gap-1.5 px-2 pb-1.5">
+                <div className="flex h-[40px] items-center gap-[8px] px-[12px] pb-[12px]">
                   <button
                     type="button"
                     onClick={handleAddCoAuthor}
-                    className={`flex h-6 w-6 items-center justify-center rounded-md transition-colors ${
+                    className={`flex h-[32px] w-[32px] items-center justify-center rounded-md transition-colors ${
                       coAuthorPanelVisible
                         ? 'bg-[var(--pear-bg-overlay)] text-[var(--pear-accent-bright)] ring-1 ring-[var(--pear-accent-dim)]'
                         : 'text-[var(--pear-text-secondary)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]'
@@ -1579,18 +1833,18 @@ export function DiffPane(): React.ReactNode {
                     aria-label="Add co-author"
                     aria-pressed={coAuthorPanelVisible}
                   >
-                    <UserPlus size={16} />
+                    <UserPlus size={20} />
                   </button>
-                  <span className="h-5 w-px bg-[var(--pear-border)]" />
+                  <span className="h-[28px] w-px bg-[var(--pear-border)]" />
                   <button
                     type="button"
                     onClick={handleGenerate}
                     disabled={selectedCommitFileCount === 0 || actionLoading}
-                    className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--pear-text-secondary)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)] disabled:opacity-40"
+                    className="flex h-[32px] w-[32px] items-center justify-center rounded-md text-[var(--pear-text-secondary)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)] disabled:opacity-40"
                     title="Generate commit message"
                     aria-label="Generate commit message"
                   >
-                    {actionLoading ? <Loader2 size={14} className="animate-spin" /> : <WandSparkles size={16} />}
+                    {actionLoading ? <Loader2 size={18} className="animate-spin" /> : <WandSparkles size={20} />}
                   </button>
                 </div>
                 {coAuthorPanelVisible && (
@@ -1612,10 +1866,10 @@ export function DiffPane(): React.ReactNode {
                 type="button"
                 onClick={handleCommit}
                 disabled={!canCommit}
-                className="flex h-6 w-full items-center justify-center rounded-md bg-[var(--pear-accent-dim)] px-3 text-[12px] font-medium text-white transition-colors hover:bg-[var(--pear-accent)] disabled:bg-[var(--pear-bg-surface)] disabled:text-[var(--pear-text-faint)]"
+                className="flex h-[50px] w-full items-center justify-center rounded-lg bg-[var(--pear-accent-dim)] px-[16px] text-[16px] font-medium text-white transition-colors hover:bg-[var(--pear-accent)] disabled:bg-[var(--pear-bg-surface)] disabled:text-[var(--pear-text-faint)]"
               >
                 {actionLoading ? (
-                  <Loader2 size={14} className="mr-2 animate-spin" />
+                  <Loader2 size={18} className="mr-2 animate-spin" />
                 ) : null}
                 Commit {selectedCommitFileCount} file{selectedCommitFileCount === 1 ? '' : 's'} to{' '}
                 <span className="ml-1 font-semibold">{commitTarget}</span>
@@ -1707,7 +1961,11 @@ export function DiffPane(): React.ReactNode {
               />
             ) : (
               <div className="flex h-full items-center justify-center px-4 text-sm text-[var(--pear-text-faint)]">
-                {files.length === 0 ? 'No changes detected' : 'Select a file to view its diff'}
+                {loading
+                  ? 'Loading diff...'
+                  : files.length === 0
+                    ? 'No changes detected'
+                    : 'Select a file to view its diff'}
               </div>
             )}
           </div>
@@ -1752,6 +2010,7 @@ export function DiffPane(): React.ReactNode {
                 {selectedCommit?.files.length || 0} changed file{selectedCommit?.files.length === 1 ? '' : 's'}
               </div>
               <div
+                ref={historyFilesListRef}
                 className="min-h-0 flex-1 overflow-y-auto focus:outline-none"
                 tabIndex={0}
                 onKeyDown={handleHistoryFilesKeyDown}
@@ -1766,15 +2025,19 @@ export function DiffPane(): React.ReactNode {
                       <button
                         key={`${selectedCommit.hash}:${file.oldPath || ''}:${file.path}`}
                         type="button"
+                        data-file-list-path={file.path}
                         onClick={() => selectCommitFile(root.path, file.path)}
-                        className={`flex h-7 w-full min-w-0 items-center gap-2 border-b border-[var(--pear-border-subtle)] px-2.5 text-left ${
-                          active
-                            ? 'bg-[var(--pear-bg-overlay)]'
-                            : 'hover:bg-[var(--pear-bg-surface-hover)]'
+                        className={`flex h-7 w-full min-w-0 items-center gap-2 border-b border-[var(--pear-border-subtle)] px-2.5 text-left outline-none focus:outline-none focus-visible:outline-none ${
+                          selectedFileRowClass(active, windowFocused)
                         }`}
                       >
-                        <FilePathLabel path={file.path} oldPath={file.oldPath} className="flex-1 text-[13px]" />
-                        <FileChangeStatusIcon kind={kind} label={statusLabel} />
+                        <FilePathLabel
+                          path={file.path}
+                          oldPath={file.oldPath}
+                          className="flex-1 text-[13px]"
+                          tone={selectedFilePathTone(active, windowFocused)}
+                        />
+                        <FileChangeStatusIcon kind={kind} label={statusLabel} active={active && windowFocused} />
                       </button>
                     )
                   })

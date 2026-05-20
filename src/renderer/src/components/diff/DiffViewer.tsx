@@ -28,6 +28,7 @@ interface Props {
 }
 
 const EMPTY_SELECTION = new Set<string>()
+const MAX_DIFF_HIGHLIGHT_CACHE_ENTRIES = 100
 
 interface SyntaxTokenNode extends TokenNode {
   type: 'syntax'
@@ -243,6 +244,27 @@ function renderCodeContent(tokens: TokenNode[] | null, fallback: string): React.
   return tokens.map(renderTokenNode)
 }
 
+function renderPendingCodeContent(fallback: string): React.ReactNode {
+  return (
+    <span aria-hidden="true" className="diff-code-content-pending">
+      {fallback || ' '}
+    </span>
+  )
+}
+
+function fileHighlightKey(file: FileData, theme: 'dark' | 'light'): string {
+  const filePath = getDiffFilePath(file)
+  const changeSignature = file.hunks
+    .flatMap((hunk) =>
+      hunk.changes.map((change) => (
+        `${change.type}:${oldLineNumber(change) ?? ''}:${newLineNumber(change) ?? ''}:${change.content}`
+      ))
+    )
+    .join('\n')
+
+  return `${theme}\0${filePath}\0${changeSignature}`
+}
+
 function renderFoldRow({
   key,
   content,
@@ -358,10 +380,22 @@ export const DiffViewer = memo(function DiffViewer({
     )
   }, [focusedFilePath, parsedFiles])
   const theme = useUIStore((s) => s.theme)
-  const [highlightedFiles, setHighlightedFiles] = useState<(HunkTokens | null)[]>([])
+  const [highlightedFilesByKey, setHighlightedFilesByKey] = useState<Map<string, HunkTokens | null>>(
+    () => new Map()
+  )
+  const highlightedFilesByKeyRef = useRef(highlightedFilesByKey)
+  const pendingHighlightKeysRef = useRef(new Set<string>())
+  const mountedRef = useRef(true)
   const [fileSources, setFileSources] = useState<Record<string, string | null>>({})
   const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set())
   const dragSelectionRef = useRef<DragSelection | null>(null)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   useEffect(() => {
     const finishDragSelection = (): void => {
@@ -433,6 +467,15 @@ export const DiffViewer = memo(function DiffViewer({
       }
     })
   }, [expandedFiles, fileSources, files])
+  const displayFilesWithHighlightKeys = useMemo(() => {
+    return displayFiles.map((file) => ({
+      file,
+      highlightKey: fileHighlightKey(file, theme)
+    }))
+  }, [displayFiles, theme])
+  const hasPendingHighlights = displayFilesWithHighlightKeys.some(
+    ({ highlightKey }) => !highlightedFilesByKey.has(highlightKey)
+  )
   const selectionMapsByFilePath = useMemo(() => {
     const maps = new Map<string, SelectionMaps>()
     if (!selectable) return maps
@@ -518,27 +561,43 @@ export const DiffViewer = memo(function DiffViewer({
   }
 
   useEffect(() => {
-    if (displayFiles.length === 0) {
-      setHighlightedFiles([])
-      return
+    const cacheHighlightedFile = (highlightKey: string, tokens: HunkTokens | null): void => {
+      if (!mountedRef.current) return
+
+      setHighlightedFilesByKey((current) => {
+        if (current.has(highlightKey)) return current
+
+        const next = new Map(current)
+        next.set(highlightKey, tokens)
+
+        while (next.size > MAX_DIFF_HIGHLIGHT_CACHE_ENTRIES) {
+          const oldestKey = next.keys().next().value
+          if (!oldestKey) break
+          next.delete(oldestKey)
+        }
+
+        highlightedFilesByKeyRef.current = next
+        return next
+      })
     }
 
-    let ignore = false
+    displayFilesWithHighlightKeys.forEach(({ file, highlightKey }) => {
+      if (
+        highlightedFilesByKeyRef.current.has(highlightKey) ||
+        pendingHighlightKeysRef.current.has(highlightKey)
+      ) {
+        return
+      }
 
-    Promise.all(displayFiles.map((file) => buildHighlightedTokens(file, theme)))
-      .then((tokens) => {
-        if (ignore) return
-        setHighlightedFiles(tokens)
-      })
-      .catch(() => {
-        if (ignore) return
-        setHighlightedFiles(displayFiles.map(() => null))
-      })
-
-    return () => {
-      ignore = true
-    }
-  }, [displayFiles, theme])
+      pendingHighlightKeysRef.current.add(highlightKey)
+      buildHighlightedTokens(file, theme)
+        .then((tokens) => cacheHighlightedFile(highlightKey, tokens))
+        .catch(() => cacheHighlightedFile(highlightKey, null))
+        .finally(() => {
+          pendingHighlightKeysRef.current.delete(highlightKey)
+        })
+    })
+  }, [displayFilesWithHighlightKeys, theme])
 
   if (displayFiles.length === 0) {
     return (
@@ -551,13 +610,14 @@ export const DiffViewer = memo(function DiffViewer({
   }
 
   return (
-    <div className="diff-view">
-      {displayFiles.map((file: FileData, index) => {
+    <div className="diff-view" aria-busy={hasPendingHighlights}>
+      {displayFilesWithHighlightKeys.map(({ file, highlightKey }) => {
         const filePath = getDiffFilePath(file)
         const source = fileSources[filePath]
         const expanded = expandedFiles.has(filePath)
         const selectionMaps = selectionMapsByFilePath.get(filePath)
-        const highlightedTokens = highlightedFiles[index]
+        const highlightReady = highlightedFilesByKey.has(highlightKey)
+        const highlightedTokens = highlightedFilesByKey.get(highlightKey) || null
         const toggleExpanded = (): void => {
           setExpandedFiles((current) => {
             const next = new Set(current)
@@ -648,7 +708,9 @@ export const DiffViewer = memo(function DiffViewer({
               >
                 <span className="diff-code-prefix">{lineSign(change)}</span>
                 <span className="diff-code-content">
-                  {renderCodeContent(tokensForChange(highlightedTokens, change), change.content)}
+                  {highlightReady
+                    ? renderCodeContent(tokensForChange(highlightedTokens, change), change.content)
+                    : renderPendingCodeContent(change.content)}
                 </span>
               </td>
             </tr>

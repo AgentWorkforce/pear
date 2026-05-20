@@ -50,6 +50,8 @@ const themeMap: Record<Theme, string> = {
   dark: 'github-dark-default',
   light: 'github-light-default'
 }
+const MAX_HIGHLIGHT_CACHE_ENTRIES = 80
+const highlightCache = new Map<string, Promise<HighlightToken[][]>>()
 
 function normalizeLanguage(candidate: string | undefined): string {
   if (!candidate) return 'text'
@@ -95,15 +97,39 @@ export async function highlightCode(
   theme: Theme
 ): Promise<HighlightToken[][]> {
   const lang = detectLanguage(filePath)
-  const lines = await codeToTokensBase(code, {
+  const cacheKey = `${theme}\0${lang}\0${code}`
+  const cached = highlightCache.get(cacheKey)
+
+  if (cached) {
+    highlightCache.delete(cacheKey)
+    highlightCache.set(cacheKey, cached)
+    return cached
+  }
+
+  const highlighted = codeToTokensBase(code, {
     lang,
     theme: themeMap[theme]
-  })
-
-  return lines.map((line) =>
-    line.map((token) => ({
-      content: token.content,
-      style: tokenStyle(token.color, token.fontStyle)
-    }))
+  }).then((lines) =>
+    lines.map((line) =>
+      line.map((token) => ({
+        content: token.content,
+        style: tokenStyle(token.color, token.fontStyle)
+      }))
+    )
   )
+
+  highlightCache.set(cacheKey, highlighted)
+  if (highlightCache.size > MAX_HIGHLIGHT_CACHE_ENTRIES) {
+    const oldestKey = highlightCache.keys().next().value
+    if (oldestKey) highlightCache.delete(oldestKey)
+  }
+
+  try {
+    return await highlighted
+  } catch (error) {
+    if (highlightCache.get(cacheKey) === highlighted) {
+      highlightCache.delete(cacheKey)
+    }
+    throw error
+  }
 }

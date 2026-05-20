@@ -120,7 +120,7 @@ function getTabTitle(tab: AppTabInput): string {
     case 'broker-details':
       return 'Agent Relay Status'
     case 'source-control':
-      return 'Source Control'
+      return 'File Changes'
   }
 }
 

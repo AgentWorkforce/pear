@@ -1,7 +1,21 @@
 import type React from 'react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { AlertCircle, Check, Cloud, Copy, KeyRound, RefreshCw, Server, TerminalSquare, Wrench } from 'lucide-react'
-import { pear, type BrokerDetails, type BrokerListAgent } from '@/lib/ipc'
+import {
+  Activity,
+  AlertCircle,
+  AlertTriangle,
+  Check,
+  Cloud,
+  Copy,
+  KeyRound,
+  List,
+  MessageSquare,
+  RefreshCw,
+  Server,
+  TerminalSquare,
+  Wrench
+} from 'lucide-react'
+import { pear, type BrokerDetails, type BrokerEventRecord, type BrokerListAgent } from '@/lib/ipc'
 import { type BrokerErrorEntry, useAgentStore } from '@/stores/agent-store'
 import { useProjectStore, type Project } from '@/stores/project-store'
 
@@ -12,6 +26,15 @@ const errorTimeFormatter = new Intl.DateTimeFormat(undefined, {
   minute: '2-digit',
   second: '2-digit'
 })
+
+const chartTimeFormatter = new Intl.DateTimeFormat(undefined, {
+  hour: 'numeric',
+  minute: '2-digit'
+})
+
+const MESSAGE_CHART_BUCKET_MS = 5 * 60 * 1_000
+const MESSAGE_CHART_RANGES = [1, 3, 12] as const
+type MessageChartRangeHours = typeof MESSAGE_CHART_RANGES[number]
 
 function formatErrorTimestamp(timestamp: number): string {
   return errorTimeFormatter.format(new Date(timestamp))
@@ -43,18 +66,25 @@ function getDefaultProjectRoot(project: Project): Project['roots'][number] | und
   return project.roots.find((root) => root.pathExists) || project.roots[0]
 }
 
-function isRecoverableBrokerRuntimeError(message: string): boolean {
+function isRecoverableBrokerRuntimeError(
+  message: string,
+  options: { allowLivePidConflict?: boolean } = {}
+): boolean {
   const hasBrokerLockConflict = /another broker instance is already running in this directory/i.test(message)
   const hasLivePidConflict = /another broker instance is already running in this directory \(pid:\s*\d+/i.test(message)
   const hasStaleLockSignal =
     /stale broker lock detected/i.test(message) ||
     /broker lock held but no valid PID file found/i.test(message)
 
-  return !hasLivePidConflict && (hasStaleLockSignal || hasBrokerLockConflict)
+  return (options.allowLivePidConflict || !hasLivePidConflict) &&
+    (hasStaleLockSignal || hasBrokerLockConflict)
 }
 
-function getAutoFixableBrokerError(entries: BrokerErrorEntry[]): BrokerErrorEntry | undefined {
-  return entries.find((entry) => isRecoverableBrokerRuntimeError(entry.message))
+function getAutoFixableBrokerError(
+  entries: BrokerErrorEntry[],
+  options: { allowLivePidConflict?: boolean } = {}
+): BrokerErrorEntry | undefined {
+  return entries.find((entry) => isRecoverableBrokerRuntimeError(entry.message, options))
 }
 
 function getConnectionStatusLabel(status: BrokerDetails['connectionFileStatus']): string {
@@ -159,20 +189,54 @@ function BrokerErrorRows({
 
 function BrokerIssueBlock({
   entries,
-  currentErrorId
+  currentErrorId,
+  project,
+  fixing,
+  fixError,
+  onAutoFix,
+  allowLivePidConflict = false
 }: {
   entries: BrokerErrorEntry[]
   currentErrorId?: string
+  project?: Project
+  fixing?: boolean
+  fixError?: string
+  onAutoFix?: (project: Project, entry: BrokerErrorEntry) => void
+  allowLivePidConflict?: boolean
 }): React.ReactNode {
   if (entries.length === 0) return null
 
+  const autoFixEntry = getAutoFixableBrokerError(entries, { allowLivePidConflict })
+  const autoFixAction = project && autoFixEntry && onAutoFix
+    ? { project, entry: autoFixEntry, run: onAutoFix }
+    : null
+
   return (
     <div>
-      <div className="mb-3 flex items-center gap-2">
-        <AlertCircle size={15} className="text-[var(--pear-red)]" />
-        <h3 className="text-sm font-semibold text-[var(--pear-text)]">Agent Relay issues</h3>
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-2">
+          <AlertCircle size={15} className="text-[var(--pear-red)]" />
+          <h3 className="text-sm font-semibold text-[var(--pear-text)]">Agent Relay issues</h3>
+        </div>
+        {autoFixAction && (
+          <button
+            type="button"
+            onClick={() => autoFixAction.run(autoFixAction.project, autoFixAction.entry)}
+            disabled={fixing}
+            className="inline-flex items-center gap-2 rounded-md border border-[var(--pear-red)]/30 bg-[var(--pear-red)]/10 px-3 py-1.5 text-sm text-[var(--pear-red)] hover:bg-[var(--pear-red)]/15 disabled:cursor-wait disabled:opacity-60"
+            title="Clear stale Agent Relay runtime files and restart this session"
+          >
+            {fixing ? <RefreshCw size={14} className="animate-spin" /> : <Wrench size={14} />}
+            <span>{fixing ? 'Fixing' : 'Auto Fix'}</span>
+          </button>
+        )}
       </div>
       <BrokerErrorRows entries={entries} currentErrorId={currentErrorId} />
+      {fixError && (
+        <p className="mt-3 rounded-lg border border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 px-3 py-2 text-sm text-[var(--pear-red)]">
+          {fixError}
+        </p>
+      )}
     </div>
   )
 }
@@ -387,16 +451,406 @@ function BrokerCommands({ broker }: { broker: BrokerDetails }): React.ReactNode 
   )
 }
 
+function getEventKind(entry: BrokerEventRecord): string {
+  return typeof entry.event.kind === 'string' ? entry.event.kind : 'unknown'
+}
+
+function getEventString(event: BrokerEventRecord['event'], key: string): string | undefined {
+  const value = event[key]
+  return typeof value === 'string' && value.trim() ? value : undefined
+}
+
+function getEventChannels(event: BrokerEventRecord['event']): string | undefined {
+  const channels = event.channels
+  if (!Array.isArray(channels)) return undefined
+  const names = channels.filter((channel): channel is string => typeof channel === 'string' && channel.trim().length > 0)
+  return names.length > 0 ? names.join(', ') : undefined
+}
+
+function compactEventText(value: string | undefined, maxLength = 220): string | undefined {
+  if (!value) return undefined
+  const compacted = value.replace(/\s+/g, ' ').trim()
+  if (compacted.length <= maxLength) return compacted
+  return `${compacted.slice(0, maxLength)}...`
+}
+
+function humanizeEventKind(kind: string): string {
+  return kind
+    .split('_')
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
+}
+
+const ERROR_EVENT_KINDS = new Set([
+  'worker_error',
+  'delivery_failed',
+  'message_delivery_failed',
+  'relaycast_publish_failed',
+  'acl_denied',
+  'agent_permanently_dead',
+  'agent_restarting',
+  'agent_exit',
+  'agent_exited'
+])
+
+function isBrokerEventError(entry: BrokerEventRecord): boolean {
+  const kind = getEventKind(entry)
+  if (ERROR_EVENT_KINDS.has(kind)) return true
+  return Boolean(
+    getEventString(entry.event, 'lastError') ||
+    (kind.includes('failed') && getEventString(entry.event, 'reason'))
+  )
+}
+
+function getBrokerEventErrorMessage(entry: BrokerEventRecord): string {
+  const event = entry.event
+  return compactEventText(
+    getEventString(event, 'message') ||
+    getEventString(event, 'lastError') ||
+    getEventString(event, 'reason') ||
+    describeBrokerEvent(entry),
+    360
+  ) || humanizeEventKind(getEventKind(entry))
+}
+
+function describeBrokerEvent(entry: BrokerEventRecord): string {
+  const event = entry.event
+  const kind = getEventKind(entry)
+  const name = getEventString(event, 'name')
+  const from = getEventString(event, 'from')
+  const target = getEventString(event, 'target') || getEventString(event, 'to')
+  const body = compactEventText(getEventString(event, 'body'))
+  const chunk = compactEventText(getEventString(event, 'chunk'))
+  const message = compactEventText(getEventString(event, 'message') || getEventString(event, 'reason') || getEventString(event, 'lastError'))
+  const eventId = getEventString(event, 'event_id')
+
+  switch (kind) {
+    case 'relay_inbound':
+      return `${from || 'unknown'} sent to ${target || 'unknown'}${body ? `: ${body}` : ''}`
+    case 'relaycast_published':
+      return `Published ${eventId || 'message'} to ${target || 'target'}`
+    case 'relaycast_publish_failed':
+      return `Publish failed for ${eventId || 'message'} to ${target || 'target'}${message ? `: ${message}` : ''}`
+    case 'message_delivery_confirmed':
+      return `Delivered ${from || 'message'} to ${target || name || 'agent'}`
+    case 'message_delivery_failed':
+      return `Delivery failed from ${from || 'sender'} to ${target || name || 'agent'}${message ? `: ${message}` : ''}`
+    case 'worker_stream':
+      return `${name || 'worker'} ${getEventString(event, 'stream') || 'stream'}${chunk ? `: ${chunk}` : ''}`
+    case 'worker_error':
+      return `${name || 'worker'} error${message ? `: ${message}` : ''}`
+    case 'agent_spawned':
+      return `Spawned ${name || 'agent'}${getEventString(event, 'cli') ? ` with ${getEventString(event, 'cli')}` : ''}`
+    case 'agent_released':
+      return `Released ${name || 'agent'}`
+    case 'agent_exit':
+    case 'agent_exited':
+      return `${name || 'agent'} exited${message ? `: ${message}` : ''}`
+    case 'agent_idle':
+      return `${name || 'agent'} is idle`
+    case 'agent_blocked_on_send':
+      return `${name || 'agent'} is blocked on send`
+    case 'delivery_queued':
+      return `Queued delivery for ${name || 'agent'}${eventId ? ` (${eventId})` : ''}`
+    case 'delivery_active':
+      return `Active delivery for ${name || 'agent'}${eventId ? ` (${eventId})` : ''}`
+    case 'delivery_injected':
+      return `Injected delivery into ${name || 'agent'}${eventId ? ` (${eventId})` : ''}`
+    case 'delivery_verified':
+      return `Verified delivery for ${name || 'agent'}${eventId ? ` (${eventId})` : ''}`
+    case 'delivery_failed':
+      return `Delivery failed for ${name || 'agent'}${message ? `: ${message}` : ''}`
+    case 'delivery_ack':
+      return `Acknowledged delivery for ${name || 'agent'}${eventId ? ` (${eventId})` : ''}`
+    case 'channel_subscribed':
+      return `${name || 'agent'} subscribed to ${getEventChannels(event) || 'channels'}`
+    case 'channel_unsubscribed':
+      return `${name || 'agent'} unsubscribed from ${getEventChannels(event) || 'channels'}`
+    default:
+      return [
+        humanizeEventKind(kind),
+        name || from,
+        message || body || chunk
+      ].filter(Boolean).join(': ')
+  }
+}
+
+function isMessageThroughputEvent(entry: BrokerEventRecord): boolean {
+  const kind = getEventKind(entry)
+  return kind === 'relay_inbound' || kind === 'relaycast_published'
+}
+
+function getMessageThroughputKey(entry: BrokerEventRecord): string {
+  return getEventString(entry.event, 'event_id') || entry.id
+}
+
+function buildMessageBuckets(
+  events: BrokerEventRecord[],
+  rangeHours: MessageChartRangeHours,
+  now = Date.now()
+): Array<{ timestamp: number; count: number }> {
+  const bucketCount = rangeHours * 12
+  const endBucket = Math.floor(now / MESSAGE_CHART_BUCKET_MS) * MESSAGE_CHART_BUCKET_MS
+  const startBucket = endBucket - ((bucketCount - 1) * MESSAGE_CHART_BUCKET_MS)
+  const buckets = Array.from({ length: bucketCount }, (_, index) => ({
+    timestamp: startBucket + (index * MESSAGE_CHART_BUCKET_MS),
+    count: 0
+  }))
+  const seenByBucket = buckets.map(() => new Set<string>())
+
+  for (const entry of events) {
+    if (!isMessageThroughputEvent(entry)) continue
+    const index = Math.floor((entry.timestamp - startBucket) / MESSAGE_CHART_BUCKET_MS)
+    if (index < 0 || index >= buckets.length) continue
+    const key = getMessageThroughputKey(entry)
+    if (seenByBucket[index].has(key)) continue
+    seenByBucket[index].add(key)
+    buckets[index].count += 1
+  }
+
+  return buckets
+}
+
+function MessageThroughputPanel({ events }: { events: BrokerEventRecord[] }): React.ReactNode {
+  const [rangeHours, setRangeHours] = useState<MessageChartRangeHours>(1)
+  const buckets = useMemo(() => buildMessageBuckets(events, rangeHours), [events, rangeHours])
+  const total = buckets.reduce((sum, bucket) => sum + bucket.count, 0)
+  const peak = Math.max(0, ...buckets.map((bucket) => bucket.count))
+  const average = buckets.length > 0 ? total / buckets.length : 0
+  const chartWidth = 640
+  const chartHeight = 170
+  const padding = { top: 16, right: 18, bottom: 18, left: 18 }
+  const plotWidth = chartWidth - padding.left - padding.right
+  const plotHeight = chartHeight - padding.top - padding.bottom
+  const maxCount = Math.max(1, peak)
+  const points = buckets.map((bucket, index) => {
+    const x = padding.left + ((plotWidth * index) / Math.max(1, buckets.length - 1))
+    const y = padding.top + plotHeight - ((bucket.count / maxCount) * plotHeight)
+    return { x, y, count: bucket.count }
+  })
+  const linePoints = points.map((point) => `${point.x},${point.y}`).join(' ')
+  const areaPath = points.length > 0
+    ? [
+        `M ${points[0].x} ${padding.top + plotHeight}`,
+        ...points.map((point) => `L ${point.x} ${point.y}`),
+        `L ${points[points.length - 1].x} ${padding.top + plotHeight}`,
+        'Z'
+      ].join(' ')
+    : ''
+  const firstBucket = buckets[0]
+  const middleBucket = buckets[Math.floor(buckets.length / 2)]
+  const lastBucket = buckets[buckets.length - 1]
+
+  return (
+    <section className="rounded-lg border border-[var(--pear-border)] bg-[var(--pear-bg-surface)]">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--pear-border-subtle)] px-5 py-4">
+        <div className="flex items-center gap-2">
+          <Activity size={16} className="text-[var(--pear-accent)]" />
+          <h2 className="text-sm font-semibold text-[var(--pear-text)]">Messages per 5 minutes</h2>
+        </div>
+        <div className="flex rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35 p-0.5">
+          {MESSAGE_CHART_RANGES.map((hours) => (
+            <button
+              key={hours}
+              type="button"
+              onClick={() => setRangeHours(hours)}
+              className={`h-7 rounded px-2.5 text-[11px] ${
+                rangeHours === hours
+                  ? 'bg-[var(--pear-bg-overlay)] text-[var(--pear-text)]'
+                  : 'text-[var(--pear-text-faint)] hover:text-[var(--pear-text-secondary)]'
+              }`}
+            >
+              {hours}h
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="p-5">
+        <div className="mb-4 grid grid-cols-3 gap-3">
+          <DetailField label="Total" value={String(total)} />
+          <DetailField label="Peak block" value={String(peak)} />
+          <DetailField label="Avg block" value={average.toFixed(1)} />
+        </div>
+        <div className="rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] p-3">
+          <svg
+            viewBox={`0 0 ${chartWidth} ${chartHeight}`}
+            className="h-44 w-full"
+            role="img"
+            aria-label={`Messages sent per 5 minute block for the past ${rangeHours} hours`}
+          >
+            {[0, 1, 2, 3].map((line) => {
+              const y = padding.top + ((plotHeight * line) / 3)
+              return (
+                <line
+                  key={line}
+                  x1={padding.left}
+                  x2={chartWidth - padding.right}
+                  y1={y}
+                  y2={y}
+                  stroke="var(--pear-border-subtle)"
+                  strokeWidth="1"
+                />
+              )
+            })}
+            {areaPath && (
+              <path d={areaPath} fill="var(--pear-bg-overlay)" opacity="0.9" />
+            )}
+            <polyline
+              points={linePoints}
+              fill="none"
+              stroke="var(--pear-accent-bright)"
+              strokeWidth="3"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            />
+            {points.filter((point) => point.count > 0).map((point, index) => (
+              <circle
+                key={`${point.x}-${index}`}
+                cx={point.x}
+                cy={point.y}
+                r="3.5"
+                fill="var(--pear-accent-bright)"
+              />
+            ))}
+          </svg>
+          <div className="mt-2 flex justify-between text-[11px] text-[var(--pear-text-faint)]">
+            <span>{firstBucket ? chartTimeFormatter.format(new Date(firstBucket.timestamp)) : ''}</span>
+            <span>{middleBucket ? chartTimeFormatter.format(new Date(middleBucket.timestamp)) : ''}</span>
+            <span>{lastBucket ? chartTimeFormatter.format(new Date(lastBucket.timestamp)) : ''}</span>
+          </div>
+        </div>
+      </div>
+    </section>
+  )
+}
+
+function BrokerEventErrorPanel({
+  events,
+  projects
+}: {
+  events: BrokerEventRecord[]
+  projects: Project[]
+}): React.ReactNode {
+  const errorEvents = events.filter(isBrokerEventError).slice(-6).reverse()
+  if (errorEvents.length === 0) return null
+
+  return (
+    <section className="rounded-lg border border-[var(--pear-red)]/25 bg-[var(--pear-bg-surface)]">
+      <div className="flex items-center gap-2 border-b border-[var(--pear-red)]/15 px-5 py-4">
+        <AlertTriangle size={16} className="text-[var(--pear-red)]" />
+        <h2 className="text-sm font-semibold text-[var(--pear-text)]">Recent event errors</h2>
+      </div>
+      <div className="space-y-2 p-5">
+        {errorEvents.map((entry) => (
+          <div
+            key={entry.id}
+            className="rounded-lg border border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 px-3 py-2.5"
+          >
+            <div className="flex flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--pear-red)]">
+              <span className="font-medium uppercase">{humanizeEventKind(getEventKind(entry))}</span>
+              <span className="text-[var(--pear-text-faint)]">{formatErrorTimestamp(entry.timestamp)}</span>
+            </div>
+            <p className="mt-1 text-sm text-[var(--pear-text)]">{getBrokerEventErrorMessage(entry)}</p>
+            <p className="mt-1 text-[11px] text-[var(--pear-text-faint)]">
+              {getProjectName(projects, entry.projectId)}
+            </p>
+          </div>
+        ))}
+      </div>
+    </section>
+  )
+}
+
+function BrokerEventFeed({
+  events,
+  projects
+}: {
+  events: BrokerEventRecord[]
+  projects: Project[]
+}): React.ReactNode {
+  const recentEvents = events.slice(-150).reverse()
+
+  return (
+    <section className="rounded-lg border border-[var(--pear-border)] bg-[var(--pear-bg-surface)]">
+      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--pear-border-subtle)] px-5 py-4">
+        <div className="flex items-center gap-2">
+          <List size={16} className="text-[var(--pear-accent)]" />
+          <h2 className="text-sm font-semibold text-[var(--pear-text)]">Broker event feed</h2>
+        </div>
+        <span className="rounded-full border border-[var(--pear-border-subtle)] px-2 py-1 text-[11px] text-[var(--pear-text-faint)]">
+          {events.length} events
+        </span>
+      </div>
+      {recentEvents.length > 0 ? (
+        <div className="max-h-[520px] overflow-y-auto">
+          {recentEvents.map((entry) => {
+            const kind = getEventKind(entry)
+            const isError = isBrokerEventError(entry)
+            return (
+              <div
+                key={entry.id}
+                className="grid grid-cols-[110px_minmax(0,1fr)] gap-3 border-b border-[var(--pear-border-subtle)] px-5 py-3 last:border-b-0"
+              >
+                <div className="min-w-0 text-[11px] text-[var(--pear-text-faint)]">
+                  <div>{formatErrorTimestamp(entry.timestamp)}</div>
+                  <div className="mt-1 truncate" title={getProjectName(projects, entry.projectId)}>
+                    {getProjectName(projects, entry.projectId)}
+                  </div>
+                </div>
+                <div className="min-w-0">
+                  <div className="mb-1 flex flex-wrap items-center gap-2">
+                    <span
+                      className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] ${
+                        isError
+                          ? 'bg-[var(--pear-red)]/10 text-[var(--pear-red)]'
+                          : 'bg-[var(--pear-bg-overlay)] text-[var(--pear-text-secondary)]'
+                      }`}
+                    >
+                      {isError ? <AlertCircle size={11} /> : <MessageSquare size={11} />}
+                      {humanizeEventKind(kind)}
+                    </span>
+                    {getEventString(entry.event, 'name') && (
+                      <span className="truncate text-[11px] text-[var(--pear-text-faint)]">
+                        {getEventString(entry.event, 'name')}
+                      </span>
+                    )}
+                  </div>
+                  <p className="break-words text-sm leading-5 text-[var(--pear-text-secondary)]">
+                    {describeBrokerEvent(entry)}
+                  </p>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      ) : (
+        <div className="px-5 py-12 text-center text-sm text-[var(--pear-text-faint)]">
+          No broker events recorded yet
+        </div>
+      )}
+    </section>
+  )
+}
+
 function BrokerCard({
   broker,
   projectName,
   statusErrors,
-  currentErrorId
+  currentErrorId,
+  project,
+  fixing,
+  fixError,
+  onAutoFix
 }: {
   broker: BrokerDetails
   projectName: string
   statusErrors: BrokerErrorEntry[]
   currentErrorId?: string
+  project?: Project
+  fixing?: boolean
+  fixError?: string
+  onAutoFix?: (project: Project, entry: BrokerErrorEntry) => void
 }): React.ReactNode {
   const Icon = broker.kind === 'cloud' ? Cloud : Server
   const apiKey = broker.apiKey || (broker.apiKeyAvailable ? 'stored in connection file' : 'n/a')
@@ -507,7 +961,15 @@ function BrokerCard({
           </div>
         )}
 
-        <BrokerIssueBlock entries={statusErrors} currentErrorId={currentErrorId} />
+        <BrokerIssueBlock
+          entries={statusErrors}
+          currentErrorId={currentErrorId}
+          project={project}
+          fixing={fixing}
+          fixError={fixError}
+          onAutoFix={onAutoFix}
+          allowLivePidConflict
+        />
       </div>
     </section>
   )
@@ -517,6 +979,9 @@ export function BrokerDetailsPage(): React.ReactNode {
   const brokerStatus = useAgentStore((s) => s.brokerStatus)
   const brokerError = useAgentStore((s) => s.brokerError)
   const brokerErrors = useAgentStore((s) => s.brokerErrors)
+  const brokerEvents = useAgentStore((s) => s.brokerEvents)
+  const hydrateBrokerEvents = useAgentStore((s) => s.hydrateBrokerEvents)
+  const syncBrokerDetailsStatus = useAgentStore((s) => s.syncBrokerDetailsStatus)
   const projects = useProjectStore((s) => s.projects)
   const [brokerDetails, setBrokerDetails] = useState<BrokerDetails[]>([])
   const [detailsLoading, setDetailsLoading] = useState(false)
@@ -545,19 +1010,33 @@ export function BrokerDetailsPage(): React.ReactNode {
     () => brokerErrors.filter((entry) => !entry.projectId),
     [brokerErrors]
   )
+  const sortedBrokerEvents = useMemo(
+    () => [...brokerEvents].sort((left, right) => left.timestamp - right.timestamp),
+    [brokerEvents]
+  )
   const hasBrokerSections = brokerDetails.length > 0 || unmatchedProjectErrorGroups.length > 0
 
   const loadBrokerDetails = useCallback(async (): Promise<void> => {
     setDetailsLoading(true)
     setDetailsError(null)
     try {
+      if (typeof pear.broker.listEvents === 'function') {
+        pear.broker.listEvents()
+          .then(hydrateBrokerEvents)
+          .catch(() => undefined)
+      }
+
       if (typeof pear.broker.listDetails === 'function') {
-        setBrokerDetails(await pear.broker.listDetails())
+        const details = await pear.broker.listDetails()
+        setBrokerDetails(details)
+        syncBrokerDetailsStatus(details)
         return
       }
 
       const liveAgents = await pear.broker.listAgents()
-      setBrokerDetails(buildAgentFallbackDetails(liveAgents, projects, brokerStatus))
+      const details = buildAgentFallbackDetails(liveAgents, projects, brokerStatus)
+      setBrokerDetails(details)
+      syncBrokerDetailsStatus(details)
       setDetailsError(
         'Agent Relay status API is not loaded in this window. Restart Pear for full diagnostics and API-key CLI strings.'
       )
@@ -566,7 +1045,7 @@ export function BrokerDetailsPage(): React.ReactNode {
     } finally {
       setDetailsLoading(false)
     }
-  }, [brokerStatus, projects])
+  }, [brokerStatus, hydrateBrokerEvents, projects, syncBrokerDetailsStatus])
 
   const handleAutoFix = useCallback(async (project: Project, entry: BrokerErrorEntry): Promise<void> => {
     const root = getDefaultProjectRoot(project)
@@ -648,6 +1127,10 @@ export function BrokerDetailsPage(): React.ReactNode {
                 projectName={getProjectName(projects, broker.projectId)}
                 statusErrors={brokerErrorsByProject.get(broker.projectId) || []}
                 currentErrorId={currentErrorId}
+                project={projects.find((project) => project.id === broker.projectId)}
+                fixing={autoFixingProjectId === broker.projectId}
+                fixError={autoFixErrors[broker.projectId]}
+                onAutoFix={(project, entry) => void handleAutoFix(project, entry)}
               />
             ))}
             {unmatchedProjectErrorGroups.map(([projectId, entries]) => (
@@ -668,6 +1151,14 @@ export function BrokerDetailsPage(): React.ReactNode {
             No managed Agent Relay sessions running
           </div>
         )}
+
+        <div className="mt-5 grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+          <div className="space-y-5">
+            <BrokerEventErrorPanel events={sortedBrokerEvents} projects={projects} />
+            <MessageThroughputPanel events={sortedBrokerEvents} />
+          </div>
+          <BrokerEventFeed events={sortedBrokerEvents} projects={projects} />
+        </div>
 
         {unattributedBrokerErrors.length > 0 && (
           <div className="mt-5">

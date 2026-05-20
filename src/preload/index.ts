@@ -75,6 +75,7 @@ const api = {
       ipcRenderer.invoke('broker:release-agent', projectId, name),
     listAgents: (projectId?: string) => ipcRenderer.invoke('broker:list-agents', projectId),
     listDetails: () => ipcRenderer.invoke('broker:list-details'),
+    listEvents: () => ipcRenderer.invoke('broker:list-events'),
     shutdown: () => ipcRenderer.invoke('broker:shutdown'),
     onEvent: (callback: (event: unknown) => void) => {
       const handler = (_: unknown, event: unknown): void => callback(event)
@@ -104,6 +105,10 @@ const api = {
     pushCurrentBranch: (root: string) => ipcRenderer.invoke('git:push-current-branch', root),
     history: (path: string, limit?: number) => ipcRenderer.invoke('git:history', path, limit),
     show: (path: string, hash: string, file?: string) => ipcRenderer.invoke('git:show', path, hash, file),
+    discardFiles: (path: string, files: string[]) =>
+      ipcRenderer.invoke('git:discard-files', path, files),
+    addGitignorePatterns: (path: string, patterns: string[]) =>
+      ipcRenderer.invoke('git:add-gitignore-patterns', path, patterns),
     commitSelection: (path: string, input: {
       title: string
       body?: string
@@ -115,7 +120,8 @@ const api = {
   },
   fs: {
     listDir: (dirPath: string) => ipcRenderer.invoke('fs:list-dir', dirPath),
-    readPreview: (filePath: string) => ipcRenderer.invoke('fs:read-preview', filePath)
+    readPreview: (filePath: string) => ipcRenderer.invoke('fs:read-preview', filePath),
+    revealPath: (filePath: string) => ipcRenderer.invoke('fs:reveal-path', filePath)
   },
   auth: {
     login: () => ipcRenderer.invoke('auth:login') as Promise<{ loggedIn: boolean; apiUrl?: string }>,

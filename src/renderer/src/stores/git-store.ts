@@ -201,7 +201,7 @@ export const useGitStore = create<GitState>((set, get) => ({
   },
 
   selectFile: (file, rootPath) => {
-    set({ selectedFile: file })
+    set({ selectedFile: file, diff: '' })
     if (file) {
       get().fetchDiff(rootPath, file)
     } else {
