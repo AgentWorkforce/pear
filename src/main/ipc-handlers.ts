@@ -45,6 +45,20 @@ function assertPathWithinProjects(targetPath: string): void {
   }
 }
 
+const gitStatusWarnings = new Set<string>()
+
+function toErrorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function warnGitStatusOnce(path: string, error: unknown): void {
+  const message = toErrorMessage(error)
+  const key = `${path}:${message}`
+  if (gitStatusWarnings.has(key)) return
+  gitStatusWarnings.add(key)
+  console.warn(`[git] Failed to read status for ${path}: ${message}`)
+}
+
 export function registerIpcHandlers(): void {
   // Fan proactive-agent events out to all renderer windows.
   proactiveAgentManager.onEvent((event) => {
@@ -266,7 +280,12 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('git:status', async (_, path: string) => {
     assertPathWithinProjects(path)
     if (!isDirectory(path)) return []
-    return git.getStatus(path)
+    try {
+      return await git.getStatus(path)
+    } catch (error) {
+      warnGitStatusOnce(path, error)
+      return []
+    }
   })
 
   ipcMain.handle('git:diff', async (_, path: string, file?: string) => {
