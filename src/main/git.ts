@@ -1,14 +1,25 @@
-import { execFile, spawn } from 'child_process'
+import { spawn } from 'child_process'
 import { createHash } from 'crypto'
 import { existsSync } from 'fs'
-import { appendFile, mkdtemp, readFile, rm } from 'fs/promises'
+import { appendFile, mkdtemp, readFile, rm, stat } from 'fs/promises'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { promisify } from 'util'
 import { assertDirectory } from './path-utils'
 import { cacheAvatarFromUrl, cachedAvatarUrl } from './avatar-cache'
 
-const exec = promisify(execFile)
+class GitCommandError extends Error {
+  code?: number | string | null
+  stdout: string
+  stderr: string
+
+  constructor(message: string, options: { code?: number | string | null; stdout?: string; stderr?: string } = {}) {
+    super(message)
+    this.name = 'GitCommandError'
+    this.code = options.code
+    this.stdout = options.stdout || ''
+    this.stderr = options.stderr || ''
+  }
+}
 
 export interface FileStatus {
   path: string
@@ -65,6 +76,8 @@ type GitHubCommitAvatar = {
 const gitHubCommitAvatarCache = new Map<string, GitHubCommitAvatar>()
 // Git suppresses merge file details unless a merge diff strategy is requested.
 const mergeDiffArgs = ['--diff-merges=first-parent']
+const MAX_UNTRACKED_SUMMARY_FILES = 500
+const MAX_UNTRACKED_SUMMARY_FILE_BYTES = 1024 * 1024
 
 export interface GitCommitSelectionInput {
   title: string
@@ -94,16 +107,73 @@ export interface GitCheckoutBranchOptions {
   stashChanges?: boolean
 }
 
-async function git(args: string[], cwd: string): Promise<string> {
+function runGit(
+  args: string[],
+  cwd: string,
+  options: { env?: NodeJS.ProcessEnv; input?: string } = {}
+): Promise<string> {
   assertDirectory(cwd, 'Git working directory')
-  const { stdout } = await exec('git', args, { cwd, maxBuffer: 10 * 1024 * 1024 })
-  return stdout
+
+  return new Promise((resolve, reject) => {
+    let child: ReturnType<typeof spawn>
+    try {
+      child = spawn('git', args, {
+        cwd,
+        env: options.env,
+        stdio: [options.input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe']
+      })
+    } catch (error) {
+      reject(error)
+      return
+    }
+
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+
+    const rejectOnce = (error: unknown): void => {
+      if (settled) return
+      settled = true
+      reject(error)
+    }
+
+    child.stdout?.on('data', (chunk) => {
+      stdout += String(chunk)
+      if (stdout.length > 10 * 1024 * 1024) {
+        child.kill()
+        rejectOnce(new GitCommandError(`git ${args.join(' ')} exceeded output buffer`, { stdout, stderr }))
+      }
+    })
+    child.stderr?.on('data', (chunk) => {
+      stderr += String(chunk)
+    })
+    child.on('error', rejectOnce)
+    child.on('close', (code) => {
+      if (settled) return
+      settled = true
+      if (code === 0) {
+        resolve(stdout)
+        return
+      }
+      reject(new GitCommandError(stderr || `git ${args.join(' ')} exited with code ${code}`, {
+        code,
+        stdout,
+        stderr
+      }))
+    })
+
+    if (options.input !== undefined) {
+      child.stdin?.end(options.input)
+    }
+  })
+}
+
+async function git(args: string[], cwd: string): Promise<string> {
+  return runGit(args, cwd)
 }
 
 async function gitWithEnv(args: string[], cwd: string, env: NodeJS.ProcessEnv): Promise<string> {
-  assertDirectory(cwd, 'Git working directory')
-  const { stdout } = await exec('git', args, { cwd, env, maxBuffer: 10 * 1024 * 1024 })
-  return stdout
+  return runGit(args, cwd, { env })
 }
 
 async function gitWithInput(
@@ -112,30 +182,7 @@ async function gitWithInput(
   input: string,
   env: NodeJS.ProcessEnv = process.env
 ): Promise<string> {
-  assertDirectory(cwd, 'Git working directory')
-
-  return new Promise((resolve, reject) => {
-    const child = spawn('git', args, { cwd, env })
-    let stdout = ''
-    let stderr = ''
-
-    child.stdout.on('data', (chunk) => {
-      stdout += String(chunk)
-    })
-    child.stderr.on('data', (chunk) => {
-      stderr += String(chunk)
-    })
-    child.on('error', reject)
-    child.on('close', (code) => {
-      if (code === 0) {
-        resolve(stdout)
-        return
-      }
-      reject(new Error(stderr || `git ${args.join(' ')} exited with code ${code}`))
-    })
-
-    child.stdin.end(input)
-  })
+  return runGit(args, cwd, { env, input })
 }
 
 async function gitAllowNonZeroExit(args: string[], cwd: string): Promise<string> {
@@ -148,6 +195,34 @@ async function gitAllowNonZeroExit(args: string[], cwd: string): Promise<string>
     if (typeof stdout === 'string') return stdout
     throw error
   }
+}
+
+function countLines(buffer: Buffer): number {
+  if (buffer.length === 0) return 0
+  let lines = 0
+  for (let index = 0; index < buffer.length; index += 1) {
+    if (buffer[index] === 10) lines += 1
+  }
+  return buffer[buffer.length - 1] === 10 ? lines : lines + 1
+}
+
+async function getUntrackedAdditions(path: string, files: FileStatus[]): Promise<number> {
+  const untracked = files
+    .filter((entry) => entry.status === 'untracked')
+    .slice(0, MAX_UNTRACKED_SUMMARY_FILES)
+
+  const counts = await Promise.all(untracked.map(async (entry) => {
+    const fullPath = join(path, entry.path)
+    try {
+      const info = await stat(fullPath)
+      if (!info.isFile() || info.size > MAX_UNTRACKED_SUMMARY_FILE_BYTES) return 0
+      return countLines(await readFile(fullPath))
+    } catch {
+      return 0
+    }
+  }))
+
+  return counts.reduce((sum, count) => sum + count, 0)
 }
 
 export async function getStatus(path: string): Promise<FileStatus[]> {
@@ -292,14 +367,7 @@ export async function getDiff(path: string, file?: string): Promise<string> {
     diff = await gitAllowNonZeroExit(['diff', '--cached'], path)
   }
 
-  const status = await getStatus(path)
-  const untrackedDiffs = await Promise.all(
-    status
-      .filter((entry) => entry.status === 'untracked')
-      .map((entry) => gitAllowNonZeroExit(['diff', '--no-index', '--', '/dev/null', entry.path], path))
-  )
-
-  return [diff, ...untrackedDiffs].filter(Boolean).join('\n')
+  return diff
 }
 
 export async function getFileContent(path: string, file: string, revision = 'HEAD'): Promise<string> {
@@ -369,15 +437,8 @@ export async function getSummary(path: string): Promise<GitSummary | null> {
     getTrackedNumstat(path),
     getStatus(path)
   ])
-  const untrackedNumstats = await Promise.all(
-    status
-      .filter((entry) => entry.status === 'untracked')
-      .map((entry) =>
-        gitAllowNonZeroExit(['diff', '--no-index', '--numstat', '--', '/dev/null', entry.path], path)
-          .catch(() => '')
-      )
-  )
-  const totals = parseNumstat([trackedNumstat, ...untrackedNumstats].filter(Boolean).join('\n'))
+  const totals = parseNumstat(trackedNumstat)
+  totals.additions += await getUntrackedAdditions(path, status)
 
   return {
     branch,

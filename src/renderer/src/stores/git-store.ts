@@ -107,6 +107,11 @@ function normalizeRootPaths(paths: Array<string | null | undefined>): string[] {
   )
 }
 
+const statusRequests = new Set<string>()
+const summaryRequests = new Set<string>()
+const projectStatusRequests = new Set<string>()
+const diffRequests = new Set<string>()
+
 export const useGitStore = create<GitState>((set, get) => ({
   files: [],
   projectFiles: [],
@@ -124,27 +129,36 @@ export const useGitStore = create<GitState>((set, get) => ({
   pollInterval: null,
 
   fetchStatus: async (path) => {
+    if (statusRequests.has(path)) return
+    statusRequests.add(path)
     try {
       const files = await pear.git.status(path)
       if (!sameFileStatuses(get().files, files)) set({ files })
     } catch {
       if (get().files.length > 0) set({ files: [] })
+    } finally {
+      statusRequests.delete(path)
     }
   },
 
   fetchSummary: async (path) => {
+    if (summaryRequests.has(path)) return
+    summaryRequests.add(path)
     try {
       const summary = await pear.git.summary(path)
       const nextSummary = summary ? { ...summary, rootPath: path } : null
       if (!sameGitSummary(get().summary, nextSummary)) set({ summary: nextSummary })
     } catch {
       if (get().summary !== null) set({ summary: null })
+    } finally {
+      summaryRequests.delete(path)
     }
   },
 
   fetchProjectStatus: async (paths) => {
     const rootPaths = normalizeRootPaths(paths)
     const rootPathKey = rootPaths.join('\0')
+    if (projectStatusRequests.has(rootPathKey)) return
     if (rootPaths.length === 0) {
       if (get().projectFiles.length > 0 || get().projectSummary !== null) {
         set({ projectFiles: [], projectSummary: null })
@@ -152,43 +166,53 @@ export const useGitStore = create<GitState>((set, get) => ({
       return
     }
 
-    const entries = await Promise.all(rootPaths.map(async (rootPath) => {
-      const [files, summary] = await Promise.all([
-        pear.git.status(rootPath).catch(() => [] as FileStatus[]),
-        pear.git.summary(rootPath).catch(() => null)
-      ])
-      return { rootPath, files, summary }
-    }))
-    const summaries = entries
-      .map((entry) => entry.summary)
-      .filter((summary): summary is IpcGitSummary => summary !== null)
-    const projectFiles = entries.flatMap((entry) =>
-      entry.files.map((file) => ({ ...file, rootPath: entry.rootPath }))
-    )
-    const projectSummary = summaries.length > 0
-      ? {
-          rootPathKey,
-          rootCount: summaries.length,
-          additions: summaries.reduce((total, summary) => total + summary.additions, 0),
-          deletions: summaries.reduce((total, summary) => total + summary.deletions, 0)
-        }
-      : null
+    projectStatusRequests.add(rootPathKey)
+    try {
+      const entries = await Promise.all(rootPaths.map(async (rootPath) => {
+        const [files, summary] = await Promise.all([
+          pear.git.status(rootPath).catch(() => [] as FileStatus[]),
+          pear.git.summary(rootPath).catch(() => null)
+        ])
+        return { rootPath, files, summary }
+      }))
+      const summaries = entries
+        .map((entry) => entry.summary)
+        .filter((summary): summary is IpcGitSummary => summary !== null)
+      const projectFiles = entries.flatMap((entry) =>
+        entry.files.map((file) => ({ ...file, rootPath: entry.rootPath }))
+      )
+      const projectSummary = summaries.length > 0
+        ? {
+            rootPathKey,
+            rootCount: summaries.length,
+            additions: summaries.reduce((total, summary) => total + summary.additions, 0),
+            deletions: summaries.reduce((total, summary) => total + summary.deletions, 0)
+          }
+        : null
 
-    if (
-      !sameProjectFileStatuses(get().projectFiles, projectFiles) ||
-      !sameProjectGitSummary(get().projectSummary, projectSummary)
-    ) {
-      set({ projectFiles, projectSummary })
+      if (
+        !sameProjectFileStatuses(get().projectFiles, projectFiles) ||
+        !sameProjectGitSummary(get().projectSummary, projectSummary)
+      ) {
+        set({ projectFiles, projectSummary })
+      }
+    } finally {
+      projectStatusRequests.delete(rootPathKey)
     }
   },
 
   fetchDiff: async (rootPath, file?) => {
+    const key = `${rootPath}:${file || ''}`
+    if (diffRequests.has(key)) return
+    diffRequests.add(key)
     set({ loading: true })
     try {
       const diff = await pear.git.diff(rootPath, file)
       set({ diff, loading: false })
     } catch {
       set({ diff: '', loading: false })
+    } finally {
+      diffRequests.delete(key)
     }
   },
 
@@ -285,7 +309,7 @@ export const useGitStore = create<GitState>((set, get) => ({
     if (file) {
       get().fetchDiff(rootPath, file)
     } else {
-      get().fetchDiff(rootPath)
+      set({ diff: '', loading: false })
     }
   },
 
