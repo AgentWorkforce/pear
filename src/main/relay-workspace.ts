@@ -118,6 +118,18 @@ export class RelayWorkspaceManager {
         this.handleAuth = authContext
         return result.handle
       })
+      // If a stale bootstrap rejects (e.g. network blip after auth changed and
+      // a newer bootstrap already succeeded), don't propagate the error to the
+      // caller — redirect them to the current/next handle, mirroring the
+      // success-path redirect above. Without this, callers awaiting an
+      // outdated bootstrap would see its failure even though a valid handle
+      // exists.
+      .catch((err) => {
+        if (!this.isCurrentBootstrap(pendingHandle, authContext, generation)) {
+          return this.getCurrentOrNextHandle()
+        }
+        throw err
+      })
       .finally(() => {
         if (this.pendingHandle === pendingHandle && this.bootstrapGeneration === generation) {
           this.pendingHandle = null
