@@ -162,6 +162,7 @@ function UserAvatar({ user }: { user?: AuthUser }): React.ReactNode {
 }
 
 function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNode {
+  const openTab = useUIStore((s) => s.openTab)
   const [auth, setAuth] = useState<{ loggedIn: boolean; user?: AuthUser }>({ loggedIn: false })
   const [loading, setLoading] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
@@ -185,6 +186,14 @@ function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNod
     setAuth({ loggedIn: false })
     setMenuOpen(false)
   }, [])
+
+  const openAccountSettings = useCallback(() => {
+    openTab({
+      kind: 'account-settings',
+      title: 'Account settings'
+    })
+    setMenuOpen(false)
+  }, [openTab])
 
   if (!auth.loggedIn) {
     return (
@@ -233,6 +242,15 @@ function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNod
             compact ? 'bottom-0 left-full ml-2 w-36' : 'bottom-full left-2 right-2'
           }`}>
             <button
+              type="button"
+              onClick={openAccountSettings}
+              className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--pear-text)] hover:bg-[var(--pear-bg-surface-hover)]"
+            >
+              <Settings size={13} />
+              <span>Account settings</span>
+            </button>
+            <button
+              type="button"
               onClick={handleLogout}
               className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
             >
