@@ -16,6 +16,12 @@ import {
 } from '@agent-relay/sdk'
 import { getAccessToken, getApiUrl } from './auth'
 import { assertDirectory } from './path-utils'
+import {
+  BrokerConnectionFileSchema,
+  GeneratedCommitDraftSchema,
+  type GeneratedCommitDraft
+} from './schemas'
+import { compactBrokerEvent, normalizeEventTimestamp } from '../shared/lib/broker-events'
 
 function isShellLikeCommand(cli: string): boolean {
   const normalized = basename(cli).toLowerCase()
@@ -87,10 +93,7 @@ export interface AttachTerminalResult {
   }
 }
 
-export interface GeneratedCommitDraft {
-  title: string
-  body: string
-}
+export type { GeneratedCommitDraft }
 
 export interface BrokerRuntimeAutoFixResult {
   removed: string[]
@@ -105,7 +108,6 @@ const COMMIT_DRAFT_MAX_DIFF_CHARS = 80_000
 const COMMIT_DRAFT_TIMEOUT_MS = 180_000
 const MAX_BROKER_EVENT_HISTORY = 3_000
 const BROKER_EVENT_HISTORY_TTL_MS = 12 * 60 * 60 * 1_000
-const MAX_EVENT_TEXT_CHARS = 1_200
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -115,44 +117,19 @@ function toErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-function normalizeEventTimestamp(value: unknown): number | undefined {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
-    return undefined
-  }
-  return value < 1_000_000_000_000 ? value * 1_000 : value
-}
-
-function compactEventText(value: unknown): unknown {
-  if (typeof value !== 'string' || value.length <= MAX_EVENT_TEXT_CHARS) {
-    return value
-  }
-  return `${value.slice(0, MAX_EVENT_TEXT_CHARS)}...`
-}
-
 type BrokerEventRecordPayload = Record<string, unknown> & { kind: string }
 
-function compactBrokerEvent(event: BrokerEventRecordPayload): BrokerEventRecordPayload {
-  const compacted = { ...(event as Record<string, unknown>) }
-  for (const key of ['body', 'chunk', 'message', 'reason', 'lastError']) {
-    if (key in compacted) {
-      compacted[key] = compactEventText(compacted[key])
-    }
-  }
-  return compacted as BrokerEventRecordPayload
+function getErrorStatus(err: unknown): unknown {
+  if (typeof err !== 'object' || err === null || !('status' in err)) return undefined
+  return (err as { status?: unknown }).status
 }
 
 function isUnsupportedInputStreamError(err: unknown): boolean {
-  const status = typeof err === 'object' && err !== null && 'status' in err
-    ? (err as { status?: unknown }).status
-    : undefined
-  return status === 404 || /\b404\b|not found|unsupported/i.test(toErrorMessage(err))
+  return getErrorStatus(err) === 404 || /\b404\b|not found|unsupported/i.test(toErrorMessage(err))
 }
 
 function isMissingAgentError(err: unknown): boolean {
-  const status = typeof err === 'object' && err !== null && 'status' in err
-    ? (err as { status?: unknown }).status
-    : undefined
-  return status === 404 || /agent_not_found|no worker named|not found/i.test(toErrorMessage(err))
+  return getErrorStatus(err) === 404 || /agent_not_found|no worker named|not found/i.test(toErrorMessage(err))
 }
 
 function withBrokerDetailsTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
@@ -214,20 +191,21 @@ function getBrokerConnectionFileInfo(
   }
 
   try {
-    const connection = JSON.parse(readFileSync(connectionPath, 'utf-8')) as Record<string, unknown>
-    const connectionUrl = normalizeBaseUrl(typeof connection.url === 'string' ? connection.url : undefined)
-    const connectionPid = typeof connection.pid === 'number' ? connection.pid : undefined
-    const connectionApiKey = typeof connection.api_key === 'string' && connection.api_key.trim().length > 0
-      ? connection.api_key.trim()
-      : undefined
+    const parsed = BrokerConnectionFileSchema.safeParse(
+      JSON.parse(readFileSync(connectionPath, 'utf-8'))
+    )
+    if (!parsed.success) {
+      return { path: connectionPath, status: 'invalid', hasApiKey: false }
+    }
+    const connectionUrl = normalizeBaseUrl(parsed.data.url)
     const sameUrl = !!baseUrl && connectionUrl === baseUrl
-    const samePid = !brokerPid || !connectionPid || connectionPid === brokerPid
+    const samePid = !brokerPid || !parsed.data.pid || parsed.data.pid === brokerPid
 
     return {
       path: connectionPath,
       status: sameUrl && samePid ? 'matches' : 'different',
-      hasApiKey: !!connectionApiKey,
-      apiKey: connectionApiKey
+      hasApiKey: !!parsed.data.apiKey,
+      apiKey: parsed.data.apiKey
     }
   } catch {
     return { path: connectionPath, status: 'invalid', hasApiKey: false }
@@ -308,24 +286,12 @@ function getJsonObjectCandidates(text: string): string[] {
   return candidates
 }
 
-function normalizeGeneratedCommitDraft(value: unknown): GeneratedCommitDraft | null {
-  if (!value || typeof value !== 'object') return null
-  const record = value as Record<string, unknown>
-  const title = typeof record.title === 'string' ? record.title.trim() : ''
-  if (!title) return null
-
-  return {
-    title,
-    body: typeof record.body === 'string' ? record.body.trim() : ''
-  }
-}
-
 function parseGeneratedCommitDraft(text: string): GeneratedCommitDraft {
   const candidates = getJsonObjectCandidates(text)
   for (const candidate of candidates.reverse()) {
     try {
-      const draft = normalizeGeneratedCommitDraft(JSON.parse(candidate))
-      if (draft) return draft
+      const draft = GeneratedCommitDraftSchema.safeParse(JSON.parse(candidate))
+      if (draft.success) return draft.data
     } catch {
       // Keep scanning terminal output; diffs can contain unrelated braces.
     }
@@ -713,7 +679,8 @@ export class BrokerManager {
     }
 
     if (this.sessions.size === 1) {
-      return this.sessions.values().next().value
+      const onlySession = this.sessions.values().next().value
+      if (onlySession) return onlySession
     }
 
     throw new Error(`No relay workspace found for agent: ${name}`)
@@ -736,9 +703,9 @@ export class BrokerManager {
       } else if ((event.kind === 'agent_exited' || event.kind === 'agent_released') && event.name) {
         this.closeInputStream(this.getInputStreamKey(projectId, event.name), 1000, 'agent closed')
         this.forgetAgentProject(event.name, projectId)
-      } else if (event.name) {
+      } else if ('name' in event && typeof event.name === 'string') {
         this.rememberAgentProject(event.name, projectId)
-      } else if (event.from) {
+      } else if ('from' in event && typeof event.from === 'string') {
         this.rememberAgentProject(event.from, projectId)
       }
     })

@@ -95,6 +95,15 @@ export interface BrokerEventRecord {
   }
 }
 
+export type GitFileStatusKind = 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked'
+
+export interface GitFileStatus {
+  path: string
+  oldPath?: string
+  status: GitFileStatusKind
+  staged: boolean
+}
+
 export interface GitSummary {
   branch: string
   additions: number
@@ -236,7 +245,6 @@ export interface PearAPI {
         screen: string
       }
     }>
-    sendInput: (projectId: string | undefined, name: string, data: string) => Promise<{ name: string; bytes_written: number }>
     sendInputFast: (projectId: string | undefined, name: string, data: string) => void
     setTerminalMode: (projectId: string | undefined, name: string, mode: TerminalAttachMode) => Promise<{
       name: string
@@ -259,7 +267,7 @@ export interface PearAPI {
     onStatus: (callback: (status: { projectId?: string; status: string; error?: string }) => void) => () => void
   }
   git: {
-    status: (path: string) => Promise<{ path: string; oldPath?: string; status: string; staged: boolean }[]>
+    status: (path: string) => Promise<GitFileStatus[]>
     diff: (path: string, file?: string) => Promise<string>
     fileContent: (path: string, file: string, revision?: string) => Promise<string>
     summary: (path: string) => Promise<GitSummary | null>

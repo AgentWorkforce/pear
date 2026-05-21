@@ -8,6 +8,10 @@ import type {
   TerminalAttachMode
 } from '@/lib/ipc'
 import { normalizeChannelName, useProjectStore } from '@/stores/project-store'
+import {
+  compactBrokerEvent as compactBrokerEventPayload,
+  normalizeEventTimestamp
+} from '@shared/lib/broker-events'
 
 export interface Agent {
   name: string
@@ -75,7 +79,6 @@ const MAX_PTY_BUFFER_CHUNKS = 10_000
 const MAX_BROKER_ERRORS = 12
 const MAX_BROKER_EVENTS = 3_000
 const BROKER_EVENT_RETENTION_MS = 12 * 60 * 60 * 1_000
-const MAX_BROKER_EVENT_TEXT_CHARS = 1_200
 const HUMAN_SENDER_NAME = 'human'
 const SYSTEM_NOTICE_SENDER_NAME = 'system'
 const HUMAN_MESSAGE_DEDUPE_WINDOW_MS = 10_000
@@ -216,28 +219,8 @@ function clearPendingDeliveries(agent: Agent, eventId?: string): Agent {
   }
 }
 
-function normalizeEventTimestamp(value: unknown): number | undefined {
-  if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) {
-    return undefined
-  }
-  return value < 1_000_000_000_000 ? value * 1_000 : value
-}
-
-function compactBrokerEventText(value: unknown): unknown {
-  if (typeof value !== 'string' || value.length <= MAX_BROKER_EVENT_TEXT_CHARS) {
-    return value
-  }
-  return `${value.slice(0, MAX_BROKER_EVENT_TEXT_CHARS)}...`
-}
-
 function compactBrokerEvent(event: Record<string, unknown>): BrokerEventRecord['event'] {
-  const compacted = { ...event }
-  for (const key of ['body', 'chunk', 'message', 'reason', 'lastError']) {
-    if (key in compacted) {
-      compacted[key] = compactBrokerEventText(compacted[key])
-    }
-  }
-  return compacted as BrokerEventRecord['event']
+  return compactBrokerEventPayload(event) as BrokerEventRecord['event']
 }
 
 function pruneBrokerEvents(events: BrokerEventRecord[], now = Date.now()): BrokerEventRecord[] {

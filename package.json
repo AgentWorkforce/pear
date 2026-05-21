@@ -22,6 +22,7 @@
     "react-dom": "^19.0.0",
     "shiki": "^4.0.2",
     "unidiff": "^1.0.4",
+    "zod": "^3.25.76",
     "zustand": "^5.0.0"
   },
   "devDependencies": {
