@@ -77,6 +77,15 @@ function createWindow(): void {
     return { action: 'deny' }
   })
 
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (process.platform !== 'darwin') return
+    if (input.type !== 'keyDown') return
+    if (!input.control || input.meta || input.key.toLowerCase() !== 'w') return
+
+    event.preventDefault()
+    mainWindow?.webContents.send('menu:close-tab')
+  })
+
   if (process.env.ELECTRON_RENDERER_URL) {
     mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
@@ -119,8 +128,14 @@ function createMenu(): void {
           }
         },
         {
-          label: 'Release Agent',
+          label: 'Close Tab',
           accelerator: 'CmdOrCtrl+W',
+          click: (): void => {
+            mainWindow?.webContents.send('menu:close-tab')
+          }
+        },
+        {
+          label: 'Release Agent',
           click: (): void => {
             mainWindow?.webContents.send('menu:release-agent')
           }
@@ -151,7 +166,17 @@ function createMenu(): void {
     },
     {
       label: 'Window',
-      submenu: [{ role: 'minimize' }, { role: 'zoom' }, { role: 'close' }]
+      submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        { type: 'separator' },
+        {
+          label: 'Close Tab',
+          click: (): void => {
+            mainWindow?.webContents.send('menu:close-tab')
+          }
+        }
+      ]
     }
   ]
 

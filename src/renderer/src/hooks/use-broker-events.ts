@@ -79,6 +79,18 @@ export function useBrokerEvents(): void {
     // Menu handlers
     const unsubNewWs = pear.onMenu('menu:new-project', () => openDialog('add-project'))
     const unsubSpawn = pear.onMenu('menu:spawn-agent', () => openDialog('spawn-agent'))
+    const unsubCloseTab = pear.onMenu('menu:close-tab', () => {
+      const { activeTabId, closeTab, tabs } = useUIStore.getState()
+
+      if (tabs.length > 1) {
+        closeTab(activeTabId)
+        return
+      }
+
+      void pear.app.confirmQuit().catch((err) => {
+        console.error('Failed to close Pear', err)
+      })
+    })
     const unsubRelease = pear.onMenu('menu:release-agent', () => {
       const activeAgentKey = useAgentStore.getState().activeAgentKey
       const agent = useAgentStore.getState().agents.find((entry) => getAgentKeyForAgent(entry) === activeAgentKey)
@@ -90,6 +102,7 @@ export function useBrokerEvents(): void {
       unsubStatus()
       unsubNewWs()
       unsubSpawn()
+      unsubCloseTab()
       unsubRelease()
     }
   }, [

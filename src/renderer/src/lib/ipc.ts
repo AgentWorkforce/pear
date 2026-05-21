@@ -182,6 +182,9 @@ export interface AuthStatus {
 }
 
 export interface PearAPI {
+  app: {
+    confirmQuit: () => Promise<boolean>
+  }
   project: {
     list: () => Promise<{ projects: unknown[]; activeId: string | null }>
     add: (name: string, rootPath?: string) => Promise<unknown>

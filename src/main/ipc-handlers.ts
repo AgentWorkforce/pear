@@ -1,4 +1,4 @@
-import { ipcMain, dialog, BrowserWindow, shell } from 'electron'
+import { app, ipcMain, dialog, BrowserWindow, shell } from 'electron'
 import { resolve } from 'path'
 import type { SpawnPtyInput, SendMessageInput } from '@agent-relay/sdk'
 import {
@@ -41,6 +41,29 @@ function assertPathWithinProjects(targetPath: string): void {
 }
 
 export function registerIpcHandlers(): void {
+  // --- App ---
+  ipcMain.handle('app:confirm-quit', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const options: Electron.MessageBoxOptions = {
+      type: 'warning',
+      buttons: ['Close Pear', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      title: 'Close Pear?',
+      message: 'Close Pear by Agent Relay?',
+      detail: 'Agent Relay will be shut down before the app closes.'
+    }
+    const result = win
+      ? await dialog.showMessageBox(win, options)
+      : await dialog.showMessageBox(options)
+
+    if (result.response !== 0) return false
+
+    await brokerManager.shutdown()
+    app.quit()
+    return true
+  })
+
   // --- Project ---
   ipcMain.handle('project:list', () => {
     const data = loadStore()

@@ -20,6 +20,9 @@ type AuthStatus = {
 }
 
 const api = {
+  app: {
+    confirmQuit: () => ipcRenderer.invoke('app:confirm-quit') as Promise<boolean>
+  },
   project: {
     list: () => ipcRenderer.invoke('project:list'),
     add: (name: string, rootPath?: string) => ipcRenderer.invoke('project:add', name, rootPath),
