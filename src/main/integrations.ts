@@ -819,12 +819,20 @@ export class IntegrationsManager {
   }
 
   private async persistIntegration(projectId: string, integration: ConnectedIntegration): Promise<void> {
+    // Resolve the async displayName lookup BEFORE touching the store so the
+    // load → modify → save sequence stays synchronous. Otherwise an awaited
+    // network fetch (when the 5-minute catalog cache is stale) creates an
+    // async gap during which another IPC handler can write to projects.json
+    // and have its changes silently overwritten when we save back the stale
+    // `data` we loaded before the await. Mirrors removePersistedIntegration's
+    // synchronous load/modify/save shape below.
+    const displayName = await this.displayNameForProvider(integration.provider)
+    const stored = toStoredIntegration(integration, displayName)
+
     const data = loadStore()
     const project = data.projects.find((entry) => entry.id === projectId)
     if (!project) throw new Error(`Project not found: ${projectId}`)
 
-    const displayName = await this.displayNameForProvider(integration.provider)
-    const stored = toStoredIntegration(integration, displayName)
     project.integrations = project.integrations.filter((entry) => {
       const current = normalizeConnectedIntegration(entry)
       return current?.integrationId !== integration.integrationId
