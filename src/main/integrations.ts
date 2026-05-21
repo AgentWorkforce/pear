@@ -97,6 +97,9 @@ type IntegrationStatusPayload = {
     integrationId?: string
     connectionId?: string
     currentConnectionId?: string | null
+    ready?: boolean
+    status?: string
+    state?: string
     connectedAt?: string
     error?: string
     errorMessage?: string
@@ -691,7 +694,18 @@ export class IntegrationsManager {
   }
 
   private statusPayloadReady(payload: IntegrationStatusPayload): boolean {
-    return payload.ready === true || payload.status === 'ready'
+    return payload.ready === true ||
+      payload.connection?.ready === true ||
+      this.isReadyStatus(payload.status) ||
+      this.isReadyStatus(payload.state) ||
+      this.isReadyStatus(payload.connection?.status) ||
+      this.isReadyStatus(payload.connection?.state) ||
+      Boolean(payload.connectedAt || payload.connection?.connectedAt)
+  }
+
+  private isReadyStatus(value: unknown): boolean {
+    if (typeof value !== 'string') return false
+    return ['ready', 'connected', 'complete', 'completed', 'success', 'active'].includes(value.trim().toLowerCase())
   }
 
   private statusFromPayload(
