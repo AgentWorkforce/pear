@@ -5,7 +5,7 @@ import tailwindcss from '@tailwindcss/vite'
 
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin({ exclude: ['@agent-relay/sdk'] })],
+    plugins: [externalizeDepsPlugin({ exclude: ['@agent-relay/sdk', '@agent-relay/cloud'] })],
     build: {
       rollupOptions: {
         external: ['ws', 'ssh2', 'cpu-features']
