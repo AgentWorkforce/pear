@@ -1,7 +1,8 @@
 {
-  "name": "pear",
+  "name": "pear-by-agent-relay",
   "version": "1.0.0",
-  "description": "Electron GUI for Agent Relay",
+  "productName": "Pear by Agent Relay",
+  "description": "Pair programming workspace for humans and AI agents",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",

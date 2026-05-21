@@ -233,9 +233,9 @@ body,
 .diff-view .diff-code {
   padding-bottom: 3px;
   padding-top: 3px;
-  white-space: pre;
-  word-break: normal;
-  overflow-wrap: normal;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .diff-view .diff-code-content-pending {

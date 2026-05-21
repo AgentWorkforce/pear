@@ -286,7 +286,7 @@ export async function login(): Promise<AuthStatus> {
       saveTokens({ accessToken, refreshToken, apiUrl, user })
 
       res.writeHead(200, { 'Content-Type': 'text/html' })
-      res.end('<html><body><h2>Logged in!</h2><p>You can close this tab and return to Pear.</p></body></html>')
+      res.end('<html><body><h2>Logged in!</h2><p>You can close this tab and return to Pear by Agent Relay.</p></body></html>')
       server.close()
       resolve({ loggedIn: true, apiUrl, user })
     })

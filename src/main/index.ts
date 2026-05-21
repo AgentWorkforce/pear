@@ -1,10 +1,13 @@
-import { app, BrowserWindow, shell, Menu, protocol } from 'electron'
+import { app, BrowserWindow, shell, Menu, protocol, nativeImage } from 'electron'
+import { existsSync } from 'fs'
 import { join } from 'path'
 import { registerIpcHandlers } from './ipc-handlers'
 import { brokerManager } from './broker'
 import { registerAvatarCacheProtocol } from './avatar-cache'
 
-app.setName('Pear')
+const APP_NAME = 'Pear by Agent Relay'
+
+app.setName(APP_NAME)
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -20,6 +23,24 @@ protocol.registerSchemesAsPrivileged([
 let mainWindow: BrowserWindow | null = null
 let shutdownPromise: Promise<void> | null = null
 
+function getAppIconPath(): string {
+  const iconPaths = app.isPackaged
+    ? [
+        join(process.resourcesPath, 'app-icon.png'),
+        join(app.getAppPath(), 'resources/app-icon.png')
+      ]
+    : [join(__dirname, '../../resources/app-icon.png')]
+
+  return iconPaths.find((path) => existsSync(path)) ?? iconPaths[0]
+}
+
+function getAppIcon(): Electron.NativeImage | undefined {
+  const iconPath = getAppIconPath()
+  const icon = nativeImage.createFromPath(iconPath)
+
+  return icon.isEmpty() ? undefined : icon
+}
+
 function shutdownBrokerOnce(): Promise<void> {
   if (!shutdownPromise) {
     shutdownPromise = brokerManager.shutdown()
@@ -34,6 +55,8 @@ function createWindow(): void {
     minWidth: 960,
     minHeight: 600,
     show: false,
+    title: APP_NAME,
+    icon: getAppIcon(),
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 10 },
     backgroundColor: '#08111a',
@@ -136,6 +159,17 @@ function createMenu(): void {
 }
 
 app.whenReady().then(() => {
+  const appIcon = getAppIcon()
+  app.setAboutPanelOptions({
+    applicationName: APP_NAME,
+    applicationVersion: app.getVersion(),
+    iconPath: getAppIconPath()
+  })
+
+  if (process.platform === 'darwin' && appIcon) {
+    app.dock.setIcon(appIcon)
+  }
+
   registerAvatarCacheProtocol()
   registerIpcHandlers()
   createMenu()

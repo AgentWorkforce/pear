@@ -8,7 +8,7 @@ import {
 export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'broker-details' | 'source-control'
 export type DialogType = 'add-project' | 'spawn-agent' | 'add-channel' | 'command-menu' | null
 export type Theme = 'dark' | 'light'
-export type TerminalLayout = 'tabs' | 'horizontal-split'
+export type TerminalLayout = 'tabs' | 'horizontal-split' | 'graph'
 export type AppTabKind = 'agents' | 'channel' | 'dm' | 'project-settings' | 'broker-details' | 'source-control'
 
 export interface AppTab {
@@ -72,7 +72,11 @@ const savedTerminalLayout = (typeof localStorage !== 'undefined'
   : null) as TerminalLayout | null
 
 const initialTerminalLayout: TerminalLayout =
-  savedTerminalLayout === 'tabs' ? savedTerminalLayout : 'horizontal-split'
+  savedTerminalLayout === 'tabs' ||
+  savedTerminalLayout === 'horizontal-split' ||
+  savedTerminalLayout === 'graph'
+    ? savedTerminalLayout
+    : 'horizontal-split'
 
 // Apply on load
 if (typeof document !== 'undefined') {
@@ -339,7 +343,12 @@ export const useUIStore = create<UIState>((set, get) => ({
     set({ terminalLayout: layout })
   },
   toggleTerminalLayout: () => {
-    const next = get().terminalLayout === 'horizontal-split' ? 'tabs' : 'horizontal-split'
+    const current = get().terminalLayout
+    const next = current === 'tabs'
+      ? 'horizontal-split'
+      : current === 'horizontal-split'
+        ? 'graph'
+        : 'tabs'
     localStorage.setItem('pear-terminal-layout', next)
     set({ terminalLayout: next })
   }

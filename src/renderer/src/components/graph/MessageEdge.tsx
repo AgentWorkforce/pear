@@ -5,6 +5,7 @@ import { BaseEdge, getSmoothStepPath, type EdgeProps } from '@xyflow/react'
 interface MessageEdgeData {
   count: number
   lastBody: string
+  lastTimestamp?: number
   [key: string]: unknown
 }
 
@@ -19,7 +20,7 @@ export function MessageEdge({
   data
 }: EdgeProps): React.ReactNode {
   const [hovered, setHovered] = useState(false)
-  const { count, lastBody } = (data || { count: 0, lastBody: '' }) as MessageEdgeData
+  const { count, lastBody, lastTimestamp } = (data || { count: 0, lastBody: '' }) as MessageEdgeData
 
   const [edgePath, labelX, labelY] = getSmoothStepPath({
     sourceX,
@@ -35,8 +36,21 @@ export function MessageEdge({
       <BaseEdge
         id={id}
         path={edgePath}
-        style={{ stroke: 'var(--pear-text-faint)', strokeWidth: 1.5 }}
+        style={{ stroke: 'var(--pear-accent-dim)', strokeWidth: 1.8 }}
       />
+      {lastTimestamp && (
+        <circle
+          key={`${id}:${lastTimestamp}:${count}`}
+          r={4}
+          fill="var(--pear-accent-bright)"
+          opacity={0.95}
+          pointerEvents="none"
+        >
+          <animateMotion dur="900ms" repeatCount="1" path={edgePath} />
+          <animate attributeName="opacity" values="0;1;1;0" dur="900ms" repeatCount="1" />
+          <animate attributeName="r" values="3;5;4;2" dur="900ms" repeatCount="1" />
+        </circle>
+      )}
       {/* Invisible wider path for hover */}
       <path
         d={edgePath}
