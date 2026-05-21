@@ -194,7 +194,10 @@ function pearUserDataDir(): string {
 export function mapDeployStatus(result: DeployResultWithHostedStatus): ProactiveAgentDeployStatus {
   const handleStatus = result.runHandle?.status
   if (handleStatus === 'starting' || handleStatus === 'warming') return 'warming'
-  if (handleStatus === 'failed' || handleStatus === 'error') return 'error'
+  // `cancelled` is part of CloudRunHandleStatus; without this branch it falls
+  // through to the default `'active'` below, which would silently report a
+  // cancelled deployment as a successful one.
+  if (handleStatus === 'failed' || handleStatus === 'cancelled' || handleStatus === 'error') return 'error'
   if (handleStatus === 'active') return 'active'
 
   if (result.status === 'warming' || result.status === 'error') return result.status
