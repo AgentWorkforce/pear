@@ -136,8 +136,12 @@ for name in "${ORDER[@]}"; do
     continue
   fi
 
-  if ! "${cmd[@]}"; then
-    rc=$?
+  # Capture the real exit code. We can't use `if ! cmd; then rc=$?` because
+  # bash sets $? to the status of the negated condition (always 0 when the
+  # then-branch is entered), discarding the failing command's actual code.
+  "${cmd[@]}" && true
+  rc=$?
+  if [[ $rc -ne 0 ]]; then
     echo
     echo "==> FAILED on $name (exit $rc)"
     echo "    Fix the underlying issue, then resume from this spec with:"
