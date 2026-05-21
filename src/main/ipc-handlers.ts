@@ -1,4 +1,4 @@
-import { ipcMain, dialog, BrowserWindow } from 'electron'
+import { ipcMain, dialog, BrowserWindow, shell } from 'electron'
 import { resolve } from 'path'
 import type { SpawnPtyInput, SendMessageInput } from '@agent-relay/sdk'
 import {
@@ -9,6 +9,7 @@ import {
   updateProject,
   addProjectChannel,
   removeProjectChannel,
+  setProjectChannelPeople,
   addProjectRoot,
   removeProjectRoot,
   addProjectIntegration,
@@ -20,13 +21,21 @@ import * as filesystem from './filesystem'
 import * as auth from './auth'
 import { assertDirectory, isDirectory } from './path-utils'
 
-function assertPathWithinProjects(targetPath: string): void {
+function getProjectIdForPath(targetPath: string): string | null {
   const resolved = resolve(targetPath)
   const { projects } = loadStore()
-  const allowed = projects.some((project) =>
-    project.roots.some((root) => resolved.startsWith(root.path + '/') || resolved === root.path)
+  const project = projects.find((candidate) =>
+    candidate.roots.some((root) => {
+      const rootPath = resolve(root.path)
+      return resolved.startsWith(rootPath + '/') || resolved === rootPath
+    })
   )
-  if (!allowed) {
+  return project?.id || null
+}
+
+function assertPathWithinProjects(targetPath: string): void {
+  const resolved = resolve(targetPath)
+  if (!getProjectIdForPath(resolved)) {
     throw new Error(`Path is outside all known project roots: ${resolved}`)
   }
 }
@@ -83,6 +92,10 @@ export function registerIpcHandlers(): void {
     removeProjectChannel(projectId, name)
   })
 
+  ipcMain.handle('project:set-channel-people', (_, projectId: string, channelName: string, people: string[]) => {
+    return setProjectChannelPeople(projectId, channelName, people)
+  })
+
   ipcMain.handle('project:add-root', async (event, projectId: string, name?: string, rootPath?: string) => {
     let path = rootPath
     if (!path) {
@@ -124,6 +137,22 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('broker:sync-channels', async (_, projectId: string, channels: string[]) => {
     await brokerManager.syncChannels(projectId, channels)
+  })
+
+  ipcMain.handle('broker:auto-fix-runtime', async (
+    event,
+    projectId: string,
+    cwd: string,
+    name: string,
+    channels?: string[],
+    errorMessage?: string
+  ) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) throw new Error('No window')
+    if (!isDirectory(cwd)) {
+      throw new Error(`Project path no longer exists: ${cwd}`)
+    }
+    return brokerManager.autoFixRuntime(projectId, cwd, name, win, channels, errorMessage)
   })
 
   ipcMain.handle('broker:spawn-agent', async (_, projectId: string, input: SpawnPtyInput) => {
@@ -174,12 +203,28 @@ export function registerIpcHandlers(): void {
     await brokerManager.sendMessage(projectId, input)
   })
 
+  ipcMain.handle('broker:subscribe-agent-channel', async (_, projectId: string | undefined, name: string, channel: string) => {
+    await brokerManager.subscribeAgentChannel(projectId, name, channel)
+  })
+
+  ipcMain.handle('broker:unsubscribe-agent-channel', async (_, projectId: string | undefined, name: string, channel: string) => {
+    await brokerManager.unsubscribeAgentChannel(projectId, name, channel)
+  })
+
   ipcMain.handle('broker:release-agent', async (_, projectId: string | undefined, name: string) => {
     await brokerManager.releaseAgent(projectId, name)
   })
 
   ipcMain.handle('broker:list-agents', async (_, projectId?: string) => {
     return brokerManager.listAgents(projectId)
+  })
+
+  ipcMain.handle('broker:list-details', async () => {
+    return brokerManager.listBrokerDetails()
+  })
+
+  ipcMain.handle('broker:list-events', () => {
+    return brokerManager.listBrokerEvents()
   })
 
   ipcMain.handle('broker:shutdown', async () => {
@@ -199,10 +244,97 @@ export function registerIpcHandlers(): void {
     return git.getDiff(path, file)
   })
 
+  ipcMain.handle('git:file-content', async (_, path: string, file: string, revision?: string) => {
+    assertPathWithinProjects(path)
+    if (!isDirectory(path)) return ''
+    return git.getFileContent(path, file, revision)
+  })
+
+  ipcMain.handle('git:summary', async (_, path: string) => {
+    assertPathWithinProjects(path)
+    if (!isDirectory(path)) return null
+    return git.getSummary(path)
+  })
+
   ipcMain.handle('git:branches', async (_, root: string) => {
     assertPathWithinProjects(root)
     if (!isDirectory(root)) return []
     return git.listBranches(root)
+  })
+
+  ipcMain.handle('git:branch-details', async (_, root: string) => {
+    assertPathWithinProjects(root)
+    if (!isDirectory(root)) return []
+    return git.listBranchDetails(root)
+  })
+
+  ipcMain.handle('git:checkout-branch', async (_, root: string, branch: string, options?: git.GitCheckoutBranchOptions) => {
+    assertPathWithinProjects(root)
+    if (!isDirectory(root)) throw new Error('Git working directory is unavailable')
+    return git.checkoutBranch(root, branch, options)
+  })
+
+  ipcMain.handle('git:branch-sync-status', async (_, root: string) => {
+    assertPathWithinProjects(root)
+    if (!isDirectory(root)) throw new Error('Git working directory is unavailable')
+    return git.getBranchSyncStatus(root)
+  })
+
+  ipcMain.handle('git:fetch-remote', async (_, root: string) => {
+    assertPathWithinProjects(root)
+    if (!isDirectory(root)) throw new Error('Git working directory is unavailable')
+    return git.fetchRemote(root)
+  })
+
+  ipcMain.handle('git:pull-current-branch', async (_, root: string) => {
+    assertPathWithinProjects(root)
+    if (!isDirectory(root)) throw new Error('Git working directory is unavailable')
+    return git.pullCurrentBranch(root)
+  })
+
+  ipcMain.handle('git:push-current-branch', async (_, root: string) => {
+    assertPathWithinProjects(root)
+    if (!isDirectory(root)) throw new Error('Git working directory is unavailable')
+    return git.pushCurrentBranch(root)
+  })
+
+  ipcMain.handle('git:history', async (_, path: string, limit?: number) => {
+    assertPathWithinProjects(path)
+    if (!isDirectory(path)) return []
+    return git.getHistory(path, limit)
+  })
+
+  ipcMain.handle('git:show', async (_, path: string, hash: string, file?: string) => {
+    assertPathWithinProjects(path)
+    if (!isDirectory(path)) return ''
+    return git.getCommitDiff(path, hash, file)
+  })
+
+  ipcMain.handle('git:discard-files', async (_, path: string, files: string[]) => {
+    assertPathWithinProjects(path)
+    if (!isDirectory(path)) throw new Error('Git working directory is unavailable')
+    return git.discardFiles(path, files)
+  })
+
+  ipcMain.handle('git:add-gitignore-patterns', async (_, path: string, patterns: string[]) => {
+    assertPathWithinProjects(path)
+    if (!isDirectory(path)) throw new Error('Git working directory is unavailable')
+    return git.addGitignorePatterns(path, patterns)
+  })
+
+  ipcMain.handle('git:commit-selection', async (_, path: string, input: git.GitCommitSelectionInput) => {
+    assertPathWithinProjects(path)
+    if (!isDirectory(path)) throw new Error('Git working directory is unavailable')
+    return git.commitSelection(path, input)
+  })
+
+  ipcMain.handle('git:generate-commit-message', async (_, path: string, input: { wholeFiles: string[]; patch?: string }) => {
+    assertPathWithinProjects(path)
+    if (!isDirectory(path)) throw new Error('Git working directory is unavailable')
+    const projectId = getProjectIdForPath(path)
+    if (!projectId) throw new Error('No project is configured for this Git working directory')
+    const diff = await git.getSelectedDiff(path, input)
+    return brokerManager.generateCommitDraft(projectId, diff)
   })
 
   // --- Files ---
@@ -214,6 +346,12 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('fs:read-preview', async (_, filePath: string) => {
     assertPathWithinProjects(filePath)
     return filesystem.readTextPreview(filePath)
+  })
+
+  ipcMain.handle('fs:reveal-path', async (_, filePath: string) => {
+    const resolvedPath = resolve(filePath)
+    assertPathWithinProjects(resolvedPath)
+    shell.showItemInFolder(resolvedPath)
   })
 
   // --- Auth ---

@@ -1,5 +1,6 @@
 @import 'tailwindcss';
 @import '@xterm/xterm/css/xterm.css';
+@import 'react-diff-view/style/index.css';
 
 /* ── Dark theme (default) ── */
 :root,
@@ -7,8 +8,12 @@
   --pear-accent: #74b8e2;
   --pear-accent-bright: #94cbef;
   --pear-accent-dim: #4a90c2;
+  --pear-selection-blue: #0b73d9;
+  --pear-focus-ring: var(--pear-selection-blue);
+  --pear-focus-shadow: rgba(11, 115, 217, 0.35);
   --pear-yellow: #e6d78d;
   --pear-orange: #ce9178;
+  --pear-green: #6ee7a8;
   --pear-red: #f0727f;
   --pear-blue: #74b8e2;
   --pear-purple: #c9a7ff;
@@ -38,8 +43,11 @@
   --pear-accent: #4a90c2;
   --pear-accent-bright: #2d6a9c;
   --pear-accent-dim: #3b79a9;
+  --pear-focus-ring: var(--pear-selection-blue);
+  --pear-focus-shadow: rgba(11, 115, 217, 0.28);
   --pear-yellow: #c89934;
   --pear-orange: #c1674b;
+  --pear-green: #1f9d55;
   --pear-red: #d95b63;
   --pear-blue: #4a90c2;
   --pear-purple: #8b72d8;
@@ -64,6 +72,41 @@
     linear-gradient(180deg, #f3f8fc 0%, #e8f1f8 18%, #d4e4f1 54%, #b5cee2 100%);
 }
 
+@layer components {
+  .project-switcher-trigger {
+    background:
+      linear-gradient(180deg,
+        color-mix(in srgb, var(--pear-bg-surface) 82%, rgba(255, 255, 255, 0.05)) 0%,
+        color-mix(in srgb, var(--pear-bg-raised) 82%, var(--pear-bg) 18%) 100%);
+    border-bottom: 1px solid color-mix(in srgb, var(--pear-border) 74%, transparent);
+    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+    backdrop-filter: blur(18px) saturate(1.16);
+  }
+
+  .project-switcher-trigger:hover,
+  .project-switcher-trigger.is-open {
+    background:
+      linear-gradient(180deg,
+        color-mix(in srgb, var(--pear-bg-surface-hover) 72%, rgba(255, 255, 255, 0.05)) 0%,
+        color-mix(in srgb, var(--pear-bg-surface) 72%, var(--pear-bg) 28%) 100%);
+  }
+
+  .project-switcher-dropdown {
+    background:
+      radial-gradient(circle at 16% 0%,
+        color-mix(in srgb, var(--pear-accent) 12%, transparent),
+        transparent 42%),
+      linear-gradient(180deg,
+        color-mix(in srgb, var(--pear-bg-surface) 86%, rgba(255, 255, 255, 0.06)) 0%,
+        color-mix(in srgb, var(--pear-bg) 84%, var(--pear-bg-surface) 16%) 100%);
+    border-bottom: 1px solid color-mix(in srgb, var(--pear-border) 86%, transparent);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.05),
+      0 18px 50px rgba(0, 0, 0, 0.35);
+    backdrop-filter: blur(22px) saturate(1.22);
+  }
+}
+
 @layer base {
   *,
   *::before,
@@ -78,6 +121,21 @@
 
   button:disabled {
     cursor: not-allowed;
+  }
+
+  button:focus-visible,
+  input:focus-visible,
+  textarea:focus-visible,
+  select:focus-visible,
+  [tabindex]:focus-visible {
+    outline: 2px solid var(--pear-focus-ring);
+    outline-offset: 2px;
+    box-shadow: 0 0 0 3px var(--pear-focus-shadow);
+  }
+
+  [data-focus-ring='none']:focus-visible {
+    outline: none;
+    box-shadow: none;
   }
 }
 
@@ -101,6 +159,12 @@ body,
   -webkit-app-region: no-drag;
 }
 
+.app-tab:has(:focus-visible) {
+  outline: 2px solid var(--pear-focus-ring);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 3px var(--pear-focus-shadow);
+}
+
 .xterm,
 .xterm * {
   -webkit-app-region: no-drag;
@@ -108,6 +172,361 @@ body,
 
 .xterm {
   cursor: text;
+}
+
+.diff-view {
+  --diff-background-color: var(--pear-bg);
+  --diff-text-color: var(--pear-text-secondary);
+  --diff-font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  --diff-gutter-insert-background-color: rgba(13, 82, 37, 0.86);
+  --diff-gutter-delete-background-color: rgba(88, 12, 21, 0.88);
+  --diff-gutter-selected-background-color: var(--pear-selection-blue);
+  --diff-gutter-selected-hover-background-color: var(--pear-selection-blue);
+  --diff-gutter-selected-border-color: var(--pear-selection-blue);
+  --diff-code-insert-background-color: rgba(12, 76, 35, 0.78);
+  --diff-code-delete-background-color: rgba(82, 10, 18, 0.8);
+  --diff-code-selected-background-color: transparent;
+  --diff-code-insert-edit-background-color: rgba(37, 126, 62, 0.86);
+  --diff-code-delete-edit-background-color: rgba(145, 38, 44, 0.9);
+  --diff-code-insert-hover-background-color: rgba(16, 96, 44, 0.88);
+  --diff-code-delete-hover-background-color: rgba(105, 16, 26, 0.88);
+  --diff-gutter-insert-hover-background-color: rgba(14, 88, 40, 0.94);
+  --diff-gutter-delete-hover-background-color: rgba(100, 15, 25, 0.94);
+  --diff-selection-background-color: rgba(64, 101, 124, 0.76);
+  --diff-selection-text-color: var(--pear-text);
+}
+
+.diff-view .diff {
+  border-spacing: 0;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.diff-view .diff *::selection {
+  background-color: var(--diff-selection-background-color);
+  color: var(--diff-selection-text-color);
+}
+
+.diff-view .diff td {
+  border: 0;
+  box-shadow: none;
+}
+
+.diff-view .diff-gutter {
+  border-left: 0;
+  border-right: 0;
+  box-shadow: none;
+  cursor: default;
+  color: var(--pear-text-faint);
+  min-width: 0;
+  padding: 0;
+}
+
+.diff-view .diff-block-col {
+  width: 8px;
+}
+
+.diff-view .diff-gutter-col {
+  width: 44px;
+}
+
+.diff-view .diff-code {
+  padding-bottom: 3px;
+  padding-top: 3px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.diff-view .diff-code-content-pending {
+  visibility: hidden;
+}
+
+.diff-view .diff-code.is-selectable {
+  cursor: pointer;
+}
+
+.diff-view .diff-gutter-selected {
+  background-color: var(--diff-gutter-selected-background-color);
+  color: #d9ecff;
+}
+
+.diff-view .diff-block-gutter {
+  position: relative;
+  width: 8px;
+  min-width: 8px;
+  padding: 0;
+  background: rgba(148, 163, 184, 0.04);
+}
+
+.diff-view .diff-block-gutter.is-active {
+  background: var(--diff-gutter-selected-border-color);
+}
+
+.diff-view .diff-block-selector {
+  box-sizing: border-box;
+  display: block;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  border: 0;
+  border-left: 2px solid transparent;
+  background: transparent;
+  padding: 0;
+}
+
+.diff-view .diff-block-selector:not(:disabled) {
+  cursor: pointer;
+}
+
+.diff-view .diff-block-selector:not(:disabled):hover,
+.diff-view .diff-block-selector.is-hovered {
+  background: rgba(116, 184, 226, 0.28);
+  border-left-color: var(--pear-selection-blue);
+}
+
+.diff-view .diff-block-selector.is-active {
+  background: transparent;
+  border-left-color: var(--diff-gutter-selected-border-color);
+}
+
+.diff-view .diff-block-selector:disabled {
+  cursor: default;
+  opacity: 1;
+}
+
+.diff-view .diff-gutter-number {
+  display: flex;
+  min-height: 100%;
+  width: 100%;
+  align-items: center;
+  border: 0;
+  box-shadow: none;
+  justify-content: flex-end;
+  padding: 0 6px;
+  text-align: right;
+  user-select: none;
+}
+
+.diff-view .diff-gutter-old-cell,
+.diff-view .diff-gutter-new-cell {
+  background: rgba(148, 163, 184, 0.026);
+}
+
+.diff-view .diff-gutter.diff-gutter-selected {
+  background: var(--diff-gutter-selected-background-color);
+  color: #d9ecff;
+}
+
+.diff-view .diff-gutter-number:hover {
+  color: var(--pear-text-secondary);
+}
+
+.diff-view .diff-gutter.is-selectable,
+.diff-view .diff-gutter-number.is-selectable {
+  cursor: pointer;
+}
+
+.diff-view .diff-gutter-number.is-selected {
+  color: #e8f4ff;
+}
+
+.diff-view .diff-gutter-insert .diff-block-selector {
+  background: rgba(110, 231, 168, 0.1);
+}
+
+.diff-view .diff-gutter-delete .diff-block-selector {
+  background: rgba(240, 114, 127, 0.12);
+}
+
+.diff-view .diff-block-selector.is-active {
+  background: transparent;
+  border-left-color: var(--diff-gutter-selected-border-color);
+}
+
+.diff-view .diff-gutter-insert .diff-block-selector:not(:disabled):hover,
+.diff-view .diff-gutter-delete .diff-block-selector:not(:disabled):hover,
+.diff-view .diff-gutter-selected .diff-block-selector.is-selected {
+  background: rgba(116, 184, 226, 0.32);
+  border-left-color: var(--pear-selection-blue);
+}
+
+.diff-view .diff-line:hover .diff-code-insert,
+.diff-view .diff-line-block-hover .diff-code-insert {
+  background-color: var(--diff-code-insert-hover-background-color);
+}
+
+.diff-view .diff-line:hover .diff-code-delete,
+.diff-view .diff-line-block-hover .diff-code-delete {
+  background-color: var(--diff-code-delete-hover-background-color);
+}
+
+.diff-view .diff-line:hover .diff-gutter-insert,
+.diff-view .diff-line-block-hover .diff-gutter-insert {
+  background-color: var(--diff-gutter-insert-hover-background-color);
+}
+
+.diff-view .diff-line:hover .diff-gutter-delete,
+.diff-view .diff-line-block-hover .diff-gutter-delete {
+  background-color: var(--diff-gutter-delete-hover-background-color);
+}
+
+.diff-view .diff-line:hover .diff-block-selector:not(:disabled),
+.diff-view .diff-line-block-hover .diff-block-selector {
+  background: rgba(116, 184, 226, 0.28);
+  border-left-color: var(--pear-selection-blue);
+}
+
+.diff-view .diff-line:hover .diff-block-gutter.is-active,
+.diff-view .diff-line-block-hover .diff-block-gutter.is-active {
+  background: var(--diff-gutter-selected-border-color);
+}
+
+.diff-view .diff-line:hover .diff-gutter-selected,
+.diff-view .diff-line-block-hover .diff-gutter-selected {
+  background-color: var(--diff-gutter-selected-hover-background-color);
+  color: #d9ecff;
+}
+
+.diff-view .diff-code-selected.diff-code-insert {
+  background-color: var(--diff-code-insert-background-color);
+  color: var(--diff-text-color);
+}
+
+.diff-view .diff-code-selected.diff-code-delete {
+  background-color: var(--diff-code-delete-background-color);
+  color: var(--diff-text-color);
+}
+
+.diff-view .diff-code-prefix {
+  display: inline-block;
+  width: 2.25ch;
+  color: var(--pear-text-secondary);
+  text-align: center;
+  user-select: none;
+}
+
+.diff-view .diff-hunk-decoration-content {
+  border-bottom: 1px solid var(--pear-border-subtle);
+  border-top: 1px solid var(--pear-border-subtle);
+  padding: 0;
+}
+
+.diff-view .diff-fold-control {
+  display: flex;
+  height: 26px;
+  width: 100%;
+  align-items: center;
+  gap: 12px;
+  border: 0;
+  background: var(--pear-bg-surface);
+  color: var(--pear-text-faint);
+  font: inherit;
+  padding: 0 12px 0 0;
+  text-align: left;
+}
+
+.diff-view .diff-fold-control:not(:disabled):hover {
+  background: var(--pear-bg-surface-hover);
+  color: var(--pear-text-secondary);
+  cursor: pointer;
+}
+
+.diff-view .diff-fold-control:disabled {
+  cursor: default;
+}
+
+.diff-view .diff-fold-marker {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 119px;
+  flex: 0 0 119px;
+  color: var(--pear-text-faint);
+}
+
+.diff-view .diff-fold-content {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.diff-view .diff-fold-count {
+  margin-left: auto;
+  color: var(--pear-text-faint);
+  font-size: 11px;
+}
+
+[data-theme='light'] .diff-view {
+  --diff-gutter-insert-background-color: #ccefd3;
+  --diff-gutter-delete-background-color: #f5cbd0;
+  --diff-gutter-selected-background-color: var(--pear-selection-blue);
+  --diff-code-insert-background-color: #dcf7e1;
+  --diff-code-delete-background-color: #f9dfe2;
+  --diff-code-insert-edit-background-color: #bce7c5;
+  --diff-code-delete-edit-background-color: #efb8be;
+}
+
+.commit-author-stack {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  isolation: isolate;
+  min-width: 18px;
+  overflow: visible;
+}
+
+.commit-primary-author-wrap {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.commit-author-avatar-wrap {
+  align-items: center;
+  display: inline-flex;
+  flex: 0 0 auto;
+  margin-left: -7px;
+  position: relative;
+  transform: translateX(-7px);
+  transition: margin-left 150ms ease, transform 150ms ease;
+}
+
+.commit-author-stack.has-co-authors:hover .commit-author-avatar-wrap,
+.commit-history-row:hover .commit-author-avatar-wrap {
+  margin-left: 2px;
+  transform: translateX(0);
+}
+
+.commit-co-author-avatar {
+  align-items: center;
+  border: 0;
+  border-radius: 9999px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.22);
+  display: inline-flex;
+  height: 18px;
+  justify-content: center;
+  overflow: hidden;
+  width: 18px;
+}
+
+.commit-author-tooltip-panel {
+  background: var(--pear-bg-surface);
+  border: 1px solid var(--pear-border-subtle);
+  border-radius: 8px;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  max-width: 260px;
+  min-width: 210px;
+  padding: 10px 12px;
+  pointer-events: none;
+  position: fixed;
+  white-space: nowrap;
+  z-index: 10000;
 }
 
 /* Scrollbar */

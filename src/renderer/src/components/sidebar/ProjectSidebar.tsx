@@ -1,10 +1,30 @@
 import type React from 'react'
-import { useState, useEffect, useCallback } from 'react'
-import { LogOut } from 'lucide-react'
-import { useProjectStore } from '@/stores/project-store'
-import { useUIStore } from '@/stores/ui-store'
-import { pear } from '@/lib/ipc'
-import { ProjectItem } from './ProjectItem'
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import {
+  ChevronDown,
+  ChevronUp,
+  FolderKanban,
+  Hash,
+  LayoutGrid,
+  LogOut,
+  MessageCircle,
+  MoreHorizontal,
+  Pause,
+  Plus,
+  Search,
+  Settings,
+  X
+} from 'lucide-react'
+import { AgentHarnessIcon } from '@/components/common/AgentIcons'
+import {
+  deriveDirectMessageRooms,
+  getDirectMessageRoomId,
+  type DirectMessageRoom
+} from '@/lib/direct-messages'
+import { getAgentKeyForAgent, isAgentTyping, useAgentStore, type Agent } from '@/stores/agent-store'
+import { useProjectStore, type Project } from '@/stores/project-store'
+import { useUIStore, type AppTab, type AppTabInput } from '@/stores/ui-store'
+import { pear, type AuthUser } from '@/lib/ipc'
 
 function AgentRelayLogo(): React.ReactNode {
   return (
@@ -42,28 +62,107 @@ function AgentRelayWordmark(): React.ReactNode {
   )
 }
 
-function PearMark(): React.ReactNode {
+function projectInitial(name: string): string {
+  return name.trim().charAt(0).toUpperCase() || '?'
+}
+
+function userInitials(user?: AuthUser): string {
+  if (user?.name?.trim()) {
+    return user.name
+      .trim()
+      .split(/\s+/)
+      .map((part) => part[0])
+      .join('')
+      .slice(0, 2)
+      .toUpperCase()
+  }
+
+  return user?.email?.trim().charAt(0).toUpperCase() || '?'
+}
+
+function githubUsernameFromEmail(email?: string): string {
+  const match = email?.trim().match(/^(?:\d+\+)?([^@]+)@users\.noreply\.github\.com$/i)
+  return match?.[1] || ''
+}
+
+function normalizeGithubUsername(value?: string): string {
+  return (value || '')
+    .trim()
+    .replace(/^@+/, '')
+    .replace(/[^A-Za-z0-9-]/g, '')
+}
+
+function isRemoteAvatarUrl(value: string): boolean {
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:'
+  } catch {
+    return false
+  }
+}
+
+function githubAvatarUrl(user?: AuthUser): string | null {
+  const username = normalizeGithubUsername(
+    user?.githubUsername || user?.username || githubUsernameFromEmail(user?.email)
+  )
+  return username ? `https://github.com/${encodeURIComponent(username)}.png?size=96` : null
+}
+
+function providedAvatarUrl(user?: AuthUser): string | null {
+  const avatarUrl = user?.avatarUrl?.trim()
+  return avatarUrl && isRemoteAvatarUrl(avatarUrl) ? avatarUrl : null
+}
+
+function avatarUrls(user?: AuthUser): string[] {
+  return Array.from(new Set([githubAvatarUrl(user), providedAvatarUrl(user), user?.cachedAvatarUrl]
+    .map((url) => url?.trim())
+    .filter((url): url is string => !!url)))
+}
+
+function useAvatarUrl(urls: string[]): { src: string | undefined; onError: () => void } {
+  const key = urls.join('\0')
+  const [index, setIndex] = useState(0)
+
+  useEffect(() => {
+    setIndex(0)
+  }, [key])
+
+  return {
+    src: urls[index],
+    onError: () => setIndex((current) => current + 1)
+  }
+}
+
+function UserAvatar({ user }: { user?: AuthUser }): React.ReactNode {
+  const label = user?.name || user?.email || 'User'
+  const avatar = useAvatarUrl(avatarUrls(user))
+
+  if (avatar.src) {
+    return (
+      <img
+        src={avatar.src}
+        alt={label}
+        title={label}
+        className="h-7 w-7 shrink-0 rounded-full bg-[var(--pear-bg-overlay)] object-cover"
+        referrerPolicy="no-referrer"
+        onError={avatar.onError}
+      />
+    )
+  }
+
   return (
-    <div className="shrink-0 text-[19px] leading-none" aria-label="Pear" title="Pear">
-      🍐
+    <div
+      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[var(--pear-accent)] text-[10px] font-semibold text-[var(--pear-bg)]"
+      title={label}
+      aria-label={label}
+    >
+      {userInitials(user)}
     </div>
   )
 }
 
-function UserAvatar({ name, email }: { name?: string; email?: string }): React.ReactNode {
-  const initials = name
-    ? name.split(' ').map(p => p[0]).join('').slice(0, 2).toUpperCase()
-    : email?.[0]?.toUpperCase() || '?'
-
-  return (
-    <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-[var(--pear-accent)] text-[10px] font-semibold text-[var(--pear-bg)]">
-      {initials}
-    </div>
-  )
-}
-
-function AccountMenu(): React.ReactNode {
-  const [auth, setAuth] = useState<{ loggedIn: boolean; user?: { name?: string; email?: string; organizationName?: string } }>({ loggedIn: false })
+function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNode {
+  const [auth, setAuth] = useState<{ loggedIn: boolean; user?: AuthUser }>({ loggedIn: false })
   const [loading, setLoading] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
 
@@ -92,12 +191,16 @@ function AccountMenu(): React.ReactNode {
       <button
         onClick={handleLogin}
         disabled={loading}
-        className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text)] disabled:opacity-50"
+        className={`flex items-center gap-2.5 rounded-lg text-sm text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text)] disabled:opacity-50 ${
+          compact ? 'h-10 w-10 justify-center p-0' : 'w-full px-3 py-2.5'
+        }`}
+        title={loading ? 'Signing in...' : 'Sign in'}
+        aria-label={loading ? 'Signing in...' : 'Sign in'}
       >
         <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-dashed border-[var(--pear-text-faint)] text-[10px] text-[var(--pear-text-faint)]">
           ?
         </div>
-        <span className="truncate">{loading ? 'Signing in...' : 'Sign in'}</span>
+        {!compact && <span className="truncate">{loading ? 'Signing in...' : 'Sign in'}</span>}
       </button>
     )
   }
@@ -106,21 +209,29 @@ function AccountMenu(): React.ReactNode {
     <div className="relative">
       <button
         onClick={() => setMenuOpen(!menuOpen)}
-        className="flex w-full items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm text-[var(--pear-text)] hover:bg-[var(--pear-bg-surface)]"
+        className={`flex items-center gap-2.5 rounded-lg text-sm text-[var(--pear-text)] hover:bg-[var(--pear-bg-surface)] ${
+          compact ? 'h-10 w-10 justify-center p-0' : 'w-full px-3 py-2.5'
+        }`}
+        title={auth.user?.name || auth.user?.email || 'User'}
+        aria-label={auth.user?.name || auth.user?.email || 'User'}
       >
-        <UserAvatar name={auth.user?.name} email={auth.user?.email} />
-        <div className="min-w-0 flex-1 text-left">
-          <div className="truncate text-sm leading-tight">{auth.user?.name || auth.user?.email || 'User'}</div>
-          {auth.user?.organizationName && (
-            <div className="truncate text-[11px] leading-tight text-[var(--pear-text-faint)]">{auth.user.organizationName}</div>
-          )}
-        </div>
+        <UserAvatar user={auth.user} />
+        {!compact && (
+          <div className="min-w-0 flex-1 text-left">
+            <div className="truncate text-sm leading-tight">{auth.user?.name || auth.user?.email || 'User'}</div>
+            {auth.user?.organizationName && (
+              <div className="truncate text-[11px] leading-tight text-[var(--pear-text-faint)]">{auth.user.organizationName}</div>
+            )}
+          </div>
+        )}
       </button>
 
       {menuOpen && (
         <>
           <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
-          <div className="absolute bottom-full left-2 right-2 z-50 mb-1 rounded-lg border border-[var(--pear-border)] bg-[var(--pear-bg-surface)] py-1 shadow-lg">
+          <div className={`absolute z-50 mb-1 rounded-lg border border-[var(--pear-border)] bg-[var(--pear-bg-surface)] py-1 shadow-lg ${
+            compact ? 'bottom-0 left-full ml-2 w-36' : 'bottom-full left-2 right-2'
+          }`}>
             <button
               onClick={handleLogout}
               className="flex w-full items-center gap-2 px-3 py-2 text-sm text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
@@ -135,44 +246,751 @@ function AccountMenu(): React.ReactNode {
   )
 }
 
-export function ProjectSidebar(): React.ReactNode {
+function tabAfterProjectSwitch(project: Project, activeTab: AppTab | undefined): AppTabInput {
+  switch (activeTab?.kind) {
+    case 'source-control':
+      return { kind: 'source-control', projectId: project.id }
+    case 'project-settings':
+      return { kind: 'project-settings', projectId: project.id }
+    case 'broker-details':
+      return {
+        kind: 'broker-details',
+        projectId: project.id,
+        title: `${project.name} Relay`
+      }
+    default:
+      return { kind: 'agents', projectId: project.id }
+  }
+}
+
+function channelAgentCount(agents: Agent[], channel: string): number {
+  return agents.filter((agent) => !agent.channels || agent.channels.includes(channel)).length
+}
+
+function compactLabel(value: string): string {
+  const letters = value.replace(/[^A-Za-z0-9]/g, '').slice(0, 2).toUpperCase()
+  return letters || '?'
+}
+
+function rowClass(active: boolean): string {
+  return `flex h-8 w-full min-w-0 items-center gap-2 rounded-md px-2 text-left text-[12px] transition-colors ${
+    active
+      ? 'bg-[var(--pear-bg-overlay)] text-[var(--pear-text)] ring-1 ring-[var(--pear-border-subtle)]'
+      : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]'
+  }`
+}
+
+function collapsedButtonClass(active: boolean): string {
+  return `relative flex h-10 w-10 shrink-0 items-center justify-center rounded-lg transition-colors ${
+    active
+      ? 'bg-[var(--pear-bg-overlay)] text-[var(--pear-text)] ring-1 ring-[var(--pear-border)]'
+      : 'text-[var(--pear-text-faint)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]'
+  }`
+}
+
+interface SectionMenuItem {
+  label: string
+  icon: React.ComponentType<{ size?: number; className?: string }>
+  onSelect: () => void
+}
+
+function HeaderActionButton({
+  label,
+  onClick,
+  children,
+  expanded
+}: {
+  label: string
+  onClick: () => void
+  children: React.ReactNode
+  expanded?: boolean
+}): React.ReactNode {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="flex h-5 w-5 items-center justify-center rounded text-[var(--pear-text-faint)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
+      title={label}
+      aria-label={label}
+      aria-expanded={expanded}
+    >
+      {children}
+    </button>
+  )
+}
+
+function SectionHeader({
+  title,
+  addLabel,
+  onAdd,
+  menuItems = []
+}: {
+  title: string
+  addLabel?: string
+  onAdd?: () => void
+  menuItems?: SectionMenuItem[]
+}): React.ReactNode {
+  const [menuOpen, setMenuOpen] = useState(false)
+  const hasMenu = menuItems.length > 0
+
+  function selectMenuItem(item: SectionMenuItem): void {
+    setMenuOpen(false)
+    item.onSelect()
+  }
+
+  return (
+    <div className="group/section-header relative flex items-center justify-between gap-2 px-2 pb-1.5 pt-3">
+      <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--pear-text-faint)]">
+        {title}
+      </span>
+      {(onAdd || hasMenu) && (
+        <div
+          className={`z-50 flex items-center gap-0.5 transition-opacity ${
+            menuOpen
+              ? 'opacity-100'
+              : 'pointer-events-none opacity-0 group-hover/section-header:pointer-events-auto group-hover/section-header:opacity-100 group-focus-within/section-header:pointer-events-auto group-focus-within/section-header:opacity-100'
+          }`}
+        >
+          {onAdd && addLabel && (
+            <HeaderActionButton label={addLabel} onClick={onAdd}>
+              <Plus size={12} />
+            </HeaderActionButton>
+          )}
+          {hasMenu && (
+            <HeaderActionButton
+              label={`${title} menu`}
+              onClick={() => setMenuOpen((open) => !open)}
+              expanded={menuOpen}
+            >
+              <MoreHorizontal size={13} />
+            </HeaderActionButton>
+          )}
+        </div>
+      )}
+
+      {menuOpen && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
+          <div className="absolute right-2 top-[calc(100%+2px)] z-50 w-44 overflow-hidden rounded-lg border border-[var(--pear-border)] bg-[var(--pear-bg-surface)] py-1 shadow-xl">
+            {menuItems.map((item) => {
+              const Icon = item.icon
+              return (
+                <button
+                  key={item.label}
+                  type="button"
+                  onClick={() => selectMenuItem(item)}
+                  className="flex h-8 w-full items-center gap-2 px-2.5 text-left text-[12px] text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
+                >
+                  <Icon size={13} className="shrink-0 text-[var(--pear-text-faint)]" />
+                  <span className="min-w-0 flex-1 truncate">{item.label}</span>
+                </button>
+              )
+            })}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
+function EmptySection({ label }: { label: string }): React.ReactNode {
+  return (
+    <div className="rounded-md border border-dashed border-[var(--pear-border-subtle)] px-2 py-2 text-[11px] text-[var(--pear-text-faint)]">
+      {label}
+    </div>
+  )
+}
+
+function AgentActivityIndicator({ agent }: { agent: Agent }): React.ReactNode {
+  if (agent.terminalMode === 'drive' || agent.currentState === 'blocked_on_send') {
+    const label = agent.currentState === 'blocked_on_send' ? 'Blocked on send' : 'Holding messages'
+    return (
+      <span
+        className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35 text-[var(--pear-text-faint)] opacity-75"
+        title={label}
+        aria-label={label}
+      >
+        <Pause size={9} strokeWidth={2.4} />
+      </span>
+    )
+  }
+
+  if (isAgentTyping(agent)) {
+    return (
+      <span
+        className="flex h-4 w-6 shrink-0 items-center justify-center gap-0.5 rounded-full border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35 opacity-75"
+        title="Thinking"
+        aria-label="Thinking"
+      >
+        <span className="h-1 w-1 rounded-full bg-[var(--pear-text-faint)] animate-pulse" />
+        <span className="h-1 w-1 rounded-full bg-[var(--pear-text-faint)] animate-pulse [animation-delay:120ms]" />
+        <span className="h-1 w-1 rounded-full bg-[var(--pear-text-faint)] animate-pulse [animation-delay:240ms]" />
+      </span>
+    )
+  }
+
+  const active = agent.activity !== 'idle' && agent.status === 'running'
+
+  return (
+    <span
+      className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35 opacity-75"
+      title={active ? 'Active' : 'Idle'}
+      aria-label={active ? 'Active' : 'Idle'}
+    >
+      <span className={`h-1.5 w-1.5 rounded-full ${active ? 'bg-[var(--pear-teal)]' : 'bg-[var(--pear-yellow)]'}`} />
+    </span>
+  )
+}
+
+function ProjectSwitcher({ collapsed = false }: { collapsed?: boolean }): React.ReactNode {
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  const switcherRef = useRef<HTMLDivElement | null>(null)
   const projects = useProjectStore((s) => s.projects)
   const activeProjectId = useProjectStore((s) => s.activeProjectId)
-  const setViewMode = useUIStore((s) => s.setViewMode)
+  const setActiveProject = useProjectStore((s) => s.setActiveProject)
+  const activeTab = useUIStore((s) => s.tabs.find((tab) => tab.id === s.activeTabId))
+  const openTab = useUIStore((s) => s.openTab)
+  const openDialog = useUIStore((s) => s.openDialog)
+  const sortedProjects = useMemo(
+    () => [...projects].sort((left, right) =>
+      left.name.localeCompare(right.name, undefined, { sensitivity: 'base', numeric: true })
+    ),
+    [projects]
+  )
+  const activeProject = projects.find((project) => project.id === activeProjectId) || sortedProjects[0]
+  const filteredProjects = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase()
+    if (!normalizedQuery) return sortedProjects
+    return sortedProjects.filter((project) => project.name.toLowerCase().includes(normalizedQuery))
+  }, [query, sortedProjects])
+
+  useEffect(() => {
+    if (projects.length === 0) {
+      setOpen(false)
+      setQuery('')
+    }
+  }, [projects.length])
+
+  useEffect(() => {
+    if (!open) return
+
+    function closeOnOutsideClick(event: PointerEvent): void {
+      const target = event.target
+      if (target instanceof Node && switcherRef.current?.contains(target)) return
+      setOpen(false)
+    }
+
+    document.addEventListener('pointerdown', closeOnOutsideClick, true)
+    return () => document.removeEventListener('pointerdown', closeOnOutsideClick, true)
+  }, [open])
+
+  function selectProject(project: Project): void {
+    setOpen(false)
+    setQuery('')
+    openTab(tabAfterProjectSwitch(project, activeTab))
+    setActiveProject(project.id).catch((error) => {
+      console.error('[sidebar] Failed to set active project:', error)
+    })
+  }
+
+  function openProjectSettingsForProject(project: Project): void {
+    setOpen(false)
+    setQuery('')
+    openTab({ kind: 'project-settings', projectId: project.id })
+    setActiveProject(project.id).catch((error) => {
+      console.error('[sidebar] Failed to set active project:', error)
+    })
+  }
+
+  function openAddProject(): void {
+    setOpen(false)
+    setQuery('')
+    openDialog('add-project')
+  }
+
+  if (!activeProject) {
+    return collapsed ? (
+      <button
+        type="button"
+        onClick={openAddProject}
+        className={collapsedButtonClass(false)}
+        title="Add project"
+        aria-label="Add project"
+      >
+        <Plus size={16} />
+      </button>
+    ) : (
+      <button
+        type="button"
+        onClick={openAddProject}
+        className="project-switcher-trigger flex h-[52px] w-full items-center gap-2.5 px-5 text-left text-[var(--pear-text-dim)] transition-colors hover:text-[var(--pear-text)]"
+      >
+        <Plus size={15} className="shrink-0 text-[var(--pear-text-faint)]" />
+        <span className="min-w-0">
+          <span className="block text-[11px] font-medium leading-[14px] text-[var(--pear-text-faint)]">
+            Current Project
+          </span>
+          <span className="block truncate text-[13px] font-semibold leading-4">Add project</span>
+        </span>
+      </button>
+    )
+  }
+
+  const switcherButton = collapsed ? (
+    <button
+      type="button"
+      onClick={() => setOpen((value) => !value)}
+      className={collapsedButtonClass(open)}
+      title={`Switch project: ${activeProject.name}`}
+      aria-label={`Switch project: ${activeProject.name}`}
+      aria-expanded={open}
+    >
+      <span className="text-sm font-semibold">{projectInitial(activeProject.name)}</span>
+    </button>
+  ) : (
+    <button
+      type="button"
+      onClick={() => setOpen((value) => !value)}
+      className={`project-switcher-trigger flex h-[52px] w-full items-center gap-2.5 px-5 text-left transition-colors ${
+        open ? 'is-open' : ''
+      }`}
+      aria-expanded={open}
+    >
+      <FolderKanban size={14} className="shrink-0 text-[var(--pear-text-secondary)]" />
+      <span className="min-w-0 flex-1 text-left">
+        <span className="block text-[11px] font-medium leading-[14px] text-[var(--pear-text-faint)]">
+          Current Project
+        </span>
+        <span className="block truncate text-[13px] font-semibold leading-4 text-[var(--pear-text)]">
+          {activeProject.name}
+        </span>
+      </span>
+      {open
+        ? <ChevronUp size={12} className="shrink-0 text-[var(--pear-text-secondary)]" />
+        : <ChevronDown size={12} className="shrink-0 text-[var(--pear-text-secondary)]" />}
+    </button>
+  )
+
+  return (
+    <div ref={switcherRef} className="relative z-50">
+      {switcherButton}
+
+      {open && (
+        <div
+          className={`project-switcher-dropdown absolute z-50 overflow-hidden rounded-lg border border-[var(--pear-border)] p-3 ${
+            collapsed
+              ? 'left-[calc(100%+8px)] top-0 w-[300px]'
+              : 'left-0 right-0 top-[calc(100%+8px)]'
+          }`}
+        >
+          <div className="mb-2 flex items-center gap-2">
+            <label className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md border border-transparent bg-[var(--pear-bg)] px-2.5 text-[12px] text-[var(--pear-text-secondary)] transition-colors focus-within:border-[#0166D6]">
+              <Search size={12} className="shrink-0 text-[var(--pear-text-faint)]" />
+              <input
+                autoFocus
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder="Filter projects"
+                className="min-w-0 flex-1 border-0 bg-transparent text-[12px] text-[var(--pear-text)] caret-[#0166D6] outline-none placeholder:text-[var(--pear-text-faint)]"
+                data-focus-ring="none"
+              />
+              {query && (
+                <button
+                  type="button"
+                  onClick={() => setQuery('')}
+                  className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--pear-text-secondary)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
+                  aria-label="Clear project filter"
+                >
+                  <X size={12} />
+                </button>
+              )}
+            </label>
+            <button
+              type="button"
+              onClick={openAddProject}
+              className="flex h-8 shrink-0 items-center gap-1.5 rounded-md border border-[var(--pear-border)] px-2.5 text-[12px] font-semibold text-[var(--pear-text)] hover:bg-[var(--pear-bg-surface-hover)]"
+            >
+              <Plus size={12} />
+              Add
+            </button>
+          </div>
+
+          <div className="max-h-[300px] overflow-y-auto">
+            {filteredProjects.length === 0 ? (
+              <div className="px-3 py-4 text-xs text-[var(--pear-text-faint)]">No projects match</div>
+            ) : (
+              <div className="space-y-1">
+                {filteredProjects.map((project) => {
+                  const active = project.id === activeProjectId
+                  return (
+                    <div
+                      key={project.id}
+                      className={`flex h-8 w-full items-center rounded-md text-[13px] font-semibold ${
+                        active
+                          ? 'bg-[var(--pear-bg-overlay)] text-[var(--pear-text)]'
+                          : 'text-[var(--pear-text-secondary)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]'
+                      }`}
+                    >
+                      <button
+                        type="button"
+                        onClick={() => selectProject(project)}
+                        className="flex h-full min-w-0 flex-1 items-center gap-2.5 rounded-l-md px-3.5 text-left"
+                      >
+                        <FolderKanban size={13} className="shrink-0 text-[var(--pear-text-secondary)]" />
+                        <span className="min-w-0 flex-1 truncate">{project.name}</span>
+                        {active && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--pear-accent)]" />}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => openProjectSettingsForProject(project)}
+                        className="flex h-full w-8 shrink-0 items-center justify-center rounded-r-md text-[var(--pear-text-faint)] hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text)]"
+                        title={`Open ${project.name} settings`}
+                        aria-label={`Open ${project.name} settings`}
+                      >
+                        <Settings size={13} />
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ProjectNavigation({ collapsed = false }: { collapsed?: boolean }): React.ReactNode {
+  const activeProjectId = useProjectStore((s) => s.activeProjectId)
+  const activeChannelName = useProjectStore((s) => s.activeChannelName)
+  const setActiveChannel = useProjectStore((s) => s.setActiveChannel)
+  const projects = useProjectStore((s) => s.projects)
+  const allAgents = useAgentStore((s) => s.agents)
+  const allMessages = useAgentStore((s) => s.messages)
+  const activeAgentKey = useAgentStore((s) => s.activeAgentKey)
+  const setActiveAgentKey = useAgentStore((s) => s.setActiveAgentKey)
+  const activeTab = useUIStore((s) => s.tabs.find((tab) => tab.id === s.activeTabId))
+  const openTab = useUIStore((s) => s.openTab)
+  const openDialog = useUIStore((s) => s.openDialog)
+  const activeProject = projects.find((project) => project.id === activeProjectId)
+  const agents = useMemo(
+    () => activeProject ? allAgents.filter((agent) => agent.projectId === activeProject.id) : [],
+    [activeProject, allAgents]
+  )
+  const directMessageRooms = useMemo(
+    () => activeProject
+      ? deriveDirectMessageRooms(allMessages, activeProject.id, activeProject.channels)
+      : [],
+    [activeProject, allMessages]
+  )
+  const activeDirectMessageRoomId = activeTab?.kind === 'dm' && activeProject
+    ? getDirectMessageRoomId(activeTab.dmParticipants || [])
+    : null
+
+  function openAgents(): void {
+    if (!activeProject) return
+    setActiveChannel(null)
+    openTab({ kind: 'agents', projectId: activeProject.id })
+  }
+
+  function openProjectSettings(): void {
+    if (!activeProject) return
+    openTab({ kind: 'project-settings', projectId: activeProject.id })
+  }
+
+  function addAgent(): void {
+    openDialog('spawn-agent')
+  }
+
+  function addChannel(): void {
+    openDialog('add-channel')
+  }
+
+  function selectAgent(agent: Agent): void {
+    setActiveChannel(null)
+    openTab({ kind: 'agents', projectId: agent.projectId })
+    setActiveAgentKey(getAgentKeyForAgent(agent))
+  }
+
+  function selectChannel(channel: string): void {
+    if (!activeProject) return
+    setActiveAgentKey(null)
+    setActiveChannel(channel)
+    openTab({ kind: 'channel', projectId: activeProject.id, channelName: channel })
+  }
+
+  function selectDirectMessage(room: DirectMessageRoom): void {
+    if (!activeProject) return
+    setActiveAgentKey(null)
+    setActiveChannel(null)
+    openTab({
+      kind: 'dm',
+      projectId: activeProject.id,
+      dmParticipants: room.participants,
+      title: room.title
+    })
+  }
+
+  if (!activeProject) {
+    return collapsed ? (
+      <div className="flex min-h-0 flex-1 flex-col items-center" />
+    ) : (
+      <div className="flex min-h-0 flex-1 px-3 py-4">
+        <button
+          type="button"
+          onClick={() => openDialog('add-project')}
+          className="h-fit w-full rounded-lg border border-dashed border-[var(--pear-border)] px-4 py-6 text-center text-xs text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text-dim)]"
+        >
+          Add a project to start
+        </button>
+      </div>
+    )
+  }
+
+  if (collapsed) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col items-center gap-2 overflow-y-auto px-2 pb-2">
+        <button
+          type="button"
+          onClick={openAgents}
+          className={collapsedButtonClass(activeTab?.kind === 'agents')}
+          title={`${activeProject.name} agents`}
+          aria-label={`${activeProject.name} agents`}
+        >
+          <LayoutGrid size={16} />
+          {agents.length > 0 && (
+            <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--pear-accent)] px-1 text-[9px] font-semibold leading-none text-[var(--pear-bg)]">
+              {agents.length}
+            </span>
+          )}
+        </button>
+        <div className="my-1 h-px w-7 shrink-0 bg-[var(--pear-border-subtle)]" />
+
+        {agents.map((agent) => {
+          const key = getAgentKeyForAgent(agent)
+          const active = activeTab?.kind === 'agents' && activeAgentKey === key
+          return (
+            <button
+              key={key}
+              type="button"
+              onClick={() => selectAgent(agent)}
+              className={collapsedButtonClass(active)}
+              title={agent.name}
+              aria-label={agent.name}
+            >
+              <AgentHarnessIcon cli={agent.cli} className="h-4 w-4" />
+              <span
+                className={`absolute bottom-1 right-1 h-1.5 w-1.5 rounded-full ${
+                  agent.status === 'running' && agent.activity !== 'idle'
+                    ? 'bg-[var(--pear-teal)]'
+                    : 'bg-[var(--pear-yellow)]'
+                }`}
+              />
+            </button>
+          )
+        })}
+
+        <div className="my-1 h-px w-7 shrink-0 bg-[var(--pear-border-subtle)]" />
+
+        {activeProject.channels.map((channel) => {
+          const active = activeTab?.kind === 'channel' &&
+            activeTab.projectId === activeProject.id &&
+            activeChannelName === channel
+          return (
+            <button
+              key={channel}
+              type="button"
+              onClick={() => selectChannel(channel)}
+              className={collapsedButtonClass(active)}
+              title={`#${channel}`}
+              aria-label={`#${channel}`}
+            >
+              <Hash size={15} />
+              <span className="absolute bottom-1 right-1 text-[8px] font-semibold leading-none">
+                {compactLabel(channel).slice(0, 1)}
+              </span>
+            </button>
+          )
+        })}
+
+        {directMessageRooms.length > 0 && (
+          <>
+            <div className="my-1 h-px w-7 shrink-0 bg-[var(--pear-border-subtle)]" />
+            {directMessageRooms.map((room) => (
+              <button
+                key={room.id}
+                type="button"
+                onClick={() => selectDirectMessage(room)}
+                className={collapsedButtonClass(activeDirectMessageRoomId === room.id)}
+                title={room.title}
+                aria-label={room.title}
+              >
+                <MessageCircle size={15} />
+                <span className="absolute bottom-1 right-1 text-[8px] font-semibold leading-none">
+                  {compactLabel(room.title).slice(0, 1)}
+                </span>
+              </button>
+            ))}
+          </>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-4">
+        <section>
+          <SectionHeader
+            title="Agents"
+            addLabel="Add agent"
+            onAdd={addAgent}
+            menuItems={[
+              { label: 'Add agent', icon: Plus, onSelect: addAgent },
+              { label: 'Agent settings', icon: Settings, onSelect: openProjectSettings }
+            ]}
+          />
+          <div className="space-y-1">
+            {agents.length === 0 ? (
+              <button
+                type="button"
+                onClick={addAgent}
+                className="w-full rounded-md border border-dashed border-[var(--pear-border-subtle)] px-2 py-2 text-left text-[11px] text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text-dim)]"
+              >
+                Spawn an agent
+              </button>
+            ) : (
+              agents.map((agent) => {
+                const key = getAgentKeyForAgent(agent)
+                const active = activeTab?.kind === 'agents' && activeAgentKey === key
+                return (
+                  <button
+                    key={key}
+                    type="button"
+                    onClick={() => selectAgent(agent)}
+                    className={rowClass(active)}
+                  >
+                    <AgentHarnessIcon cli={agent.cli} className="h-3.5 w-3.5 shrink-0 text-[var(--pear-text-faint)]" />
+                    <span className="min-w-0 flex-1 truncate">{agent.name}</span>
+                    <AgentActivityIndicator agent={agent} />
+                  </button>
+                )
+              })
+            )}
+          </div>
+        </section>
+
+        <section>
+          <SectionHeader
+            title="Channels"
+            addLabel="Add channel"
+            onAdd={addChannel}
+            menuItems={[
+              { label: 'Add channel', icon: Plus, onSelect: addChannel },
+              { label: 'Channel settings', icon: Settings, onSelect: openProjectSettings }
+            ]}
+          />
+          <div className="space-y-1">
+            {activeProject.channels.length === 0 ? (
+              <EmptySection label="No channels" />
+            ) : (
+              activeProject.channels.map((channel) => {
+                const active = activeTab?.kind === 'channel' &&
+                  activeTab.projectId === activeProject.id &&
+                  activeChannelName === channel
+                const count = channelAgentCount(agents, channel)
+                return (
+                  <button
+                    key={channel}
+                    type="button"
+                    onClick={() => selectChannel(channel)}
+                    className={rowClass(active)}
+                  >
+                    <Hash size={12} className="shrink-0" />
+                    <span className="min-w-0 flex-1 truncate">{channel}</span>
+                    {count > 0 && (
+                      <span className="shrink-0 rounded-full bg-[var(--pear-bg)]/40 px-1.5 py-0.5 text-[10px] leading-none text-[var(--pear-text-faint)]">
+                        {count}
+                      </span>
+                    )}
+                  </button>
+                )
+              })
+            )}
+          </div>
+        </section>
+
+        <section>
+          <SectionHeader title="DMs" />
+          <div className="space-y-1">
+            {directMessageRooms.length === 0 ? (
+              <div className="px-2 py-1 text-[11px] text-[var(--pear-text-faint)]">No DMs</div>
+            ) : (
+              directMessageRooms.map((room) => (
+                <button
+                  key={room.id}
+                  type="button"
+                  onClick={() => selectDirectMessage(room)}
+                  className={rowClass(activeDirectMessageRoomId === room.id)}
+                >
+                  <MessageCircle size={12} className="shrink-0" />
+                  <span className="min-w-0 flex-1 truncate">{room.title}</span>
+                  <span className="shrink-0 rounded-full bg-[var(--pear-bg)]/40 px-1.5 py-0.5 text-[10px] leading-none text-[var(--pear-text-faint)]">
+                    {room.messageCount}
+                  </span>
+                </button>
+              ))
+            )}
+          </div>
+        </section>
+      </div>
+    </div>
+  )
+}
+
+export function ProjectSidebar(): React.ReactNode {
+  const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
+
+  if (sidebarCollapsed) {
+    return (
+      <div className="flex h-full flex-col items-center border-r border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)]/95 py-2 backdrop-blur-xl">
+        <div className="mb-2 flex h-9 w-9 items-center justify-center">
+          <AgentRelayLogo />
+        </div>
+
+        <div className="mb-2">
+          <ProjectSwitcher collapsed />
+        </div>
+
+        <ProjectNavigation collapsed />
+
+        <div className="shrink-0 border-t border-[var(--pear-border-subtle)] px-2 pt-2">
+          <AccountMenu compact />
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div className="flex h-full flex-col border-r border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)]/95 backdrop-blur-xl">
-      <div className="titlebar-drag h-[40px] shrink-0" />
-
-      <div className="titlebar-nodrag border-b border-[var(--pear-border-subtle)] px-5 pb-4 pt-3">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-2.5">
-            <AgentRelayLogo />
-            <AgentRelayWordmark />
-          </div>
-          <PearMark />
+      <div className="titlebar-nodrag flex h-16 shrink-0 items-center border-b border-[var(--pear-border-subtle)] px-5">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <AgentRelayLogo />
+          <AgentRelayWordmark />
         </div>
       </div>
 
-      <div className="titlebar-nodrag px-6 pb-3 pt-5">
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-[var(--pear-text-faint)]">Projects</span>
+      <div className="titlebar-nodrag shrink-0 pb-2">
+        <ProjectSwitcher />
       </div>
 
-      <div className="flex-1 space-y-2 overflow-y-auto px-5 pb-5">
-        {projects.length === 0 ? (
-          <button
-            onClick={() => setViewMode('project-settings')}
-            className="mt-1 w-full rounded-xl border border-dashed border-[var(--pear-border)] px-4 py-6 text-center text-xs text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text-dim)]"
-          >
-            Open project settings
-          </button>
-        ) : (
-          projects.map((project) => (
-            <ProjectItem key={project.id} project={project} isActive={project.id === activeProjectId} />
-          ))
-        )}
-      </div>
+      <ProjectNavigation />
 
+      <div className="shrink-0 border-t border-[var(--pear-border-subtle)] px-3 py-2">
+        <AccountMenu />
+      </div>
     </div>
   )
 }

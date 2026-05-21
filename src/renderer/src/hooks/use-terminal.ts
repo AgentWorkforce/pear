@@ -174,42 +174,10 @@ export function useTerminal(
     let resizeObserver: ResizeObserver | null = null
     let disposed = false
     let cleanupBounce: (() => void) | null = null
-    let inputFlushTimer: ReturnType<typeof setTimeout> | null = null
-    let inputBuffer = ''
-    let inputFlushing = false
-
-    const flushInput = async (): Promise<void> => {
-      if (inputFlushing || inputBuffer.length === 0) return
-
-      inputFlushing = true
-      try {
-        while (inputBuffer.length > 0) {
-          const data = inputBuffer
-          inputBuffer = ''
-          await pear.broker.sendInput(projectId, agentName!, data)
-        }
-      } catch (err) {
-        console.error('[terminal] sendInput failed:', err)
-      } finally {
-        inputFlushing = false
-        if (inputBuffer.length > 0 && !inputFlushTimer) {
-          scheduleInputFlush()
-        }
-      }
-    }
-
-    const scheduleInputFlush = (): void => {
-      if (inputFlushTimer || inputFlushing) return
-      inputFlushTimer = setTimeout(() => {
-        inputFlushTimer = null
-        void flushInput()
-      }, 4)
-    }
 
     const sendInput = (data: string): void => {
       if (terminalModeRef.current === 'view') return
-      inputBuffer += data
-      scheduleInputFlush()
+      pear.broker.sendInputFast(projectId, agentName!, data)
     }
 
     const focusTerminal = (requireActive = false): void => {
@@ -410,9 +378,6 @@ export function useTerminal(
     return () => {
       disposed = true
       cleanupBounce?.()
-      if (inputFlushTimer) {
-        clearTimeout(inputFlushTimer)
-      }
       unsubStore?.()
       container.removeEventListener('pointerdown', handlePointerDown)
       container.removeEventListener('keydown', handleKeyDown)
@@ -464,9 +429,7 @@ export function useTerminal(
 
     const sendInput = (data: string): void => {
       if (terminalModeRef.current === 'view') return
-      pear.broker.sendInput(projectId, agentName, data).catch((err) => {
-        console.error('[terminal] sendInput failed:', err)
-      })
+      pear.broker.sendInputFast(projectId, agentName, data)
     }
 
     const handleGlobalKeyDown = (event: KeyboardEvent): void => {

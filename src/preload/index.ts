@@ -1,6 +1,23 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
-export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings'
+export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'broker-details' | 'source-control'
+
+type AuthUser = {
+  name?: string
+  email?: string
+  githubUsername?: string
+  username?: string
+  avatarUrl?: string
+  cachedAvatarUrl?: string
+  organizationName?: string
+  projectName?: string
+}
+
+type AuthStatus = {
+  loggedIn: boolean
+  apiUrl?: string
+  user?: AuthUser
+}
 
 const api = {
   project: {
@@ -14,6 +31,8 @@ const api = {
       ipcRenderer.invoke('project:add-channel', projectId, name),
     removeChannel: (projectId: string, name: string) =>
       ipcRenderer.invoke('project:remove-channel', projectId, name),
+    setChannelPeople: (projectId: string, channelName: string, people: string[]) =>
+      ipcRenderer.invoke('project:set-channel-people', projectId, channelName, people),
     addRoot: (projectId: string, name?: string, rootPath?: string) =>
       ipcRenderer.invoke('project:add-root', projectId, name, rootPath),
     removeRoot: (projectId: string, rootId: string) =>
@@ -28,6 +47,13 @@ const api = {
       ipcRenderer.invoke('broker:start', projectId, cwd, name, channels) as Promise<boolean>,
     syncChannels: (projectId: string, channels: string[]) =>
       ipcRenderer.invoke('broker:sync-channels', projectId, channels),
+    autoFixRuntime: (
+      projectId: string,
+      cwd: string,
+      name: string,
+      channels?: string[],
+      errorMessage?: string
+    ) => ipcRenderer.invoke('broker:auto-fix-runtime', projectId, cwd, name, channels, errorMessage) as Promise<{ removed: string[] }>,
     connectCloud: () => ipcRenderer.invoke('broker:connect-cloud') as Promise<string>,
     spawnAgent: (projectId: string, input: {
       name: string
@@ -58,9 +84,15 @@ const api = {
       ipcRenderer.invoke('broker:resize-pty', projectId, name, rows, cols),
     sendMessage: (projectId: string | undefined, input: { to: string; text: string; from?: string }) =>
       ipcRenderer.invoke('broker:send-message', projectId, input),
+    subscribeAgentChannel: (projectId: string | undefined, name: string, channel: string) =>
+      ipcRenderer.invoke('broker:subscribe-agent-channel', projectId, name, channel),
+    unsubscribeAgentChannel: (projectId: string | undefined, name: string, channel: string) =>
+      ipcRenderer.invoke('broker:unsubscribe-agent-channel', projectId, name, channel),
     releaseAgent: (projectId: string | undefined, name: string) =>
       ipcRenderer.invoke('broker:release-agent', projectId, name),
     listAgents: (projectId?: string) => ipcRenderer.invoke('broker:list-agents', projectId),
+    listDetails: () => ipcRenderer.invoke('broker:list-details'),
+    listEvents: () => ipcRenderer.invoke('broker:list-events'),
     shutdown: () => ipcRenderer.invoke('broker:shutdown'),
     onEvent: (callback: (event: unknown) => void) => {
       const handler = (_: unknown, event: unknown): void => callback(event)
@@ -77,16 +109,41 @@ const api = {
   git: {
     status: (path: string) => ipcRenderer.invoke('git:status', path),
     diff: (path: string, file?: string) => ipcRenderer.invoke('git:diff', path, file),
-    branches: (root: string) => ipcRenderer.invoke('git:branches', root)
+    fileContent: (path: string, file: string, revision?: string) =>
+      ipcRenderer.invoke('git:file-content', path, file, revision),
+    summary: (path: string) => ipcRenderer.invoke('git:summary', path),
+    branches: (root: string) => ipcRenderer.invoke('git:branches', root),
+    branchDetails: (root: string) => ipcRenderer.invoke('git:branch-details', root),
+    checkoutBranch: (root: string, branch: string, options?: { stashChanges?: boolean }) =>
+      ipcRenderer.invoke('git:checkout-branch', root, branch, options),
+    branchSyncStatus: (root: string) => ipcRenderer.invoke('git:branch-sync-status', root),
+    fetchRemote: (root: string) => ipcRenderer.invoke('git:fetch-remote', root),
+    pullCurrentBranch: (root: string) => ipcRenderer.invoke('git:pull-current-branch', root),
+    pushCurrentBranch: (root: string) => ipcRenderer.invoke('git:push-current-branch', root),
+    history: (path: string, limit?: number) => ipcRenderer.invoke('git:history', path, limit),
+    show: (path: string, hash: string, file?: string) => ipcRenderer.invoke('git:show', path, hash, file),
+    discardFiles: (path: string, files: string[]) =>
+      ipcRenderer.invoke('git:discard-files', path, files),
+    addGitignorePatterns: (path: string, patterns: string[]) =>
+      ipcRenderer.invoke('git:add-gitignore-patterns', path, patterns),
+    commitSelection: (path: string, input: {
+      title: string
+      body?: string
+      wholeFiles: string[]
+      patch?: string
+    }) => ipcRenderer.invoke('git:commit-selection', path, input),
+    generateCommitMessage: (path: string, input: { wholeFiles: string[]; patch?: string }) =>
+      ipcRenderer.invoke('git:generate-commit-message', path, input)
   },
   fs: {
     listDir: (dirPath: string) => ipcRenderer.invoke('fs:list-dir', dirPath),
-    readPreview: (filePath: string) => ipcRenderer.invoke('fs:read-preview', filePath)
+    readPreview: (filePath: string) => ipcRenderer.invoke('fs:read-preview', filePath),
+    revealPath: (filePath: string) => ipcRenderer.invoke('fs:reveal-path', filePath)
   },
   auth: {
-    login: () => ipcRenderer.invoke('auth:login') as Promise<{ loggedIn: boolean; apiUrl?: string }>,
+    login: () => ipcRenderer.invoke('auth:login') as Promise<AuthStatus>,
     logout: () => ipcRenderer.invoke('auth:logout'),
-    status: () => ipcRenderer.invoke('auth:status') as Promise<{ loggedIn: boolean; apiUrl?: string }>
+    status: () => ipcRenderer.invoke('auth:status') as Promise<AuthStatus>
   },
   onMenu: (channel: string, callback: (...args: unknown[]) => void) => {
     const handler = (_: unknown, ...args: unknown[]): void => callback(...args)

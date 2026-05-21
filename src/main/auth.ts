@@ -3,6 +3,7 @@ import { createServer, type Server } from 'http'
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs'
 import { join } from 'path'
 import { URL } from 'url'
+import { cacheAvatarFromUrl, cachedAvatarUrl, isRemoteAvatarUrl } from './avatar-cache'
 
 const CLOUD_API_URL = process.env.RELAY_CLOUD_URL || 'https://agentrelay.dev/cloud'
 
@@ -17,6 +18,9 @@ interface StoredTokens {
 interface UserInfo {
   name?: string
   email?: string
+  githubUsername?: string
+  avatarUrl?: string
+  cachedAvatarUrl?: string
   organizationName?: string
   projectName?: string
 }
@@ -50,17 +54,80 @@ function hasStoredTokens(): boolean {
 }
 
 function normalizeUserInfo(value: unknown): UserInfo | undefined {
-  if (!value || typeof value !== 'object') return undefined
+  if (!isRecord(value)) return undefined
 
-  const record = value as Record<string, unknown>
+  const record = value
+  const githubRecord = firstObject(record, [
+    'github',
+    'githubUser',
+    'github_user',
+    'githubProfile',
+    'github_profile',
+    'githubAccount',
+    'github_account'
+  ])
   const user: UserInfo = {}
+  const githubUsername =
+    firstString(record, ['githubUsername', 'github_username', 'githubLogin', 'github_login']) ||
+    firstString(githubRecord, ['githubUsername', 'github_username', 'username', 'login']) ||
+    firstString(record, ['username', 'login'])
+  const avatarUrl =
+    firstString(record, ['githubAvatarUrl', 'github_avatar_url']) ||
+    firstString(githubRecord, ['avatarUrl', 'avatar_url', 'avatar', 'picture', 'image']) ||
+    firstString(record, ['avatarUrl', 'avatar_url', 'avatar', 'picture', 'image'])
+  const cachedAvatarUrl = firstString(record, ['cachedAvatarUrl', 'cached_avatar_url'])
 
-  if (typeof record.name === 'string') user.name = record.name
-  if (typeof record.email === 'string') user.email = record.email
-  if (typeof record.organizationName === 'string') user.organizationName = record.organizationName
-  if (typeof record.projectName === 'string') user.projectName = record.projectName
+  const name = firstString(record, ['name', 'displayName', 'display_name'])
+  const email = firstString(record, ['email'])
+  const organizationName = firstString(record, ['organizationName', 'organization_name'])
+  const projectName = firstString(record, ['projectName', 'project_name'])
+
+  if (name) user.name = name
+  if (email) user.email = email
+  if (githubUsername) user.githubUsername = githubUsername
+  if (avatarUrl) user.avatarUrl = avatarUrl
+  if (cachedAvatarUrl) user.cachedAvatarUrl = cachedAvatarUrl
+  if (organizationName) user.organizationName = organizationName
+  if (projectName) user.projectName = projectName
 
   return Object.keys(user).length > 0 ? user : undefined
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function firstString(record: Record<string, unknown> | undefined, keys: string[]): string | undefined {
+  if (!record) return undefined
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return undefined
+}
+
+function firstObject(record: Record<string, unknown> | undefined, keys: string[]): Record<string, unknown> | undefined {
+  if (!record) return undefined
+  for (const key of keys) {
+    const value = record[key]
+    if (isRecord(value)) return value
+  }
+  return undefined
+}
+
+function mergeUserInfo(previous: UserInfo | undefined, next: UserInfo | undefined): UserInfo | undefined {
+  const normalizedPrevious = normalizeUserInfo(previous)
+  const normalizedNext = normalizeUserInfo(next)
+  if (!normalizedPrevious && !normalizedNext) return undefined
+  return { ...(normalizedPrevious || {}), ...(normalizedNext || {}) }
+}
+
+function hasAvatarIdentity(user: UserInfo | undefined): boolean {
+  const normalized = normalizeUserInfo(user)
+  return !!(
+    normalized?.githubUsername ||
+    (normalized?.avatarUrl && isRemoteAvatarUrl(normalized.avatarUrl))
+  )
 }
 
 function saveAuthMeta(tokens: Pick<StoredTokens, 'apiUrl' | 'user'>): void {
@@ -81,6 +148,43 @@ function loadAuthMeta(): Pick<AuthStatus, 'apiUrl' | 'user'> {
   } catch {
     return { apiUrl: CLOUD_API_URL }
   }
+}
+
+function githubAvatarUrl(user: UserInfo | undefined): string | undefined {
+  const githubUsername = user?.githubUsername?.trim()
+  return githubUsername ? `https://github.com/${encodeURIComponent(githubUsername)}.png?size=96` : undefined
+}
+
+function avatarSourceUrl(user: UserInfo | undefined): string | undefined {
+  return githubAvatarUrl(user) || (isRemoteAvatarUrl(user?.avatarUrl) ? user?.avatarUrl : undefined)
+}
+
+async function withCachedAvatar(user: UserInfo | undefined, waitForMissing: boolean): Promise<UserInfo | undefined> {
+  const normalized = normalizeUserInfo(user)
+  if (!normalized) return undefined
+
+  const sourceUrl = avatarSourceUrl(normalized)
+  const cacheIdentity = {
+    sourceUrl,
+    githubUsername: normalized.githubUsername,
+    email: normalized.email,
+    name: normalized.name
+  }
+  const existingCachedAvatarUrl = cachedAvatarUrl(cacheIdentity) || normalized.cachedAvatarUrl
+
+  if (!sourceUrl) {
+    return existingCachedAvatarUrl ? { ...normalized, cachedAvatarUrl: existingCachedAvatarUrl } : normalized
+  }
+
+  if (existingCachedAvatarUrl) {
+    void cacheAvatarFromUrl(sourceUrl, cacheIdentity)
+    return { ...normalized, cachedAvatarUrl: existingCachedAvatarUrl }
+  }
+
+  if (!waitForMissing) return normalized
+
+  const nextCachedAvatarUrl = await cacheAvatarFromUrl(sourceUrl, cacheIdentity)
+  return nextCachedAvatarUrl ? { ...normalized, cachedAvatarUrl: nextCachedAvatarUrl } : normalized
 }
 
 function saveTokens(tokens: StoredTokens): void {
@@ -111,20 +215,40 @@ function clearTokens(): void {
 }
 
 async function fetchWhoami(apiUrl: string, accessToken: string): Promise<UserInfo | undefined> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), 2500)
+
   try {
     const res = await fetch(`${apiUrl}/api/v1/auth/whoami`, {
-      headers: { Authorization: `Bearer ${accessToken}` }
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: controller.signal
     })
     if (!res.ok) return undefined
-    const data = await res.json()
-    return {
-      name: data.user?.name,
-      email: data.user?.email,
-      organizationName: data.organization?.name,
-      projectName: data.project?.name
-    }
+    const data = await res.json() as unknown
+    const record = isRecord(data) ? data : {}
+    const userRecord = firstObject(record, ['user']) || record
+    const organizationRecord = firstObject(record, ['organization', 'org'])
+    const projectRecord = firstObject(record, ['project'])
+    const githubRecord =
+      firstObject(record, ['github', 'githubUser', 'github_user', 'githubProfile', 'github_profile', 'githubAccount', 'github_account']) ||
+      firstObject(userRecord, ['github', 'githubUser', 'github_user', 'githubProfile', 'github_profile', 'githubAccount', 'github_account'])
+
+    return normalizeUserInfo({
+      ...userRecord,
+      github: githubRecord,
+      organizationName:
+        firstString(userRecord, ['organizationName', 'organization_name']) ||
+        firstString(record, ['organizationName', 'organization_name']) ||
+        firstString(organizationRecord, ['name']),
+      projectName:
+        firstString(userRecord, ['projectName', 'project_name']) ||
+        firstString(record, ['projectName', 'project_name']) ||
+        firstString(projectRecord, ['name'])
+    })
   } catch {
     return undefined
+  } finally {
+    clearTimeout(timeout)
   }
 }
 
@@ -158,11 +282,11 @@ export async function login(): Promise<AuthStatus> {
       }
 
       // Fetch user info before resolving
-      const user = await fetchWhoami(apiUrl, accessToken)
+      const user = await withCachedAvatar(await fetchWhoami(apiUrl, accessToken), true)
       saveTokens({ accessToken, refreshToken, apiUrl, user })
 
       res.writeHead(200, { 'Content-Type': 'text/html' })
-      res.end('<html><body><h2>Logged in!</h2><p>You can close this tab and return to Pear.</p></body></html>')
+      res.end('<html><body><h2>Logged in!</h2><p>You can close this tab and return to Pear by Agent Relay.</p></body></html>')
       server.close()
       resolve({ loggedIn: true, apiUrl, user })
     })
@@ -195,8 +319,22 @@ export function logout(): void {
   clearTokens()
 }
 
-export function getAuthStatus(): AuthStatus {
+export async function getAuthStatus(): Promise<AuthStatus> {
   if (!hasStoredTokens()) return { loggedIn: false }
+
+  const tokens = loadTokens()
+  if (tokens) {
+    const cachedUser = normalizeUserInfo(tokens.user)
+    const freshUser = hasAvatarIdentity(cachedUser)
+      ? undefined
+      : await fetchWhoami(tokens.apiUrl, tokens.accessToken)
+    const user = await withCachedAvatar(mergeUserInfo(tokens.user, freshUser), true)
+    if (freshUser || user?.cachedAvatarUrl !== tokens.user?.cachedAvatarUrl) {
+      saveTokens({ ...tokens, user })
+    }
+    return { loggedIn: true, apiUrl: tokens.apiUrl, user }
+  }
+
   const meta = loadAuthMeta()
   return { loggedIn: true, apiUrl: meta.apiUrl, user: meta.user }
 }

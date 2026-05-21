@@ -7,6 +7,7 @@ import {
   Monitor,
   MoonStar,
   Search,
+  Server,
   Settings
 } from 'lucide-react'
 import { useProjectStore } from '@/stores/project-store'
@@ -43,7 +44,7 @@ export function CommandMenu(): React.ReactNode {
   const activeDialog = useUIStore((s) => s.activeDialog)
   const openDialog = useUIStore((s) => s.openDialog)
   const closeDialog = useUIStore((s) => s.closeDialog)
-  const setViewMode = useUIStore((s) => s.setViewMode)
+  const openTab = useUIStore((s) => s.openTab)
   const toggleTheme = useUIStore((s) => s.toggleTheme)
   const toggleTerminalLayout = useUIStore((s) => s.toggleTerminalLayout)
   const activeProject = useProjectStore((s) => s.getActiveProject())
@@ -71,6 +72,21 @@ export function CommandMenu(): React.ReactNode {
       run: () => openDialog('spawn-agent')
     },
     {
+      id: 'broker-details',
+      label: 'Agent Relay Status',
+      description: 'Open Agent Relay health, events, and connection metadata',
+      keywords: ['broker', 'agent relay', 'status', 'connection', 'port', 'api key', 'events'],
+      Icon: Server,
+      run: () => {
+        openTab({
+          kind: 'broker-details',
+          projectId: activeProject?.id,
+          title: activeProject ? `${activeProject.name} Relay` : undefined
+        })
+        closeDialog()
+      }
+    },
+    {
       id: 'project-settings',
       label: 'Project settings',
       description: activeProject
@@ -79,18 +95,18 @@ export function CommandMenu(): React.ReactNode {
       keywords: ['settings', 'roots', 'channels', 'integrations'],
       Icon: Settings,
       run: () => {
-        setViewMode('project-settings')
+        openTab({ kind: 'project-settings', projectId: activeProject?.id })
         closeDialog()
       }
     },
     {
       id: 'terminal',
-      label: 'Show terminals',
-      description: 'Return to the terminal view',
+      label: 'Show agents',
+      description: 'Open the agent quadrants tab',
       keywords: ['terminal', 'agents'],
       Icon: Monitor,
       run: () => {
-        setViewMode('terminal')
+        openTab({ kind: 'agents', projectId: activeProject?.id })
         closeDialog()
       }
     },
@@ -116,7 +132,7 @@ export function CommandMenu(): React.ReactNode {
         closeDialog()
       }
     }
-  ], [activeProject, closeDialog, openDialog, setViewMode, toggleTerminalLayout, toggleTheme])
+  ], [activeProject, closeDialog, openDialog, openTab, toggleTerminalLayout, toggleTheme])
 
   const filteredActions = useMemo(
     () => actions.filter((action) => matchesAction(action, query)),

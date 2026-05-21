@@ -21,6 +21,7 @@ export interface Project {
   rootPath: string
   roots: ProjectRoot[]
   channels: string[]
+  channelPeople: Record<string, string[]>
   integrations: ProjectIntegration[]
 }
 
@@ -87,6 +88,32 @@ function normalizeChannels(value: unknown): string[] {
   return deduped.length > 0 ? deduped : ['general']
 }
 
+function normalizePeopleList(value: unknown): string[] {
+  const people = Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string')
+    : []
+  const names = people.map((entry) => entry.trim()).filter(Boolean)
+  return Array.from(new Map(names.map((name) => [name.toLowerCase(), name])).values())
+}
+
+function normalizeChannelPeople(value: unknown, channels: string[]): Record<string, string[]> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+
+  const channelSet = new Set(channels)
+  const result: Record<string, string[]> = {}
+  for (const [rawChannelName, rawPeople] of Object.entries(value as Record<string, unknown>)) {
+    const channelName = normalizeChannelName(rawChannelName)
+    if (!channelName || !channelSet.has(channelName)) continue
+
+    const people = normalizePeopleList(rawPeople)
+    if (people.length > 0) {
+      result[channelName] = people
+    }
+  }
+
+  return result
+}
+
 function dedupeRoots(roots: ProjectRoot[]): ProjectRoot[] {
   const seen = new Set<string>()
   const deduped: ProjectRoot[] = []
@@ -121,13 +148,16 @@ function normalizeProject(value: unknown): Project | null {
 
   if (!id || !name || !primaryRootPath || roots.length === 0) return null
 
+  const channels = normalizeChannels(record.channels)
+
   return {
     id,
     name,
     relayWorkspaceId,
     rootPath: primaryRootPath,
     roots,
-    channels: normalizeChannels(record.channels),
+    channels,
+    channelPeople: normalizeChannelPeople(record.channelPeople, channels),
     integrations
   }
 }
@@ -179,6 +209,7 @@ export function addProject(name: string, rootPath: string): Project {
     rootPath,
     roots: [root],
     channels: ['general'],
+    channelPeople: {},
     integrations: []
   }
   data.projects.push(project)
@@ -215,8 +246,27 @@ export function removeProjectChannel(projectId: string, channelName: string): vo
   const normalizedName = normalizeChannelName(channelName)
   if (project) {
     project.channels = project.channels.filter((channel) => channel !== normalizedName)
+    delete project.channelPeople[normalizedName]
     saveStore(data)
   }
+}
+
+export function setProjectChannelPeople(projectId: string, channelName: string, people: string[]): string[] {
+  const data = loadStore()
+  const project = data.projects.find((entry) => entry.id === projectId)
+  const normalizedName = normalizeChannelName(channelName)
+  if (!project || !normalizedName || !project.channels.includes(normalizedName)) {
+    return []
+  }
+
+  const normalizedPeople = normalizePeopleList(people)
+  if (normalizedPeople.length > 0) {
+    project.channelPeople[normalizedName] = normalizedPeople
+  } else {
+    delete project.channelPeople[normalizedName]
+  }
+  saveStore(data)
+  return normalizedPeople
 }
 
 export function addProjectRoot(projectId: string, rootPath: string, name?: string): ProjectRoot {

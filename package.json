@@ -1,7 +1,8 @@
 {
-  "name": "pear",
+  "name": "pear-by-agent-relay",
   "version": "1.0.0",
-  "description": "Electron GUI for Agent Relay",
+  "productName": "Pear by Agent Relay",
+  "description": "Pair programming workspace for humans and AI agents",
   "author": "Agent Workforce",
   "homepage": "https://pear.agentrelay.com",
   "main": "./out/main/index.js",
@@ -14,7 +15,7 @@
     "deploy": "sst deploy"
   },
   "dependencies": {
-    "@agent-relay/sdk": "^6.2.5",
+    "@agent-relay/sdk": "^6.3.1",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
