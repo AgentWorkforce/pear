@@ -1,11 +1,14 @@
 import type React from 'react'
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   AlertTriangle,
   Bot,
   Check,
+  Eye,
+  EyeOff,
   Folder,
   Hash,
+  Loader2,
   Plug,
   Plus,
   Settings,
@@ -13,6 +16,8 @@ import {
   X
 } from 'lucide-react'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
+import { ProactiveAgentsSection } from '@/components/proactive/ProactiveAgentsSection'
+import { pear, type ConnectedIntegration } from '@/lib/ipc'
 import { useAgentStore } from '@/stores/agent-store'
 import { normalizeChannelName, useProjectStore, type ProjectRoot } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
@@ -130,6 +135,154 @@ function RootRow({
         <X size={13} />
       </IconButton>
     </div>
+  )
+}
+
+type ProjectVisibilityMetadata = {
+  visible?: boolean
+  previousMountPaths?: string[]
+}
+
+function projectVisibilityFromScope(scope: Record<string, unknown>): ProjectVisibilityMetadata {
+  const value = scope.projectVisibility
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+
+  const record = value as Record<string, unknown>
+  return {
+    visible: typeof record.visible === 'boolean' ? record.visible : undefined,
+    previousMountPaths: Array.isArray(record.previousMountPaths)
+      ? record.previousMountPaths.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+      : undefined
+  }
+}
+
+function providerMountRoot(provider: string): string {
+  return `/integrations/${provider}`
+}
+
+function visibilityMountPaths(integration: ConnectedIntegration, visibility: ProjectVisibilityMetadata): string[] {
+  const currentPaths = integration.mountPaths.filter(Boolean)
+  if (currentPaths.length > 0) return currentPaths
+  if (visibility.previousMountPaths && visibility.previousMountPaths.length > 0) return visibility.previousMountPaths
+  return [providerMountRoot(integration.provider)]
+}
+
+function IntegrationVisibilitySection({ projectId }: { projectId: string }): React.ReactNode {
+  const [integrations, setIntegrations] = useState<ConnectedIntegration[]>([])
+  const [loading, setLoading] = useState(true)
+  const [busyIntegrationId, setBusyIntegrationId] = useState<string | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  const load = useCallback(async () => {
+    setError(null)
+    setLoading(true)
+    try {
+      setIntegrations(await pear.integrations.list(projectId))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setLoading(false)
+    }
+  }, [projectId])
+
+  useEffect(() => {
+    void load()
+  }, [load])
+
+  useEffect(() => {
+    return pear.integrations.onEvent((event) => {
+      if ('projectId' in event && event.projectId === projectId) void load()
+    })
+  }, [load, projectId])
+
+  const setVisibility = useCallback(async (integration: ConnectedIntegration, visible: boolean) => {
+    const visibility = projectVisibilityFromScope(integration.scope)
+    const previousMountPaths = visibilityMountPaths(integration, visibility)
+    const nextMountPaths = visible ? previousMountPaths : []
+    const nextScope = {
+      ...integration.scope,
+      projectVisibility: {
+        visible,
+        previousMountPaths
+      }
+    }
+
+    setBusyIntegrationId(integration.integrationId)
+    setError(null)
+    try {
+      const nextIntegration = await pear.integrations.updateScope(
+        projectId,
+        integration.integrationId,
+        nextScope,
+        nextMountPaths
+      )
+      setIntegrations((current) =>
+        current.map((entry) =>
+          entry.integrationId === nextIntegration.integrationId ? nextIntegration : entry
+        )
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusyIntegrationId(null)
+    }
+  }, [projectId])
+
+  return (
+    <Section
+      title="Integration visibility"
+      action={loading ? <Loader2 size={13} className="animate-spin text-[var(--pear-text-faint)]" /> : null}
+    >
+      {error && (
+        <div className="mb-3 rounded-md border border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 px-3 py-2 text-sm text-[var(--pear-red)]">
+          {error}
+        </div>
+      )}
+      <div className="space-y-2">
+        {integrations.length === 0 ? (
+          <div className="rounded-lg border border-dashed border-[var(--pear-border)] px-4 py-3 text-sm text-[var(--pear-text-faint)]">
+            No account integrations connected
+          </div>
+        ) : (
+          integrations.map((integration) => {
+            const visibility = projectVisibilityFromScope(integration.scope)
+            const visible = visibility.visible !== false
+            const busy = busyIntegrationId === integration.integrationId
+
+            return (
+              <div
+                key={integration.integrationId}
+                className="flex items-center gap-3 rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-3 py-2.5"
+              >
+                <Plug size={15} className="shrink-0 text-[var(--pear-text-faint)]" />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm text-[var(--pear-text)]">{integration.provider}</div>
+                  <div className="truncate text-xs text-[var(--pear-text-faint)]">
+                    {visible
+                      ? visibilityMountPaths(integration, visibility).join(', ')
+                      : providerMountRoot(integration.provider)}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void setVisibility(integration, !visible)}
+                  className={`flex h-8 items-center gap-2 rounded-md border px-3 text-xs transition-colors disabled:opacity-40 ${
+                    visible
+                      ? 'border-[var(--pear-accent-dim)] text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)]'
+                      : 'border-[var(--pear-border)] text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]'
+                  }`}
+                  aria-pressed={visible}
+                >
+                  {visible ? <Eye size={13} /> : <EyeOff size={13} />}
+                  {visible ? 'Visible' : 'Hidden'}
+                </button>
+              </div>
+            )
+          })
+        )}
+      </div>
+    </Section>
   )
 }
 
@@ -411,6 +564,8 @@ export function ProjectSettings(): React.ReactNode {
           </div>
         </Section>
 
+        <ProactiveAgentsSection projectId={project.id} />
+
         <Section title="Integrations">
           <form
             className="mb-3 flex max-w-lg items-center gap-2"
@@ -461,6 +616,8 @@ export function ProjectSettings(): React.ReactNode {
             ))}
           </div>
         </Section>
+
+        <IntegrationVisibilitySection projectId={project.id} />
 
         <Section title="Danger">
           <button
