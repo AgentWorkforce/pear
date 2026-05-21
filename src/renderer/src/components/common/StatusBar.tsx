@@ -9,18 +9,17 @@ import { useUIStore } from '@/stores/ui-store'
 export function StatusBar(): React.ReactNode {
   const brokerStatus = useAgentStore((s) => s.brokerStatus)
   const brokerErrors = useAgentStore((s) => s.brokerErrors)
-  const agents = useAgentStore((s) => s.agents)
   const project = useProjectStore((s) => s.getActiveProject())
-  const root = useProjectStore((s) => s.getActiveRoot())
-  const changedFiles = useGitStore((s) => s.files)
-  const summary = useGitStore((s) => s.summary)
+  const projectChangedFiles = useGitStore((s) => s.projectFiles)
+  const projectSummary = useGitStore((s) => s.projectSummary)
   const theme = useUIStore((s) => s.theme)
   const toggleTheme = useUIStore((s) => s.toggleTheme)
   const openTab = useUIStore((s) => s.openTab)
-
-  const runningAgents = agents.filter(
-    (a) => a.status === 'running' && (!project || a.projectId === project.id)
-  ).length
+  const projectRootPathKey = project?.roots
+    .filter((root) => root.pathExists)
+    .map((root) => root.path)
+    .join('\0') || ''
+  const projectSummaryMatchesRoots = !!projectSummary && projectSummary.rootPathKey === projectRootPathKey
 
   const statusColor =
     brokerStatus === 'connected'
@@ -55,31 +54,21 @@ export function StatusBar(): React.ReactNode {
         )}
       </button>
 
-      {runningAgents > 0 && (
-        <span>{runningAgents} agent{runningAgents !== 1 ? 's' : ''}</span>
-      )}
-
-      {project && (
-        <div className="flex items-center gap-1.5">
-          <span className="text-[var(--pear-text-secondary)]">{project.name}</span>
-        </div>
-      )}
-
-      {project && root?.pathExists && summary?.rootPath === root.path && (
+      {project && projectSummaryMatchesRoots && (
         <button
           type="button"
           onClick={() => openTab({ kind: 'source-control', projectId: project.id })}
           className="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[var(--pear-text-dim)] transition-colors hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text)]"
-          title="Open source control"
-          aria-label={`Open source control. ${changedFiles.length} changed files.`}
+          title={`Open source control across ${projectSummary.rootCount} Git ${projectSummary.rootCount === 1 ? 'root' : 'roots'}`}
+          aria-label={`Open source control. ${projectChangedFiles.length} changed files across ${projectSummary.rootCount} Git ${projectSummary.rootCount === 1 ? 'root' : 'roots'}.`}
         >
           <FileDiff size={12} className="text-[var(--pear-text-faint)]" />
-          <span>{changedFiles.length} changed file{changedFiles.length === 1 ? '' : 's'}</span>
-          {(summary.additions > 0 || summary.deletions > 0) && (
+          <span>{projectChangedFiles.length} changed file{projectChangedFiles.length === 1 ? '' : 's'}</span>
+          {(projectSummary.additions > 0 || projectSummary.deletions > 0) && (
             <span className="tabular-nums">
-              <span className="text-[var(--pear-green)]">+{formatGitDiffLineCount(summary.additions)}</span>
+              <span className="text-[var(--pear-green)]">+{formatGitDiffLineCount(projectSummary.additions)}</span>
               <span className="mx-1 text-[var(--pear-text-faint)]">/</span>
-              <span className="text-[var(--pear-red)]">-{formatGitDiffLineCount(summary.deletions)}</span>
+              <span className="text-[var(--pear-red)]">-{formatGitDiffLineCount(projectSummary.deletions)}</span>
             </span>
           )}
         </button>

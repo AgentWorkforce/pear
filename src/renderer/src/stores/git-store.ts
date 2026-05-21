@@ -14,15 +14,28 @@ export interface FileStatus {
   staged: boolean
 }
 
+export interface ProjectFileStatus extends FileStatus {
+  rootPath: string
+}
+
 export interface GitSummary extends IpcGitSummary {
   rootPath: string
 }
 
+export interface ProjectGitSummary {
+  additions: number
+  deletions: number
+  rootCount: number
+  rootPathKey: string
+}
+
 interface GitState {
   files: FileStatus[]
+  projectFiles: ProjectFileStatus[]
   selectedFile: string | null
   diff: string
   summary: GitSummary | null
+  projectSummary: ProjectGitSummary | null
   history: GitHistoryCommit[]
   selectedCommit: GitHistoryCommit | null
   selectedCommitFile: string | null
@@ -34,6 +47,7 @@ interface GitState {
 
   fetchStatus: (path: string) => Promise<void>
   fetchSummary: (path: string) => Promise<void>
+  fetchProjectStatus: (paths: string[]) => Promise<void>
   fetchDiff: (rootPath: string, file?: string) => Promise<void>
   fetchHistory: (rootPath: string) => Promise<void>
   selectCommit: (rootPath: string, commit: GitHistoryCommit | null) => Promise<void>
@@ -44,7 +58,7 @@ interface GitState {
     input: { wholeFiles: string[]; patch?: string }
   ) => Promise<GitCommitDraft>
   selectFile: (file: string | null, rootPath: string) => void
-  startPolling: (rootPath: string) => void
+  startPolling: (rootPath: string | null, projectRootPaths?: string[]) => void
   stopPolling: () => void
 }
 
@@ -53,6 +67,19 @@ function sameFileStatuses(left: FileStatus[], right: FileStatus[]): boolean {
   return left.every((file, index) => {
     const other = right[index]
     return !!other &&
+      file.path === other.path &&
+      file.oldPath === other.oldPath &&
+      file.status === other.status &&
+      file.staged === other.staged
+  })
+}
+
+function sameProjectFileStatuses(left: ProjectFileStatus[], right: ProjectFileStatus[]): boolean {
+  if (left.length !== right.length) return false
+  return left.every((file, index) => {
+    const other = right[index]
+    return !!other &&
+      file.rootPath === other.rootPath &&
       file.path === other.path &&
       file.oldPath === other.oldPath &&
       file.status === other.status &&
@@ -69,11 +96,28 @@ function sameGitSummary(left: GitSummary | null, right: GitSummary | null): bool
     left.deletions === right.deletions
 }
 
+function sameProjectGitSummary(left: ProjectGitSummary | null, right: ProjectGitSummary | null): boolean {
+  if (left === right) return true
+  if (!left || !right) return false
+  return left.rootPathKey === right.rootPathKey &&
+    left.rootCount === right.rootCount &&
+    left.additions === right.additions &&
+    left.deletions === right.deletions
+}
+
+function normalizeRootPaths(paths: Array<string | null | undefined>): string[] {
+  return Array.from(
+    new Set(paths.filter((path): path is string => typeof path === 'string' && path.length > 0))
+  )
+}
+
 export const useGitStore = create<GitState>((set, get) => ({
   files: [],
+  projectFiles: [],
   selectedFile: null,
   diff: '',
   summary: null,
+  projectSummary: null,
   history: [],
   selectedCommit: null,
   selectedCommitFile: null,
@@ -99,6 +143,46 @@ export const useGitStore = create<GitState>((set, get) => ({
       if (!sameGitSummary(get().summary, nextSummary)) set({ summary: nextSummary })
     } catch {
       if (get().summary !== null) set({ summary: null })
+    }
+  },
+
+  fetchProjectStatus: async (paths) => {
+    const rootPaths = normalizeRootPaths(paths)
+    const rootPathKey = rootPaths.join('\0')
+    if (rootPaths.length === 0) {
+      if (get().projectFiles.length > 0 || get().projectSummary !== null) {
+        set({ projectFiles: [], projectSummary: null })
+      }
+      return
+    }
+
+    const entries = await Promise.all(rootPaths.map(async (rootPath) => {
+      const [files, summary] = await Promise.all([
+        pear.git.status(rootPath).catch(() => [] as FileStatus[]),
+        pear.git.summary(rootPath).catch(() => null)
+      ])
+      return { rootPath, files, summary }
+    }))
+    const summaries = entries
+      .map((entry) => entry.summary)
+      .filter((summary): summary is IpcGitSummary => summary !== null)
+    const projectFiles = entries.flatMap((entry) =>
+      entry.files.map((file) => ({ ...file, rootPath: entry.rootPath }))
+    )
+    const projectSummary = summaries.length > 0
+      ? {
+          rootPathKey,
+          rootCount: summaries.length,
+          additions: summaries.reduce((total, summary) => total + summary.additions, 0),
+          deletions: summaries.reduce((total, summary) => total + summary.deletions, 0)
+        }
+      : null
+
+    if (
+      !sameProjectFileStatuses(get().projectFiles, projectFiles) ||
+      !sameProjectGitSummary(get().projectSummary, projectSummary)
+    ) {
+      set({ projectFiles, projectSummary })
     }
   },
 
@@ -209,15 +293,32 @@ export const useGitStore = create<GitState>((set, get) => ({
     }
   },
 
-  startPolling: (rootPath) => {
+  startPolling: (rootPath, projectRootPaths = rootPath ? [rootPath] : []) => {
     get().stopPolling()
-    get().fetchStatus(rootPath)
-    get().fetchSummary(rootPath)
-    const selectedFile = get().selectedFile
-    if (selectedFile) get().fetchDiff(rootPath, selectedFile)
-    const interval = setInterval(() => {
+    const normalizedProjectRootPaths = normalizeRootPaths(
+      projectRootPaths.length > 0 ? projectRootPaths : [rootPath]
+    )
+
+    if (rootPath) {
       get().fetchStatus(rootPath)
       get().fetchSummary(rootPath)
+      const selectedFile = get().selectedFile
+      if (selectedFile) get().fetchDiff(rootPath, selectedFile)
+    }
+
+    if (normalizedProjectRootPaths.length > 0) {
+      get().fetchProjectStatus(normalizedProjectRootPaths)
+    } else {
+      get().fetchProjectStatus([])
+      return
+    }
+
+    const interval = setInterval(() => {
+      if (rootPath) {
+        get().fetchStatus(rootPath)
+        get().fetchSummary(rootPath)
+      }
+      get().fetchProjectStatus(normalizedProjectRootPaths)
     }, 3000)
     set({ pollInterval: interval })
   },

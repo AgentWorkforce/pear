@@ -10,6 +10,7 @@ import { AppTopBar } from '@/components/common/AppTopBar'
 import { CommandMenu } from '@/components/common/CommandMenu'
 import { StatusBar } from '@/components/common/StatusBar'
 import { AddProjectDialog } from '@/components/sidebar/AddProjectDialog'
+import { AddChannelDialog } from '@/components/sidebar/AddChannelDialog'
 import { SpawnAgentDialog } from '@/components/sidebar/SpawnAgentDialog'
 import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
@@ -92,7 +93,7 @@ export default function App(): React.ReactNode {
 
       <div className="flex min-h-0 flex-1">
         <div
-          className={`h-full shrink-0 transition-[width] duration-150 ${
+          className={`relative z-30 h-full shrink-0 transition-[width] duration-150 ${
             sidebarCollapsed ? 'w-[56px]' : 'w-[272px] min-w-[220px] max-w-[380px]'
           }`}
         >
@@ -109,6 +110,7 @@ export default function App(): React.ReactNode {
       <StatusBar />
 
       {activeDialog === 'add-project' && <AddProjectDialog />}
+      {activeDialog === 'add-channel' && <AddChannelDialog />}
       {activeDialog === 'spawn-agent' && <SpawnAgentDialog />}
       <CommandMenu />
     </div>

@@ -1,17 +1,22 @@
 import type React from 'react'
-import { useEffect, useRef, useState } from 'react'
-import { Send, User, X } from 'lucide-react'
+import { useState } from 'react'
+import { X } from 'lucide-react'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
+import type { AuthUser } from '@/lib/ipc'
 import { renderChatMessageBody } from '@/lib/chat-formatting'
 import { useAgentStore } from '@/stores/agent-store'
 import type {
   ChatMessage as ChatMessageType,
   ChatThreadReply
 } from '@/stores/agent-store'
+import { useProjectStore } from '@/stores/project-store'
 import { ChatMessage } from './ChatMessage'
+import { ChatComposerInput } from './ChatComposerInput'
+import { HumanAvatar } from './HumanAvatar'
 
 interface ThreadPanelProps {
   message: ChatMessageType
+  authUser?: AuthUser | null
   onClose: () => void
   onReply: (messageId: string, body: string) => void
 }
@@ -20,7 +25,13 @@ function formatTime(timestamp: number): string {
   return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
-function ReplyAvatar({ reply }: { reply: ChatThreadReply }): React.ReactNode {
+function ReplyAvatar({
+  reply,
+  authUser
+}: {
+  reply: ChatThreadReply
+  authUser?: AuthUser | null
+}): React.ReactNode {
   const agent = useAgentStore((state) =>
     state.agents.find((candidate) =>
       candidate.name === reply.from &&
@@ -28,21 +39,33 @@ function ReplyAvatar({ reply }: { reply: ChatThreadReply }): React.ReactNode {
     )
   )
 
+  if (reply.isHuman) {
+    return (
+      <HumanAvatar
+        user={authUser}
+        iconSize={14}
+        className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center overflow-hidden rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-overlay)]"
+      />
+    )
+  }
+
   return (
     <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-overlay)]">
-      {reply.isHuman ? (
-        <User size={14} className="text-[var(--pear-accent-bright)]" />
-      ) : (
-        <AgentHarnessIcon cli={agent?.cli} className="h-4 w-4 text-[var(--pear-text)]" />
-      )}
+      <AgentHarnessIcon cli={agent?.cli} className="h-4 w-4 text-[var(--pear-text)]" />
     </div>
   )
 }
 
-function ThreadReplyRow({ reply }: { reply: ChatThreadReply }): React.ReactNode {
+function ThreadReplyRow({
+  reply,
+  authUser
+}: {
+  reply: ChatThreadReply
+  authUser?: AuthUser | null
+}): React.ReactNode {
   return (
     <div className="flex gap-3 rounded-md px-1 py-2 hover:bg-[var(--pear-bg-surface-hover)]/45">
-      <ReplyAvatar reply={reply} />
+      <ReplyAvatar reply={reply} authUser={authUser} />
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
           <span className="text-sm font-medium text-[var(--pear-accent-bright)]">
@@ -58,26 +81,21 @@ function ThreadReplyRow({ reply }: { reply: ChatThreadReply }): React.ReactNode 
   )
 }
 
-export function ThreadPanel({ message, onClose, onReply }: ThreadPanelProps): React.ReactNode {
+export function ThreadPanel({ message, authUser, onClose, onReply }: ThreadPanelProps): React.ReactNode {
   const [text, setText] = useState('')
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const agents = useAgentStore((state) => state.agents)
+  const activeProjectId = useProjectStore((state) => state.activeProjectId)
   const replies = message.threadReplies || []
+  const mentionProjectId = message.projectId || activeProjectId
+  const runningAgents = agents.filter(
+    (agent) => agent.status === 'running' && (!mentionProjectId || agent.projectId === mentionProjectId)
+  )
   const canSend = text.trim().length > 0
 
-  useEffect(() => {
-    const textarea = textareaRef.current
-    if (!textarea) return
-
-    textarea.style.height = '0px'
-    const nextHeight = Math.min(textarea.scrollHeight, 180)
-    textarea.style.height = `${Math.max(nextHeight, 72)}px`
-  }, [text])
-
-  const handleSubmit = (event?: React.FormEvent): void => {
-    event?.preventDefault()
+  const handleSubmit = (): void => {
     if (!canSend) return
 
-    onReply(message.id, text)
+    onReply(message.id, text.trim())
     setText('')
   }
 
@@ -104,6 +122,7 @@ export function ThreadPanel({ message, onClose, onReply }: ThreadPanelProps): Re
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
         <ChatMessage
           message={message}
+          authUser={authUser}
           showRoute={false}
           showActions={false}
           showThreadSummary={false}
@@ -124,47 +143,24 @@ export function ThreadPanel({ message, onClose, onReply }: ThreadPanelProps): Re
         ) : (
           <div className="space-y-1">
             {replies.map((reply) => (
-              <ThreadReplyRow key={reply.id} reply={reply} />
+              <ThreadReplyRow key={reply.id} reply={reply} authUser={authUser} />
             ))}
           </div>
         )}
       </div>
 
-      <form
-        className="shrink-0 border-t border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] p-4"
-        onSubmit={handleSubmit}
-      >
-        <div className="rounded-md border border-[var(--pear-bg-overlay)] bg-[var(--pear-bg-surface)] p-3">
-          <textarea
-            ref={textareaRef}
-            value={text}
-            onChange={(event) => setText(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey) {
-                event.preventDefault()
-                handleSubmit()
-              }
-            }}
-            placeholder="Reply..."
-            rows={3}
-            className="block w-full resize-none bg-transparent text-sm leading-5 text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)]"
-          />
-          <div className="mt-2 flex justify-end">
-            <button
-              type="submit"
-              disabled={!canSend}
-              className={`flex h-8 w-8 items-center justify-center rounded-full transition-colors ${
-                canSend
-                  ? 'bg-[var(--pear-accent)] text-[var(--pear-bg)] hover:opacity-90'
-                  : 'bg-[var(--pear-bg-overlay)] text-[var(--pear-text-faint)]'
-              }`}
-              aria-label="Send thread reply"
-            >
-              <Send size={14} className="translate-x-[1px]" />
-            </button>
-          </div>
-        </div>
-      </form>
+      <div className="shrink-0 border-t border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] p-4">
+        <ChatComposerInput
+          value={text}
+          placeholder="Reply..."
+          sendLabel="Send thread reply"
+          runningAgents={runningAgents}
+          activeProjectId={mentionProjectId}
+          canSend={canSend}
+          onChange={setText}
+          onSubmit={handleSubmit}
+        />
+      </div>
     </aside>
   )
 }

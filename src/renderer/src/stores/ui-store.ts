@@ -6,7 +6,7 @@ import {
 } from '@/lib/direct-messages'
 
 export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'broker-details' | 'source-control'
-export type DialogType = 'add-project' | 'spawn-agent' | 'command-menu' | null
+export type DialogType = 'add-project' | 'spawn-agent' | 'add-channel' | 'command-menu' | null
 export type Theme = 'dark' | 'light'
 export type TerminalLayout = 'tabs' | 'horizontal-split'
 export type AppTabKind = 'agents' | 'channel' | 'dm' | 'project-settings' | 'broker-details' | 'source-control'
@@ -110,9 +110,7 @@ function getTabTitle(tab: AppTabInput): string {
     case 'agents':
       return 'Agents'
     case 'channel':
-      return normalizeChannelForTab(tab.channelName)
-        ? `#${normalizeChannelForTab(tab.channelName)}`
-        : 'Messages'
+      return normalizeChannelForTab(tab.channelName) || 'Messages'
     case 'dm':
       return getDirectMessageRoomTitle(tab.dmParticipants || [])
     case 'project-settings':

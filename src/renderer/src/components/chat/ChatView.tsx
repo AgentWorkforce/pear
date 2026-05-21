@@ -3,7 +3,6 @@ import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Bot,
   Check,
-  Hash,
   MessageCircle,
   Settings,
   User,
@@ -17,7 +16,7 @@ import {
   messageMatchesDirectMessageRoom,
   sortDirectMessageParticipants
 } from '@/lib/direct-messages'
-import { pear } from '@/lib/ipc'
+import { pear, type AuthUser } from '@/lib/ipc'
 import {
   useAgentStore,
   type Agent,
@@ -337,6 +336,7 @@ export function ChatView(): React.ReactNode {
   const currentAppTab = useUIStore((s) => s.tabs.find((tab) => tab.id === s.activeTabId))
   const allMessages = useAgentStore((s) => s.messages)
   const allAgents = useAgentStore((s) => s.agents)
+  const addChannelJoinNotice = useAgentStore((s) => s.addChannelJoinNotice)
   const addThreadReply = useAgentStore((s) => s.addThreadReply)
   const renameMessageChannel = useAgentStore((s) => s.renameMessageChannel)
   const setAgentChannelMembership = useAgentStore((s) => s.setAgentChannelMembership)
@@ -371,6 +371,7 @@ export function ChatView(): React.ReactNode {
   const [settingsError, setSettingsError] = useState<string | null>(null)
   const [savingName, setSavingName] = useState(false)
   const [changingAgentName, setChangingAgentName] = useState<string | null>(null)
+  const [authUser, setAuthUser] = useState<AuthUser | null>(null)
 
   const projectMessages = useMemo(
     () => activeProjectId
@@ -433,6 +434,22 @@ export function ChatView(): React.ReactNode {
   }, [activeThreadMessage, activeThreadMessageId])
 
   useEffect(() => {
+    let cancelled = false
+
+    pear.auth.status()
+      .then((status) => {
+        if (!cancelled) setAuthUser(status.loggedIn ? status.user || null : null)
+      })
+      .catch(() => {
+        if (!cancelled) setAuthUser(null)
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
     if (activeTab === 'messages' && !directMessageReadOnly) return
     setActiveThreadMessageId(null)
   }, [activeTab, directMessageReadOnly])
@@ -475,7 +492,11 @@ export function ChatView(): React.ReactNode {
 
     setSettingsError(null)
     try {
-      await setChannelPeople(activeChannelName, [...invitedHumans, nextName])
+      const nextPeople = await setChannelPeople(activeChannelName, [...invitedHumans, nextName])
+      const joinedName = nextPeople.find((name) => name.toLowerCase() === nextName.toLowerCase())
+      if (joinedName) {
+        addChannelJoinNotice(activeProjectId || undefined, activeChannelName, joinedName)
+      }
       setHumanInviteDraft('')
     } catch (err) {
       setSettingsError(err instanceof Error ? err.message : 'Failed to invite person')
@@ -538,9 +559,11 @@ export function ChatView(): React.ReactNode {
       <header className="shrink-0 border-b border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)]">
         <div className="flex min-h-[72px] items-center justify-between gap-4 px-5">
           <div className="flex min-w-0 items-center gap-3">
-            <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35 text-[var(--pear-text-faint)]">
-              {directMessageParticipants ? <MessageCircle size={25} /> : <Hash size={25} />}
-            </div>
+            {directMessageParticipants ? (
+              <div className="flex h-11 w-11 shrink-0 items-center justify-center rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35 text-[var(--pear-text-faint)]">
+                <MessageCircle size={25} />
+              </div>
+            ) : null}
             <div className="min-w-0">
               <h1 className="truncate text-2xl font-semibold text-[var(--pear-text)]">
                 {roomTitle}
@@ -591,6 +614,7 @@ export function ChatView(): React.ReactNode {
                           {showDateDivider && <DateDivider timestamp={message.timestamp} />}
                           <ChatMessage
                             message={message}
+                            authUser={authUser}
                             showRoute={!activeChannelName && !directMessageParticipants}
                             showActions={canInteractWithMessages}
                             showThreadSummary={canInteractWithMessages}
@@ -639,6 +663,7 @@ export function ChatView(): React.ReactNode {
         {activeTab === 'messages' && activeThreadMessage && canInteractWithMessages && (
           <ThreadPanel
             message={activeThreadMessage}
+            authUser={authUser}
             onClose={() => setActiveThreadMessageId(null)}
             onReply={addThreadReply}
           />

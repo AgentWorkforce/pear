@@ -30,6 +30,10 @@ function getBrokerChannels(project: Project | undefined): string[] {
   return project ? Array.from(new Set(project.channels)) : []
 }
 
+function normalizeChannelList(channelNames: string[]): string[] {
+  return Array.from(new Set(channelNames.map(normalizeChannelName).filter(Boolean)))
+}
+
 function getRelayWorkspaceName(project: Project): string {
   return `pear-${project.relayWorkspaceId}`
 }
@@ -186,6 +190,7 @@ interface ProjectState {
   addRoot: (name?: string, rootPath?: string) => Promise<ProjectRoot | null>
   removeRoot: (id: string) => Promise<void>
   addChannel: (name: string) => Promise<void>
+  rememberDiscoveredChannels: (projectId: string | undefined, channels: string[]) => void
   removeChannel: (name: string) => Promise<void>
   renameChannel: (oldName: string, newName: string) => Promise<string | null>
   setChannelPeople: (channelName: string, people: string[]) => Promise<string[]>
@@ -340,6 +345,34 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
       )
     }))
     await get().syncBrokerChannels()
+  },
+
+  rememberDiscoveredChannels: (projectId, channelNames) => {
+    if (!projectId) return
+
+    const project = get().projects.find((candidate) => candidate.id === projectId)
+    if (!project) return
+
+    const missingChannels = normalizeChannelList(channelNames)
+      .filter((channel) => !project.channels.includes(channel))
+    if (missingChannels.length === 0) return
+
+    set((state) => ({
+      projects: state.projects.map((candidate) =>
+        candidate.id === projectId
+          ? {
+              ...candidate,
+              channels: [...candidate.channels, ...missingChannels]
+            }
+          : candidate
+      )
+    }))
+
+    for (const channel of missingChannels) {
+      void pear.project.addChannel(projectId, channel).catch((err) => {
+        console.error(`[project] Failed to persist discovered channel ${channel}:`, err)
+      })
+    }
   },
 
   removeChannel: async (name) => {

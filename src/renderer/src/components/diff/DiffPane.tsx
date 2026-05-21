@@ -9,13 +9,12 @@ import {
   Expand,
   FileDiff,
   Filter,
+  FolderGit2,
   GitBranch,
   GitCommitHorizontal,
   GripVertical,
-  Lock,
   Loader2,
   Minimize2,
-  Plus,
   RefreshCw,
   Search,
   UserPlus,
@@ -31,7 +30,7 @@ import {
   type GitHistoryCoAuthor,
   type GitHistoryCommit
 } from '@/lib/ipc'
-import { normalizeChannelName, useProjectStore, type Project } from '@/stores/project-store'
+import { normalizeChannelName, useProjectStore, type Project, type ProjectRoot } from '@/stores/project-store'
 import { useGitStore } from '@/stores/git-store'
 import { useUIStore } from '@/stores/ui-store'
 import {
@@ -64,30 +63,6 @@ type FileContextMenuState = {
   paths: string[]
 }
 type EmptyFileProbe = { rootPath: string; path: string; empty: boolean }
-
-function projectRootPath(project: Project): string {
-  return project.roots.find((root) => root.pathExists)?.path || project.roots[0]?.path || project.rootPath
-}
-
-function pathTail(path: string, depth = 1): string {
-  const parts = path.replace(/\\/g, '/').split('/').filter(Boolean)
-  return parts.slice(-depth).join('/') || path
-}
-
-function projectGroupLabel(project: Project): string {
-  const rootPath = projectRootPath(project)
-  const parts = rootPath.replace(/\\/g, '/').split('/').filter(Boolean)
-  return parts.length > 1 ? parts[parts.length - 2] : 'Projects'
-}
-
-function groupProjects(projects: Project[]): Array<{ label: string; projects: Project[] }> {
-  const grouped = new Map<string, Project[]>()
-  for (const project of projects) {
-    const label = projectGroupLabel(project)
-    grouped.set(label, [...(grouped.get(label) || []), project])
-  }
-  return Array.from(grouped, ([label, groupedProjects]) => ({ label, projects: groupedProjects }))
-}
 
 function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value))
@@ -440,6 +415,13 @@ function absoluteFilePath(rootPath: string, filePath: string): string {
 function fileNameFromPath(path: string): string {
   const parts = normalizePathSeparators(path).split('/')
   return parts[parts.length - 1] || path
+}
+
+function pathTail(path: string, depth = 2): string {
+  const normalized = normalizePathSeparators(path).replace(/\/+$/, '')
+  const parts = normalized.split('/').filter(Boolean)
+  if (parts.length === 0) return path
+  return parts.slice(-depth).join('/')
 }
 
 function fileExtension(path: string): string | null {
@@ -1063,101 +1045,151 @@ function HistoryCommitDetails({
   )
 }
 
-function CurrentProjectSelector({ width }: { width: number }): React.ReactNode {
+type BranchSwitchMode = 'stash' | 'carry'
+type BranchSelectorTab = 'branches' | 'worktrees'
+type RootGitState = 'checking' | 'git' | 'not-git'
+
+function gitStateForRoot(root: ProjectRoot, states: Record<string, RootGitState>): RootGitState {
+  if (!root.pathExists) return 'not-git'
+  return states[root.id] || 'checking'
+}
+
+function rootStatusLabel(root: ProjectRoot, state: RootGitState): string {
+  if (!root.pathExists) return 'Path missing'
+  if (state === 'checking') return 'Checking git'
+  if (state === 'not-git') return 'No git repo'
+  return pathTail(root.path)
+}
+
+function CurrentRootSelector({
+  project,
+  activeRoot,
+  gitStates,
+  width,
+  onSelect
+}: {
+  project: Project | undefined
+  activeRoot: ProjectRoot | undefined
+  gitStates: Record<string, RootGitState>
+  width: number
+  onSelect: (id: string) => void
+}): React.ReactNode {
   const [open, setOpen] = useState(false)
   const [query, setQuery] = useState('')
-  const projects = useProjectStore((s) => s.projects)
-  const activeProjectId = useProjectStore((s) => s.activeProjectId)
-  const setActiveProject = useProjectStore((s) => s.setActiveProject)
-  const openTab = useUIStore((s) => s.openTab)
-  const openDialog = useUIStore((s) => s.openDialog)
-  const activeProject = projects.find((project) => project.id === activeProjectId) || projects[0]
-  const canSwitchProjects = projects.length > 1
-  const filteredProjects = useMemo(() => {
-    const normalizedQuery = query.trim().toLowerCase()
-    if (!normalizedQuery) return projects
-    return projects.filter((project) => {
-      const rootPath = projectRootPath(project)
-      return [
-        project.name,
-        projectGroupLabel(project),
-        pathTail(rootPath, 2),
-        rootPath
-      ].some((value) => value.toLowerCase().includes(normalizedQuery))
-    })
-  }, [projects, query])
-  const groups = useMemo(() => groupProjects(filteredProjects), [filteredProjects])
+  const roots = project?.roots || []
+  const activeRootState = activeRoot ? gitStateForRoot(activeRoot, gitStates) : 'not-git'
+  const normalizedQuery = query.trim().toLowerCase()
+  const filteredRoots = normalizedQuery
+    ? roots.filter((root) =>
+        `${root.name} ${root.path}`.toLowerCase().includes(normalizedQuery)
+      )
+    : roots
 
   useEffect(() => {
-    if (!canSwitchProjects) {
-      setOpen(false)
-      setQuery('')
-    }
-  }, [canSwitchProjects])
-
-  function selectProject(project: Project): void {
     setOpen(false)
     setQuery('')
-    openTab({ kind: 'source-control', projectId: project.id })
-    setActiveProject(project.id).catch((error) => {
-      console.error('[source-control] Failed to set active project:', error)
-    })
-  }
+  }, [project?.id])
 
-  function openAddProject(): void {
+  function selectRoot(root: ProjectRoot): void {
+    if (gitStateForRoot(root, gitStates) !== 'git') return
+    onSelect(root.id)
     setOpen(false)
     setQuery('')
-    openDialog('add-project')
   }
 
-  const headerContent = (
-    <>
-      <Lock size={14} className="shrink-0 text-[var(--pear-text-secondary)]" />
-      <span className="min-w-0 flex-1 text-left">
-        <span className="block text-[11px] font-medium leading-[14px] text-[var(--pear-text-faint)]">
-          Current Project
+  function renderRoot(root: ProjectRoot): React.ReactNode {
+    const state = gitStateForRoot(root, gitStates)
+    const selected = root.id === activeRoot?.id
+    const disabled = state !== 'git'
+
+    return (
+      <button
+        key={root.id}
+        type="button"
+        onClick={() => selectRoot(root)}
+        disabled={disabled}
+        title={disabled ? rootStatusLabel(root, state) : root.path}
+        className={`flex h-10 w-full items-center gap-2.5 px-3.5 text-left ${
+          selected && !disabled
+            ? 'bg-[var(--pear-bg-overlay)] text-[var(--pear-text)]'
+            : disabled
+              ? 'cursor-not-allowed text-[var(--pear-text-faint)] opacity-50'
+              : 'text-[var(--pear-text-secondary)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]'
+        }`}
+      >
+        {selected && !disabled ? (
+          <Check size={13} className="shrink-0 text-[var(--pear-text)]" />
+        ) : state === 'checking' ? (
+          <Loader2 size={13} className="shrink-0 animate-spin text-[var(--pear-text-faint)]" />
+        ) : (
+          <FolderGit2 size={13} className="shrink-0 text-[var(--pear-text-secondary)]" />
+        )}
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[13px] font-semibold">{root.name}</span>
+          <span className="block truncate text-[11px] font-medium text-[var(--pear-text-faint)]">
+            {rootStatusLabel(root, state)}
+          </span>
         </span>
-        <span className="block truncate text-[13px] font-semibold leading-4 text-[var(--pear-text)]">
-          {activeProject?.name || 'No project'}
-        </span>
-      </span>
-      {canSwitchProjects && (
-        open
-          ? <ChevronUp size={12} className="shrink-0 text-[var(--pear-text-secondary)]" />
-          : <ChevronDown size={12} className="shrink-0 text-[var(--pear-text-secondary)]" />
-      )}
-    </>
-  )
+      </button>
+    )
+  }
 
   return (
     <div
       className="relative h-full shrink-0 border-r border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)]"
       style={{ width }}
     >
-      {canSwitchProjects ? (
-        <button
-          type="button"
-          onClick={() => setOpen((value) => !value)}
-          className="flex h-full w-full items-center gap-2.5 px-3 text-left hover:bg-[var(--pear-bg-surface-hover)]"
-          aria-expanded={open}
-        >
-          {headerContent}
-        </button>
-      ) : (
-        <div className="flex h-full w-full items-center gap-2.5 px-3">
-          {headerContent}
-        </div>
-      )}
+      <button
+        type="button"
+        onClick={() => setOpen((value) => !value)}
+        className="flex h-full w-full items-center gap-2.5 px-3 text-left hover:bg-[var(--pear-bg-surface-hover)]"
+        aria-expanded={open}
+        aria-label="Select repository root"
+        title={activeRoot?.path}
+      >
+        <FolderGit2
+          size={14}
+          className={`shrink-0 ${
+            activeRootState === 'git'
+              ? 'text-[var(--pear-text-secondary)]'
+              : 'text-[var(--pear-text-faint)]'
+          }`}
+        />
+        <span className="min-w-0 flex-1 text-left">
+          <span className="block text-[11px] font-medium leading-[14px] text-[var(--pear-text-faint)]">
+            Repository Root
+          </span>
+          <span
+            className={`block truncate text-[13px] font-semibold leading-4 ${
+              activeRootState === 'git'
+                ? 'text-[var(--pear-text)]'
+                : 'text-[var(--pear-text-faint)]'
+            }`}
+          >
+            {activeRoot?.name || 'No root selected'}
+          </span>
+        </span>
+        {activeRootState === 'checking' ? (
+          <Loader2 size={12} className="shrink-0 animate-spin text-[var(--pear-text-secondary)]" />
+        ) : open ? (
+          <ChevronUp size={12} className="shrink-0 text-[var(--pear-text-secondary)]" />
+        ) : (
+          <ChevronDown size={12} className="shrink-0 text-[var(--pear-text-secondary)]" />
+        )}
+      </button>
 
-      {canSwitchProjects && open && (
-        <div className="absolute left-0 top-full z-50 w-full border-b border-r border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] pb-2 shadow-xl">
+      {open && (
+        <div
+          className="absolute left-0 top-full z-50 overflow-hidden bg-[var(--pear-bg)] pb-2 shadow-2xl"
+          style={{ width: Math.max(width, 420) }}
+        >
           <div className="flex items-center gap-2 px-2 py-2">
             <label className="flex h-7 min-w-0 flex-1 items-center gap-2 rounded-md border border-[var(--pear-accent-dim)] bg-[var(--pear-bg)] px-2.5 text-[12px] text-[var(--pear-text-secondary)] ring-1 ring-[var(--pear-accent-dim)]">
               <Search size={12} className="shrink-0 text-[var(--pear-text-faint)]" />
               <input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="Filter projects"
+                placeholder="Filter"
                 className="min-w-0 flex-1 border-0 bg-transparent text-[12px] text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)]"
               />
               {query && (
@@ -1165,52 +1197,26 @@ function CurrentProjectSelector({ width }: { width: number }): React.ReactNode {
                   type="button"
                   onClick={() => setQuery('')}
                   className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-[var(--pear-text-secondary)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
-                  aria-label="Clear project filter"
+                  aria-label="Clear root filter"
                 >
                   <X size={12} />
                 </button>
               )}
             </label>
-            <button
-              type="button"
-              onClick={openAddProject}
-              className="flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-[var(--pear-border)] px-2.5 text-[12px] font-semibold text-[var(--pear-text)] hover:bg-[var(--pear-bg-surface-hover)]"
-            >
-              <Plus size={12} />
-              Add
-            </button>
           </div>
 
-          <div className="max-h-[280px] overflow-y-auto">
-            {groups.length === 0 ? (
-              <div className="px-3 py-4 text-xs text-[var(--pear-text-faint)]">No projects match</div>
+          <div className="max-h-[360px] overflow-y-auto">
+            {roots.length === 0 ? (
+              <div className="px-3 py-4 text-xs text-[var(--pear-text-faint)]">No roots configured</div>
+            ) : filteredRoots.length === 0 ? (
+              <div className="px-3 py-4 text-xs text-[var(--pear-text-faint)]">No roots match</div>
             ) : (
-              groups.map((group) => (
-                <div key={group.label} className="pt-1.5 first:pt-0">
-                  <div className="px-3.5 pb-1 text-[12px] font-semibold text-[var(--pear-text-faint)]">
-                    {group.label}
-                  </div>
-                  {group.projects.map((project) => {
-                    const active = project.id === activeProjectId
-                    return (
-                      <button
-                        key={project.id}
-                        type="button"
-                        onClick={() => selectProject(project)}
-                        className={`flex h-8 w-full items-center gap-2.5 px-3.5 text-left text-[13px] font-semibold ${
-                          active
-                            ? 'bg-[var(--pear-bg-overlay)] text-[var(--pear-text)]'
-                            : 'text-[var(--pear-text-secondary)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]'
-                        }`}
-                      >
-                        <Lock size={13} className="shrink-0 text-[var(--pear-text-secondary)]" />
-                        <span className="min-w-0 flex-1 truncate">{project.name}</span>
-                        {active && <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[var(--pear-accent)]" />}
-                      </button>
-                    )
-                  })}
+              <div className="pb-1.5">
+                <div className="px-3.5 pb-1 pt-2 text-[12px] font-semibold text-[var(--pear-text-faint)]">
+                  Project Roots
                 </div>
-              ))
+                {filteredRoots.map(renderRoot)}
+              </div>
             )}
           </div>
         </div>
@@ -1218,9 +1224,6 @@ function CurrentProjectSelector({ width }: { width: number }): React.ReactNode {
     </div>
   )
 }
-
-type BranchSwitchMode = 'stash' | 'carry'
-type BranchSelectorTab = 'branches' | 'worktrees'
 
 function branchDisplayName(branch: GitBranchInfo): string {
   return branch.remote ? branch.name.replace(/^[^/]+\//, '') : branch.name
@@ -1754,6 +1757,7 @@ export function DiffPane(): React.ReactNode {
   const [branchSyncLoading, setBranchSyncLoading] = useState(false)
   const [branchSyncError, setBranchSyncError] = useState<string | null>(null)
   const [lastFetchedByRoot, setLastFetchedByRoot] = useState<Record<string, number>>({})
+  const [rootGitStates, setRootGitStates] = useState<Record<string, RootGitState>>({})
   const [authUser, setAuthUser] = useState<AuthUser | null>(null)
   const [fileContextMenu, setFileContextMenu] = useState<FileContextMenuState | null>(null)
   const [fileRowSelection, setFileRowSelection] = useState<Set<string>>(new Set())
@@ -1763,8 +1767,10 @@ export function DiffPane(): React.ReactNode {
   const historyCommitListRef = useRef<HTMLDivElement>(null)
   const historyFilesListRef = useRef<HTMLDivElement>(null)
   const windowFocused = useWindowFocused()
+  const activeProject = useProjectStore((s) => s.getActiveProject())
   const root = useProjectStore((s) => s.getActiveRoot())
   const activeProjectId = useProjectStore((s) => s.activeProjectId)
+  const setActiveRoot = useProjectStore((s) => s.setActiveRoot)
   const agents = useAgentStore((s) => s.agents)
   const files = useGitStore((s) => s.files)
   const diff = useGitStore((s) => s.diff)
@@ -1786,6 +1792,60 @@ export function DiffPane(): React.ReactNode {
   const fetchSummary = useGitStore((s) => s.fetchSummary)
   const fetchHistory = useGitStore((s) => s.fetchHistory)
   const selectedFileEntry = files.find((file) => file.path === selectedFile)
+  const activeRootGitState = root ? gitStateForRoot(root, rootGitStates) : 'not-git'
+  const hasActiveGitRoot = !!root?.pathExists && activeRootGitState === 'git'
+  const rootProbeKey = useMemo(
+    () => activeProject?.roots
+      .map((projectRoot) => `${projectRoot.id}:${projectRoot.path}:${projectRoot.pathExists ? '1' : '0'}`)
+      .join('\n') || '',
+    [activeProject?.roots]
+  )
+
+  useEffect(() => {
+    const roots = activeProject?.roots || []
+    if (roots.length === 0) {
+      setRootGitStates({})
+      return
+    }
+
+    let cancelled = false
+    const initialStates: Record<string, RootGitState> = {}
+    roots.forEach((projectRoot) => {
+      initialStates[projectRoot.id] = projectRoot.pathExists ? 'checking' : 'not-git'
+    })
+    setRootGitStates(initialStates)
+
+    roots.forEach((projectRoot) => {
+      if (!projectRoot.pathExists) return
+
+      pear.git.summary(projectRoot.path)
+        .then((summary) => {
+          if (cancelled) return
+          setRootGitStates((current) => ({
+            ...current,
+            [projectRoot.id]: summary ? 'git' : 'not-git'
+          }))
+        })
+        .catch(() => {
+          if (cancelled) return
+          setRootGitStates((current) => ({ ...current, [projectRoot.id]: 'not-git' }))
+        })
+    })
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeProject?.id, rootProbeKey])
+
+  useEffect(() => {
+    if (!activeProject || activeProject.roots.length === 0) return
+    if (root?.pathExists && activeRootGitState !== 'not-git') return
+
+    const firstGitRoot = activeProject.roots.find((projectRoot) => rootGitStates[projectRoot.id] === 'git')
+    if (firstGitRoot && firstGitRoot.id !== root?.id) {
+      setActiveRoot(firstGitRoot.id)
+    }
+  }, [activeProject, activeRootGitState, root?.id, root?.pathExists, rootGitStates, setActiveRoot])
 
   const filteredFiles = useMemo(() => {
     const query = filter.trim().toLowerCase()
@@ -2009,7 +2069,7 @@ export function DiffPane(): React.ReactNode {
   }, [fileContextMenu])
 
   useEffect(() => {
-    if (activeTab !== 'changes' || !root?.pathExists) return
+    if (activeTab !== 'changes' || !root || !hasActiveGitRoot) return
 
     const firstFile = files[0]?.path || null
     const selectedFileStillExists = !!selectedFile && files.some((file) => file.path === selectedFile)
@@ -2022,26 +2082,26 @@ export function DiffPane(): React.ReactNode {
     if (!selectedFileStillExists) {
       selectFile(firstFile, root.path)
     }
-  }, [activeTab, files, root?.path, root?.pathExists, selectFile, selectedFile])
+  }, [activeTab, files, hasActiveGitRoot, root, selectFile, selectedFile])
 
   useEffect(() => {
-    if (activeTab !== 'changes' || !root?.pathExists) return
+    if (activeTab !== 'changes' || !hasActiveGitRoot) return
 
     window.requestAnimationFrame(() => {
       changedFilesListRef.current?.focus({ preventScroll: true })
     })
-  }, [activeTab, root?.path, root?.pathExists])
+  }, [activeTab, hasActiveGitRoot, root?.path])
 
   useEffect(() => {
-    if (activeTab !== 'history' || !root?.pathExists) return
+    if (activeTab !== 'history' || !hasActiveGitRoot) return
 
     window.requestAnimationFrame(() => {
       historyCommitListRef.current?.focus({ preventScroll: true })
     })
-  }, [activeTab, root?.path, root?.pathExists])
+  }, [activeTab, hasActiveGitRoot, root?.path])
 
   useEffect(() => {
-    if (!root?.pathExists || !selectedFileEntry || loading || diff.trim()) {
+    if (!root || !hasActiveGitRoot || !selectedFileEntry || loading || diff.trim()) {
       setEmptyFileProbe(null)
       return
     }
@@ -2070,7 +2130,7 @@ export function DiffPane(): React.ReactNode {
     return () => {
       cancelled = true
     }
-  }, [diff, loading, root?.path, root?.pathExists, selectedFileEntry?.path])
+  }, [diff, hasActiveGitRoot, loading, root, selectedFileEntry?.path])
 
   useEffect(() => {
     if (activeTab !== 'changes') return
@@ -2088,13 +2148,14 @@ export function DiffPane(): React.ReactNode {
   }, [activeTab, selectedCommitFile, selectedCommitFilePaths])
 
   useEffect(() => {
-    if (activeTab !== 'history' || !root?.pathExists) return
+    if (activeTab !== 'history' || !root || !hasActiveGitRoot) return
     void fetchHistory(root.path)
-  }, [activeTab, fetchHistory, root?.path, root?.pathExists])
+  }, [activeTab, fetchHistory, hasActiveGitRoot, root])
 
   useEffect(() => {
-    if (!root?.pathExists) {
+    if (!root || !hasActiveGitRoot) {
       setBranchSyncStatus(null)
+      setBranchStatusLoading(false)
       return
     }
 
@@ -2118,12 +2179,37 @@ export function DiffPane(): React.ReactNode {
     return () => {
       cancelled = true
     }
-  }, [root?.path, root?.pathExists, summary?.branch])
+  }, [hasActiveGitRoot, root, summary?.branch])
 
-  if (!root?.pathExists) {
+  if (!root || !root.pathExists || activeRootGitState !== 'git') {
+    const rootMessage = !root
+      ? 'Select a project root to see changes.'
+      : !root.pathExists
+        ? 'Select an available project root to see changes.'
+        : activeRootGitState === 'checking'
+          ? 'Checking this root for git.'
+          : 'Select a git repository root to see changes.'
+
     return (
-      <div className="flex h-full items-center justify-center bg-[var(--pear-bg)] px-8">
-        <p className="text-[13px] text-[var(--pear-text-faint)]">Select an available project root to see changes.</p>
+      <div className="flex h-full min-h-0 flex-col bg-[var(--pear-bg)]">
+        <div
+          className="relative z-30 flex shrink-0 border-b border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)]"
+          style={{ height: SOURCE_HEADER_HEIGHT }}
+        >
+          <CurrentRootSelector
+            project={activeProject}
+            activeRoot={root}
+            gitStates={rootGitStates}
+            width={leftSidebarWidth}
+            onSelect={setActiveRoot}
+          />
+          <div className="flex min-w-0 flex-1 items-center px-4 text-[13px] font-medium text-[var(--pear-text-faint)]">
+            {rootMessage}
+          </div>
+        </div>
+        <div className="flex flex-1 items-center justify-center px-8">
+          <p className="text-[13px] text-[var(--pear-text-faint)]">{rootMessage}</p>
+        </div>
       </div>
     )
   }
@@ -2599,7 +2685,13 @@ export function DiffPane(): React.ReactNode {
         className="relative z-30 flex shrink-0 border-b border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)]"
         style={{ height: SOURCE_HEADER_HEIGHT }}
       >
-        <CurrentProjectSelector width={leftSidebarWidth} />
+        <CurrentRootSelector
+          project={activeProject}
+          activeRoot={root}
+          gitStates={rootGitStates}
+          width={leftSidebarWidth}
+          onSelect={setActiveRoot}
+        />
         <CurrentBranchSelector
           rootPath={root.path}
           currentBranch={branchSyncStatus?.branch || summary?.branch || 'detached'}
