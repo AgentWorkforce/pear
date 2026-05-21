@@ -6,12 +6,15 @@
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
+    "prebuild": "node scripts/sync-runtime-types.mjs",
     "build": "electron-vite build",
-    "preview": "electron-vite preview"
+    "preview": "electron-vite preview",
+    "sync:runtime-types": "node scripts/sync-runtime-types.mjs"
   },
   "dependencies": {
     "@agent-relay/sdk": "^6.3.1",
     "@agentworkforce/deploy": "^3.0.15",
+    "@monaco-editor/react": "^4.7.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
