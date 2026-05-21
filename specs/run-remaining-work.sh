@@ -17,14 +17,26 @@
 # the PR as the spec instructs.
 #
 # Usage:
-#   ./specs/run-remaining-work.sh              # run all specs in dependency order
-#   ./specs/run-remaining-work.sh 04           # run only this spec (by NN prefix)
-#   DRY_RUN=1 ./specs/run-remaining-work.sh    # just print the ricky commands
+#   ./specs/run-remaining-work.sh                # run every spec in dependency order
+#   ./specs/run-remaining-work.sh --from 01      # RESUME: start at this NN and run the rest
+#   ./specs/run-remaining-work.sh --only 04      # run only this spec
+#   ./specs/run-remaining-work.sh 04             # back-compat: same as --only 04
+#   DRY_RUN=1 ./specs/run-remaining-work.sh ...  # print the ricky commands without executing
+#
+# Examples:
+#   # Paused mid-01? Resume from 01 onward (skips 05 + 04 which already ran):
+#   ./specs/run-remaining-work.sh --from 01
+#
+#   # Just re-run the one spec that failed:
+#   ./specs/run-remaining-work.sh --only 02
+#
+# Stops on the first failure and prints the exact command to resume from there.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-ONLY="${1:-}"
+FROM=""
+ONLY=""
 DRY_RUN="${DRY_RUN:-0}"
 
 # Dependency order, not numeric order.
@@ -36,6 +48,46 @@ ORDER=(
   "03-proactive-agents.md"
 )
 
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --from)
+      FROM="${2:-}"
+      [[ -z "$FROM" ]] && { echo "error: --from needs an NN prefix (e.g. 01)" >&2; exit 2; }
+      shift 2
+      ;;
+    --from=*)
+      FROM="${1#*=}"
+      shift
+      ;;
+    --only)
+      ONLY="${2:-}"
+      [[ -z "$ONLY" ]] && { echo "error: --only needs an NN prefix (e.g. 04)" >&2; exit 2; }
+      shift 2
+      ;;
+    --only=*)
+      ONLY="${1#*=}"
+      shift
+      ;;
+    -h|--help)
+      sed -n '2,33p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+      exit 0
+      ;;
+    --*)
+      echo "error: unknown flag $1" >&2; exit 2
+      ;;
+    *)
+      # Back-compat: a bare positional NN means --only NN.
+      ONLY="$1"
+      shift
+      ;;
+  esac
+done
+
+if [[ -n "$FROM" && -n "$ONLY" ]]; then
+  echo "error: pass --from OR --only, not both" >&2
+  exit 2
+fi
+
 if ! command -v ricky >/dev/null 2>&1; then
   echo "error: 'ricky' is not on PATH. Install it (npm i -g @agentworkforce/ricky) or run from a shell that has it." >&2
   exit 127
@@ -43,15 +95,29 @@ fi
 
 total=${#ORDER[@]}
 idx=0
+seen_from=0
 
-echo "==> Running $total specs (remaining work) in dependency order: 05 → 04 → 01 → 02 → 03"
+[[ -n "$FROM" ]] && echo "==> Resuming from $FROM onward (dependency order: 05 → 04 → 01 → 02 → 03)"
+[[ -n "$ONLY" ]] && echo "==> Running only $ONLY"
+[[ -z "$FROM$ONLY" ]] && echo "==> Running $total specs in dependency order: 05 → 04 → 01 → 02 → 03"
+
 for name in "${ORDER[@]}"; do
   idx=$((idx + 1))
   spec="$SCRIPT_DIR/$name"
 
-  if [[ -n "$ONLY" && "$name" != "$ONLY"* ]]; then
-    echo "  - skip [$idx/$total] $name (only running $ONLY)"
-    continue
+  if [[ -n "$ONLY" ]]; then
+    if [[ "$name" != "$ONLY"* ]]; then
+      echo "  - skip [$idx/$total] $name (only running $ONLY)"
+      continue
+    fi
+  elif [[ -n "$FROM" ]]; then
+    if [[ "$seen_from" -eq 0 ]]; then
+      if [[ "$name" != "$FROM"* ]]; then
+        echo "  - skip [$idx/$total] $name (resuming from $FROM)"
+        continue
+      fi
+      seen_from=1
+    fi
   fi
 
   if [[ ! -f "$spec" ]]; then
@@ -74,11 +140,16 @@ for name in "${ORDER[@]}"; do
     rc=$?
     echo
     echo "==> FAILED on $name (exit $rc)"
-    echo "    Fix the underlying issue, then resume with:"
-    echo "      $0 ${name%%-*}"
+    echo "    Fix the underlying issue, then resume from this spec with:"
+    echo "      $0 --from ${name%%-*}"
     exit "$rc"
   fi
 done
+
+if [[ -n "$FROM" && "$seen_from" -eq 0 ]]; then
+  echo "==> warning: --from $FROM matched no spec in the order; nothing ran." >&2
+  exit 2
+fi
 
 echo
 echo "==> Done. Verify each spec's PR is open (one per touched repo)."
