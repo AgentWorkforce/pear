@@ -1040,7 +1040,7 @@ export function BrokerDetailsPage(): React.ReactNode {
       setBrokerDetails(details)
       syncBrokerDetailsStatus(details)
       setDetailsError(
-        'Agent Relay status API is not loaded in this window. Restart Pear for full diagnostics and connection metadata.'
+        'Agent Relay status API is not loaded in this window. Restart Pear by Agent Relay for full diagnostics and connection metadata.'
       )
     } catch (err) {
       setDetailsError(err instanceof Error ? err.message : String(err))

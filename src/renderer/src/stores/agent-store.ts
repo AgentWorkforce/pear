@@ -502,6 +502,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           lastActivityAtMs: lastActivityAtMs ?? agent.lastActivityAtMs,
           typingUntilMs,
           channels,
+          parent: liveAgent.parent || agent.parent,
           terminalMode: terminalMode || agent.terminalMode
         }
       })
@@ -526,6 +527,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           typingUntilMs,
           projectId: liveAgent.projectId,
           channels,
+          parent: liveAgent.parent,
           terminalMode: terminalModeFromInboundDeliveryMode(liveAgent.inboundDeliveryMode) || 'passthrough',
           ptyBuffer: [],
           pendingDeliveryIds: []

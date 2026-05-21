@@ -1,7 +1,8 @@
 import type React from 'react'
 import { useEffect, useState } from 'react'
-import { ChevronLeft, ChevronRight, Columns2, PanelTop, X, Plus } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Columns2, Network, PanelTop, X } from 'lucide-react'
 import { AgentHarnessIcon, ClaudeIcon, CodexIcon } from '@/components/common/AgentIcons'
+import { GraphView } from '@/components/graph/GraphView'
 import { spawnProjectAgent, type SpawnAgentCli } from '@/lib/spawn-agent'
 import { pear, type TerminalAttachMode } from '@/lib/ipc'
 import { getAgentKeyForAgent, isAgentTyping, type Agent, useAgentStore } from '@/stores/agent-store'
@@ -214,6 +215,7 @@ export function TerminalPane(): React.ReactNode {
   const [spawningCli, setSpawningCli] = useState<SpawnAgentCli | null>(null)
   const [spawnError, setSpawnError] = useState<string | null>(null)
   const [splitPage, setSplitPage] = useState(0)
+  const graphEnabled = terminalLayout === 'graph'
   const splitEnabled = terminalLayout === 'horizontal-split' && agents.length > 1
   const splitPages = splitEnabled ? chunkAgents(agents) : []
   const splitPageCount = splitPages.length
@@ -223,6 +225,7 @@ export function TerminalPane(): React.ReactNode {
     : agents.length > 1
       ? 'Show split terminal pages'
       : 'Start another agent to split terminals'
+  const graphButtonTitle = graphEnabled ? 'Show terminal tabs' : 'Show agent graph'
 
   const handleSpawn = async (cli: SpawnAgentCli): Promise<void> => {
     if (!activeProject) {
@@ -354,15 +357,6 @@ export function TerminalPane(): React.ReactNode {
     <div className="flex h-full flex-col bg-[var(--pear-bg)]">
       {/* Tab bar */}
       <div className="flex shrink-0 items-center gap-0 border-b border-[var(--pear-bg-surface)] bg-[var(--pear-bg-raised)] px-1.5 py-1">
-        <button
-          type="button"
-          onClick={() => openDialog('spawn-agent')}
-          className="mr-1 flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-[#0b84ff] text-white shadow-sm transition-colors hover:bg-[#2994ff] active:bg-[#006ed6]"
-          title="Spawn agent"
-          aria-label="Spawn agent"
-        >
-          <Plus size={16} strokeWidth={2.6} />
-        </button>
         <div className="flex flex-1 overflow-x-auto">
           {splitEnabled ? (
             splitPages.map((pageAgents, pageIndex) => {
@@ -475,6 +469,20 @@ export function TerminalPane(): React.ReactNode {
         >
           {splitEnabled ? <PanelTop size={14} /> : <Columns2 size={14} />}
         </button>
+        <button
+          type="button"
+          onClick={() => setTerminalLayout(graphEnabled ? 'tabs' : 'graph')}
+          aria-pressed={graphEnabled}
+          className={`rounded-xl px-3 py-2 transition-colors ${
+            graphEnabled
+              ? 'bg-[var(--pear-bg)] text-[var(--pear-text)] shadow-sm'
+              : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]'
+          }`}
+          title={graphButtonTitle}
+          aria-label={graphButtonTitle}
+        >
+          <Network size={14} />
+        </button>
       </div>
       {spawnError && (
         <div className="shrink-0 border-b border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 px-3 py-2 text-xs text-[var(--pear-red)]">
@@ -483,7 +491,11 @@ export function TerminalPane(): React.ReactNode {
       )}
 
       {/* Terminal instances stay mounted in tabbed mode to preserve scroll. */}
-      {splitEnabled ? (
+      {graphEnabled ? (
+        <div className="min-h-0 flex-1 overflow-hidden bg-[var(--pear-bg)]">
+          <GraphView />
+        </div>
+      ) : splitEnabled ? (
         <div className="relative min-h-0 flex-1 overflow-hidden bg-[var(--pear-bg)]">
           {splitPages.map((pageAgents, pageIndex) => {
             const visible = pageIndex === splitPage

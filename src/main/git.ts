@@ -487,7 +487,7 @@ export async function checkoutBranch(
 
   if (options.stashChanges && (await getStatus(path)).length > 0) {
     const currentBranch = await getBranchName(path)
-    await git(['stash', 'push', '-u', '-m', `Pear: changes on ${currentBranch} before switching to ${branchName}`], path)
+    await git(['stash', 'push', '-u', '-m', `Pear by Agent Relay: changes on ${currentBranch} before switching to ${branchName}`], path)
   }
 
   if (remotePrefix && branchName.startsWith(remotePrefix)) {

@@ -9,7 +9,7 @@ import {
 export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'broker-details' | 'source-control'
 export type DialogType = 'add-project' | 'spawn-agent' | 'add-channel' | 'command-menu' | null
 const ThemeSchema = z.enum(['dark', 'light'])
-const TerminalLayoutSchema = z.enum(['tabs', 'horizontal-split'])
+const TerminalLayoutSchema = z.enum(['tabs', 'horizontal-split', 'graph'])
 export type Theme = z.infer<typeof ThemeSchema>
 export type TerminalLayout = z.infer<typeof TerminalLayoutSchema>
 export type AppTabKind = 'agents' | 'channel' | 'dm' | 'project-settings' | 'broker-details' | 'source-control'
@@ -338,7 +338,12 @@ export const useUIStore = create<UIState>((set, get) => ({
     set({ terminalLayout: layout })
   },
   toggleTerminalLayout: () => {
-    const next = get().terminalLayout === 'horizontal-split' ? 'tabs' : 'horizontal-split'
+    const current = get().terminalLayout
+    const next = current === 'tabs'
+      ? 'horizontal-split'
+      : current === 'horizontal-split'
+        ? 'graph'
+        : 'tabs'
     localStorage.setItem('pear-terminal-layout', next)
     set({ terminalLayout: next })
   }
