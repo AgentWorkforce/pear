@@ -729,9 +729,16 @@ export class CloudAgentManager {
 
     const auth = await this.requireCloudAuth()
     const workspaceId = await this.requireAccountWorkspaceId()
+    // RelayfileSetup's accessToken callback is invoked repeatedly across the
+    // mount's lifetime so it can pick up refreshed tokens. Resolve fresh auth
+    // each call — using the captured `auth.accessToken` value here would lock
+    // the mount to the original token and break silently when it expires.
     const setup = new RelayfileSetup({
       cloudApiUrl: auth.apiUrl,
-      accessToken: () => auth.accessToken
+      accessToken: async () => {
+        const fresh = await resolveCloudAuth()
+        return fresh?.accessToken ?? auth.accessToken
+      }
     })
     const launcher = this.createConflictPolicyLauncher(projectId, policy)
     const mountInput = {

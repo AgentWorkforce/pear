@@ -37,6 +37,13 @@ export function CloudAgentDialog(): React.ReactNode {
     closeDialog()
   }
 
+  // Stable identities for the props CloudAgentPicker / CloudAuthRequired use in
+  // useEffect dependency arrays — inline arrow functions here would create a
+  // new reference on every render and refire those effects (e.g. re-fetching
+  // the agent list on every parent store change).
+  const handleAuthenticated = useCallback(() => setState('picker'), [])
+  const handleAuthRequired = useCallback(() => setState('auth-required'), [])
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onClick={closeDialog}>
       <div
@@ -89,7 +96,7 @@ export function CloudAgentDialog(): React.ReactNode {
             </div>
           ) : state === 'auth-required' ? (
             <CloudAuthRequired
-              onAuthenticated={() => setState('picker')}
+              onAuthenticated={handleAuthenticated}
               onCancel={closeDialog}
             />
           ) : (
@@ -97,7 +104,7 @@ export function CloudAgentDialog(): React.ReactNode {
               projectId={project.id}
               onAttach={handleAttached}
               onCancel={closeDialog}
-              onAuthRequired={() => setState('auth-required')}
+              onAuthRequired={handleAuthRequired}
             />
           )}
         </div>

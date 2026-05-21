@@ -31,7 +31,11 @@ function getErrorCode(error: unknown): string | undefined {
 function isAuthRequiredError(error: unknown): boolean {
   const code = getErrorCode(error)
   if (code === 'AUTH_REQUIRED') return true
-  return /auth|required|sign in|login/i.test(getErrorMessage(error))
+  // Match only explicit auth-required signals — not the generic "required" /
+  // "auth*" substrings, which also occur in "Cloud agent name is required",
+  // "authorization scope insufficient", etc., and would misroute the user to
+  // the sign-in flow instead of showing the real error.
+  return /cloud-auth-required|sign in to|login required|not logged in/i.test(getErrorMessage(error))
 }
 
 function formatRelativeTime(value: string | undefined): string {
