@@ -175,10 +175,6 @@ export function registerIpcHandlers(): void {
     return brokerManager.connectCloud('cloud', win)
   })
 
-  ipcMain.handle('broker:send-input', async (_, projectId: string | undefined, name: string, data: string) => {
-    await brokerManager.sendInput(projectId, name, data)
-  })
-
   ipcMain.on('broker:send-input-fast', (_, projectId: string | undefined, name: string, data: string) => {
     brokerManager.queueInput(projectId, name, data)
   })

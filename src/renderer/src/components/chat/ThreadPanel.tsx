@@ -4,6 +4,7 @@ import { X } from 'lucide-react'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
 import type { AuthUser } from '@/lib/ipc'
 import { renderChatMessageBody } from '@/lib/chat-formatting'
+import { formatClockTime } from '@/lib/format'
 import { useAgentStore } from '@/stores/agent-store'
 import type {
   ChatMessage as ChatMessageType,
@@ -19,10 +20,6 @@ interface ThreadPanelProps {
   authUser?: AuthUser | null
   onClose: () => void
   onReply: (messageId: string, body: string) => void
-}
-
-function formatTime(timestamp: number): string {
-  return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }
 
 function ReplyAvatar({
@@ -71,7 +68,7 @@ function ThreadReplyRow({
           <span className="text-sm font-medium text-[var(--pear-accent-bright)]">
             {reply.isHuman ? 'You' : reply.from}
           </span>
-          <span className="text-[10px] text-[var(--pear-text-faint)]">{formatTime(reply.timestamp)}</span>
+          <span className="text-[10px] text-[var(--pear-text-faint)]">{formatClockTime(reply.timestamp)}</span>
         </div>
         <div className="mt-0.5 space-y-1 break-words text-sm leading-5 text-[var(--pear-text)]">
           {renderChatMessageBody(reply.body)}

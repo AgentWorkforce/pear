@@ -4,26 +4,15 @@ import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs'
 import { join } from 'path'
 import { URL } from 'url'
 import { cacheAvatarFromUrl, cachedAvatarUrl, isRemoteAvatarUrl } from './avatar-cache'
+import {
+  AuthMetaSchema,
+  StoredTokensSchema,
+  UserInfoSchema,
+  type StoredTokens,
+  type UserInfo
+} from './schemas'
 
 const CLOUD_API_URL = process.env.RELAY_CLOUD_URL || 'https://agentrelay.dev/cloud'
-
-interface StoredTokens {
-  accessToken: string
-  refreshToken: string
-  apiUrl: string
-  expiresAt?: string
-  user?: UserInfo
-}
-
-interface UserInfo {
-  name?: string
-  email?: string
-  githubUsername?: string
-  avatarUrl?: string
-  cachedAvatarUrl?: string
-  organizationName?: string
-  projectName?: string
-}
 
 interface AuthStatus {
   loggedIn: boolean
@@ -53,46 +42,9 @@ function hasStoredTokens(): boolean {
   }
 }
 
-function normalizeUserInfo(value: unknown): UserInfo | undefined {
-  if (!isRecord(value)) return undefined
-
-  const record = value
-  const githubRecord = firstObject(record, [
-    'github',
-    'githubUser',
-    'github_user',
-    'githubProfile',
-    'github_profile',
-    'githubAccount',
-    'github_account'
-  ])
-  const user: UserInfo = {}
-  const githubUsername =
-    firstString(record, ['githubUsername', 'github_username', 'githubLogin', 'github_login']) ||
-    firstString(githubRecord, ['githubUsername', 'github_username', 'username', 'login']) ||
-    firstString(record, ['username', 'login'])
-  const avatarUrl =
-    firstString(record, ['githubAvatarUrl', 'github_avatar_url']) ||
-    firstString(githubRecord, ['avatarUrl', 'avatar_url', 'avatar', 'picture', 'image']) ||
-    firstString(record, ['avatarUrl', 'avatar_url', 'avatar', 'picture', 'image'])
-  const cachedAvatarUrl = firstString(record, ['cachedAvatarUrl', 'cached_avatar_url'])
-
-  const name = firstString(record, ['name', 'displayName', 'display_name'])
-  const email = firstString(record, ['email'])
-  const organizationName = firstString(record, ['organizationName', 'organization_name'])
-  const projectName = firstString(record, ['projectName', 'project_name'])
-
-  if (name) user.name = name
-  if (email) user.email = email
-  if (githubUsername) user.githubUsername = githubUsername
-  if (avatarUrl) user.avatarUrl = avatarUrl
-  if (cachedAvatarUrl) user.cachedAvatarUrl = cachedAvatarUrl
-  if (organizationName) user.organizationName = organizationName
-  if (projectName) user.projectName = projectName
-
-  return Object.keys(user).length > 0 ? user : undefined
-}
-
+// The cloud API has historically returned the same logical field under several keys
+// (camelCase vs snake_case, sometimes nested inside a `github` block). We tolerate
+// all variants when normalizing, then validate the final shape with UserInfoSchema.
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
@@ -113,6 +65,48 @@ function firstObject(record: Record<string, unknown> | undefined, keys: string[]
     if (isRecord(value)) return value
   }
   return undefined
+}
+
+const GITHUB_OBJECT_KEYS = [
+  'github',
+  'githubUser',
+  'github_user',
+  'githubProfile',
+  'github_profile',
+  'githubAccount',
+  'github_account'
+]
+
+function normalizeUserInfo(value: unknown): UserInfo | undefined {
+  if (!isRecord(value)) return undefined
+
+  const githubRecord = firstObject(value, GITHUB_OBJECT_KEYS)
+  const candidate = {
+    name: firstString(value, ['name', 'displayName', 'display_name']),
+    email: firstString(value, ['email']),
+    githubUsername:
+      firstString(value, ['githubUsername', 'github_username', 'githubLogin', 'github_login']) ||
+      firstString(githubRecord, ['githubUsername', 'github_username', 'username', 'login']) ||
+      firstString(value, ['username', 'login']),
+    avatarUrl:
+      firstString(value, ['githubAvatarUrl', 'github_avatar_url']) ||
+      firstString(githubRecord, ['avatarUrl', 'avatar_url', 'avatar', 'picture', 'image']) ||
+      firstString(value, ['avatarUrl', 'avatar_url', 'avatar', 'picture', 'image']),
+    cachedAvatarUrl: firstString(value, ['cachedAvatarUrl', 'cached_avatar_url']),
+    organizationName: firstString(value, ['organizationName', 'organization_name']),
+    projectName: firstString(value, ['projectName', 'project_name'])
+  }
+
+  const parsed = UserInfoSchema.parse(candidate)
+  // Zod preserves keys with `undefined` values from the input, so we strip
+  // them before returning. Without this, an empty whoami payload would shadow
+  // previously cached fields during `mergeUserInfo` (e.g. clearing the cached
+  // avatar URL on every refresh).
+  const user: UserInfo = {}
+  for (const [key, value] of Object.entries(parsed) as Array<[keyof UserInfo, string | undefined]>) {
+    if (value !== undefined) user[key] = value
+  }
+  return Object.keys(user).length > 0 ? user : undefined
 }
 
 function mergeUserInfo(previous: UserInfo | undefined, next: UserInfo | undefined): UserInfo | undefined {
@@ -140,10 +134,11 @@ function saveAuthMeta(tokens: Pick<StoredTokens, 'apiUrl' | 'user'>): void {
 
 function loadAuthMeta(): Pick<AuthStatus, 'apiUrl' | 'user'> {
   try {
-    const record = JSON.parse(readFileSync(getAuthMetaPath(), 'utf8')) as Record<string, unknown>
+    const parsed = AuthMetaSchema.safeParse(JSON.parse(readFileSync(getAuthMetaPath(), 'utf8')))
+    if (!parsed.success) return { apiUrl: CLOUD_API_URL }
     return {
-      apiUrl: typeof record.apiUrl === 'string' ? record.apiUrl : CLOUD_API_URL,
-      user: normalizeUserInfo(record.user)
+      apiUrl: parsed.data.apiUrl?.trim() || CLOUD_API_URL,
+      user: parsed.data.user
     }
   } catch {
     return { apiUrl: CLOUD_API_URL }
@@ -197,9 +192,10 @@ function loadTokens(): StoredTokens | null {
   try {
     const raw = readFileSync(getAuthPath())
     const decrypted = safeStorage.decryptString(raw)
-    const tokens = JSON.parse(decrypted) as StoredTokens
-    saveAuthMeta(tokens)
-    return tokens
+    const parsed = StoredTokensSchema.safeParse(JSON.parse(decrypted))
+    if (!parsed.success) return null
+    saveAuthMeta(parsed.data)
+    return parsed.data
   } catch {
     return null
   }
@@ -224,14 +220,13 @@ async function fetchWhoami(apiUrl: string, accessToken: string): Promise<UserInf
       signal: controller.signal
     })
     if (!res.ok) return undefined
-    const data = await res.json() as unknown
+    const data: unknown = await res.json()
     const record = isRecord(data) ? data : {}
     const userRecord = firstObject(record, ['user']) || record
     const organizationRecord = firstObject(record, ['organization', 'org'])
     const projectRecord = firstObject(record, ['project'])
     const githubRecord =
-      firstObject(record, ['github', 'githubUser', 'github_user', 'githubProfile', 'github_profile', 'githubAccount', 'github_account']) ||
-      firstObject(userRecord, ['github', 'githubUser', 'github_user', 'githubProfile', 'github_profile', 'githubAccount', 'github_account'])
+      firstObject(record, GITHUB_OBJECT_KEYS) || firstObject(userRecord, GITHUB_OBJECT_KEYS)
 
     return normalizeUserInfo({
       ...userRecord,

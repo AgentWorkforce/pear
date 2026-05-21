@@ -3,16 +3,12 @@ import {
   pear,
   type GitCommitDraft,
   type GitCommitSelectionInput,
+  type GitFileStatus,
   type GitHistoryCommit,
   type GitSummary as IpcGitSummary
 } from '@/lib/ipc'
 
-export interface FileStatus {
-  path: string
-  oldPath?: string
-  status: 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked'
-  staged: boolean
-}
+export type FileStatus = GitFileStatus
 
 export interface ProjectFileStatus extends FileStatus {
   rootPath: string
@@ -129,7 +125,7 @@ export const useGitStore = create<GitState>((set, get) => ({
 
   fetchStatus: async (path) => {
     try {
-      const files = (await pear.git.status(path)) as FileStatus[]
+      const files = await pear.git.status(path)
       if (!sameFileStatuses(get().files, files)) set({ files })
     } catch {
       if (get().files.length > 0) set({ files: [] })

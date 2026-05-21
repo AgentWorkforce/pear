@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { z } from 'zod'
 import {
   getDirectMessageRoomId,
   getDirectMessageRoomTitle,
@@ -7,8 +8,10 @@ import {
 
 export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'broker-details' | 'source-control'
 export type DialogType = 'add-project' | 'spawn-agent' | 'add-channel' | 'command-menu' | null
-export type Theme = 'dark' | 'light'
-export type TerminalLayout = 'tabs' | 'horizontal-split'
+const ThemeSchema = z.enum(['dark', 'light'])
+const TerminalLayoutSchema = z.enum(['tabs', 'horizontal-split'])
+export type Theme = z.infer<typeof ThemeSchema>
+export type TerminalLayout = z.infer<typeof TerminalLayoutSchema>
 export type AppTabKind = 'agents' | 'channel' | 'dm' | 'project-settings' | 'broker-details' | 'source-control'
 
 export interface AppTab {
@@ -61,18 +64,14 @@ function applyTheme(theme: Theme): void {
   localStorage.setItem('pear-theme', theme)
 }
 
-const savedTheme = (typeof localStorage !== 'undefined'
-  ? localStorage.getItem('pear-theme')
-  : null) as Theme | null
+function readStored<T>(key: string, schema: z.ZodType<T>, fallback: T): T {
+  if (typeof localStorage === 'undefined') return fallback
+  const parsed = schema.safeParse(localStorage.getItem(key))
+  return parsed.success ? parsed.data : fallback
+}
 
-const initialTheme: Theme = savedTheme || 'dark'
-
-const savedTerminalLayout = (typeof localStorage !== 'undefined'
-  ? localStorage.getItem('pear-terminal-layout')
-  : null) as TerminalLayout | null
-
-const initialTerminalLayout: TerminalLayout =
-  savedTerminalLayout === 'tabs' ? savedTerminalLayout : 'horizontal-split'
+const initialTheme = readStored('pear-theme', ThemeSchema, 'dark')
+const initialTerminalLayout = readStored('pear-terminal-layout', TerminalLayoutSchema, 'horizontal-split')
 
 // Apply on load
 if (typeof document !== 'undefined') {

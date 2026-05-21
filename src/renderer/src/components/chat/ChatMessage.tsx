@@ -4,6 +4,7 @@ import { MessageCircle, SmilePlus } from 'lucide-react'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
 import type { AuthUser } from '@/lib/ipc'
 import { renderChatMessageBody } from '@/lib/chat-formatting'
+import { formatClockTime, formatRelativeShort } from '@/lib/format'
 import { useAgentStore } from '@/stores/agent-store'
 import type {
   ChatMessage as ChatMessageType,
@@ -41,25 +42,6 @@ function getAgentColor(name: string): string {
     hash = name.charCodeAt(i) + ((hash << 5) - hash)
   }
   return agentColors[Math.abs(hash) % agentColors.length]
-}
-
-function formatTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-}
-
-function formatReplyTime(timestamp: number): string {
-  const now = Date.now()
-  const ageMs = now - timestamp
-  if (ageMs >= 0 && ageMs < 60_000) return 'just now'
-  if (ageMs >= 0 && ageMs < 3_600_000) {
-    const minutes = Math.max(1, Math.floor(ageMs / 60_000))
-    return `${minutes}m ago`
-  }
-  if (ageMs >= 0 && ageMs < 86_400_000) {
-    const hours = Math.max(1, Math.floor(ageMs / 3_600_000))
-    return `${hours}h ago`
-  }
-  return new Date(timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' })
 }
 
 function participantKey(participant: Pick<ChatThreadReply, 'from' | 'isHuman' | 'projectId'>): string {
@@ -257,7 +239,7 @@ function ThreadSummary({
       </span>
       {lastReply && (
         <span className="min-w-0 truncate font-normal text-[var(--pear-text-faint)]">
-          {formatReplyTime(lastReply.timestamp)}
+          {formatRelativeShort(lastReply.timestamp)}
         </span>
       )}
     </button>
@@ -289,7 +271,7 @@ export function ChatMessage({
       <div className="flex justify-center px-2 py-2">
         <div className="flex max-w-full items-center gap-2 rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/45 px-2.5 py-1 text-xs text-[var(--pear-text-faint)]">
           <span className="truncate">{message.body}</span>
-          <span className="shrink-0 text-[10px]">{formatTime(message.timestamp)}</span>
+          <span className="shrink-0 text-[10px]">{formatClockTime(message.timestamp)}</span>
         </div>
       </div>
     )
@@ -329,7 +311,7 @@ export function ChatMessage({
             {message.isHuman ? 'You' : message.from}
           </span>
           <span className="text-[10px] text-[var(--pear-text-faint)]">
-            {formatTime(message.timestamp)}
+            {formatClockTime(message.timestamp)}
           </span>
           {showRoute && message.to && !message.isHuman && (
             <span className="text-[10px] text-[var(--pear-text-faint)]">

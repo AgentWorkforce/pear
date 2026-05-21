@@ -4,6 +4,11 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { readFile, rename, writeFile } from 'fs/promises'
 import { homedir } from 'os'
 import { join } from 'path'
+import {
+  AvatarCacheManifestSchema,
+  type AvatarCacheEntry,
+  type AvatarCacheManifest
+} from './schemas'
 
 const AVATAR_PROTOCOL = 'pear-avatar'
 const AVATAR_HOST = 'avatar'
@@ -11,20 +16,6 @@ const CACHE_DIR = join(homedir(), '.agentworkforce', 'pear', 'github_avatars')
 const MANIFEST_PATH = join(CACHE_DIR, 'avatars.json')
 const MAX_AVATAR_BYTES = 1_500_000
 const CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000
-
-type AvatarCacheEntry = {
-  key: string
-  sourceUrl: string
-  fileName: string
-  contentType: string
-  byteLength: number
-  updatedAt: string
-}
-
-type AvatarCacheManifest = {
-  version: 1
-  avatars: Record<string, AvatarCacheEntry>
-}
 
 type AvatarIdentity = {
   sourceUrl?: string
@@ -41,14 +32,11 @@ function ensureCacheDir(): void {
 
 function loadManifest(): AvatarCacheManifest {
   try {
-    const manifest = JSON.parse(readFileSync(MANIFEST_PATH, 'utf8')) as AvatarCacheManifest
-    if (manifest.version === 1 && manifest.avatars && typeof manifest.avatars === 'object') {
-      return manifest
-    }
+    const parsed = AvatarCacheManifestSchema.safeParse(JSON.parse(readFileSync(MANIFEST_PATH, 'utf8')))
+    if (parsed.success) return parsed.data
   } catch {
     // Cache metadata is best-effort; corrupt or missing metadata just starts fresh.
   }
-
   return { version: 1, avatars: {} }
 }
 

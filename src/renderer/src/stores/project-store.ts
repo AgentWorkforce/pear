@@ -1,29 +1,47 @@
 import { create } from 'zustand'
+import { z } from 'zod'
+import {
+  ProjectIntegrationSchema,
+  ProjectRootSchema,
+  makeProjectSchema,
+  normalizeChannelName
+} from '@shared/schemas/project'
 import { pear } from '@/lib/ipc'
 
-export interface ProjectRoot {
-  id: string
-  name: string
-  path: string
-  pathExists: boolean
+// Renderer enriches each root with `pathExists` populated by the main process.
+const RendererProjectRootSchema = ProjectRootSchema.and(
+  z.object({ pathExists: z.boolean().optional() })
+).transform((value) => ({
+  id: value.id,
+  name: value.name,
+  path: value.path,
+  pathExists: typeof value.pathExists === 'boolean' ? value.pathExists : true
+}))
+
+const RendererProjectSchema = makeProjectSchema(RendererProjectRootSchema).transform((project) => ({
+  ...project,
+  rootPathExists: project.roots.some((root) => root.path === project.rootPath && root.pathExists)
+}))
+
+export type ProjectRoot = z.infer<typeof RendererProjectRootSchema>
+export type ProjectIntegration = z.infer<typeof ProjectIntegrationSchema>
+export type Project = z.infer<typeof RendererProjectSchema>
+
+export { normalizeChannelName }
+
+function parseProject(value: unknown): Project | null {
+  const result = RendererProjectSchema.safeParse(value)
+  return result.success ? result.data : null
 }
 
-export interface ProjectIntegration {
-  id: string
-  name: string
-  type: string
+function parseIntegration(value: unknown): ProjectIntegration | null {
+  const result = ProjectIntegrationSchema.safeParse(value)
+  return result.success ? result.data : null
 }
 
-export interface Project {
-  id: string
-  name: string
-  relayWorkspaceId: string
-  rootPath: string
-  rootPathExists: boolean
-  roots: ProjectRoot[]
-  channels: string[]
-  channelPeople: Record<string, string[]>
-  integrations: ProjectIntegration[]
+function parseRoot(value: unknown): ProjectRoot | null {
+  const result = RendererProjectRootSchema.safeParse(value)
+  return result.success ? result.data : null
 }
 
 function getBrokerChannels(project: Project | undefined): string[] {
@@ -38,135 +56,9 @@ function getRelayWorkspaceName(project: Project): string {
   return `pear-${project.relayWorkspaceId}`
 }
 
-function defaultRootName(path: string): string {
-  return path.split(/[\\/]/).filter(Boolean).pop() || path
-}
-
-function normalizeRoot(value: unknown): ProjectRoot | null {
-  if (!value || typeof value !== 'object') return null
-  const record = value as Record<string, unknown>
-  const path = typeof record.path === 'string' ? record.path : null
-  if (!path) return null
-
-  return {
-    id: typeof record.id === 'string' ? record.id : path,
-    name: typeof record.name === 'string' && record.name.trim()
-      ? record.name.trim()
-      : defaultRootName(path),
-    path,
-    pathExists: typeof record.pathExists === 'boolean' ? record.pathExists : true
-  }
-}
-
-function normalizeIntegration(value: unknown): ProjectIntegration | null {
-  if (!value || typeof value !== 'object') return null
-  const record = value as Record<string, unknown>
-  const name = typeof record.name === 'string' ? record.name.trim() : ''
-  if (!name) return null
-
-  return {
-    id: typeof record.id === 'string' ? record.id : crypto.randomUUID(),
-    name,
-    type: typeof record.type === 'string' && record.type.trim() ? record.type.trim() : 'custom'
-  }
-}
-
-export function normalizeChannelName(value: string): string {
-  return value
-    .normalize('NFKD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/-+/g, '-')
-    .replace(/^-|-$/g, '')
-}
-
-function normalizeChannels(value: unknown): string[] {
-  const channels = Array.isArray(value)
-    ? value.filter((entry): entry is string => typeof entry === 'string')
-    : []
-  const deduped = Array.from(new Set(channels.map(normalizeChannelName).filter(Boolean)))
-  return deduped.length > 0 ? deduped : ['general']
-}
-
-function normalizePeopleList(value: unknown): string[] {
-  const people = Array.isArray(value)
-    ? value.filter((entry): entry is string => typeof entry === 'string')
-    : []
-  const names = people.map((entry) => entry.trim()).filter(Boolean)
-  return Array.from(new Map(names.map((name) => [name.toLowerCase(), name])).values())
-}
-
-function normalizeChannelPeople(value: unknown, channels: string[]): Record<string, string[]> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
-
-  const channelSet = new Set(channels)
-  const result: Record<string, string[]> = {}
-  for (const [rawChannelName, rawPeople] of Object.entries(value as Record<string, unknown>)) {
-    const channelName = normalizeChannelName(rawChannelName)
-    if (!channelName || !channelSet.has(channelName)) continue
-
-    const people = normalizePeopleList(rawPeople)
-    if (people.length > 0) {
-      result[channelName] = people
-    }
-  }
-
-  return result
-}
-
-function dedupeRoots(roots: ProjectRoot[]): ProjectRoot[] {
-  const seen = new Set<string>()
-  const deduped: ProjectRoot[] = []
-
-  for (const root of roots) {
-    if (seen.has(root.path)) continue
-    seen.add(root.path)
-    deduped.push(root)
-  }
-
-  return deduped
-}
-
 function getDefaultRoot(project: Project | undefined): ProjectRoot | undefined {
   if (!project) return undefined
   return project.roots.find((root) => root.pathExists) || project.roots[0]
-}
-
-function normalizeProject(value: unknown): Project | null {
-  if (!value || typeof value !== 'object') return null
-  const record = value as Record<string, unknown>
-  const id = typeof record.id === 'string' ? record.id : null
-  const name = typeof record.name === 'string' ? record.name : null
-  const relayWorkspaceId = typeof record.relayWorkspaceId === 'string' && record.relayWorkspaceId.trim()
-    ? record.relayWorkspaceId.trim()
-    : id || ''
-  const rootPath = typeof record.rootPath === 'string' ? record.rootPath : null
-  const roots = Array.isArray(record.roots)
-    ? dedupeRoots(record.roots.map(normalizeRoot).filter((entry): entry is ProjectRoot => entry !== null))
-    : []
-  const primaryRoot = rootPath || roots[0]?.path || null
-  const integrations = Array.isArray(record.integrations)
-    ? record.integrations
-        .map(normalizeIntegration)
-        .filter((entry): entry is ProjectIntegration => entry !== null)
-    : []
-
-  if (!id || !name || !primaryRoot || roots.length === 0) return null
-
-  const channels = normalizeChannels(record.channels)
-
-  return {
-    id,
-    name,
-    relayWorkspaceId,
-    rootPath: primaryRoot,
-    rootPathExists: roots.some((root) => root.path === primaryRoot && root.pathExists),
-    roots,
-    channels,
-    channelPeople: normalizeChannelPeople(record.channelPeople, channels),
-    integrations
-  }
 }
 
 interface ProjectState {
@@ -214,9 +106,10 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   load: async () => {
     set({ loading: true })
     const data = await pear.project.list()
-    const projects = (data.projects as unknown[])
-      .map(normalizeProject)
-      .filter((project): project is Project => project !== null)
+    const projects = data.projects.flatMap((raw) => {
+      const project = parseProject(raw)
+      return project ? [project] : []
+    })
     const activeProjectId = projects.some((project) => project.id === data.activeId)
       ? data.activeId
       : projects.find((project) => project.roots.some((root) => root.pathExists))?.id || null
@@ -268,7 +161,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   addProject: async (name, rootPath) => {
-    const project = (await pear.project.add(name, rootPath)) as Project | null
+    const project = parseProject(await pear.project.add(name, rootPath))
     if (project) {
       await pear.project.setActive(project.id)
       await get().load()
@@ -311,7 +204,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   addRoot: async (name, rootPath) => {
     const { activeProjectId } = get()
     if (!activeProjectId) return null
-    const root = normalizeRoot(await pear.project.addRoot(activeProjectId, name, rootPath))
+    const root = parseRoot(await pear.project.addRoot(activeProjectId, name, rootPath))
     await get().load()
     if (root) {
       get().setActiveRoot(root.id)
@@ -470,7 +363,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   addIntegration: async (name, type = 'custom') => {
     const { activeProjectId } = get()
     if (!activeProjectId || !name.trim()) return null
-    const integration = normalizeIntegration(
+    const integration = parseIntegration(
       await pear.project.addIntegration(activeProjectId, name.trim(), type)
     )
     if (!integration) return null
