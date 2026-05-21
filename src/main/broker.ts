@@ -482,6 +482,7 @@ interface BrokerClientInternals {
 
 export class BrokerManager {
   private sessions = new Map<string, BrokerSession>()
+  private startPromises = new Map<string, Promise<void>>()
   private agentProjects = new Map<string, Set<string>>()
   private inputQueues = new Map<string, QueuedInput>()
   private inputStreams = new Map<string, PtyInputStream>()
@@ -533,7 +534,55 @@ export class BrokerManager {
       return
     }
 
+    const inFlight = this.startPromises.get(normalizedProjectId)
+    if (inFlight) {
+      try {
+        await inFlight
+        const started = this.sessions.get(normalizedProjectId)
+        if (!started) {
+          throw new Error(`Broker start completed without a session for project ${normalizedProjectId}`)
+        }
+        started.window = win
+        started.cwd = cwd
+        started.name = name
+        await this.syncChannels(normalizedProjectId, nextChannels)
+        this.sendStatus(normalizedProjectId, 'connected')
+        return
+      } catch (err) {
+        this.sendStatusToWindow(win, normalizedProjectId, 'error', String(err))
+        throw err
+      }
+    }
+
     const startBroker = async (): Promise<void> => {
+      const existingClient = await this.connectExistingBroker(normalizedProjectId, cwd)
+      if (existingClient) {
+        const unsubEvent = this.attachClient(normalizedProjectId, existingClient, win)
+        this.sessions.set(normalizedProjectId, {
+          projectId: normalizedProjectId,
+          client: existingClient,
+          window: win,
+          unsubEvent,
+          cwd,
+          name,
+          channels: [],
+          cloudSandboxId: null
+        })
+        existingClient.connectEvents()
+
+        await this.syncChannels(normalizedProjectId, nextChannels)
+        this.publishBrokerEvent(normalizedProjectId, win, {
+          kind: 'broker_initialized',
+          name,
+          cwd,
+          url: getClientBaseUrl(existingClient),
+          channels: nextChannels,
+          source: 'local'
+        })
+        this.sendStatus(normalizedProjectId, 'connected')
+        return
+      }
+
       const opts: AgentRelaySpawnOptions = {
         cwd,
         brokerName: name,
@@ -572,12 +621,35 @@ export class BrokerManager {
       this.sendStatus(normalizedProjectId, 'connected')
     }
 
+    const startPromise = startBroker()
+    this.startPromises.set(normalizedProjectId, startPromise)
     try {
-      await startBroker()
+      await startPromise
     } catch (err) {
       console.error(`[broker] Failed to start for project ${normalizedProjectId}:`, err)
       this.sendStatusToWindow(win, normalizedProjectId, 'error', String(err))
       throw err
+    } finally {
+      if (this.startPromises.get(normalizedProjectId) === startPromise) {
+        this.startPromises.delete(normalizedProjectId)
+      }
+    }
+  }
+
+  private async connectExistingBroker(projectId: string, cwd: string): Promise<AgentRelayClient | null> {
+    const connectionPath = join(cwd, '.agent-relay', 'connection.json')
+    if (!existsSync(connectionPath)) {
+      return null
+    }
+
+    try {
+      const client = AgentRelayClient.connect({ cwd })
+      await client.getSession()
+      console.log(`[broker] Reusing existing broker for project ${projectId}: ${connectionPath}`)
+      return client
+    } catch (err) {
+      console.warn(`[broker] Existing broker connection is not reusable for project ${projectId}:`, err)
+      return null
     }
   }
 
