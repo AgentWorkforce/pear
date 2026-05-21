@@ -65,9 +65,9 @@ export function CommandMenu(): React.ReactNode {
       id: 'spawn-agent',
       label: 'Add agent',
       description: activeProject
-        ? 'Start a Claude or Codex agent in the active project'
-        : 'Start a Claude or Codex agent after adding a project',
-      keywords: ['spawn agent', 'new agent', 'claude', 'codex'],
+        ? 'Start a local Claude or Codex agent, or attach a cloud agent'
+        : 'Add a project, then start a local or cloud agent',
+      keywords: ['spawn agent', 'new agent', 'claude', 'codex', 'cloud'],
       Icon: Bot,
       run: () => openDialog('spawn-agent')
     },

@@ -298,8 +298,8 @@ function BrokerCommands({ broker }: { broker: BrokerDetails }): React.ReactNode 
       ? {
           label: 'Export once',
           value: [
-            `export RELAY_BROKER_URL=${shellQuote(broker.url)}`,
-            `export RELAY_BROKER_API_KEY=${shellQuote(broker.apiKey)}`,
+            `export RELAY_BROKER_URL=${shellQuote(broker.url ?? '')}`,
+            `export RELAY_BROKER_API_KEY=${shellQuote(broker.apiKey ?? '')}`,
             `agent-relay view ${quotedTarget}`
           ].join('\n')
         }

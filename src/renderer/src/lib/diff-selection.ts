@@ -62,11 +62,13 @@ function buildHunkPatch(hunk: HunkData, indexedChanges: { change: ChangeData; in
   const deletes = indexedChanges.filter((entry) => entry.change.type === 'delete')
   const inserts = indexedChanges.filter((entry) => entry.change.type === 'insert')
   const first = indexedChanges[0]
-  const oldStart = deletes.length > 0
-    ? deletes[0].change.lineNumber
+  const firstDelete = deletes[0]?.change
+  const firstInsert = inserts[0]?.change
+  const oldStart = firstDelete && firstDelete.type === 'delete'
+    ? firstDelete.lineNumber
     : getOldAnchorForInsert(hunk, first.index)
-  const newStart = inserts.length > 0
-    ? inserts[0].change.lineNumber
+  const newStart = firstInsert && firstInsert.type === 'insert'
+    ? firstInsert.lineNumber
     : getNewAnchorForDelete(hunk, first.index)
   const oldLines = deletes.length
   const newLines = inserts.length

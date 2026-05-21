@@ -66,6 +66,15 @@ interface QueuedInput {
   flushing: boolean
 }
 
+export interface CloudAgentSandboxHandle {
+  sandboxId: string
+  execUrl: string
+  apiKey?: string
+  relayfileMountPath?: string
+}
+
+type BrokerEventObserver = (projectId: string, event: BrokerEvent) => void
+
 export interface AttachTerminalInput {
   name: string
   rows?: number
@@ -112,6 +121,18 @@ function isUnsupportedInputStreamError(err: unknown): boolean {
     ? (err as { status?: unknown }).status
     : undefined
   return status === 404 || /\b404\b|not found|unsupported/i.test(toErrorMessage(err))
+}
+
+function getBrokerEventName(event: BrokerEvent): string | undefined {
+  return 'name' in event && typeof event.name === 'string' && event.name.trim()
+    ? event.name
+    : undefined
+}
+
+function getBrokerEventFrom(event: BrokerEvent): string | undefined {
+  return 'from' in event && typeof event.from === 'string' && event.from.trim()
+    ? event.from
+    : undefined
 }
 
 function withBrokerDetailsTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
@@ -317,7 +338,7 @@ function isAgentNameConflict(err: unknown): boolean {
 interface BrokerSession {
   projectId: string
   client: AgentRelayClient
-  window: BrowserWindow
+  window?: BrowserWindow
   unsubEvent: () => void
   cwd: string
   name: string
@@ -388,6 +409,7 @@ export class BrokerManager {
   private inputQueues = new Map<string, QueuedInput>()
   private inputStreams = new Map<string, PtyInputStream>()
   private inputStreamFallbacks = new Set<string>()
+  private eventObservers = new Set<BrokerEventObserver>()
 
   get cwd(): string | null {
     return this.sessions.values().next().value?.cwd || null
@@ -399,6 +421,13 @@ export class BrokerManager {
 
   get isCloud(): boolean {
     return Array.from(this.sessions.values()).some((session) => session.cloudSandboxId !== null)
+  }
+
+  onBrokerEvent(observer: BrokerEventObserver): () => void {
+    this.eventObservers.add(observer)
+    return () => {
+      this.eventObservers.delete(observer)
+    }
   }
 
   async start(
@@ -460,16 +489,68 @@ export class BrokerManager {
     }
   }
 
+  async attachCloudSandbox(
+    projectId: string,
+    handle: CloudAgentSandboxHandle,
+    win?: BrowserWindow
+  ): Promise<string> {
+    const normalizedProjectId = projectId.trim()
+    if (!normalizedProjectId) {
+      throw new Error('Project id is required')
+    }
+
+    const sandboxId = handle.sandboxId.trim()
+    const execUrl = handle.execUrl.trim()
+    const apiKey = handle.apiKey?.trim() || undefined
+    if (!sandboxId) {
+      throw new Error('Cloud sandbox id is required')
+    }
+    if (!execUrl) {
+      throw new Error('Cloud sandbox exec URL is required')
+    }
+
+    await this.shutdown(normalizedProjectId)
+
+    try {
+      console.log('[broker] Connecting to cloud broker via SDK:', execUrl)
+      const client = new AgentRelayClient({
+        baseUrl: execUrl,
+        ...(apiKey ? { apiKey } : {})
+      })
+      await client.getSession()
+
+      const unsubEvent = this.attachClient(normalizedProjectId, client, win)
+      this.sessions.set(normalizedProjectId, {
+        projectId: normalizedProjectId,
+        client,
+        window: win,
+        unsubEvent,
+        cwd: '',
+        name: `cloud-${normalizedProjectId}`,
+        channels: [],
+        cloudSandboxId: sandboxId
+      })
+      client.connectEvents()
+
+      this.sendStatus(normalizedProjectId, 'connected')
+      return sandboxId
+    } catch (err) {
+      console.error(`[broker] Failed to connect cloud broker for project ${normalizedProjectId}:`, err)
+      this.sendStatusToWindow(win, normalizedProjectId, 'error', String(err))
+      throw err
+    }
+  }
+
   /**
    * Connect to a broker running in a remote Daytona sandbox.
-   * Creates the sandbox via the cloud API, then connects through the SDK.
+   * Creates an ad-hoc sandbox via the cloud API, then attaches through the
+   * same SDK path used by CloudAgentManager-provisioned sandboxes.
    */
   async connectCloud(projectId: string, win: BrowserWindow): Promise<string> {
     const normalizedProjectId = projectId.trim()
     if (!normalizedProjectId) {
       throw new Error('Project id is required')
     }
-    await this.shutdown(normalizedProjectId)
 
     try {
       const token = await getAccessToken()
@@ -500,25 +581,11 @@ export class BrokerManager {
       }
       const { httpUrl, apiKey } = await termRes.json() as { httpUrl: string; apiKey: string }
 
-      console.log('[broker] Connecting to cloud broker via SDK:', httpUrl)
-      const client = new AgentRelayClient({ baseUrl: httpUrl, apiKey })
-      await client.getSession()
-
-      const unsubEvent = this.attachClient(normalizedProjectId, client, win)
-      this.sessions.set(normalizedProjectId, {
-        projectId: normalizedProjectId,
-        client,
-        window: win,
-        unsubEvent,
-        cwd: '',
-        name: `cloud-${normalizedProjectId}`,
-        channels: [],
-        cloudSandboxId: sandboxId
-      })
-      client.connectEvents()
-
-      this.sendStatus(normalizedProjectId, 'connected')
-      return sandboxId
+      return this.attachCloudSandbox(normalizedProjectId, {
+        sandboxId,
+        execUrl: httpUrl,
+        apiKey
+      }, win)
     } catch (err) {
       console.error(`[broker] Failed to connect cloud broker for project ${normalizedProjectId}:`, err)
       this.sendStatusToWindow(win, normalizedProjectId, 'error', String(err))
@@ -549,27 +616,44 @@ export class BrokerManager {
     }
 
     if (this.sessions.size === 1) {
-      return this.sessions.values().next().value
+      const session = this.sessions.values().next().value
+      if (session) {
+        return session
+      }
     }
 
     throw new Error(`No relay workspace found for agent: ${name}`)
   }
 
-  private attachClient(projectId: string, client: AgentRelayClient, win: BrowserWindow): () => void {
+  private attachClient(projectId: string, client: AgentRelayClient, win?: BrowserWindow): () => void {
     return client.onEvent((event: BrokerEvent) => {
-      if (event.kind === 'agent_spawned' && event.name) {
-        this.rememberAgentProject(event.name, projectId)
-      } else if ((event.kind === 'agent_exit' || event.kind === 'agent_exited' || event.kind === 'agent_released') && event.name) {
-        this.closeInputStream(this.getInputStreamKey(projectId, event.name), 1000, 'agent closed')
-        this.forgetAgentProject(event.name, projectId)
-      } else if (event.name) {
-        this.rememberAgentProject(event.name, projectId)
-      } else if (event.from) {
-        this.rememberAgentProject(event.from, projectId)
+      const eventName = getBrokerEventName(event)
+      const eventFrom = getBrokerEventFrom(event)
+
+      if (event.kind === 'agent_spawned' && eventName) {
+        this.rememberAgentProject(eventName, projectId)
+      } else if ((event.kind === 'agent_exit' || event.kind === 'agent_exited' || event.kind === 'agent_released') && eventName) {
+        this.closeInputStream(this.getInputStreamKey(projectId, eventName), 1000, 'agent closed')
+        this.forgetAgentProject(eventName, projectId)
+      } else if (eventName) {
+        this.rememberAgentProject(eventName, projectId)
+      } else if (eventFrom) {
+        this.rememberAgentProject(eventFrom, projectId)
       }
 
-      if (win && !win.isDestroyed()) {
-        win.webContents.send('broker:event', { ...event, projectId })
+      const windows = win ? [win] : BrowserWindow.getAllWindows()
+      for (const targetWindow of windows) {
+        if (!targetWindow.isDestroyed()) {
+          // Local and cloud sessions share this forwarder, so activity events from
+          // sandbox brokers reach the renderer through the same path.
+          targetWindow.webContents.send('broker:event', { ...event, projectId })
+        }
+      }
+
+      if (this.sessions.get(projectId)?.cloudSandboxId) {
+        for (const observer of Array.from(this.eventObservers)) {
+          observer(projectId, event)
+        }
       }
     })
   }
@@ -1149,7 +1233,7 @@ export class BrokerManager {
   async shutdown(projectId?: string): Promise<void> {
     const targetProjectIds = projectId ? [projectId] : Array.from(this.sessions.keys())
     for (const targetProjectId of targetProjectIds) {
-      for (const [key, queue] of this.inputQueues.entries()) {
+      for (const [key, queue] of Array.from(this.inputQueues.entries())) {
         if (queue.projectId !== targetProjectId) continue
         if (queue.timer) {
           clearTimeout(queue.timer)
@@ -1167,13 +1251,21 @@ export class BrokerManager {
         // Ignore shutdown errors.
       }
       this.sessions.delete(targetProjectId)
-      for (const [agentName, mappedProjectIds] of this.agentProjects.entries()) {
+      for (const [agentName, mappedProjectIds] of Array.from(this.agentProjects.entries())) {
         mappedProjectIds.delete(targetProjectId)
         if (mappedProjectIds.size === 0) {
           this.agentProjects.delete(agentName)
         }
       }
     }
+  }
+
+  async detachCloudSandbox(projectId: string): Promise<void> {
+    const normalizedProjectId = projectId.trim()
+    if (!normalizedProjectId) return
+    const session = this.sessions.get(normalizedProjectId)
+    this.sendStatusToWindow(session?.window, normalizedProjectId, 'disconnected')
+    await this.shutdown(normalizedProjectId)
   }
 
   private sendStatus(projectId: string, status: string, error?: string): void {

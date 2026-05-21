@@ -5,11 +5,11 @@ import {
   sortDirectMessageParticipants
 } from '@/lib/direct-messages'
 
-export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'broker-details' | 'source-control'
-export type DialogType = 'add-project' | 'spawn-agent' | 'command-menu' | null
+export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control'
+export type DialogType = 'add-project' | 'spawn-agent' | 'spawn-local-agent' | 'cloud-agent' | 'command-menu' | null
 export type Theme = 'dark' | 'light'
 export type TerminalLayout = 'tabs' | 'horizontal-split'
-export type AppTabKind = 'agents' | 'channel' | 'dm' | 'project-settings' | 'broker-details' | 'source-control'
+export type AppTabKind = 'agents' | 'channel' | 'dm' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control'
 
 export interface AppTab {
   id: string
@@ -96,6 +96,8 @@ function getTabId(tab: AppTabInput): string {
     }
     case 'project-settings':
       return `project-settings:${tab.projectId || 'global'}`
+    case 'account-settings':
+      return 'account-settings'
     case 'broker-details':
       return 'broker-details'
     case 'source-control':
@@ -117,6 +119,8 @@ function getTabTitle(tab: AppTabInput): string {
       return getDirectMessageRoomTitle(tab.dmParticipants || [])
     case 'project-settings':
       return 'Settings'
+    case 'account-settings':
+      return 'Account settings'
     case 'broker-details':
       return 'Broker'
     case 'source-control':
@@ -146,6 +150,8 @@ function viewModeForTab(tab: AppTab): ViewMode {
       return 'chat'
     case 'project-settings':
       return 'project-settings'
+    case 'account-settings':
+      return 'account-settings'
     case 'broker-details':
       return 'broker-details'
     case 'source-control':
@@ -159,6 +165,8 @@ function tabInputForViewMode(mode: ViewMode): AppTabInput {
       return { kind: 'channel' }
     case 'project-settings':
       return { kind: 'project-settings' }
+    case 'account-settings':
+      return { kind: 'account-settings' }
     case 'broker-details':
       return { kind: 'broker-details' }
     case 'source-control':

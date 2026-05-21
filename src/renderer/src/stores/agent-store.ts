@@ -159,7 +159,7 @@ function getTypingUntilMs(currentState: AgentCurrentState, lastActivityAtMs?: nu
   return typingUntilMs > Date.now() ? typingUntilMs : undefined
 }
 
-const typingExpiryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const typingExpiryTimers = new Map<string, number>()
 
 function addPendingDelivery(agent: Agent, eventId?: string): Agent {
   if (!eventId || agent.pendingDeliveryIds.includes(eventId)) {
@@ -283,7 +283,7 @@ function scheduleTypingExpiry(
     }))
   }, delay + 50)
 
-  typingExpiryTimers.set(key, timer)
+  typingExpiryTimers.set(key, timer as unknown as number)
 }
 
 export const useAgentStore = create<AgentState>((set, get) => ({
@@ -428,7 +428,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         const projectId = event.projectId || parentAgent?.projectId || activeProjectId || brokerProjectId || undefined
         const rootId = parentAgent?.rootId
         const rootPath = parentAgent?.rootPath
-        const agentKey = getAgentKey(projectId, event.name)
+        const agentKey = getAgentKey(projectId, event.name!)
         const currentState: AgentCurrentState = 'idle'
 
         return {
@@ -574,34 +574,37 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         })
       }))
     } else if (kind === 'relay_inbound' && event.from && event.target && event.body) {
+      const eventFrom = event.from
+      const eventTarget = event.target
+      const eventBody = event.body
       set((state) => {
-        const projectId = event.projectId || state.agents.find((a) => a.name === event.from)?.projectId
+        const projectId = event.projectId || state.agents.find((a) => a.name === eventFrom)?.projectId
         const timestamp = Date.now()
-        const isHuman = isHumanSender(event.from)
+        const isHuman = isHumanSender(eventFrom)
         const msg: ChatMessage = {
           id: event.event_id || crypto.randomUUID(),
-          from: event.from,
-          to: event.target,
-          body: event.body,
+          from: eventFrom,
+          to: eventTarget,
+          body: eventBody,
           timestamp,
           isHuman,
           projectId
         }
         const relay: RelayMessage = {
-          from: event.from,
-          target: event.target,
-          body: event.body,
+          from: eventFrom,
+          target: eventTarget,
+          body: eventBody,
           timestamp,
           projectId
         }
-        const targetName = event.target.startsWith('#') ? null : normalizeMessageTarget(event.target)
+        const targetName = eventTarget.startsWith('#') ? null : normalizeMessageTarget(eventTarget)
         const messages = isHuman && isDuplicateHumanEcho(state.messages, msg)
           ? state.messages
           : [...state.messages, msg]
 
         return {
           agents: state.agents.map((a) => {
-            const nextAgent = matchesAgent(a, projectId, event.from!) ? clearPendingDeliveries(a) : a
+            const nextAgent = matchesAgent(a, projectId, eventFrom) ? clearPendingDeliveries(a) : a
             if (targetName && matchesAgent(nextAgent, projectId, targetName) && nextAgent.terminalMode !== 'drive') {
               const lastActivityAtMs = Date.now()
               const typingUntilMs = lastActivityAtMs + TYPING_ACTIVITY_WINDOW_MS

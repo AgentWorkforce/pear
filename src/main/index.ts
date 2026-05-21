@@ -2,15 +2,19 @@ import { app, BrowserWindow, shell, Menu } from 'electron'
 import { join } from 'path'
 import { registerIpcHandlers } from './ipc-handlers'
 import { brokerManager } from './broker'
+import { cloudAgentManager } from './cloud-agent'
 
 app.setName('Pear')
 
 let mainWindow: BrowserWindow | null = null
 let shutdownPromise: Promise<void> | null = null
 
-function shutdownBrokerOnce(): Promise<void> {
+function shutdownAppOnce(): Promise<void> {
   if (!shutdownPromise) {
-    shutdownPromise = brokerManager.shutdown()
+    shutdownPromise = Promise.all([
+      cloudAgentManager.shutdownAll(),
+      brokerManager.shutdown()
+    ]).then(() => undefined)
   }
   return shutdownPromise
 }
@@ -134,10 +138,10 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', async () => {
-  await shutdownBrokerOnce()
+  await shutdownAppOnce()
   if (process.platform !== 'darwin') app.quit()
 })
 
 app.on('before-quit', async () => {
-  await shutdownBrokerOnce()
+  await shutdownAppOnce()
 })

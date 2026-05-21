@@ -1,6 +1,7 @@
 import { app } from 'electron'
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'fs'
 import { basename, join } from 'path'
+import type { ProactiveAgentBinding, ProactiveAgentDraft } from './proactive-agent.types'
 
 export interface ProjectRoot {
   id: string
@@ -12,22 +13,51 @@ export interface ProjectIntegration {
   id: string
   name: string
   type: string
+  provider?: string
+  integrationId?: string
+  scope?: Record<string, unknown>
+  mountPaths?: string[]
+  connectedAt?: string
+  notifyAgent?: boolean
+  lastSyncAt?: string
+  lastError?: string
+}
+
+export interface RelayWorkspace {
+  id: string
+  createdAt: string
+}
+
+export interface RelayWorkspaceRecord extends RelayWorkspace {
+  apiUrl?: string
+  authKey?: string
 }
 
 export interface Project {
   id: string
   name: string
-  relayWorkspaceId: string
+  relayWorkspaceId?: string
   rootPath: string
   roots: ProjectRoot[]
   channels: string[]
   channelPeople: Record<string, string[]>
   integrations: ProjectIntegration[]
+  cloudAgent?: {
+    id: string
+    sandboxId: string
+    relayfileMountPath: string
+    attachedAt: string
+    autoPullAfterRun: boolean
+  }
+  proactiveAgents?: ProactiveAgentBinding[]
 }
+
+export type ProjectCloudAgent = NonNullable<Project['cloudAgent']>
 
 interface StoreData {
   projects: Project[]
   activeProjectId: string | null
+  relayWorkspace?: { id: string; createdAt: string; apiUrl?: string; authKey?: string }
 }
 
 const getStorePath = (): string => {
@@ -57,16 +87,187 @@ function normalizeRoot(value: unknown): ProjectRoot | null {
   }
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function normalizeStringList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+
+  const seen = new Set<string>()
+  const result: string[] = []
+  for (const entry of value) {
+    if (typeof entry !== 'string') continue
+    const trimmed = entry.trim()
+    if (!trimmed || seen.has(trimmed)) continue
+    seen.add(trimmed)
+    result.push(trimmed)
+  }
+
+  return result
+}
+
+function normalizeRelayWorkspace(value: unknown): RelayWorkspaceRecord | undefined {
+  if (!isRecord(value)) return undefined
+
+  const id = typeof value.id === 'string' ? value.id.trim() : ''
+  if (!id) return undefined
+
+  const createdAt = typeof value.createdAt === 'string' ? value.createdAt.trim() : ''
+  const createdAtTime = createdAt ? Date.parse(createdAt) : Number.NaN
+  const apiUrl = typeof value.apiUrl === 'string' ? value.apiUrl.trim().replace(/\/+$/, '') : ''
+  const authKey = typeof value.authKey === 'string' ? value.authKey.trim() : ''
+
+  return {
+    id,
+    createdAt: Number.isNaN(createdAtTime) ? new Date(0).toISOString() : new Date(createdAtTime).toISOString(),
+    ...(apiUrl ? { apiUrl } : {}),
+    ...(authKey ? { authKey } : {})
+  }
+}
+
 function normalizeIntegration(value: unknown): ProjectIntegration | null {
-  if (!value || typeof value !== 'object') return null
-  const record = value as Record<string, unknown>
+  if (!isRecord(value)) return null
+  const record = value
   const name = typeof record.name === 'string' ? record.name.trim() : ''
   if (!name) return null
+
+  const provider = typeof record.provider === 'string' && record.provider.trim()
+    ? record.provider.trim()
+    : undefined
+  const integrationId = typeof record.integrationId === 'string' && record.integrationId.trim()
+    ? record.integrationId.trim()
+    : undefined
+  const scope = isRecord(record.scope) ? record.scope : undefined
+  const mountPaths = normalizeStringList(record.mountPaths)
 
   return {
     id: typeof record.id === 'string' ? record.id : crypto.randomUUID(),
     name,
-    type: typeof record.type === 'string' && record.type.trim() ? record.type.trim() : 'custom'
+    type: typeof record.type === 'string' && record.type.trim() ? record.type.trim() : 'custom',
+    ...(provider ? { provider } : {}),
+    ...(integrationId ? { integrationId } : {}),
+    ...(scope ? { scope } : {}),
+    ...(mountPaths ? { mountPaths } : {}),
+    ...(typeof record.connectedAt === 'string' && record.connectedAt.trim()
+      ? { connectedAt: record.connectedAt.trim() }
+      : {}),
+    ...(typeof record.notifyAgent === 'boolean' ? { notifyAgent: record.notifyAgent } : {}),
+    ...(typeof record.lastSyncAt === 'string' && record.lastSyncAt.trim()
+      ? { lastSyncAt: record.lastSyncAt.trim() }
+      : {}),
+    ...(typeof record.lastError === 'string' && record.lastError.trim()
+      ? { lastError: record.lastError.trim() }
+      : {})
+  }
+}
+
+function normalizeCloudAgent(value: unknown): ProjectCloudAgent | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const record = value as Record<string, unknown>
+  const id = typeof record.id === 'string' ? record.id.trim() : ''
+  const sandboxId = typeof record.sandboxId === 'string' ? record.sandboxId.trim() : ''
+  const relayfileMountPath =
+    typeof record.relayfileMountPath === 'string' ? record.relayfileMountPath : ''
+
+  if (!id || !sandboxId || !relayfileMountPath) return null
+
+  const attachedAt =
+    typeof record.attachedAt === 'string' && record.attachedAt.trim()
+      ? record.attachedAt
+      : new Date(0).toISOString()
+  const autoPullAfterRun =
+    typeof record.autoPullAfterRun === 'boolean' ? record.autoPullAfterRun : true
+
+  return {
+    id,
+    sandboxId,
+    relayfileMountPath,
+    attachedAt,
+    autoPullAfterRun
+  }
+}
+
+function normalizeProactiveAgentDraft(value: unknown): ProactiveAgentDraft | null {
+  if (!isRecord(value)) return null
+  const id = typeof value.id === 'string' ? value.id.trim() : ''
+  const name = typeof value.name === 'string' ? value.name.trim() : ''
+  const cloudAgentId = typeof value.cloudAgentId === 'string' ? value.cloudAgentId.trim() : ''
+  const model = typeof value.model === 'string' ? value.model.trim() : ''
+  const systemPrompt = typeof value.systemPrompt === 'string' ? value.systemPrompt : ''
+  const handlerCode = typeof value.handlerCode === 'string' ? value.handlerCode : ''
+
+  if (!id || !name || !cloudAgentId || !model || !systemPrompt || !handlerCode) return null
+
+  const harness = value.harness === 'codex' || value.harness === 'opencode' ? value.harness : 'claude'
+  const watch = Array.isArray(value.watch)
+    ? value.watch
+        .filter(isRecord)
+        .map((rule) => ({
+          paths: normalizeStringList(rule.paths) || [],
+          events: (Array.isArray(rule.events) ? rule.events : [])
+            .filter((entry): entry is 'created' | 'updated' | 'deleted' =>
+              entry === 'created' || entry === 'updated' || entry === 'deleted'
+            ),
+          ...(typeof rule.debounceMs === 'number' ? { debounceMs: rule.debounceMs } : {}),
+          ...(typeof rule.match === 'string' ? { match: rule.match } : {})
+        }))
+    : []
+
+  return {
+    id,
+    name,
+    ...(typeof value.description === 'string' ? { description: value.description } : {}),
+    cloudAgentId,
+    harness,
+    model,
+    systemPrompt,
+    integrations: isRecord(value.integrations) ? value.integrations as Record<string, Record<string, unknown>> : {},
+    watch,
+    handlerCode,
+    ...(isRecord(value.inputs) ? { inputs: value.inputs as Record<string, string> } : {}),
+    ...(isRecord(value.memory) ? { memory: value.memory as ProactiveAgentDraft['memory'] } : {}),
+    ...(isRecord(value.harnessSettings)
+      ? { harnessSettings: value.harnessSettings as ProactiveAgentDraft['harnessSettings'] }
+      : {}),
+    ...(isRecord(value.mount) && typeof value.mount.enabled === 'boolean'
+      ? { mount: { enabled: value.mount.enabled } }
+      : { mount: { enabled: false } }),
+    runMode: value.runMode === 'local' ? 'local' : 'cloud'
+  }
+}
+
+function normalizeProactiveAgentBinding(value: unknown, projectId: string): ProactiveAgentBinding | null {
+  if (!isRecord(value)) return null
+  const draft = normalizeProactiveAgentDraft(value.draft)
+  if (!draft) return null
+
+  const personaId = typeof value.personaId === 'string' && value.personaId.trim()
+    ? value.personaId.trim()
+    : draft.id
+  const status = value.status === 'warming' ||
+    value.status === 'active' ||
+    value.status === 'paused' ||
+    value.status === 'error'
+    ? value.status
+    : 'draft'
+  const createdAt = typeof value.createdAt === 'string' && value.createdAt.trim()
+    ? value.createdAt
+    : new Date(0).toISOString()
+  const updatedAt = typeof value.updatedAt === 'string' && value.updatedAt.trim()
+    ? value.updatedAt
+    : createdAt
+
+  return {
+    projectId,
+    personaId,
+    cloudAgentId: draft.cloudAgentId,
+    status,
+    ...(typeof value.lastError === 'string' && value.lastError.trim() ? { lastError: value.lastError } : {}),
+    ...(typeof value.lastFiredAt === 'string' && value.lastFiredAt.trim() ? { lastFiredAt: value.lastFiredAt } : {}),
+    createdAt,
+    updatedAt,
+    draft
   }
 }
 
@@ -132,9 +333,10 @@ function normalizeProject(value: unknown): Project | null {
   const record = value as Record<string, unknown>
   const id = typeof record.id === 'string' ? record.id : null
   const name = typeof record.name === 'string' ? record.name : null
-  const relayWorkspaceId = typeof record.relayWorkspaceId === 'string' && record.relayWorkspaceId.trim()
-    ? record.relayWorkspaceId.trim()
-    : id || ''
+  const relayWorkspaceId =
+    typeof record.relayWorkspaceId === 'string' && record.relayWorkspaceId.trim()
+      ? record.relayWorkspaceId.trim()
+      : undefined
   const rootPath = typeof record.rootPath === 'string' ? record.rootPath : null
   const roots = Array.isArray(record.roots)
     ? dedupeRoots(record.roots.map(normalizeRoot).filter((entry): entry is ProjectRoot => entry !== null))
@@ -145,6 +347,12 @@ function normalizeProject(value: unknown): Project | null {
         .map(normalizeIntegration)
         .filter((entry): entry is ProjectIntegration => entry !== null)
     : []
+  const cloudAgent = normalizeCloudAgent(record.cloudAgent)
+  const proactiveAgents = Array.isArray(record.proactiveAgents) && id
+    ? record.proactiveAgents
+        .map((entry) => normalizeProactiveAgentBinding(entry, id))
+        .filter((entry): entry is ProactiveAgentBinding => entry !== null)
+    : []
 
   if (!id || !name || !primaryRootPath || roots.length === 0) return null
 
@@ -153,12 +361,14 @@ function normalizeProject(value: unknown): Project | null {
   return {
     id,
     name,
-    relayWorkspaceId,
     rootPath: primaryRootPath,
     roots,
     channels,
     channelPeople: normalizeChannelPeople(record.channelPeople, channels),
-    integrations
+    integrations,
+    ...(relayWorkspaceId ? { relayWorkspaceId } : {}),
+    ...(cloudAgent ? { cloudAgent } : {}),
+    ...(proactiveAgents.length > 0 ? { proactiveAgents } : {})
   }
 }
 
@@ -172,10 +382,12 @@ function normalizeStore(raw: unknown): StoreData {
     typeof record.activeProjectId === 'string' || record.activeProjectId === null
       ? record.activeProjectId
       : null
+  const relayWorkspace = normalizeRelayWorkspace(record.relayWorkspace)
 
   return {
     projects,
-    activeProjectId
+    activeProjectId,
+    ...(relayWorkspace ? { relayWorkspace } : {})
   }
 }
 
@@ -195,6 +407,43 @@ export function saveStore(data: StoreData): void {
   renameSync(tmpPath, storePath)
 }
 
+export function getRelayWorkspace(): { id: string; createdAt: string } | null {
+  const relayWorkspace = loadStore().relayWorkspace
+  return relayWorkspace ? { id: relayWorkspace.id, createdAt: relayWorkspace.createdAt } : null
+}
+
+export function setRelayWorkspace(workspace: { id: string; createdAt: string }): void {
+  const data = loadStore()
+  const relayWorkspace = normalizeRelayWorkspace(workspace)
+  if (relayWorkspace) {
+    data.relayWorkspace = { id: relayWorkspace.id, createdAt: relayWorkspace.createdAt }
+  } else {
+    delete data.relayWorkspace
+  }
+  saveStore(data)
+}
+
+export function clearRelayWorkspace(): void {
+  const data = loadStore()
+  delete data.relayWorkspace
+  saveStore(data)
+}
+
+export function getRelayWorkspaceRecord(): RelayWorkspaceRecord | undefined {
+  return loadStore().relayWorkspace
+}
+
+export function setRelayWorkspaceRecord(record: RelayWorkspaceRecord | null): void {
+  const data = loadStore()
+  const relayWorkspace = normalizeRelayWorkspace(record)
+  if (relayWorkspace) {
+    data.relayWorkspace = relayWorkspace
+  } else {
+    delete data.relayWorkspace
+  }
+  saveStore(data)
+}
+
 export function addProject(name: string, rootPath: string): Project {
   const data = loadStore()
   const root: ProjectRoot = {
@@ -205,7 +454,6 @@ export function addProject(name: string, rootPath: string): Project {
   const project: Project = {
     id: crypto.randomUUID(),
     name,
-    relayWorkspaceId: crypto.randomUUID(),
     rootPath,
     roots: [root],
     channels: ['general'],

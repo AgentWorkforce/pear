@@ -1,5 +1,11 @@
 import type React from 'react'
-import { bundledLanguages, bundledLanguagesAlias, codeToTokensBase } from 'shiki'
+import {
+  bundledLanguages,
+  bundledLanguagesAlias,
+  codeToTokensBase,
+  type BundledLanguage,
+  type BundledTheme
+} from 'shiki'
 import type { Theme } from '@/stores/ui-store'
 
 export interface HighlightToken {
@@ -94,10 +100,10 @@ export async function highlightCode(
   filePath: string | null | undefined,
   theme: Theme
 ): Promise<HighlightToken[][]> {
-  const lang = detectLanguage(filePath)
+  const lang = detectLanguage(filePath) as BundledLanguage
   const lines = await codeToTokensBase(code, {
     lang,
-    theme: themeMap[theme]
+    theme: themeMap[theme] as BundledTheme
   })
 
   return lines.map((line) =>

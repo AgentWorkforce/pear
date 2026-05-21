@@ -126,6 +126,196 @@ export interface GitCheckoutBranchOptions {
   stashChanges?: boolean
 }
 
+export type CloudAgentRecord = {
+  id: string
+  name: string
+  displayName?: string
+  harness: string
+  defaultModel: string
+  status: 'ready' | 'warming' | 'error' | 'stopped'
+  lastUsedAt?: string
+  lastError?: string
+  lastAuthenticatedAt?: string | null
+}
+
+export type CreateCloudAgentInput = {
+  name: string
+  harness: string
+  model: string
+}
+
+export type CloudAgentSandboxStatus = 'warming' | 'ready' | 'stopping' | 'stopped'
+
+export type CloudAgentBinding = {
+  projectId: string
+  cloudAgentId: string
+  sandboxId: string
+  relayfileMountPath: string
+  attachedAt: string
+}
+
+export type CloudAgentMountStatus = {
+  ready: boolean
+  lastReconcileAt?: string
+  pendingWrites: number
+  conflicts: number
+}
+
+export type CloudAgentSyncMode = 'sandbox-priority' | 'local-priority'
+
+export type CloudAgentStatus = {
+  binding: CloudAgentBinding
+  sandbox: { id: string; status: CloudAgentSandboxStatus }
+  mount: CloudAgentMountStatus
+  syncMode: CloudAgentSyncMode
+}
+
+export type CloudAgentEvent =
+  | { type: 'sandbox-status'; projectId: string; status: CloudAgentSandboxStatus }
+  | { type: 'mount-status'; projectId: string; mount: CloudAgentMountStatus }
+  | { type: 'sync-mode-changed'; projectId: string; syncMode: CloudAgentSyncMode }
+  | { type: 'error'; projectId: string; message: string }
+
+export type ProactiveAgentHarness = 'claude' | 'codex' | 'opencode'
+export type ProactiveAgentStatus = 'draft' | 'warming' | 'active' | 'paused' | 'error'
+export type ProactiveAgentRunStatus = 'running' | 'succeeded' | 'failed'
+export type ProactiveAgentRunMode = 'cloud' | 'local'
+export type ProactiveAgentWatchEventKind = 'created' | 'updated' | 'deleted'
+
+export type ProactiveAgentDraft = {
+  id: string
+  name: string
+  description?: string
+  cloudAgentId: string
+  harness: ProactiveAgentHarness
+  model: string
+  systemPrompt: string
+  integrations: Record<string, Record<string, unknown>>
+  watch: Array<{
+    paths: string[]
+    events: ProactiveAgentWatchEventKind[]
+    debounceMs?: number
+    match?: string
+  }>
+  handlerCode: string
+  inputs?: Record<string, string>
+  memory?: { enabled: boolean; scopes?: Array<'workspace' | 'project' | 'persona'>; ttlDays?: number }
+  harnessSettings?: { reasoning?: 'low' | 'medium' | 'high'; timeoutSeconds?: number }
+  mount?: { enabled: boolean }
+  runMode?: ProactiveAgentRunMode
+}
+
+export type ProactiveAgentBinding = {
+  projectId: string
+  personaId: string
+  cloudAgentId: string
+  status: ProactiveAgentStatus
+  lastError?: string
+  lastFiredAt?: string
+  createdAt: string
+  updatedAt: string
+  draft: ProactiveAgentDraft
+}
+
+export type ProactiveAgentRun = {
+  runId: string
+  projectId: string
+  personaId: string
+  firedAt: string
+  trigger: {
+    type: 'relayfile-change'
+    path: string
+    eventKind: ProactiveAgentWatchEventKind
+  }
+  durationMs?: number
+  status: ProactiveAgentRunStatus
+  summary?: string
+  error?: string
+}
+
+export type ProactiveAgentTranscript = {
+  runId: string
+  projectId?: string
+  personaId?: string
+  messages: Array<{
+    role: 'system' | 'user' | 'assistant' | 'tool'
+    content: string
+    ts: string
+  }>
+}
+
+export type ProactiveAgentRunsPage = {
+  runs: ProactiveAgentRun[]
+  nextCursor?: string
+}
+
+export type ProactiveAgentDeployResult = {
+  status: 'active' | 'warming' | 'error'
+  error?: string
+}
+
+export type ProactiveAgentEvent =
+  | { type: 'binding-updated'; projectId: string; personaId: string; binding: ProactiveAgentBinding }
+  | { type: 'binding-removed'; projectId: string; personaId: string }
+  | { type: 'run-started'; projectId: string; personaId: string; run: ProactiveAgentRun }
+  | { type: 'run-update'; projectId: string; personaId: string; runId: string; chunk: string }
+  | { type: 'run-finished'; projectId: string; personaId: string; run: ProactiveAgentRun }
+
+export type IntegrationAuthMethod = 'oauth' | 'token' | 'apikey'
+
+export type IntegrationCapabilities = {
+  webhook: boolean
+  poll: boolean
+  writeback: boolean
+}
+
+export type IntegrationAdapter = {
+  provider: string
+  displayName: string
+  iconUrl?: string
+  version: string
+  capabilities: IntegrationCapabilities
+  authMethod: IntegrationAuthMethod
+  requiredScopes?: string[]
+  defaultMountPaths: string[]
+  description: string
+}
+
+export type ConnectedIntegration = {
+  provider: string
+  integrationId: string
+  scope: Record<string, unknown>
+  mountPaths: string[]
+  connectedAt: string
+  notifyAgent: boolean
+  lastSyncAt?: string
+  lastError?: string
+}
+
+export type IntegrationConnectStatus =
+  | 'pending'
+  | 'awaiting-user'
+  | 'choosing-scope'
+  | 'completed'
+  | 'error'
+  | 'expired'
+
+export type IntegrationConnectSession = {
+  sessionId: string
+  provider: string
+  status: IntegrationConnectStatus
+  authUrl?: string
+  scopeChoices?: Record<string, unknown>
+  integrationId?: string
+  error?: string
+}
+
+export type IntegrationsEvent =
+  | { type: 'session-update'; sessionId: string; session: IntegrationConnectSession }
+  | { type: 'integration-added'; projectId: string; integration: ConnectedIntegration }
+  | { type: 'integration-removed'; projectId: string; integrationId: string }
+  | { type: 'integration-error'; projectId: string; integrationId: string; message: string }
+
 export interface PearAPI {
   project: {
     list: () => Promise<{ projects: unknown[]; activeId: string | null }>
@@ -223,9 +413,55 @@ export interface PearAPI {
     }>
   }
   auth: {
-    login: () => Promise<{ loggedIn: boolean; apiUrl?: string; user?: { name?: string; email?: string; organizationName?: string; projectName?: string } }>
+    login: (input?: { apiUrl?: string }) => Promise<{ loggedIn: boolean; apiUrl?: string; user?: { name?: string; email?: string; organizationName?: string; projectName?: string } }>
     logout: () => Promise<void>
     status: () => Promise<{ loggedIn: boolean; apiUrl?: string; user?: { name?: string; email?: string; organizationName?: string; projectName?: string } }>
+  }
+  cloudAgent: {
+    list: () => Promise<CloudAgentRecord[]>
+    create: (input: CreateCloudAgentInput) => Promise<CloudAgentRecord>
+    delete: (id: string) => Promise<void>
+    attach: (projectId: string, cloudAgentId: string) => Promise<CloudAgentBinding>
+    detach: (projectId: string) => Promise<void>
+    status: (projectId: string) => Promise<CloudAgentStatus | null>
+    onEvent: (callback: (event: CloudAgentEvent) => void) => () => void
+  }
+  proactiveAgent: {
+    list: (projectId: string) => Promise<ProactiveAgentBinding[]>
+    create: (projectId: string, draft: ProactiveAgentDraft) => Promise<ProactiveAgentBinding>
+    update: (projectId: string, personaId: string, draft: ProactiveAgentDraft) => Promise<ProactiveAgentBinding>
+    deploy: (projectId: string, personaId: string) => Promise<ProactiveAgentDeployResult>
+    pause: (projectId: string, personaId: string) => Promise<void>
+    resume: (projectId: string, personaId: string) => Promise<void>
+    undeploy: (projectId: string, personaId: string) => Promise<void>
+    runs: (
+      projectId: string,
+      personaId: string,
+      opts?: { limit?: number; cursor?: string }
+    ) => Promise<ProactiveAgentRunsPage>
+    runTranscript: (runId: string) => Promise<ProactiveAgentTranscript>
+    onEvent: (callback: (event: ProactiveAgentEvent) => void) => () => void
+  }
+  integrations: {
+    catalog: () => Promise<IntegrationAdapter[]>
+    list: (projectId: string) => Promise<ConnectedIntegration[]>
+    startConnect: (projectId: string, provider: string) => Promise<IntegrationConnectSession>
+    pollConnect: (sessionId: string) => Promise<IntegrationConnectSession>
+    completeConnect: (
+      projectId: string,
+      sessionId: string,
+      scope: Record<string, unknown>,
+      mountPaths: string[],
+      notifyAgent: boolean
+    ) => Promise<ConnectedIntegration>
+    updateScope: (
+      projectId: string,
+      integrationId: string,
+      scope: Record<string, unknown>,
+      mountPaths: string[]
+    ) => Promise<ConnectedIntegration>
+    disconnect: (projectId: string, integrationId: string) => Promise<void>
+    onEvent: (callback: (event: IntegrationsEvent) => void) => () => void
   }
   onMenu: (channel: string, callback: (...args: unknown[]) => void) => () => void
 }

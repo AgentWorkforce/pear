@@ -6,10 +6,17 @@
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
-    "preview": "electron-vite preview"
+    "preview": "electron-vite preview",
+    "typecheck": "tsc -b --noEmit"
   },
+  "workspaces": [
+    "packages/*"
+  ],
   "dependencies": {
+    "@agent-relay/cloud": "6.3.0",
     "@agent-relay/sdk": "^6.3.0",
+    "@agentworkforce/deploy": "file:packages/deploy",
+    "@relayfile/sdk": "0.7.23",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",

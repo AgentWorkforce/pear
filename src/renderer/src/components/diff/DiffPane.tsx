@@ -1217,7 +1217,7 @@ export function DiffPane(): React.ReactNode {
     }
   }, [root?.path, root?.pathExists, summary?.branch])
 
-  if (!root?.pathExists) {
+  if (!root || !root.pathExists) {
     return (
       <div className="flex h-full items-center justify-center bg-[var(--pear-bg)] px-8">
         <p className="text-sm text-[var(--pear-text-faint)]">Select an available project root to see changes.</p>
@@ -1254,6 +1254,7 @@ export function DiffPane(): React.ReactNode {
   }
 
   async function refreshRepository(nextStatus?: GitBranchSyncStatus): Promise<void> {
+    if (!root) return
     if (nextStatus) setBranchSyncStatus(nextStatus)
     await Promise.all([
       fetchStatus(root.path),
@@ -1274,6 +1275,7 @@ export function DiffPane(): React.ReactNode {
   }
 
   async function handleRemoteSync(): Promise<void> {
+    if (!root) return
     setBranchSyncLoading(true)
     setBranchSyncError(null)
     try {
@@ -1300,6 +1302,7 @@ export function DiffPane(): React.ReactNode {
   }
 
   function handleChangedFilesKeyDown(event: React.KeyboardEvent): void {
+    if (!root) return
     if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
     event.preventDefault()
     const path = nextFilePath(filteredFilePaths, selectedFile, event.key === 'ArrowDown' ? 1 : -1)
@@ -1307,6 +1310,7 @@ export function DiffPane(): React.ReactNode {
   }
 
   function handleHistoryFilesKeyDown(event: React.KeyboardEvent): void {
+    if (!root) return
     if (event.key !== 'ArrowDown' && event.key !== 'ArrowUp') return
     event.preventDefault()
     const path = nextFilePath(selectedCommitFilePaths, selectedCommitFile, event.key === 'ArrowDown' ? 1 : -1)
@@ -1377,6 +1381,7 @@ export function DiffPane(): React.ReactNode {
   }
 
   async function handleGenerate(): Promise<void> {
+    if (!root) return
     setMessage(null)
     try {
       const draft = await generateCommitMessage(root.path, {
@@ -1392,6 +1397,7 @@ export function DiffPane(): React.ReactNode {
   }
 
   async function handleCommit(): Promise<void> {
+    if (!root) return
     setMessage(null)
     try {
       const commitCoAuthors = coAuthorInput.trim()

@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
-export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'broker-details' | 'source-control'
+export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control'
 
 const api = {
   project: {
@@ -111,9 +111,84 @@ const api = {
     readPreview: (filePath: string) => ipcRenderer.invoke('fs:read-preview', filePath)
   },
   auth: {
-    login: () => ipcRenderer.invoke('auth:login') as Promise<{ loggedIn: boolean; apiUrl?: string }>,
+    login: (input?: { apiUrl?: string }) =>
+      ipcRenderer.invoke('auth:login', input) as Promise<{ loggedIn: boolean; apiUrl?: string }>,
     logout: () => ipcRenderer.invoke('auth:logout'),
     status: () => ipcRenderer.invoke('auth:status') as Promise<{ loggedIn: boolean; apiUrl?: string }>
+  },
+  cloudAgent: {
+    list: () => ipcRenderer.invoke('cloud-agent:list'),
+    create: (input: { name: string; harness: string; model: string }) =>
+      ipcRenderer.invoke('cloud-agent:create', input),
+    delete: (id: string) => ipcRenderer.invoke('cloud-agent:delete', id),
+    attach: (projectId: string, cloudAgentId: string) =>
+      ipcRenderer.invoke('cloud-agent:attach', projectId, cloudAgentId),
+    detach: (projectId: string) => ipcRenderer.invoke('cloud-agent:detach', projectId),
+    status: (projectId: string) => ipcRenderer.invoke('cloud-agent:status', projectId),
+    onEvent: (callback: (event: unknown) => void) => {
+      const handler = (_: unknown, event: unknown): void => callback(event)
+      ipcRenderer.on('cloud-agent:event', handler)
+      return () => ipcRenderer.removeListener('cloud-agent:event', handler)
+    }
+  },
+  proactiveAgent: {
+    list: (projectId: string) => ipcRenderer.invoke('proactive-agent:list', projectId),
+    create: (projectId: string, draft: unknown) =>
+      ipcRenderer.invoke('proactive-agent:create', projectId, draft),
+    update: (projectId: string, personaId: string, draft: unknown) =>
+      ipcRenderer.invoke('proactive-agent:update', projectId, personaId, draft),
+    deploy: (projectId: string, personaId: string) =>
+      ipcRenderer.invoke('proactive-agent:deploy', projectId, personaId),
+    pause: (projectId: string, personaId: string) =>
+      ipcRenderer.invoke('proactive-agent:pause', projectId, personaId),
+    resume: (projectId: string, personaId: string) =>
+      ipcRenderer.invoke('proactive-agent:resume', projectId, personaId),
+    undeploy: (projectId: string, personaId: string) =>
+      ipcRenderer.invoke('proactive-agent:undeploy', projectId, personaId),
+    runs: (projectId: string, personaId: string, opts?: { limit?: number; cursor?: string }) =>
+      ipcRenderer.invoke('proactive-agent:runs', projectId, personaId, opts),
+    runTranscript: (runId: string) =>
+      ipcRenderer.invoke('proactive-agent:run-transcript', runId),
+    onEvent: (callback: (event: unknown) => void) => {
+      const handler = (_: unknown, event: unknown): void => callback(event)
+      ipcRenderer.on('proactive-agent:event', handler)
+      return () => ipcRenderer.removeListener('proactive-agent:event', handler)
+    }
+  },
+  integrations: {
+    catalog: () => ipcRenderer.invoke('integrations:catalog'),
+    list: (projectId: string) => ipcRenderer.invoke('integrations:list', projectId),
+    startConnect: (projectId: string, provider: string) =>
+      ipcRenderer.invoke('integrations:start-connect', projectId, provider),
+    pollConnect: (sessionId: string) =>
+      ipcRenderer.invoke('integrations:poll-connect', sessionId),
+    completeConnect: (
+      projectId: string,
+      sessionId: string,
+      scope: Record<string, unknown>,
+      mountPaths: string[],
+      notifyAgent: boolean
+    ) => ipcRenderer.invoke(
+      'integrations:complete-connect',
+      projectId,
+      sessionId,
+      scope,
+      mountPaths,
+      notifyAgent
+    ),
+    updateScope: (
+      projectId: string,
+      integrationId: string,
+      scope: Record<string, unknown>,
+      mountPaths: string[]
+    ) => ipcRenderer.invoke('integrations:update-scope', projectId, integrationId, scope, mountPaths),
+    disconnect: (projectId: string, integrationId: string) =>
+      ipcRenderer.invoke('integrations:disconnect', projectId, integrationId),
+    onEvent: (callback: (event: unknown) => void) => {
+      const handler = (_: unknown, event: unknown): void => callback(event)
+      ipcRenderer.on('integrations:event', handler)
+      return () => ipcRenderer.removeListener('integrations:event', handler)
+    }
   },
   onMenu: (channel: string, callback: (...args: unknown[]) => void) => {
     const handler = (_: unknown, ...args: unknown[]): void => callback(...args)
