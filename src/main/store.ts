@@ -2,6 +2,7 @@ import { app } from 'electron'
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'fs'
 import { basename, join } from 'path'
 import { z } from 'zod'
+import type { ProactiveAgentBinding, ProactiveAgentDraft } from './proactive-agent.types'
 import {
   PeopleListSchema,
   ProjectIntegrationSchema,
@@ -20,6 +21,29 @@ export type Project = z.infer<typeof ProjectSchema>
 type StoreData = z.infer<typeof StoreSchema>
 
 const defaultData: StoreData = { projects: [], activeProjectId: null }
+
+// Wave-additive types (cloud-agent / proactive-agent / relay workspace) — kept
+// as ambient exports here so per-spec branches that consume them compile. The
+// schema-side extensions will land with the per-spec branches that need them.
+export type ProjectCloudAgent = {
+  id: string
+  sandboxId: string
+  relayfileMountPath: string
+  attachedAt: string
+  autoPullAfterRun: boolean
+}
+
+export interface RelayWorkspace {
+  id: string
+  createdAt: string
+}
+
+export interface RelayWorkspaceRecord extends RelayWorkspace {
+  apiUrl?: string
+  authKey?: string
+}
+
+export type { ProactiveAgentBinding, ProactiveAgentDraft }
 
 const getStorePath = (): string => {
   const dir = join(app.getPath('userData'), 'config')
@@ -49,12 +73,48 @@ export function saveStore(data: StoreData): void {
   renameSync(tmpPath, storePath)
 }
 
+export function getRelayWorkspace(): { id: string; createdAt: string } | null {
+  const relayWorkspace = loadStore().relayWorkspace
+  return relayWorkspace ? { id: relayWorkspace.id, createdAt: relayWorkspace.createdAt } : null
+}
+
+export function setRelayWorkspace(workspace: { id: string; createdAt: string }): void {
+  const data = loadStore()
+  const relayWorkspace = normalizeRelayWorkspace(workspace)
+  if (relayWorkspace) {
+    data.relayWorkspace = { id: relayWorkspace.id, createdAt: relayWorkspace.createdAt }
+  } else {
+    delete data.relayWorkspace
+  }
+  saveStore(data)
+}
+
+export function clearRelayWorkspace(): void {
+  const data = loadStore()
+  delete data.relayWorkspace
+  saveStore(data)
+}
+
+export function getRelayWorkspaceRecord(): RelayWorkspaceRecord | undefined {
+  return loadStore().relayWorkspace
+}
+
+export function setRelayWorkspaceRecord(record: RelayWorkspaceRecord | null): void {
+  const data = loadStore()
+  const relayWorkspace = normalizeRelayWorkspace(record)
+  if (relayWorkspace) {
+    data.relayWorkspace = relayWorkspace
+  } else {
+    delete data.relayWorkspace
+  }
+  saveStore(data)
+}
+
 export function addProject(name: string, rootPath: string): Project {
   const data = loadStore()
   const project: Project = {
     id: crypto.randomUUID(),
     name,
-    relayWorkspaceId: crypto.randomUUID(),
     rootPath,
     roots: [{ id: crypto.randomUUID(), name: defaultRootName(rootPath), path: rootPath }],
     channels: ['general'],

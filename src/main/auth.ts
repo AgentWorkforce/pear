@@ -1,8 +1,10 @@
 import { app, shell, safeStorage } from 'electron'
+import { createHash } from 'crypto'
 import { createServer, type Server } from 'http'
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs'
 import { join } from 'path'
 import { URL } from 'url'
+import { readStoredAuth as readCloudSdkAuth } from '@agent-relay/cloud'
 import { cacheAvatarFromUrl, cachedAvatarUrl, isRemoteAvatarUrl } from './avatar-cache'
 import {
   AuthMetaSchema,
@@ -13,6 +15,7 @@ import {
 } from './schemas'
 
 const CLOUD_API_URL = process.env.RELAY_CLOUD_URL || 'https://agentrelay.dev/cloud'
+const TOKEN_EXPIRY_BUFFER_MS = 60_000
 
 interface AuthStatus {
   loggedIn: boolean
@@ -201,6 +204,17 @@ function loadTokens(): StoredTokens | null {
   }
 }
 
+export function isTokenExpired(tokens: Pick<StoredTokens, 'expiresAt'>): boolean {
+  if (!tokens.expiresAt) return false
+  const expiresMs = Date.parse(tokens.expiresAt)
+  if (Number.isNaN(expiresMs)) return false
+  return expiresMs - Date.now() < TOKEN_EXPIRY_BUFFER_MS
+}
+
+export function readStoredAuth(): StoredTokens | null {
+  return loadTokens()
+}
+
 function clearTokens(): void {
   try {
     writeFileSync(getAuthPath(), '')
@@ -352,4 +366,89 @@ export function getApiUrl(): string {
     return loadAuthMeta().apiUrl || CLOUD_API_URL
   }
   return CLOUD_API_URL
+}
+
+export interface CloudAuth {
+  accessToken: string
+  apiUrl: string
+  accountKey: string
+}
+
+function normalizeCloudApiUrl(url: string | undefined): string {
+  return (url || getApiUrl()).trim().replace(/\/+$/, '')
+}
+
+function readJwtPayload(token: string): Record<string, unknown> | null {
+  const [, payload] = token.split('.')
+  if (!payload) return null
+  try {
+    return JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as Record<string, unknown>
+  } catch {
+    return null
+  }
+}
+
+function deriveAuthSubject(accessToken: string, user?: UserInfo): string {
+  if (user?.email?.trim()) return `email:${user.email.trim().toLowerCase()}`
+
+  const payload = readJwtPayload(accessToken)
+  const subject = payload?.sub ?? payload?.userId ?? payload?.user_id ?? payload?.email
+  if (typeof subject === 'string' && subject.trim()) return `token-subject:${subject.trim()}`
+
+  return `token-hash:${createHash('sha256').update(accessToken).digest('hex')}`
+}
+
+function deriveCloudAuthAccountKey(apiUrl: string, accessToken: string, user?: UserInfo): string {
+  const normalizedApiUrl = normalizeCloudApiUrl(apiUrl)
+  const subject = deriveAuthSubject(accessToken, user)
+  return createHash('sha256').update(`${normalizedApiUrl}\0${subject}`).digest('hex')
+}
+
+function isCloudSdkAuthExpired(auth: { accessTokenExpiresAt?: string } | null): boolean {
+  if (!auth?.accessTokenExpiresAt) return true
+  const expiresAt = Date.parse(auth.accessTokenExpiresAt)
+  return Number.isNaN(expiresAt) || expiresAt - Date.now() < TOKEN_EXPIRY_BUFFER_MS
+}
+
+/**
+ * Resolve cloud credentials the same way for every cloud-backed feature.
+ * Prefers Pear's in-app login (the encrypted userData store), then falls back
+ * to the @agent-relay/cloud SDK credentials — CLOUD_API_* env vars or
+ * ~/.agent-relay/cloud-auth.json — so env/file-provisioned auth works exactly
+ * like it does in ../workforce and ../cloud. Returns null when neither source
+ * has valid, unexpired credentials.
+ */
+export async function resolveCloudAuth(): Promise<CloudAuth | null> {
+  const pearAuth = loadTokens()
+  if (pearAuth && !isTokenExpired(pearAuth)) {
+    const apiUrl = normalizeCloudApiUrl(pearAuth.apiUrl)
+    return {
+      accessToken: pearAuth.accessToken,
+      apiUrl,
+      accountKey: deriveCloudAuthAccountKey(apiUrl, pearAuth.accessToken, pearAuth.user)
+    }
+  }
+
+  const cloudAuth = await readCloudSdkAuth()
+  if (cloudAuth && !isCloudSdkAuthExpired(cloudAuth)) {
+    const apiUrl = normalizeCloudApiUrl(cloudAuth.apiUrl)
+    return {
+      accessToken: cloudAuth.accessToken,
+      apiUrl,
+      accountKey: deriveCloudAuthAccountKey(apiUrl, cloudAuth.accessToken)
+    }
+  }
+
+  return null
+}
+
+export async function ensureAuthenticated(apiUrl?: string): Promise<AuthStatus> {
+  const stored = loadTokens()
+  if (stored && !isTokenExpired(stored)) {
+    return { loggedIn: true, apiUrl: stored.apiUrl, user: stored.user }
+  }
+  if (apiUrl && stored) {
+    saveAuthMeta({ apiUrl, user: stored.user })
+  }
+  return login()
 }

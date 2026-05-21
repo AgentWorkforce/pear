@@ -3,6 +3,7 @@ import { existsSync } from 'fs'
 import { join } from 'path'
 import { registerIpcHandlers } from './ipc-handlers'
 import { brokerManager } from './broker'
+import { cloudAgentManager } from './cloud-agent'
 import { registerAvatarCacheProtocol } from './avatar-cache'
 
 const APP_NAME = 'Pear by Agent Relay'
@@ -43,7 +44,10 @@ function getAppIcon(): Electron.NativeImage | undefined {
 
 function shutdownBrokerOnce(): Promise<void> {
   if (!shutdownPromise) {
-    shutdownPromise = brokerManager.shutdown()
+    shutdownPromise = Promise.all([
+      cloudAgentManager.shutdownAll(),
+      brokerManager.shutdown()
+    ]).then(() => undefined)
   }
   return shutdownPromise
 }
@@ -206,10 +210,10 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', async () => {
-  await shutdownBrokerOnce()
+  await shutdownAppOnce()
   if (process.platform !== 'darwin') app.quit()
 })
 
 app.on('before-quit', async () => {
-  await shutdownBrokerOnce()
+  await shutdownAppOnce()
 })

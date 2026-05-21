@@ -19,7 +19,7 @@ export async function listDirectory(dirPath: string): Promise<ExplorerEntry[]> {
   const entries = await readdir(dirPath, { withFileTypes: true })
 
   return entries
-    .map((entry) => ({
+    .map((entry): ExplorerEntry => ({
       name: entry.name,
       path: path.join(dirPath, entry.name),
       type: entry.isDirectory() ? 'directory' : 'file'

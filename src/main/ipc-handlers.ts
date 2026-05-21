@@ -19,7 +19,12 @@ import { brokerManager } from './broker'
 import * as git from './git'
 import * as filesystem from './filesystem'
 import * as auth from './auth'
+import { cloudAgentManager } from './cloud-agent'
+import { proactiveAgentManager } from './proactive-agent'
+import { integrationsManager } from './integrations'
+import { resetRelayWorkspaceManager } from './relay-workspace'
 import { assertDirectory, isDirectory } from './path-utils'
+import type { ProactiveAgentDraft } from './proactive-agent.types'
 
 function getProjectIdForPath(targetPath: string): string | null {
   const resolved = resolve(targetPath)
@@ -41,6 +46,13 @@ function assertPathWithinProjects(targetPath: string): void {
 }
 
 export function registerIpcHandlers(): void {
+  // Fan proactive-agent events out to all renderer windows.
+  proactiveAgentManager.onEvent((event) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send('proactive-agent:event', event)
+    }
+  })
+
   // --- App ---
   ipcMain.handle('app:confirm-quit', async (event) => {
     const win = BrowserWindow.fromWebContents(event.sender)
@@ -374,15 +386,128 @@ export function registerIpcHandlers(): void {
   })
 
   // --- Auth ---
-  ipcMain.handle('auth:login', async () => {
-    return auth.login()
+  ipcMain.handle('auth:login', async (_, input?: { apiUrl?: string }) => {
+    const status = await auth.ensureAuthenticated(input?.apiUrl)
+    if (status.loggedIn) resetRelayWorkspaceManager()
+    return status
   })
 
   ipcMain.handle('auth:logout', () => {
+    resetRelayWorkspaceManager()
     auth.logout()
   })
 
   ipcMain.handle('auth:status', () => {
     return auth.getAuthStatus()
+  })
+
+  // --- Cloud Agent ---
+  // Renderer-facing channels. The event stream `cloud-agent:event` is emitted by cloudAgentManager via webContents.send().
+  ipcMain.handle('cloud-agent:list', async () => {
+    return cloudAgentManager.list()
+  })
+
+  ipcMain.handle('cloud-agent:create', async (_, input: { name: string; harness: string; model: string }) => {
+    return cloudAgentManager.create(input)
+  })
+
+  ipcMain.handle('cloud-agent:delete', async (_, id: string) => {
+    return cloudAgentManager.delete(id)
+  })
+
+  ipcMain.handle('cloud-agent:attach', async (event, projectId: string, cloudAgentId: string) => {
+    return cloudAgentManager.attach(projectId, cloudAgentId, BrowserWindow.fromWebContents(event.sender))
+  })
+
+  ipcMain.handle('cloud-agent:detach', async (_, projectId: string) => {
+    return cloudAgentManager.detach(projectId)
+  })
+
+  ipcMain.handle('cloud-agent:status', async (_, projectId: string) => {
+    return cloudAgentManager.status(projectId)
+  })
+
+  // --- Proactive Agent ---
+  ipcMain.handle('proactive-agent:list', async (_, projectId: string) => {
+    return proactiveAgentManager.list(projectId)
+  })
+
+  ipcMain.handle('proactive-agent:create', async (_, projectId: string, draft: ProactiveAgentDraft) => {
+    return proactiveAgentManager.create(projectId, draft)
+  })
+
+  ipcMain.handle('proactive-agent:update', async (_, projectId: string, personaId: string, draft: ProactiveAgentDraft) => {
+    return proactiveAgentManager.update(projectId, personaId, draft)
+  })
+
+  ipcMain.handle('proactive-agent:deploy', async (_, projectId: string, personaId: string) => {
+    return proactiveAgentManager.deploy(projectId, personaId)
+  })
+
+  ipcMain.handle('proactive-agent:pause', async (_, projectId: string, personaId: string) => {
+    return proactiveAgentManager.pause(projectId, personaId)
+  })
+
+  ipcMain.handle('proactive-agent:resume', async (_, projectId: string, personaId: string) => {
+    return proactiveAgentManager.resume(projectId, personaId)
+  })
+
+  ipcMain.handle('proactive-agent:undeploy', async (_, projectId: string, personaId: string) => {
+    return proactiveAgentManager.undeploy(projectId, personaId)
+  })
+
+  ipcMain.handle('proactive-agent:runs', async (
+    _,
+    projectId: string,
+    personaId: string,
+    opts?: { limit?: number; cursor?: string }
+  ) => {
+    return proactiveAgentManager.runs(projectId, personaId, opts)
+  })
+
+  ipcMain.handle('proactive-agent:run-transcript', async (_, runId: string) => {
+    return proactiveAgentManager.runTranscript(runId)
+  })
+
+  // --- Integrations ---
+  ipcMain.handle('integrations:catalog', async () => {
+    return integrationsManager.listCatalog()
+  })
+
+  ipcMain.handle('integrations:list', (_, projectId: string) => {
+    return integrationsManager.listConnected(projectId)
+  })
+
+  ipcMain.handle('integrations:start-connect', async (_, projectId: string, provider: string) => {
+    return integrationsManager.startConnect(projectId, provider)
+  })
+
+  ipcMain.handle('integrations:poll-connect', async (_, sessionId: string) => {
+    return integrationsManager.pollConnect(sessionId)
+  })
+
+  ipcMain.handle(
+    'integrations:complete-connect',
+    async (
+      _,
+      projectId: string,
+      sessionId: string,
+      scope: Record<string, unknown>,
+      mountPaths: string[],
+      notifyAgent: boolean
+    ) => {
+      return integrationsManager.completeConnect(projectId, sessionId, scope, mountPaths, notifyAgent)
+    }
+  )
+
+  ipcMain.handle(
+    'integrations:update-scope',
+    async (_, projectId: string, integrationId: string, scope: Record<string, unknown>, mountPaths: string[]) => {
+      return integrationsManager.updateScope(projectId, integrationId, scope, mountPaths)
+    }
+  )
+
+  ipcMain.handle('integrations:disconnect', async (_, projectId: string, integrationId: string) => {
+    return integrationsManager.disconnect(projectId, integrationId)
   })
 }

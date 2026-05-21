@@ -53,6 +53,7 @@ function tabSubtitle(tab: AppTab, projectNameById: Map<string, string>): string 
     case 'agents':
       return projectName ? `${projectName} agents` : 'Agent quadrants'
   }
+  return ''
 }
 
 export function AppTopBar(): React.ReactNode {
