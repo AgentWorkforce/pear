@@ -6,3 +6,5 @@ dist/
 .DS_Store
 /.agent-relay
 *.tsbuildinfo
+.relay/
+.workflow-artifacts/
