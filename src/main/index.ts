@@ -1,15 +1,48 @@
-import { app, BrowserWindow, shell, Menu } from 'electron'
+import { app, BrowserWindow, shell, Menu, protocol, nativeImage } from 'electron'
+import { existsSync } from 'fs'
 import { join } from 'path'
 import { registerIpcHandlers } from './ipc-handlers'
 import { brokerManager } from './broker'
 import { cloudAgentManager } from './cloud-agent'
+import { registerAvatarCacheProtocol } from './avatar-cache'
 
-app.setName('Pear')
+const APP_NAME = 'Pear by Agent Relay'
+
+app.setName(APP_NAME)
+
+protocol.registerSchemesAsPrivileged([
+  {
+    scheme: 'pear-avatar',
+    privileges: {
+      standard: true,
+      secure: true,
+      supportFetchAPI: true
+    }
+  }
+])
 
 let mainWindow: BrowserWindow | null = null
 let shutdownPromise: Promise<void> | null = null
 
-function shutdownAppOnce(): Promise<void> {
+function getAppIconPath(): string {
+  const iconPaths = app.isPackaged
+    ? [
+        join(process.resourcesPath, 'app-icon.png'),
+        join(app.getAppPath(), 'resources/app-icon.png')
+      ]
+    : [join(__dirname, '../../resources/app-icon.png')]
+
+  return iconPaths.find((path) => existsSync(path)) ?? iconPaths[0]
+}
+
+function getAppIcon(): Electron.NativeImage | undefined {
+  const iconPath = getAppIconPath()
+  const icon = nativeImage.createFromPath(iconPath)
+
+  return icon.isEmpty() ? undefined : icon
+}
+
+function shutdownBrokerOnce(): Promise<void> {
   if (!shutdownPromise) {
     shutdownPromise = Promise.all([
       cloudAgentManager.shutdownAll(),
@@ -26,6 +59,8 @@ function createWindow(): void {
     minWidth: 960,
     minHeight: 600,
     show: false,
+    title: APP_NAME,
+    icon: getAppIcon(),
     titleBarStyle: 'hiddenInset',
     trafficLightPosition: { x: 16, y: 10 },
     backgroundColor: '#08111a',
@@ -44,6 +79,15 @@ function createWindow(): void {
   mainWindow.webContents.setWindowOpenHandler((details) => {
     shell.openExternal(details.url)
     return { action: 'deny' }
+  })
+
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (process.platform !== 'darwin') return
+    if (input.type !== 'keyDown') return
+    if (!input.control || input.meta || input.key.toLowerCase() !== 'w') return
+
+    event.preventDefault()
+    mainWindow?.webContents.send('menu:close-tab')
   })
 
   if (process.env.ELECTRON_RENDERER_URL) {
@@ -88,8 +132,14 @@ function createMenu(): void {
           }
         },
         {
-          label: 'Release Agent',
+          label: 'Close Tab',
           accelerator: 'CmdOrCtrl+W',
+          click: (): void => {
+            mainWindow?.webContents.send('menu:close-tab')
+          }
+        },
+        {
+          label: 'Release Agent',
           click: (): void => {
             mainWindow?.webContents.send('menu:release-agent')
           }
@@ -120,7 +170,17 @@ function createMenu(): void {
     },
     {
       label: 'Window',
-      submenu: [{ role: 'minimize' }, { role: 'zoom' }, { role: 'close' }]
+      submenu: [
+        { role: 'minimize' },
+        { role: 'zoom' },
+        { type: 'separator' },
+        {
+          label: 'Close Tab',
+          click: (): void => {
+            mainWindow?.webContents.send('menu:close-tab')
+          }
+        }
+      ]
     }
   ]
 
@@ -128,6 +188,18 @@ function createMenu(): void {
 }
 
 app.whenReady().then(() => {
+  const appIcon = getAppIcon()
+  app.setAboutPanelOptions({
+    applicationName: APP_NAME,
+    applicationVersion: app.getVersion(),
+    iconPath: getAppIconPath()
+  })
+
+  if (process.platform === 'darwin' && appIcon) {
+    app.dock.setIcon(appIcon)
+  }
+
+  registerAvatarCacheProtocol()
   registerIpcHandlers()
   createMenu()
   createWindow()

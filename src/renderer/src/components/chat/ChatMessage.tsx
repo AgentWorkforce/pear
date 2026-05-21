@@ -1,9 +1,16 @@
 import type React from 'react'
 import { useState } from 'react'
-import { MessageCircle, SmilePlus, User } from 'lucide-react'
+import { MessageCircle, SmilePlus } from 'lucide-react'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
+import type { AuthUser } from '@/lib/ipc'
+import { renderChatMessageBody } from '@/lib/chat-formatting'
+import { formatClockTime, formatRelativeShort } from '@/lib/format'
 import { useAgentStore } from '@/stores/agent-store'
-import type { ChatMessage as ChatMessageType } from '@/stores/agent-store'
+import type {
+  ChatMessage as ChatMessageType,
+  ChatThreadReply
+} from '@/stores/agent-store'
+import { HumanAvatar } from './HumanAvatar'
 
 interface Props {
   message: ChatMessageType
@@ -11,6 +18,7 @@ interface Props {
   showActions?: boolean
   showThreadSummary?: boolean
   activeThread?: boolean
+  authUser?: AuthUser | null
   onReply?: (message: ChatMessageType) => void
   onReact?: (messageId: string, emoji: string) => void
 }
@@ -36,23 +44,25 @@ function getAgentColor(name: string): string {
   return agentColors[Math.abs(hash) % agentColors.length]
 }
 
-function formatTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+function participantKey(participant: Pick<ChatThreadReply, 'from' | 'isHuman' | 'projectId'>): string {
+  return `${participant.projectId || 'unknown'}:${participant.isHuman ? 'human' : participant.from}`
 }
 
-function formatReplyTime(timestamp: number): string {
-  const now = Date.now()
-  const ageMs = now - timestamp
-  if (ageMs >= 0 && ageMs < 60_000) return 'just now'
-  if (ageMs >= 0 && ageMs < 3_600_000) {
-    const minutes = Math.max(1, Math.floor(ageMs / 60_000))
-    return `${minutes}m ago`
+function threadParticipants(replies: ChatThreadReply[]): ChatThreadReply[] {
+  const participants: ChatThreadReply[] = []
+  const seen = new Set<string>()
+
+  for (let index = replies.length - 1; index >= 0; index -= 1) {
+    const reply = replies[index]
+    const key = participantKey(reply)
+    if (seen.has(key)) continue
+
+    seen.add(key)
+    participants.unshift(reply)
+    if (participants.length === 2) break
   }
-  if (ageMs >= 0 && ageMs < 86_400_000) {
-    const hours = Math.max(1, Math.floor(ageMs / 3_600_000))
-    return `${hours}h ago`
-  }
-  return new Date(timestamp).toLocaleDateString([], { month: 'short', day: 'numeric' })
+
+  return participants
 }
 
 interface MessageActionsProps {
@@ -157,12 +167,92 @@ function InlineReactionButton({
   )
 }
 
+function ThreadParticipantAvatar({
+  participant,
+  authUser
+}: {
+  participant: ChatThreadReply
+  authUser?: AuthUser | null
+}): React.ReactNode {
+  const agent = useAgentStore((state) =>
+    state.agents.find((candidate) =>
+      candidate.name === participant.from &&
+      (!participant.projectId || candidate.projectId === participant.projectId)
+    )
+  )
+
+  if (participant.isHuman) {
+    return (
+      <HumanAvatar
+        user={authUser}
+        iconSize={11}
+        className="flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-md border-2 border-[var(--pear-bg)] bg-[var(--pear-bg-overlay)]"
+      />
+    )
+  }
+
+  const color = getAgentColor(participant.from)
+
+  return (
+    <span
+      className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md border-2 border-[var(--pear-bg)]"
+      style={{ backgroundColor: `color-mix(in srgb, ${color} 22%, var(--pear-bg))` }}
+      title={participant.from}
+      aria-label={participant.from}
+    >
+      <AgentHarnessIcon cli={agent?.cli} className="h-3.5 w-3.5 text-[var(--pear-text)]" />
+    </span>
+  )
+}
+
+function ThreadSummary({
+  message,
+  replies,
+  authUser,
+  onReply
+}: {
+  message: ChatMessageType
+  replies: ChatThreadReply[]
+  authUser?: AuthUser | null
+  onReply?: (message: ChatMessageType) => void
+}): React.ReactNode {
+  const lastReply = replies[replies.length - 1]
+  const participants = threadParticipants(replies)
+
+  return (
+    <button
+      type="button"
+      onClick={() => onReply?.(message)}
+      className="flex min-h-7 max-w-full items-center gap-2 rounded-md pr-2 text-left text-xs font-medium hover:bg-[var(--pear-bg-overlay)]"
+    >
+      <span className="flex shrink-0 -space-x-1">
+        {participants.map((participant) => (
+          <ThreadParticipantAvatar
+            key={participantKey(participant)}
+            participant={participant}
+            authUser={authUser}
+          />
+        ))}
+      </span>
+      <span className="shrink-0 text-[var(--pear-accent-bright)]">
+        {replies.length} {replies.length === 1 ? 'reply' : 'replies'}
+      </span>
+      {lastReply && (
+        <span className="min-w-0 truncate font-normal text-[var(--pear-text-faint)]">
+          {formatRelativeShort(lastReply.timestamp)}
+        </span>
+      )}
+    </button>
+  )
+}
+
 export function ChatMessage({
   message,
   showRoute = true,
   showActions = true,
   showThreadSummary = true,
   activeThread = false,
+  authUser,
   onReply,
   onReact
 }: Props): React.ReactNode {
@@ -175,7 +265,17 @@ export function ChatMessage({
   const color = message.isHuman ? 'var(--pear-accent-bright)' : getAgentColor(message.from)
   const reactions = message.reactions || []
   const replies = message.threadReplies || []
-  const lastReply = replies[replies.length - 1]
+
+  if (message.kind === 'notice') {
+    return (
+      <div className="flex justify-center px-2 py-2">
+        <div className="flex max-w-full items-center gap-2 rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/45 px-2.5 py-1 text-xs text-[var(--pear-text-faint)]">
+          <span className="truncate">{message.body}</span>
+          <span className="shrink-0 text-[10px]">{formatClockTime(message.timestamp)}</span>
+        </div>
+      </div>
+    )
+  }
 
   return (
     <div
@@ -185,19 +285,25 @@ export function ChatMessage({
     >
       {showActions && <MessageActions message={message} onReply={onReply} onReact={onReact} />}
 
-      <div
-        className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-[var(--pear-border-subtle)]"
-        style={{ backgroundColor: `color-mix(in srgb, ${color} 20%, transparent)` }}
-      >
-        {message.isHuman ? (
-          <User size={15} style={{ color }} />
-        ) : (
+      {message.isHuman ? (
+        <HumanAvatar
+          user={authUser}
+          color={color}
+          iconSize={15}
+          className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-md border border-[var(--pear-border-subtle)]"
+          style={{ backgroundColor: `color-mix(in srgb, ${color} 20%, transparent)` }}
+        />
+      ) : (
+        <div
+          className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-[var(--pear-border-subtle)]"
+          style={{ backgroundColor: `color-mix(in srgb, ${color} 20%, transparent)` }}
+        >
           <AgentHarnessIcon
             cli={agent?.cli}
             className="h-5 w-5 text-[var(--pear-text)]"
           />
-        )}
-      </div>
+        </div>
+      )}
 
       <div className={`min-w-0 flex-1 ${showActions ? 'pr-16' : ''}`}>
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
@@ -205,7 +311,7 @@ export function ChatMessage({
             {message.isHuman ? 'You' : message.from}
           </span>
           <span className="text-[10px] text-[var(--pear-text-faint)]">
-            {formatTime(message.timestamp)}
+            {formatClockTime(message.timestamp)}
           </span>
           {showRoute && message.to && !message.isHuman && (
             <span className="text-[10px] text-[var(--pear-text-faint)]">
@@ -213,47 +319,44 @@ export function ChatMessage({
             </span>
           )}
         </div>
-        <p className="mt-0.5 whitespace-pre-wrap break-words text-sm leading-5 text-[var(--pear-text)]">
-          {message.body}
-        </p>
+        <div className="mt-0.5 space-y-1 break-words text-sm leading-5 text-[var(--pear-text)]">
+          {renderChatMessageBody(message.body)}
+        </div>
 
         {(reactions.length > 0 || (showThreadSummary && replies.length > 0)) && (
-          <div className="mt-2 flex flex-wrap items-center gap-2">
-            {reactions.map((reaction) => (
-              <button
-                key={reaction.emoji}
-                type="button"
-                onClick={() => onReact?.(message.id, reaction.emoji)}
-                className={`flex h-7 items-center gap-1 rounded-full border px-2 text-xs ${
-                  reaction.reactedByHuman
-                    ? 'border-[var(--pear-accent-dim)] bg-[var(--pear-bg-overlay)] text-[var(--pear-text)]'
-                    : 'border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35 text-[var(--pear-text-secondary)] hover:border-[var(--pear-accent-dim)]'
-                }`}
-                aria-label={`Toggle ${reaction.emoji} reaction`}
-              >
-                <span>{reaction.emoji}</span>
-                <span>{reaction.count}</span>
-              </button>
-            ))}
+          <div className="mt-2 space-y-2">
+            {reactions.length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5">
+                {reactions.map((reaction) => (
+                  <button
+                    key={reaction.emoji}
+                    type="button"
+                    onClick={() => onReact?.(message.id, reaction.emoji)}
+                    className={`flex h-7 items-center gap-1 rounded-full border px-2 text-xs font-semibold ${
+                      reaction.reactedByHuman
+                        ? 'border-transparent bg-[var(--pear-accent-dim)] text-white hover:brightness-110'
+                        : 'border-[var(--pear-border-subtle)] bg-[var(--pear-bg-overlay)] text-[var(--pear-text-secondary)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]'
+                    }`}
+                    aria-label={`Toggle ${reaction.emoji} reaction`}
+                  >
+                    <span>{reaction.emoji}</span>
+                    <span>{reaction.count}</span>
+                  </button>
+                ))}
 
-            {reactions.length > 0 && onReact && (
-              <InlineReactionButton messageId={message.id} onReact={onReact} />
+                {onReact && (
+                  <InlineReactionButton messageId={message.id} onReact={onReact} />
+                )}
+              </div>
             )}
 
             {showThreadSummary && replies.length > 0 && (
-              <button
-                type="button"
-                onClick={() => onReply?.(message)}
-                className="flex h-7 items-center gap-2 rounded-full px-2 text-xs font-medium text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)]"
-              >
-                <MessageCircle size={13} />
-                <span>{replies.length} {replies.length === 1 ? 'reply' : 'replies'}</span>
-                {lastReply && (
-                  <span className="font-normal text-[var(--pear-text-faint)]">
-                    Last reply {formatReplyTime(lastReply.timestamp)}
-                  </span>
-                )}
-              </button>
+              <ThreadSummary
+                message={message}
+                replies={replies}
+                authUser={authUser}
+                onReply={onReply}
+              />
             )}
           </div>
         )}

@@ -1,6 +1,17 @@
 import { create } from 'zustand'
-import type { AgentCurrentState, BrokerListAgent, InboundDeliveryMode, TerminalAttachMode } from '@/lib/ipc'
-import { useProjectStore } from '@/stores/project-store'
+import type {
+  AgentCurrentState,
+  BrokerDetails,
+  BrokerEventRecord,
+  BrokerListAgent,
+  InboundDeliveryMode,
+  TerminalAttachMode
+} from '@/lib/ipc'
+import { normalizeChannelName, useProjectStore } from '@/stores/project-store'
+import {
+  compactBrokerEvent as compactBrokerEventPayload,
+  normalizeEventTimestamp
+} from '@shared/lib/broker-events'
 
 export interface Agent {
   name: string
@@ -23,6 +34,7 @@ export interface Agent {
 
 export interface ChatMessage {
   id: string
+  kind?: 'message' | 'notice'
   from: string
   to: string
   body: string
@@ -65,8 +77,12 @@ export interface BrokerErrorEntry {
 
 const MAX_PTY_BUFFER_CHUNKS = 10_000
 const MAX_BROKER_ERRORS = 12
+const MAX_BROKER_EVENTS = 3_000
+const BROKER_EVENT_RETENTION_MS = 12 * 60 * 60 * 1_000
 const HUMAN_SENDER_NAME = 'human'
+const SYSTEM_NOTICE_SENDER_NAME = 'system'
 const HUMAN_MESSAGE_DEDUPE_WINDOW_MS = 10_000
+const JOIN_NOTICE_DEDUPE_WINDOW_MS = 30_000
 const TYPING_ACTIVITY_WINDOW_MS = 12_000
 
 export function getAgentKey(projectId: string | undefined, name: string): string {
@@ -97,6 +113,10 @@ function matchesAgent(agent: Agent, projectId: string | undefined, name: string)
 interface BrokerEvent {
   kind: string
   projectId?: string
+  historyId?: string
+  observedAt?: number
+  timestamp?: number
+  seq?: number
   name?: string
   chunk?: string
   stream?: string
@@ -104,6 +124,7 @@ interface BrokerEvent {
   model?: string
   runtime?: string
   parent?: string
+  channels?: string[]
   from?: string
   target?: string
   body?: string
@@ -114,6 +135,9 @@ interface BrokerEvent {
   mode?: InboundDeliveryMode
   code?: number
   signal?: string
+  reason?: string
+  message?: string
+  lastError?: string
   [key: string]: unknown
 }
 
@@ -195,8 +219,52 @@ function clearPendingDeliveries(agent: Agent, eventId?: string): Agent {
   }
 }
 
+function compactBrokerEvent(event: Record<string, unknown>): BrokerEventRecord['event'] {
+  return compactBrokerEventPayload(event) as BrokerEventRecord['event']
+}
+
+function pruneBrokerEvents(events: BrokerEventRecord[], now = Date.now()): BrokerEventRecord[] {
+  const cutoff = now - BROKER_EVENT_RETENTION_MS
+  return events
+    .filter((entry) => entry.timestamp >= cutoff)
+    .slice(-MAX_BROKER_EVENTS)
+}
+
+function toBrokerEventRecord(event: BrokerEvent): BrokerEventRecord {
+  const timestamp =
+    normalizeEventTimestamp(event.observedAt) ??
+    normalizeEventTimestamp(event.timestamp) ??
+    Date.now()
+  const projectId = event.projectId || 'unknown'
+  const seq = typeof event.seq === 'number' ? event.seq : undefined
+  const eventId = typeof event.event_id === 'string' || typeof event.event_id === 'number'
+    ? String(event.event_id)
+    : undefined
+  const id = typeof event.historyId === 'string' && event.historyId
+    ? event.historyId
+    : `${projectId}:${seq ?? eventId ?? crypto.randomUUID()}`
+
+  return {
+    id,
+    projectId,
+    timestamp,
+    event: compactBrokerEvent(event as Record<string, unknown>)
+  }
+}
+
 function normalizeMessageTarget(target: string): string {
   return target.trim().replace(/^#/, '')
+}
+
+function normalizeChannelList(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+
+  return Array.from(new Set(
+    value
+      .filter((entry): entry is string => typeof entry === 'string')
+      .map((channel) => normalizeChannelName(normalizeMessageTarget(channel)))
+      .filter(Boolean)
+  ))
 }
 
 function isHumanSender(sender: string): boolean {
@@ -220,6 +288,49 @@ function isDuplicateHumanEcho(
   )
 }
 
+function createChannelJoinNotice(
+  projectId: string | undefined,
+  channelName: string,
+  participantName: string,
+  timestamp = Date.now()
+): ChatMessage | null {
+  const normalizedChannelName = normalizeChannelName(normalizeMessageTarget(channelName))
+  const displayName = participantName.trim()
+  if (!normalizedChannelName || !displayName) return null
+
+  return {
+    id: crypto.randomUUID(),
+    kind: 'notice',
+    from: SYSTEM_NOTICE_SENDER_NAME,
+    to: `#${normalizedChannelName}`,
+    body: `${displayName} joined the channel`,
+    timestamp,
+    isHuman: false,
+    projectId
+  }
+}
+
+function isDuplicateJoinNotice(messages: ChatMessage[], candidate: ChatMessage): boolean {
+  return messages.some((message) =>
+    message.kind === 'notice' &&
+    message.body === candidate.body &&
+    (!message.projectId || !candidate.projectId || message.projectId === candidate.projectId) &&
+    normalizeMessageTarget(message.to) === normalizeMessageTarget(candidate.to) &&
+    Math.abs(message.timestamp - candidate.timestamp) < JOIN_NOTICE_DEDUPE_WINDOW_MS
+  )
+}
+
+function appendJoinNotices(messages: ChatMessage[], notices: ChatMessage[]): ChatMessage[] {
+  let nextMessages = messages
+
+  for (const notice of notices) {
+    if (isDuplicateJoinNotice(nextMessages, notice)) continue
+    nextMessages = [...nextMessages, notice]
+  }
+
+  return nextMessages
+}
+
 interface AgentState {
   agents: Agent[]
   activeAgentKey: string | null
@@ -228,6 +339,7 @@ interface AgentState {
   brokerStatus: 'disconnected' | 'connected' | 'error'
   brokerError: string | null
   brokerErrors: BrokerErrorEntry[]
+  brokerEvents: BrokerEventRecord[]
 
   setActiveAgentKey: (key: string | null) => void
   setAgentTerminalMode: (projectId: string | undefined, name: string, mode: TerminalAttachMode) => void
@@ -240,9 +352,13 @@ interface AgentState {
     options?: TrackSpawnedAgentOptions
   ) => void
   syncBrokerAgents: (agents: BrokerListAgent[]) => void
+  syncBrokerDetailsStatus: (details: Pick<BrokerDetails, 'projectId' | 'health'>[]) => void
+  hydrateBrokerEvents: (events: BrokerEventRecord[]) => void
+  recordBrokerEvent: (event: BrokerEvent) => void
   handleBrokerEvent: (event: BrokerEvent) => void
   handleBrokerStatus: (status: { projectId?: string; status: string; error?: string }) => void
   addHumanMessage: (to: string, body: string, projectId?: string) => void
+  addChannelJoinNotice: (projectId: string | undefined, channelName: string, participantName: string) => void
   addThreadReply: (messageId: string, body: string) => void
   toggleMessageReaction: (messageId: string, emoji: string) => void
   renameMessageChannel: (projectId: string | undefined, oldName: string, newName: string) => void
@@ -294,6 +410,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   brokerStatus: 'disconnected',
   brokerError: null,
   brokerErrors: [],
+  brokerEvents: [],
 
   setActiveAgentKey: (key) => set({ activeAgentKey: key }),
 
@@ -311,6 +428,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     const activity = activityFromCurrentState(currentState)
     const lastActivityAtMs = getActivityTimestampMs(options?.lastActivityAt, options?.lastActivityMs)
     const typingUntilMs = getTypingUntilMs(currentState, lastActivityAtMs)
+    const channels = normalizeChannelList(options?.channels)
     set((state) => ({
       agents: state.agents.some((a) => matchesAgent(a, projectId, name))
         ? state.agents.map((a) =>
@@ -325,7 +443,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                   activity,
                   lastActivityAtMs: lastActivityAtMs ?? a.lastActivityAtMs,
                   typingUntilMs,
-                  channels: options?.channels || a.channels,
+                  channels: channels ?? a.channels,
                   terminalMode: options?.terminalMode || a.terminalMode
                 }
               : a
@@ -343,7 +461,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
               projectId,
               rootId,
               rootPath,
-              channels: options?.channels,
+              channels,
               terminalMode: options?.terminalMode || 'passthrough',
               ptyBuffer: [],
               pendingDeliveryIds: []
@@ -364,6 +482,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         const liveAgent = liveByKey.get(getAgentKeyForAgent(agent))
         if (!liveAgent) return agent
 
+        const channels = normalizeChannelList(liveAgent.channels)
         const currentState = liveAgent.current_state || 'idle'
         const lastActivityAtMs = getActivityTimestampMs(
           liveAgent.last_activity_at,
@@ -382,7 +501,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           activity: activityFromCurrentState(currentState),
           lastActivityAtMs: lastActivityAtMs ?? agent.lastActivityAtMs,
           typingUntilMs,
-          channels: liveAgent.channels,
+          channels,
+          parent: liveAgent.parent || agent.parent,
           terminalMode: terminalMode || agent.terminalMode
         }
       })
@@ -394,6 +514,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         const currentState = liveAgent.current_state || 'idle'
         const lastActivityAtMs = getActivityTimestampMs(liveAgent.last_activity_at, liveAgent.last_activity_ms, now)
         const typingUntilMs = getTypingUntilMs(currentState, lastActivityAtMs)
+        const channels = normalizeChannelList(liveAgent.channels)
         scheduleTypingExpiry(key, typingUntilMs, set)
         nextAgents.push({
           name: liveAgent.name,
@@ -405,7 +526,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           lastActivityAtMs,
           typingUntilMs,
           projectId: liveAgent.projectId,
-          channels: liveAgent.channels,
+          channels,
+          parent: liveAgent.parent,
           terminalMode: terminalModeFromInboundDeliveryMode(liveAgent.inboundDeliveryMode) || 'passthrough',
           ptyBuffer: [],
           pendingDeliveryIds: []
@@ -413,6 +535,60 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       }
 
       return { agents: nextAgents }
+    })
+  },
+
+  syncBrokerDetailsStatus: (details) => {
+    set((state) => {
+      const connectedProjectIds = new Set(
+        details
+          .filter((detail) => detail.health === 'connected')
+          .map((detail) => detail.projectId)
+      )
+      const brokerErrors = connectedProjectIds.size > 0
+        ? state.brokerErrors.filter((entry) => !entry.projectId || !connectedProjectIds.has(entry.projectId))
+        : state.brokerErrors
+
+      return {
+        brokerStatus: connectedProjectIds.size > 0
+          ? 'connected'
+          : brokerErrors.length > 0
+            ? 'error'
+            : 'disconnected',
+        brokerError: brokerErrors.length > 0 ? brokerErrors[0].message : null,
+        brokerErrors
+      }
+    })
+  },
+
+  hydrateBrokerEvents: (events) => {
+    set((state) => {
+      const byId = new Map(state.brokerEvents.map((entry) => [entry.id, entry]))
+      for (const entry of events) {
+        byId.set(entry.id, {
+          ...entry,
+          event: compactBrokerEvent(entry.event)
+        })
+      }
+      return {
+        brokerEvents: pruneBrokerEvents(
+          Array.from(byId.values()).sort((left, right) => left.timestamp - right.timestamp)
+        )
+      }
+    })
+  },
+
+  recordBrokerEvent: (event) => {
+    const entry = toBrokerEventRecord(event)
+    set((state) => {
+      if (state.brokerEvents.some((candidate) => candidate.id === entry.id)) {
+        return {}
+      }
+      return {
+        brokerEvents: pruneBrokerEvents(
+          [...state.brokerEvents, entry].sort((left, right) => left.timestamp - right.timestamp)
+        )
+      }
     })
   },
 
@@ -430,6 +606,15 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         const rootPath = parentAgent?.rootPath
         const agentKey = getAgentKey(projectId, event.name!)
         const currentState: AgentCurrentState = 'idle'
+        const channels = normalizeChannelList(event.channels)
+        const existingAgent = state.agents.find((a) => matchesAgent(a, projectId, event.name!))
+        const existingChannels = existingAgent?.channels || []
+        const notices = channels
+          ? channels
+              .filter((channel) => !existingChannels.includes(channel))
+              .map((channel) => createChannelJoinNotice(projectId, channel, event.name!))
+              .filter((notice): notice is ChatMessage => notice !== null)
+          : []
 
         return {
           agents: state.agents.some((a) => matchesAgent(a, projectId, event.name!))
@@ -443,7 +628,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                       activity: activityFromCurrentState(currentState),
                       currentState,
                       lastActivityAtMs: a.lastActivityAtMs,
-                      channels: a.channels,
+                      channels: channels ?? a.channels,
                       projectId: a.projectId || projectId,
                       rootId: a.rootId || rootId,
                       rootPath: a.rootPath || rootPath,
@@ -462,7 +647,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                   activity: activityFromCurrentState(currentState),
                   currentState,
                   lastActivityAtMs: undefined,
-                  channels: undefined,
+                  channels,
                   projectId,
                   rootId,
                   rootPath,
@@ -472,7 +657,51 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                   pendingDeliveryIds: []
                 }
               ],
-          activeAgentKey: state.activeAgentKey || agentKey
+          activeAgentKey: state.activeAgentKey || agentKey,
+          messages: notices.length > 0 ? appendJoinNotices(state.messages, notices) : state.messages
+        }
+      })
+    } else if ((kind === 'channel_subscribed' || kind === 'channel_unsubscribed') && event.name) {
+      const channels = normalizeChannelList(event.channels)
+      if (!channels || channels.length === 0) return
+
+      set((state) => {
+        const notices: ChatMessage[] = []
+        let matchedAgent = false
+
+        const agents = state.agents.map((agent) => {
+          if (!matchesAgent(agent, event.projectId, event.name!)) return agent
+          matchedAgent = true
+
+          const projectChannels = useProjectStore.getState().projects
+            .find((project) => project.id === (event.projectId || agent.projectId))
+            ?.channels || []
+          const currentChannels = agent.channels ?? projectChannels
+          const joinedChannels = kind === 'channel_subscribed'
+            ? channels.filter((channel) => !currentChannels.includes(channel))
+            : []
+          const nextChannels = kind === 'channel_subscribed'
+            ? Array.from(new Set([...currentChannels, ...channels]))
+            : currentChannels.filter((channel) => !channels.includes(channel))
+
+          for (const channel of joinedChannels) {
+            const notice = createChannelJoinNotice(event.projectId || agent.projectId, channel, event.name!)
+            if (notice) notices.push(notice)
+          }
+
+          return { ...agent, channels: nextChannels }
+        })
+
+        if (!matchedAgent && kind === 'channel_subscribed') {
+          for (const channel of channels) {
+            const notice = createChannelJoinNotice(event.projectId, channel, event.name!)
+            if (notice) notices.push(notice)
+          }
+        }
+
+        return {
+          agents,
+          messages: notices.length > 0 ? appendJoinNotices(state.messages, notices) : state.messages
         }
       })
     } else if ((kind === 'agent_exited' || kind === 'agent_released') && event.name) {
@@ -640,6 +869,16 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     set((state) => {
       const nextStatus = status.status as 'connected' | 'disconnected' | 'error'
       const nextError = status.error || null
+      if (nextStatus === 'connected') {
+        return {
+          brokerStatus: nextStatus,
+          brokerError: null,
+          brokerErrors: status.projectId
+            ? state.brokerErrors.filter((entry) => entry.projectId !== status.projectId)
+            : []
+        }
+      }
+
       const shouldRecord =
         nextStatus === 'error' &&
         !!nextError &&
@@ -682,6 +921,15 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       messages: isDuplicateHumanEcho(state.messages, msg)
         ? state.messages
         : [...state.messages, msg]
+    }))
+  },
+
+  addChannelJoinNotice: (projectId, channelName, participantName) => {
+    const notice = createChannelJoinNotice(projectId, channelName, participantName)
+    if (!notice) return
+
+    set((state) => ({
+      messages: appendJoinNotices(state.messages, [notice])
     }))
   },
 
@@ -782,20 +1030,30 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     const nextChannelName = normalizeMessageTarget(channelName)
     if (!nextChannelName) return
 
-    set((state) => ({
-      agents: state.agents.map((agent) => {
-        if (!matchesAgent(agent, projectId, name)) return agent
+    set((state) => {
+      const notices: ChatMessage[] = []
 
-        const channels = agent.channels || []
-        const nextChannels = subscribed
-          ? channels.includes(nextChannelName)
-            ? channels
-            : [...channels, nextChannelName]
-          : channels.filter((channel) => channel !== nextChannelName)
+      return {
+        agents: state.agents.map((agent) => {
+          if (!matchesAgent(agent, projectId, name)) return agent
 
-        return { ...agent, channels: nextChannels }
-      })
-    }))
+          const channels = agent.channels || []
+          const alreadySubscribed = channels.includes(nextChannelName)
+          const nextChannels = subscribed
+            ? alreadySubscribed
+              ? channels
+              : [...channels, nextChannelName]
+            : channels.filter((channel) => channel !== nextChannelName)
+          const notice = subscribed && !alreadySubscribed
+            ? createChannelJoinNotice(projectId || agent.projectId, nextChannelName, name)
+            : null
+          if (notice) notices.push(notice)
+
+          return { ...agent, channels: nextChannels }
+        }),
+        messages: notices.length > 0 ? appendJoinNotices(state.messages, notices) : state.messages
+      }
+    })
   },
 
   clearAll: () =>
@@ -806,7 +1064,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       relayMessages: [],
       brokerStatus: 'disconnected',
       brokerError: null,
-      brokerErrors: []
+      brokerErrors: [],
+      brokerEvents: []
     }),
 
   getAgentBuffer: (projectId, name) => {

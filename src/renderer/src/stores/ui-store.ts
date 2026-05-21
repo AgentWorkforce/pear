@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { z } from 'zod'
 import {
   getDirectMessageRoomId,
   getDirectMessageRoomTitle,
@@ -6,9 +7,11 @@ import {
 } from '@/lib/direct-messages'
 
 export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control'
-export type DialogType = 'add-project' | 'spawn-agent' | 'spawn-local-agent' | 'cloud-agent' | 'command-menu' | null
-export type Theme = 'dark' | 'light'
-export type TerminalLayout = 'tabs' | 'horizontal-split'
+export type DialogType = 'add-project' | 'spawn-agent' | 'spawn-local-agent' | 'cloud-agent' | 'add-channel' | 'command-menu' | null
+const ThemeSchema = z.enum(['dark', 'light'])
+const TerminalLayoutSchema = z.enum(['tabs', 'horizontal-split', 'graph'])
+export type Theme = z.infer<typeof ThemeSchema>
+export type TerminalLayout = z.infer<typeof TerminalLayoutSchema>
 export type AppTabKind = 'agents' | 'channel' | 'dm' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control'
 
 export interface AppTab {
@@ -61,18 +64,14 @@ function applyTheme(theme: Theme): void {
   localStorage.setItem('pear-theme', theme)
 }
 
-const savedTheme = (typeof localStorage !== 'undefined'
-  ? localStorage.getItem('pear-theme')
-  : null) as Theme | null
+function readStored<T>(key: string, schema: z.ZodType<T>, fallback: T): T {
+  if (typeof localStorage === 'undefined') return fallback
+  const parsed = schema.safeParse(localStorage.getItem(key))
+  return parsed.success ? parsed.data : fallback
+}
 
-const initialTheme: Theme = savedTheme || 'dark'
-
-const savedTerminalLayout = (typeof localStorage !== 'undefined'
-  ? localStorage.getItem('pear-terminal-layout')
-  : null) as TerminalLayout | null
-
-const initialTerminalLayout: TerminalLayout =
-  savedTerminalLayout === 'tabs' ? savedTerminalLayout : 'horizontal-split'
+const initialTheme = readStored('pear-theme', ThemeSchema, 'dark')
+const initialTerminalLayout = readStored('pear-terminal-layout', TerminalLayoutSchema, 'horizontal-split')
 
 // Apply on load
 if (typeof document !== 'undefined') {
@@ -99,7 +98,7 @@ function getTabId(tab: AppTabInput): string {
     case 'account-settings':
       return 'account-settings'
     case 'broker-details':
-      return 'broker-details'
+      return `broker-details:${tab.projectId || 'global'}`
     case 'source-control':
       return `source-control:${tab.projectId || 'global'}`
   }
@@ -112,9 +111,7 @@ function getTabTitle(tab: AppTabInput): string {
     case 'agents':
       return 'Agents'
     case 'channel':
-      return normalizeChannelForTab(tab.channelName)
-        ? `#${normalizeChannelForTab(tab.channelName)}`
-        : 'Messages'
+      return normalizeChannelForTab(tab.channelName) || 'Messages'
     case 'dm':
       return getDirectMessageRoomTitle(tab.dmParticipants || [])
     case 'project-settings':
@@ -122,9 +119,9 @@ function getTabTitle(tab: AppTabInput): string {
     case 'account-settings':
       return 'Account settings'
     case 'broker-details':
-      return 'Broker'
+      return 'Agent Relay Status'
     case 'source-control':
-      return 'Source Control'
+      return 'File Changes'
   }
 }
 
@@ -349,7 +346,12 @@ export const useUIStore = create<UIState>((set, get) => ({
     set({ terminalLayout: layout })
   },
   toggleTerminalLayout: () => {
-    const next = get().terminalLayout === 'horizontal-split' ? 'tabs' : 'horizontal-split'
+    const current = get().terminalLayout
+    const next = current === 'tabs'
+      ? 'horizontal-split'
+      : current === 'horizontal-split'
+        ? 'graph'
+        : 'tabs'
     localStorage.setItem('pear-terminal-layout', next)
     set({ terminalLayout: next })
   }

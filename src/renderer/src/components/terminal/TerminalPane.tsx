@@ -1,7 +1,8 @@
 import type React from 'react'
 import { useEffect, useState } from 'react'
-import { ChevronLeft, ChevronRight, Columns2, PanelTop, X, Plus } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Columns2, Network, PanelTop, X } from 'lucide-react'
 import { AgentHarnessIcon, ClaudeIcon, CodexIcon } from '@/components/common/AgentIcons'
+import { GraphView } from '@/components/graph/GraphView'
 import { spawnProjectAgent, type SpawnAgentCli } from '@/lib/spawn-agent'
 import { pear, type TerminalAttachMode } from '@/lib/ipc'
 import { getAgentKeyForAgent, isAgentTyping, type Agent, useAgentStore } from '@/stores/agent-store'
@@ -214,14 +215,17 @@ export function TerminalPane(): React.ReactNode {
   const [spawningCli, setSpawningCli] = useState<SpawnAgentCli | null>(null)
   const [spawnError, setSpawnError] = useState<string | null>(null)
   const [splitPage, setSplitPage] = useState(0)
+  const graphEnabled = terminalLayout === 'graph'
   const splitEnabled = terminalLayout === 'horizontal-split' && agents.length > 1
   const splitPages = splitEnabled ? chunkAgents(agents) : []
   const splitPageCount = splitPages.length
+  const activeAgent = agents.find((agent) => getAgentKeyForAgent(agent) === activeAgentKey)
   const splitButtonTitle = splitEnabled
     ? 'Move terminals back to tabs'
     : agents.length > 1
       ? 'Show split terminal pages'
       : 'Start another agent to split terminals'
+  const graphButtonTitle = graphEnabled ? 'Show terminal tabs' : 'Show agent graph'
 
   const handleSpawn = async (cli: SpawnAgentCli): Promise<void> => {
     if (!activeProject) {
@@ -354,57 +358,102 @@ export function TerminalPane(): React.ReactNode {
       {/* Tab bar */}
       <div className="flex shrink-0 items-center gap-0 border-b border-[var(--pear-bg-surface)] bg-[var(--pear-bg-raised)] px-1.5 py-1">
         <div className="flex flex-1 overflow-x-auto">
-          {agents.map((agent) => (
-            <div
-              key={getAgentKeyForAgent(agent)}
-              role="tab"
-              tabIndex={0}
-              aria-selected={activeAgentKey === getAgentKeyForAgent(agent)}
-              onClick={() => setActiveAgentKey(getAgentKeyForAgent(agent))}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault()
-                  setActiveAgentKey(getAgentKeyForAgent(agent))
-                }
-              }}
-              className={`group my-1 flex cursor-pointer items-center gap-2.5 rounded-xl border border-transparent px-4 py-3 text-sm transition-colors ${
-                activeAgentKey === getAgentKeyForAgent(agent)
-                  ? 'bg-[var(--pear-bg)] text-[var(--pear-text)] shadow-sm'
-                  : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)]'
-              }`}
-            >
-              <span
-                className="flex h-4 w-4 shrink-0 items-center justify-center"
-                title={agent.cli}
-                aria-label={agent.cli}
-              >
-                <AgentHarnessIcon
-                  cli={agent.cli}
-                  className={`h-4 w-4 ${
-                    agent.status === 'running' ? 'text-[var(--pear-text-dim)]' : 'text-[var(--pear-text-faint)]'
-                  }`}
-                />
-              </span>
-              <div className="flex items-center gap-2">
-                <span className="max-w-[120px] truncate">{agent.name}</span>
-                {isAgentTyping(agent) && <TypingDots />}
-              </div>
-              {agent.status === 'running' && (
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    pear.broker.releaseAgent(agent.projectId, agent.name)
+          {splitEnabled ? (
+            splitPages.map((pageAgents, pageIndex) => {
+              const active = pageIndex === splitPage
+              const title = `Page ${pageIndex + 1}: ${pageAgents.map((agent) => agent.name).join(', ')}`
+              const agentCount = pageAgents.length === 1 ? '1 agent' : `${pageAgents.length} agents`
+
+              return (
+                <div
+                  key={pageAgents.map(getAgentKeyForAgent).join('|')}
+                  role="tab"
+                  tabIndex={0}
+                  aria-selected={active}
+                  onClick={() => goToSplitPage(pageIndex)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      goToSplitPage(pageIndex)
+                    }
                   }}
-                  className="ml-1 rounded-md p-1 opacity-0 hover:bg-[var(--pear-bg-overlay)] group-hover:opacity-100"
-                  title="Release agent"
-                  aria-label={`Release agent ${agent.name}`}
+                  className={`my-1 flex cursor-pointer items-center gap-2.5 rounded-xl border border-transparent px-4 py-3 text-sm transition-colors ${
+                    active
+                      ? 'bg-[var(--pear-bg)] text-[var(--pear-text)] shadow-sm'
+                      : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)]'
+                  }`}
+                  title={title}
+                  aria-label={`Show terminal page ${pageIndex + 1}`}
                 >
-                  <X size={12} />
-                </button>
-              )}
-            </div>
-          ))}
+                  <span className="font-medium">Page {pageIndex + 1}</span>
+                  <span className="rounded-full bg-white/[0.06] px-2 py-0.5 text-[11px] text-[var(--pear-text-faint)]">
+                    {agentCount}
+                  </span>
+                </div>
+              )
+            })
+          ) : (
+            agents.map((agent) => (
+              <div
+                key={getAgentKeyForAgent(agent)}
+                role="tab"
+                tabIndex={0}
+                aria-selected={activeAgentKey === getAgentKeyForAgent(agent)}
+                onClick={() => setActiveAgentKey(getAgentKeyForAgent(agent))}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    setActiveAgentKey(getAgentKeyForAgent(agent))
+                  }
+                }}
+                className={`group my-1 flex cursor-pointer items-center gap-2.5 rounded-xl border border-transparent px-4 py-3 text-sm transition-colors ${
+                  activeAgentKey === getAgentKeyForAgent(agent)
+                    ? 'bg-[var(--pear-bg)] text-[var(--pear-text)] shadow-sm'
+                    : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)]'
+                }`}
+              >
+                <span
+                  className="flex h-4 w-4 shrink-0 items-center justify-center"
+                  title={agent.cli}
+                  aria-label={agent.cli}
+                >
+                  <AgentHarnessIcon
+                    cli={agent.cli}
+                    className={`h-4 w-4 ${
+                      agent.status === 'running' ? 'text-[var(--pear-text-dim)]' : 'text-[var(--pear-text-faint)]'
+                    }`}
+                  />
+                </span>
+                <div className="flex items-center gap-2">
+                  <span className="max-w-[120px] truncate">{agent.name}</span>
+                  {isAgentTyping(agent) && <TypingDots />}
+                </div>
+                {agent.status === 'running' && (
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      pear.broker.releaseAgent(agent.projectId, agent.name)
+                    }}
+                    className="ml-1 rounded-md p-1 opacity-0 hover:bg-[var(--pear-bg-overlay)] group-hover:opacity-100"
+                    title="Release agent"
+                    aria-label={`Release agent ${agent.name}`}
+                  >
+                    <X size={12} />
+                  </button>
+                )}
+              </div>
+            ))
+          )}
         </div>
+        {!splitEnabled && activeAgent && (
+          <PendingMessagesMenu
+            projectId={activeAgent.projectId}
+            agentName={activeAgent.name}
+            deliveryMode={getQueueDeliveryMode(activeAgent)}
+            refreshToken={activeAgent.pendingDeliveryIds.join('|')}
+            onDeliveryModeChange={(mode) => void handleDeliveryModeChange(activeAgent, mode)}
+          />
+        )}
         <button
           type="button"
           onClick={() => setTerminalLayout(splitEnabled ? 'tabs' : 'horizontal-split')}
@@ -422,12 +471,17 @@ export function TerminalPane(): React.ReactNode {
         </button>
         <button
           type="button"
-          onClick={() => openDialog('spawn-agent')}
-          className="rounded-xl px-3 py-2 text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
-          title="Spawn agent"
-          aria-label="Spawn agent"
+          onClick={() => setTerminalLayout(graphEnabled ? 'tabs' : 'graph')}
+          aria-pressed={graphEnabled}
+          className={`rounded-xl px-3 py-2 transition-colors ${
+            graphEnabled
+              ? 'bg-[var(--pear-bg)] text-[var(--pear-text)] shadow-sm'
+              : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]'
+          }`}
+          title={graphButtonTitle}
+          aria-label={graphButtonTitle}
         >
-          <Plus size={14} />
+          <Network size={14} />
         </button>
       </div>
       {spawnError && (
@@ -437,7 +491,11 @@ export function TerminalPane(): React.ReactNode {
       )}
 
       {/* Terminal instances stay mounted in tabbed mode to preserve scroll. */}
-      {splitEnabled ? (
+      {graphEnabled ? (
+        <div className="min-h-0 flex-1 overflow-hidden bg-[var(--pear-bg)]">
+          <GraphView />
+        </div>
+      ) : splitEnabled ? (
         <div className="relative min-h-0 flex-1 overflow-hidden bg-[var(--pear-bg)]">
           {splitPages.map((pageAgents, pageIndex) => {
             const visible = pageIndex === splitPage
@@ -503,7 +561,7 @@ export function TerminalPane(): React.ReactNode {
           )}
         </div>
       ) : (
-        <div className="relative min-h-0 flex-1">
+        <div className="relative min-h-0 flex-1 overflow-hidden">
           {agents.map((agent) => {
             const agentKey = getAgentKeyForAgent(agent)
             const active = agentKey === activeAgentKey
@@ -514,12 +572,11 @@ export function TerminalPane(): React.ReactNode {
                 className="absolute inset-0"
                 style={{ display: active ? 'block' : 'none' }}
               >
-                <SplitTerminalTile
+                <TerminalProject
                   agent={agent}
                   visible={active}
                   active={active}
                   onActivate={() => setActiveAgentKey(agentKey)}
-                  onDeliveryModeChange={(targetAgent, mode) => void handleDeliveryModeChange(targetAgent, mode)}
                 />
               </div>
             )

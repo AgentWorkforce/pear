@@ -4,3 +4,7 @@ dist/
 .npm-cache/
 *.env
 .DS_Store
+/.agent-relay
+*.tsbuildinfo
+.relay/
+.workflow-artifacts/

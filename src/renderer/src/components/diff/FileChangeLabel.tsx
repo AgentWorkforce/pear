@@ -36,14 +36,18 @@ export function fileChangeStatusLabel(kind: FileChangeKind): string {
 
 export function FileChangeStatusIcon({
   kind,
-  label = statusLabels[kind]
+  label = statusLabels[kind],
+  active = false
 }: {
   kind: FileChangeKind
   label?: string
+  active?: boolean
 }): React.ReactNode {
   return (
     <span
-      className={`flex h-[14px] w-[14px] shrink-0 items-center justify-center rounded-[3px] border-2 ${statusClasses[kind]}`}
+      className={`flex h-[14px] w-[14px] shrink-0 items-center justify-center rounded-[3px] border-2 ${
+        active ? 'border-white text-white' : statusClasses[kind]
+      }`}
       title={label}
       aria-label={label}
     >
@@ -69,13 +73,45 @@ function splitFilePath(path: string): { directory: string; fileName: string } {
   }
 }
 
-function FilePathSegment({ path, className = '' }: { path: string; className?: string }): React.ReactNode {
+export type FilePathLabelTone = 'default' | 'selectedActive' | 'selectedInactive'
+
+const pathToneClasses: Record<
+  FilePathLabelTone,
+  { directory: string; fileName: string; arrow: string }
+> = {
+  default: {
+    directory: 'text-[var(--pear-text-dim)]',
+    fileName: 'text-[var(--pear-text)]',
+    arrow: 'text-[var(--pear-text-secondary)]'
+  },
+  selectedActive: {
+    directory: 'text-white/65',
+    fileName: 'text-white',
+    arrow: 'text-white/65'
+  },
+  selectedInactive: {
+    directory: 'text-[var(--pear-text-dim)]',
+    fileName: 'text-white',
+    arrow: 'text-[var(--pear-text-secondary)]'
+  }
+}
+
+function FilePathSegment({
+  path,
+  className = '',
+  tone = 'default'
+}: {
+  path: string
+  className?: string
+  tone?: FilePathLabelTone
+}): React.ReactNode {
   const { directory, fileName } = splitFilePath(path)
+  const toneClasses = pathToneClasses[tone]
 
   return (
     <span className={`flex min-w-0 items-baseline overflow-hidden ${className}`}>
-      {directory && <span className="min-w-0 truncate text-[var(--pear-text-dim)]">{directory}</span>}
-      <span className="max-w-full shrink-0 truncate font-semibold text-[var(--pear-text)]">{fileName}</span>
+      {directory && <span className={`min-w-0 truncate ${toneClasses.directory}`}>{directory}</span>}
+      <span className={`max-w-full shrink-0 truncate ${toneClasses.fileName}`}>{fileName}</span>
     </span>
   )
 }
@@ -83,21 +119,25 @@ function FilePathSegment({ path, className = '' }: { path: string; className?: s
 export function FilePathLabel({
   path,
   oldPath,
-  className = ''
+  className = '',
+  tone = 'default'
 }: {
   path: string
   oldPath?: string
   className?: string
+  tone?: FilePathLabelTone
 }): React.ReactNode {
+  const toneClasses = pathToneClasses[tone]
+
   if (oldPath && oldPath !== path) {
     return (
       <span className={`flex min-w-0 items-center gap-2 overflow-hidden ${className}`}>
-        <FilePathSegment path={oldPath} className="flex-1 basis-0" />
-        <ArrowRight size={12} strokeWidth={2.4} className="shrink-0 text-[var(--pear-text-secondary)]" />
-        <FilePathSegment path={path} className="flex-1 basis-0" />
+        <FilePathSegment path={oldPath} className="flex-1 basis-0" tone={tone} />
+        <ArrowRight size={12} strokeWidth={2.4} className={`shrink-0 ${toneClasses.arrow}`} />
+        <FilePathSegment path={path} className="flex-1 basis-0" tone={tone} />
       </span>
     )
   }
 
-  return <FilePathSegment path={path} className={className} />
+  return <FilePathSegment path={path} className={className} tone={tone} />
 }

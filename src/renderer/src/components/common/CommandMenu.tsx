@@ -73,12 +73,16 @@ export function CommandMenu(): React.ReactNode {
     },
     {
       id: 'broker-details',
-      label: 'Broker details',
-      description: 'Open broker connection details and CLI commands',
-      keywords: ['broker', 'connection', 'port', 'api key', 'cli'],
+      label: 'Agent Relay Status',
+      description: 'Open Agent Relay health, events, and connection metadata',
+      keywords: ['broker', 'agent relay', 'status', 'connection', 'port', 'api key', 'events'],
       Icon: Server,
       run: () => {
-        openTab({ kind: 'broker-details' })
+        openTab({
+          kind: 'broker-details',
+          projectId: activeProject?.id,
+          title: activeProject ? `${activeProject.name} Relay` : undefined
+        })
         closeDialog()
       }
     },

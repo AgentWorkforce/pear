@@ -1,4 +1,5 @@
 import { existsSync, readFileSync } from 'fs'
+import { rm } from 'fs/promises'
 import { basename, join } from 'path'
 import { BrowserWindow } from 'electron'
 import {
@@ -15,6 +16,12 @@ import {
 } from '@agent-relay/sdk'
 import { getAccessToken, getApiUrl } from './auth'
 import { assertDirectory } from './path-utils'
+import {
+  BrokerConnectionFileSchema,
+  GeneratedCommitDraftSchema,
+  type GeneratedCommitDraft
+} from './schemas'
+import { compactBrokerEvent, normalizeEventTimestamp } from '../shared/lib/broker-events'
 
 function isShellLikeCommand(cli: string): boolean {
   const normalized = basename(cli).toLowerCase()
@@ -95,9 +102,10 @@ export interface AttachTerminalResult {
   }
 }
 
-export interface GeneratedCommitDraft {
-  title: string
-  body: string
+export type { GeneratedCommitDraft }
+
+export interface BrokerRuntimeAutoFixResult {
+  removed: string[]
 }
 
 function isPositiveInteger(value: unknown): value is number {
@@ -107,6 +115,8 @@ function isPositiveInteger(value: unknown): value is number {
 const BROKER_DETAILS_TIMEOUT_MS = 3_000
 const COMMIT_DRAFT_MAX_DIFF_CHARS = 80_000
 const COMMIT_DRAFT_TIMEOUT_MS = 180_000
+const MAX_BROKER_EVENT_HISTORY = 3_000
+const BROKER_EVENT_HISTORY_TTL_MS = 12 * 60 * 60 * 1_000
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -116,11 +126,19 @@ function toErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
+type BrokerEventRecordPayload = Record<string, unknown> & { kind: string }
+
+function getErrorStatus(err: unknown): unknown {
+  if (typeof err !== 'object' || err === null || !('status' in err)) return undefined
+  return (err as { status?: unknown }).status
+}
+
 function isUnsupportedInputStreamError(err: unknown): boolean {
-  const status = typeof err === 'object' && err !== null && 'status' in err
-    ? (err as { status?: unknown }).status
-    : undefined
-  return status === 404 || /\b404\b|not found|unsupported/i.test(toErrorMessage(err))
+  return getErrorStatus(err) === 404 || /\b404\b|not found|unsupported/i.test(toErrorMessage(err))
+}
+
+function isMissingAgentError(err: unknown): boolean {
+  return getErrorStatus(err) === 404 || /agent_not_found|no worker named|not found/i.test(toErrorMessage(err))
 }
 
 function getBrokerEventName(event: BrokerEvent): string | undefined {
@@ -194,20 +212,21 @@ function getBrokerConnectionFileInfo(
   }
 
   try {
-    const connection = JSON.parse(readFileSync(connectionPath, 'utf-8')) as Record<string, unknown>
-    const connectionUrl = normalizeBaseUrl(typeof connection.url === 'string' ? connection.url : undefined)
-    const connectionPid = typeof connection.pid === 'number' ? connection.pid : undefined
-    const connectionApiKey = typeof connection.api_key === 'string' && connection.api_key.trim().length > 0
-      ? connection.api_key.trim()
-      : undefined
+    const parsed = BrokerConnectionFileSchema.safeParse(
+      JSON.parse(readFileSync(connectionPath, 'utf-8'))
+    )
+    if (!parsed.success) {
+      return { path: connectionPath, status: 'invalid', hasApiKey: false }
+    }
+    const connectionUrl = normalizeBaseUrl(parsed.data.url)
     const sameUrl = !!baseUrl && connectionUrl === baseUrl
-    const samePid = !brokerPid || !connectionPid || connectionPid === brokerPid
+    const samePid = !brokerPid || !parsed.data.pid || parsed.data.pid === brokerPid
 
     return {
       path: connectionPath,
       status: sameUrl && samePid ? 'matches' : 'different',
-      hasApiKey: !!connectionApiKey,
-      apiKey: connectionApiKey
+      hasApiKey: !!parsed.data.apiKey,
+      apiKey: parsed.data.apiKey
     }
   } catch {
     return { path: connectionPath, status: 'invalid', hasApiKey: false }
@@ -288,29 +307,63 @@ function getJsonObjectCandidates(text: string): string[] {
   return candidates
 }
 
-function normalizeGeneratedCommitDraft(value: unknown): GeneratedCommitDraft | null {
-  if (!value || typeof value !== 'object') return null
-  const record = value as Record<string, unknown>
-  const title = typeof record.title === 'string' ? record.title.trim() : ''
-  if (!title) return null
-
-  return {
-    title,
-    body: typeof record.body === 'string' ? record.body.trim() : ''
-  }
-}
-
 function parseGeneratedCommitDraft(text: string): GeneratedCommitDraft {
   const candidates = getJsonObjectCandidates(text)
   for (const candidate of candidates.reverse()) {
     try {
-      const draft = normalizeGeneratedCommitDraft(JSON.parse(candidate))
-      if (draft) return draft
+      const draft = GeneratedCommitDraftSchema.safeParse(JSON.parse(candidate))
+      if (draft.success) return draft.data
     } catch {
       // Keep scanning terminal output; diffs can contain unrelated braces.
     }
   }
   throw new Error('Commit message agent did not return a usable JSON draft')
+}
+
+function getBrokerRuntimeSafeName(name: string): string {
+  return name
+    .split('')
+    .map((char) => /[a-z0-9-]/i.test(char) ? char : '-')
+    .join('')
+}
+
+function getBrokerRuntimeCleanupPaths(cwd: string, brokerName: string): string[] {
+  const root = join(cwd, '.agent-relay')
+  const safeName = getBrokerRuntimeSafeName(brokerName)
+
+  return [
+    join(root, 'connection.json'),
+    join(root, `broker-${safeName}.lock`),
+    join(root, `state-${safeName}.json`),
+    join(root, `pending-${safeName}.json`)
+  ]
+}
+
+function isRecoverableBrokerRuntimeError(
+  err: unknown,
+  options: { allowLivePidConflict?: boolean } = {}
+): boolean {
+  const message = toErrorMessage(err)
+  const hasBrokerLockConflict = /another broker instance is already running in this directory/i.test(message)
+  const hasLivePidConflict = /another broker instance is already running in this directory \(pid:\s*\d+/i.test(message)
+  const hasStaleLockSignal =
+    /stale broker lock detected/i.test(message) ||
+    /broker lock held but no valid PID file found/i.test(message)
+
+  return (options.allowLivePidConflict || !hasLivePidConflict) &&
+    (hasStaleLockSignal || hasBrokerLockConflict)
+}
+
+async function clearBrokerRuntimeFiles(cwd: string, brokerName: string): Promise<string[]> {
+  const removed: string[] = []
+
+  for (const filePath of getBrokerRuntimeCleanupPaths(cwd, brokerName)) {
+    if (!existsSync(filePath)) continue
+    await rm(filePath, { force: true })
+    removed.push(filePath)
+  }
+
+  return removed
 }
 
 function getAvailableAgentName(requestedName: string, existingNames: Set<string>): string {
@@ -375,8 +428,24 @@ export interface BrokerDetails {
   session?: {
     brokerVersion: string
     protocolVersion: number
+    workspaceKey?: string
+    defaultWorkspaceId?: string
     mode: string
     uptimeSecs: number
+  }
+  relaycast?: {
+    workspaceKey?: string
+    defaultWorkspaceId?: string
+    authenticated?: boolean
+    workspaceCount?: number
+    workspaces: Array<{
+      workspaceId: string
+      workspaceAlias?: string | null
+      selfName: string
+      selfAgentId: string
+      authenticated: boolean
+      default: boolean
+    }>
   }
   agentCount: number
   pendingDeliveryCount: number
@@ -384,9 +453,17 @@ export interface BrokerDetails {
   error?: string
 }
 
+export interface BrokerEventRecord {
+  id: string
+  projectId: string
+  timestamp: number
+  event: BrokerEventRecordPayload
+}
+
 interface BrokerStateSnapshot {
   agents: ListAgent[]
   pendingDeliveryCount: number
+  auth?: BrokerStatus['auth']
 }
 
 interface BrokerConnectionFileInfo {
@@ -410,6 +487,8 @@ export class BrokerManager {
   private inputStreams = new Map<string, PtyInputStream>()
   private inputStreamFallbacks = new Set<string>()
   private eventObservers = new Set<BrokerEventObserver>()
+  private eventHistory: BrokerEventRecord[] = []
+  private eventSerial = 0
 
   get cwd(): string | null {
     return this.sessions.values().next().value?.cwd || null
@@ -454,7 +533,7 @@ export class BrokerManager {
       return
     }
 
-    try {
+    const startBroker = async (): Promise<void> => {
       const opts: AgentRelaySpawnOptions = {
         cwd,
         brokerName: name,
@@ -481,7 +560,20 @@ export class BrokerManager {
         cloudSandboxId: null
       })
 
+      this.publishBrokerEvent(normalizedProjectId, win, {
+        kind: 'broker_initialized',
+        name,
+        cwd,
+        url: getClientBaseUrl(client),
+        brokerPid: client.brokerPid,
+        channels: nextChannels,
+        source: 'local'
+      })
       this.sendStatus(normalizedProjectId, 'connected')
+    }
+
+    try {
+      await startBroker()
     } catch (err) {
       console.error(`[broker] Failed to start for project ${normalizedProjectId}:`, err)
       this.sendStatusToWindow(win, normalizedProjectId, 'error', String(err))
@@ -489,6 +581,42 @@ export class BrokerManager {
     }
   }
 
+  async autoFixRuntime(
+    projectId: string,
+    cwd: string,
+    name: string,
+    win: BrowserWindow,
+    channels: string[] = [],
+    errorMessage?: string
+  ): Promise<BrokerRuntimeAutoFixResult> {
+    const normalizedProjectId = projectId.trim()
+    if (!normalizedProjectId) {
+      throw new Error('Project id is required')
+    }
+    const hasManagedSession = this.sessions.has(normalizedProjectId)
+    if (errorMessage && !isRecoverableBrokerRuntimeError(errorMessage, {
+      allowLivePidConflict: hasManagedSession
+    })) {
+      throw new Error('This broker error does not look like stale Agent Relay runtime state.')
+    }
+
+    assertDirectory(cwd, 'Project path')
+    await this.shutdown(normalizedProjectId)
+    const removed = await clearBrokerRuntimeFiles(cwd, name)
+    console.warn(
+      `[broker] Auto-fixed runtime files for project ${normalizedProjectId}:`,
+      removed.length > 0 ? removed : '(no files existed)'
+    )
+    await delay(250)
+    await this.start(normalizedProjectId, cwd, name, win, channels)
+    return { removed }
+  }
+
+  /**
+   * Attach to an already-provisioned cloud sandbox (used by CloudAgentManager
+   * which warms the box via the cloud-agents/{id}/box endpoint). connectCloud
+   * is the legacy ad-hoc path that creates a sandbox here.
+   */
   async attachCloudSandbox(
     projectId: string,
     handle: CloudAgentSandboxHandle,
@@ -532,6 +660,13 @@ export class BrokerManager {
       })
       client.connectEvents()
 
+      this.publishBrokerEvent(normalizedProjectId, win, {
+        kind: 'broker_initialized',
+        name: `cloud-${normalizedProjectId}`,
+        url: getClientBaseUrl(client),
+        cloudSandboxId: sandboxId,
+        source: 'cloud'
+      })
       this.sendStatus(normalizedProjectId, 'connected')
       return sandboxId
     } catch (err) {
@@ -620,10 +755,8 @@ export class BrokerManager {
     }
 
     if (this.sessions.size === 1) {
-      const session = this.sessions.values().next().value
-      if (session) {
-        return session
-      }
+      const onlySession = this.sessions.values().next().value
+      if (onlySession) return onlySession
     }
 
     throw new Error(`No relay workspace found for agent: ${name}`)
@@ -631,35 +764,84 @@ export class BrokerManager {
 
   private attachClient(projectId: string, client: AgentRelayClient, win?: BrowserWindow): () => void {
     return client.onEvent((event: BrokerEvent) => {
-      const eventName = getBrokerEventName(event)
-      const eventFrom = getBrokerEventFrom(event)
+      this.publishBrokerEvent(projectId, win, event as unknown as BrokerEventRecordPayload)
 
-      if (event.kind === 'agent_spawned' && eventName) {
-        this.rememberAgentProject(eventName, projectId)
-      } else if ((event.kind === 'agent_exit' || event.kind === 'agent_exited' || event.kind === 'agent_released') && eventName) {
-        this.closeInputStream(this.getInputStreamKey(projectId, eventName), 1000, 'agent closed')
-        this.forgetAgentProject(eventName, projectId)
-      } else if (eventName) {
-        this.rememberAgentProject(eventName, projectId)
-      } else if (eventFrom) {
-        this.rememberAgentProject(eventFrom, projectId)
+      if (event.kind === 'agent_spawned' && event.name) {
+        this.rememberAgentProject(event.name, projectId)
+      } else if (event.kind === 'agent_exit' && event.name) {
+        this.closeInputStream(this.getInputStreamKey(projectId, event.name), 1000, 'agent closed')
+        this.forgetAgentProject(event.name, projectId)
+        void client.release(event.name, 'agent exit').catch((err) => {
+          if (!isMissingAgentError(err)) {
+            console.warn(`[broker] Failed to release exited agent ${event.name}:`, err)
+          }
+        })
+      } else if ((event.kind === 'agent_exited' || event.kind === 'agent_released') && event.name) {
+        this.closeInputStream(this.getInputStreamKey(projectId, event.name), 1000, 'agent closed')
+        this.forgetAgentProject(event.name, projectId)
+      } else if ('name' in event && typeof event.name === 'string') {
+        this.rememberAgentProject(event.name, projectId)
+      } else if ('from' in event && typeof event.from === 'string') {
+        this.rememberAgentProject(event.from, projectId)
       }
 
-      const windows = win ? [win] : BrowserWindow.getAllWindows()
-      for (const targetWindow of windows) {
-        if (!targetWindow.isDestroyed()) {
-          // Local and cloud sessions share this forwarder, so activity events from
-          // sandbox brokers reach the renderer through the same path.
-          targetWindow.webContents.send('broker:event', { ...event, projectId })
-        }
-      }
-
+      // Fan out cloud-sandbox events to CloudAgentManager (which observes them
+      // to track sandbox/agent activity for its mount + restart logic).
       if (this.sessions.get(projectId)?.cloudSandboxId) {
         for (const observer of Array.from(this.eventObservers)) {
           observer(projectId, event)
         }
       }
     })
+  }
+
+  private publishBrokerEvent(
+    projectId: string,
+    win: BrowserWindow | undefined,
+    event: BrokerEventRecordPayload
+  ): BrokerEventRecord {
+    const record = this.recordBrokerEvent(projectId, event)
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('broker:event', {
+        ...event,
+        projectId,
+        observedAt: record.timestamp,
+        historyId: record.id
+      })
+    }
+    return record
+  }
+
+  private recordBrokerEvent(projectId: string, event: BrokerEventRecordPayload): BrokerEventRecord {
+    const eventRecord = event as Record<string, unknown>
+    const timestamp = normalizeEventTimestamp(eventRecord.timestamp) ?? Date.now()
+    const record: BrokerEventRecord = {
+      id: `${projectId}:${++this.eventSerial}`,
+      projectId,
+      timestamp,
+      event: compactBrokerEvent(event)
+    }
+
+    this.eventHistory.push(record)
+    this.pruneBrokerEventHistory()
+    return record
+  }
+
+  private pruneBrokerEventHistory(now = Date.now()): void {
+    const cutoff = now - BROKER_EVENT_HISTORY_TTL_MS
+    if (this.eventHistory.length <= MAX_BROKER_EVENT_HISTORY) {
+      const firstFreshIndex = this.eventHistory.findIndex((entry) => entry.timestamp >= cutoff)
+      if (firstFreshIndex > 0) {
+        this.eventHistory.splice(0, firstFreshIndex)
+      } else if (firstFreshIndex === -1 && this.eventHistory.length > 0) {
+        this.eventHistory = []
+      }
+      return
+    }
+
+    this.eventHistory = this.eventHistory
+      .filter((entry) => entry.timestamp >= cutoff)
+      .slice(-MAX_BROKER_EVENT_HISTORY)
   }
 
   private rememberAgentProject(name: string, projectId: string): void {
@@ -1163,6 +1345,25 @@ export class BrokerManager {
         ])
         const [metadata, state] = sessionResult
         const agents = state.status === 'fulfilled' ? state.value.agents : []
+        const auth = state.status === 'fulfilled' ? state.value.auth : undefined
+        const workspaceKey = metadata.status === 'fulfilled' ? metadata.value.workspace_key : undefined
+        const defaultWorkspaceId = metadata.status === 'fulfilled' ? metadata.value.default_workspace_id : undefined
+        const relaycast = workspaceKey || defaultWorkspaceId || auth
+          ? {
+              workspaceKey,
+              defaultWorkspaceId,
+              authenticated: auth?.authenticated,
+              workspaceCount: auth?.workspace_count,
+              workspaces: (auth?.workspaces || []).map((workspace) => ({
+                workspaceId: workspace.workspace_id,
+                workspaceAlias: workspace.workspace_alias,
+                selfName: workspace.self_name,
+                selfAgentId: workspace.self_agent_id,
+                authenticated: workspace.authenticated,
+                default: workspace.default
+              }))
+            }
+          : undefined
         const errors = sessionResult
           .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
           .map((result) => toErrorMessage(result.reason))
@@ -1186,10 +1387,13 @@ export class BrokerManager {
             ? {
                 brokerVersion: metadata.value.broker_version,
                 protocolVersion: metadata.value.protocol_version,
+                workspaceKey: metadata.value.workspace_key,
+                defaultWorkspaceId: metadata.value.default_workspace_id,
                 mode: metadata.value.mode,
                 uptimeSecs: metadata.value.uptime_secs
               }
             : undefined,
+          relaycast,
           agentCount: agents.length,
           pendingDeliveryCount: state.status === 'fulfilled' ? state.value.pendingDeliveryCount : 0,
           agents: agents.map((agent) => ({
@@ -1210,6 +1414,14 @@ export class BrokerManager {
     return details
   }
 
+  listBrokerEvents(): BrokerEventRecord[] {
+    this.pruneBrokerEventHistory()
+    return this.eventHistory.map((entry) => ({
+      ...entry,
+      event: { ...(entry.event as Record<string, unknown>) } as BrokerEventRecordPayload
+    }))
+  }
+
   private async getBrokerStateSnapshot(session: BrokerSession): Promise<BrokerStateSnapshot> {
     try {
       const status: BrokerStatus = await withBrokerDetailsTimeout(
@@ -1218,7 +1430,8 @@ export class BrokerManager {
       )
       return {
         agents: status.agents,
-        pendingDeliveryCount: status.pending_delivery_count
+        pendingDeliveryCount: status.pending_delivery_count,
+        auth: status.auth
       }
     } catch (statusErr) {
       try {

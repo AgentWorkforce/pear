@@ -1,8 +1,9 @@
 import type React from 'react'
 import { memo, useEffect, useMemo, useRef, useState } from 'react'
+import { ChevronsUpDown } from 'lucide-react'
 import {
   parseDiff,
-  expandCollapsedBlockBy,
+  expandFromRawCode,
   getChangeKey,
   getCollapsedLinesCountBetween,
   type HunkData,
@@ -28,6 +29,7 @@ interface Props {
 }
 
 const EMPTY_SELECTION = new Set<string>()
+const MAX_DIFF_HIGHLIGHT_CACHE_ENTRIES = 100
 
 interface SyntaxTokenNode extends TokenNode {
   type: 'syntax'
@@ -48,6 +50,8 @@ interface DragSelection {
   changed: boolean
   appliedLineIds: Set<string>
 }
+
+type ExpandedRangesByFilePath = Record<string, string[]>
 
 function isSyntaxToken(token: TokenNode): token is SyntaxTokenNode {
   return token.type === 'syntax'
@@ -74,28 +78,42 @@ async function buildHighlightedTokens(file: FileData, theme: 'dark' | 'light'): 
   const filePath = file.newPath === '/dev/null' ? file.oldPath : file.newPath
   const old: TokenNode[][] = []
   const next: TokenNode[][] = []
+  const highlightableChanges: ChangeData[] = []
 
   for (const hunk of file.hunks) {
     for (const change of hunk.changes) {
       if (change.type === 'insert' || change.type === 'delete' || change.type === 'normal') {
-        const highlightedLine = await highlightCode(change.content, filePath, theme)
-        const tokenNodes = toTokenNodes(highlightedLine[0] || [])
-
-        if (change.type === 'insert' && change.lineNumber > 0) {
-          next[change.lineNumber - 1] = tokenNodes
-        }
-
-        if (change.type === 'delete' && change.lineNumber > 0) {
-          old[change.lineNumber - 1] = tokenNodes
-        }
-
-        if (change.type === 'normal') {
-          if (change.oldLineNumber > 0) old[change.oldLineNumber - 1] = tokenNodes
-          if (change.newLineNumber > 0) next[change.newLineNumber - 1] = tokenNodes
-        }
+        highlightableChanges.push(change)
       }
     }
   }
+
+  if (highlightableChanges.length === 0) {
+    return { old, new: next }
+  }
+
+  const highlightedLines = await highlightCode(
+    highlightableChanges.map((change) => change.content).join('\n'),
+    filePath,
+    theme
+  )
+
+  highlightableChanges.forEach((change, index) => {
+    const tokenNodes = toTokenNodes(highlightedLines[index] || [])
+
+    if (change.type === 'insert' && change.lineNumber > 0) {
+      next[change.lineNumber - 1] = tokenNodes
+    }
+
+    if (change.type === 'delete' && change.lineNumber > 0) {
+      old[change.lineNumber - 1] = tokenNodes
+    }
+
+    if (change.type === 'normal') {
+      if (change.oldLineNumber > 0) old[change.oldLineNumber - 1] = tokenNodes
+      if (change.newLineNumber > 0) next[change.newLineNumber - 1] = tokenNodes
+    }
+  })
 
   return { old, new: next }
 }
@@ -153,6 +171,15 @@ function sourcePathForFile(file: FileData): string | null {
 function sourceLineCount(source: string): number {
   const lines = source.split('\n')
   return lines[lines.length - 1] === '' ? Math.max(lines.length - 1, 0) : lines.length
+}
+
+function rangeKey(start: number, end: number): string {
+  return `${start}:${end}`
+}
+
+function rangeFromKey(key: string): [number, number] | null {
+  const [start, end] = key.split(':').map((part) => Number(part))
+  return Number.isFinite(start) && Number.isFinite(end) && end > start ? [start, end] : null
 }
 
 function oldLineNumber(change: ChangeData): number | undefined {
@@ -229,34 +256,68 @@ function renderCodeContent(tokens: TokenNode[] | null, fallback: string): React.
   return tokens.map(renderTokenNode)
 }
 
+function renderPendingCodeContent(fallback: string): React.ReactNode {
+  return (
+    <span aria-hidden="true" className="diff-code-content-pending">
+      {fallback || ' '}
+    </span>
+  )
+}
+
+function renderEmptyFileState(): React.ReactNode {
+  return (
+    <div className="flex h-full min-h-[240px] items-center justify-center px-4 text-[13px] font-medium text-[var(--pear-text)]">
+      The file is empty
+    </div>
+  )
+}
+
+function fileHasRenderableChanges(file: FileData): boolean {
+  return file.hunks.some((hunk) => hunk.changes.length > 0)
+}
+
+function fileHighlightKey(file: FileData, theme: 'dark' | 'light'): string {
+  const filePath = getDiffFilePath(file)
+  const changeSignature = file.hunks
+    .flatMap((hunk) =>
+      hunk.changes.map((change) => (
+        `${change.type}:${oldLineNumber(change) ?? ''}:${newLineNumber(change) ?? ''}:${change.content}`
+      ))
+    )
+    .join('\n')
+
+  return `${theme}\0${filePath}\0${changeSignature}`
+}
+
 function renderFoldRow({
   key,
   content,
   hiddenLines,
-  expandable,
-  expanded,
-  onToggle
+  canExpand,
+  onExpand
 }: {
   key: string
   content: string
   hiddenLines: number
-  expandable: boolean
-  expanded: boolean
-  onToggle: () => void
+  canExpand: boolean
+  onExpand: () => void
 }): React.ReactElement {
   return (
     <tr key={key} className="diff-decoration diff-hunk-decoration">
       <td className="diff-decoration-content diff-hunk-decoration-content" colSpan={4}>
         <button
           type="button"
-          onClick={expandable ? onToggle : undefined}
-          disabled={!expandable}
+          onClick={canExpand ? onExpand : undefined}
+          disabled={!canExpand}
           className="diff-fold-control"
-          title={expandable ? (expanded ? 'Fold unchanged lines' : 'Expand unchanged lines') : content}
+          title={canExpand ? 'Expand All' : content}
+          aria-label={canExpand ? `Expand ${hiddenLines} hidden unchanged lines` : content}
         >
-          <span className="diff-fold-marker">{hiddenLines > 0 && !expanded ? '...' : '@@'}</span>
+          <span className="diff-fold-marker">
+            {hiddenLines > 0 ? <ChevronsUpDown size={14} strokeWidth={2.4} /> : '@@'}
+          </span>
           <span className="diff-fold-content">{content}</span>
-          {hiddenLines > 0 && !expanded && (
+          {hiddenLines > 0 && (
             <span className="diff-fold-count">{hiddenLines} hidden</span>
           )}
         </button>
@@ -268,33 +329,30 @@ function renderFoldRow({
 function renderHunkRows({
   hunks,
   source,
-  expanded,
-  onToggleExpanded,
+  onExpandRange,
   renderChange
 }: {
   hunks: HunkData[]
   source: string | null | undefined
-  expanded: boolean
-  onToggleExpanded: () => void
+  onExpandRange: (start: number, end: number) => void
   renderChange: (change: ChangeData, key: string) => React.ReactElement
 }): React.ReactElement[] {
   const rows: React.ReactElement[] = []
-  const expandable = !!source && hunks.length > 0
-  const lineCount = source ? sourceLineCount(source) : 0
+  const hasSource = source !== null && source !== undefined
+  const lineCount = hasSource ? sourceLineCount(source) : 0
 
   hunks.forEach((hunk, index) => {
     const previousHunk = index > 0 ? hunks[index - 1] : null
-    const hiddenLines = expandable && !expanded
-      ? Math.max(0, getCollapsedLinesCountBetween(previousHunk, hunk))
-      : 0
+    const hiddenLines = Math.max(0, getCollapsedLinesCountBetween(previousHunk, hunk))
+    const foldStart = previousHunk ? previousHunk.oldStart + previousHunk.oldLines : 1
+    const foldEnd = hunk.oldStart
 
     rows.push(renderFoldRow({
       key: `decoration-${hunk.content}-${index}`,
       content: hunk.content,
       hiddenLines,
-      expandable,
-      expanded,
-      onToggle: onToggleExpanded
+      canExpand: hasSource && hiddenLines > 0,
+      onExpand: () => onExpandRange(foldStart, foldEnd)
     }))
 
     hunk.changes.forEach((change) => {
@@ -302,17 +360,18 @@ function renderHunkRows({
     })
   })
 
-  if (expandable && !expanded) {
+  if (hasSource) {
     const lastHunk = hunks[hunks.length - 1]
     const hiddenLines = Math.max(0, lineCount - (lastHunk.oldStart + lastHunk.oldLines) + 1)
     if (hiddenLines > 0) {
+      const foldStart = lastHunk.oldStart + lastHunk.oldLines
+      const foldEnd = lineCount + 1
       rows.push(renderFoldRow({
         key: 'decoration-tail',
         content: 'End of file',
         hiddenLines,
-        expandable,
-        expanded,
-        onToggle: onToggleExpanded
+        canExpand: true,
+        onExpand: () => onExpandRange(foldStart, foldEnd)
       }))
     }
   }
@@ -331,6 +390,8 @@ export const DiffViewer = memo(function DiffViewer({
   onSetLines
 }: Props): React.ReactNode {
   const parsedFiles = useMemo(() => {
+    if (!diff.trim()) return []
+
     try {
       return parseDiff(diff)
     } catch {
@@ -344,10 +405,22 @@ export const DiffViewer = memo(function DiffViewer({
     )
   }, [focusedFilePath, parsedFiles])
   const theme = useUIStore((s) => s.theme)
-  const [highlightedFiles, setHighlightedFiles] = useState<(HunkTokens | null)[]>([])
+  const [highlightedFilesByKey, setHighlightedFilesByKey] = useState<Map<string, HunkTokens | null>>(
+    () => new Map()
+  )
+  const highlightedFilesByKeyRef = useRef(highlightedFilesByKey)
+  const pendingHighlightKeysRef = useRef(new Set<string>())
+  const mountedRef = useRef(true)
   const [fileSources, setFileSources] = useState<Record<string, string | null>>({})
-  const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set())
+  const [expandedRangesByFilePath, setExpandedRangesByFilePath] = useState<ExpandedRangesByFilePath>({})
   const dragSelectionRef = useRef<DragSelection | null>(null)
+
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
 
   useEffect(() => {
     const finishDragSelection = (): void => {
@@ -373,7 +446,7 @@ export const DiffViewer = memo(function DiffViewer({
   }, [onSetLines])
 
   useEffect(() => {
-    setExpandedFiles(new Set())
+    setExpandedRangesByFilePath({})
   }, [diff, rootPath])
 
   useEffect(() => {
@@ -411,14 +484,41 @@ export const DiffViewer = memo(function DiffViewer({
     return files.map((file) => {
       const filePath = getDiffFilePath(file)
       const source = fileSources[filePath]
-      if (!source || !expandedFiles.has(filePath) || file.hunks.length === 0) return file
+      const expandedRangeKeys = expandedRangesByFilePath[filePath] || []
+      if (source === null || source === undefined || expandedRangeKeys.length === 0 || file.hunks.length === 0) {
+        return file
+      }
 
       return {
         ...file,
-        hunks: expandCollapsedBlockBy(file.hunks, source, () => true)
+        hunks: expandedRangeKeys
+          .map(rangeFromKey)
+          .filter((range): range is [number, number] => !!range)
+          .sort(([a], [b]) => a - b)
+          .reduce((hunks, [start, end]) => expandFromRawCode(hunks, source, start, end), file.hunks)
       }
     })
-  }, [expandedFiles, fileSources, files])
+  }, [expandedRangesByFilePath, fileSources, files])
+  const displayFilesWithHighlightKeys = useMemo(() => {
+    return displayFiles.map((file) => ({
+      file,
+      highlightKey: fileHighlightKey(file, theme)
+    }))
+  }, [displayFiles, theme])
+  const hasPendingHighlights = displayFilesWithHighlightKeys.some(
+    ({ highlightKey }) => !highlightedFilesByKey.has(highlightKey)
+  )
+  const selectionMapsByFilePath = useMemo(() => {
+    const maps = new Map<string, SelectionMaps>()
+    if (!selectable) return maps
+
+    displayFiles.forEach((file) => {
+      const filePath = getDiffFilePath(file)
+      maps.set(filePath, buildSelectionMaps(filePath, file.hunks))
+    })
+
+    return maps
+  }, [displayFiles, selectable])
 
   function setLines(filePath: string, lineIds: string[], selected: boolean): void {
     if (onSetLines) {
@@ -493,27 +593,43 @@ export const DiffViewer = memo(function DiffViewer({
   }
 
   useEffect(() => {
-    if (displayFiles.length === 0) {
-      setHighlightedFiles([])
-      return
+    const cacheHighlightedFile = (highlightKey: string, tokens: HunkTokens | null): void => {
+      if (!mountedRef.current) return
+
+      setHighlightedFilesByKey((current) => {
+        if (current.has(highlightKey)) return current
+
+        const next = new Map(current)
+        next.set(highlightKey, tokens)
+
+        while (next.size > MAX_DIFF_HIGHLIGHT_CACHE_ENTRIES) {
+          const oldestKey = next.keys().next().value
+          if (!oldestKey) break
+          next.delete(oldestKey)
+        }
+
+        highlightedFilesByKeyRef.current = next
+        return next
+      })
     }
 
-    let ignore = false
+    displayFilesWithHighlightKeys.forEach(({ file, highlightKey }) => {
+      if (
+        highlightedFilesByKeyRef.current.has(highlightKey) ||
+        pendingHighlightKeysRef.current.has(highlightKey)
+      ) {
+        return
+      }
 
-    Promise.all(displayFiles.map((file) => buildHighlightedTokens(file, theme)))
-      .then((tokens) => {
-        if (ignore) return
-        setHighlightedFiles(tokens)
-      })
-      .catch(() => {
-        if (ignore) return
-        setHighlightedFiles(displayFiles.map(() => null))
-      })
-
-    return () => {
-      ignore = true
-    }
-  }, [displayFiles, theme])
+      pendingHighlightKeysRef.current.add(highlightKey)
+      buildHighlightedTokens(file, theme)
+        .then((tokens) => cacheHighlightedFile(highlightKey, tokens))
+        .catch(() => cacheHighlightedFile(highlightKey, null))
+        .finally(() => {
+          pendingHighlightKeysRef.current.delete(highlightKey)
+        })
+    })
+  }, [displayFilesWithHighlightKeys, theme])
 
   if (displayFiles.length === 0) {
     return (
@@ -525,34 +641,41 @@ export const DiffViewer = memo(function DiffViewer({
     )
   }
 
+  if (!displayFiles.some(fileHasRenderableChanges)) {
+    return renderEmptyFileState()
+  }
+
   return (
-    <div className="diff-view">
-      {displayFiles.map((file: FileData, index) => {
+    <div className="diff-view" aria-busy={hasPendingHighlights}>
+      {displayFilesWithHighlightKeys.map(({ file, highlightKey }) => {
         const filePath = getDiffFilePath(file)
         const source = fileSources[filePath]
-        const expanded = expandedFiles.has(filePath)
-        const selectionMaps = buildSelectionMaps(filePath, file.hunks)
-        const highlightedTokens = highlightedFiles[index]
-        const toggleExpanded = (): void => {
-          setExpandedFiles((current) => {
-            const next = new Set(current)
-            if (next.has(filePath)) {
-              next.delete(filePath)
-            } else {
-              next.add(filePath)
+        const selectionMaps = selectionMapsByFilePath.get(filePath)
+        const highlightReady = highlightedFilesByKey.has(highlightKey)
+        const highlightedTokens = highlightedFilesByKey.get(highlightKey) || null
+        const expandRange = (start: number, end: number): void => {
+          if (end <= start) return
+
+          setExpandedRangesByFilePath((current) => {
+            const key = rangeKey(start, end)
+            const currentRanges = current[filePath] || []
+            if (currentRanges.includes(key)) return current
+
+            return {
+              ...current,
+              [filePath]: [...currentRanges, key]
             }
-            return next
           })
         }
         const renderChange = (change: ChangeData, key: string): React.ReactElement => {
           const changeKey = getChangeKey(change)
-          const lineId = selectable && isSelectableChange(change)
+          const lineId = selectable && selectionMaps && isSelectableChange(change)
             ? selectionMaps.lineIdsByChangeKey.get(changeKey)
             : undefined
-          const blockLineIds = selectable && isSelectableChange(change)
+          const blockLineIds = selectable && selectionMaps && isSelectableChange(change)
             ? selectionMaps.blockLineIdsByChangeKey.get(changeKey) || []
             : []
-          const blockId = selectable && isSelectableChange(change)
+          const blockId = selectable && selectionMaps && isSelectableChange(change)
             ? selectionMaps.blockIdByChangeKey.get(changeKey)
             : undefined
           const selected = !!lineId && isLineSelected(filePath, lineId)
@@ -623,7 +746,9 @@ export const DiffViewer = memo(function DiffViewer({
               >
                 <span className="diff-code-prefix">{lineSign(change)}</span>
                 <span className="diff-code-content">
-                  {renderCodeContent(tokensForChange(highlightedTokens, change), change.content)}
+                  {highlightReady
+                    ? renderCodeContent(tokensForChange(highlightedTokens, change), change.content)
+                    : renderPendingCodeContent(change.content)}
                 </span>
               </td>
             </tr>
@@ -643,8 +768,7 @@ export const DiffViewer = memo(function DiffViewer({
                 {renderHunkRows({
                   hunks: file.hunks,
                   source,
-                  expanded,
-                  onToggleExpanded: toggleExpanded,
+                  onExpandRange: expandRange,
                   renderChange
                 })}
               </tbody>

@@ -1,22 +1,16 @@
 {
-  "name": "pear",
+  "name": "pear-by-agent-relay",
   "version": "1.0.0",
-  "description": "Electron GUI for Agent Relay",
+  "productName": "Pear by Agent Relay",
+  "description": "Pair programming workspace for humans and AI agents",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
-    "preview": "electron-vite preview",
-    "typecheck": "tsc -b --noEmit"
+    "preview": "electron-vite preview"
   },
-  "workspaces": [
-    "packages/*"
-  ],
   "dependencies": {
-    "@agent-relay/cloud": "6.3.0",
-    "@agent-relay/sdk": "^6.3.0",
-    "@agentworkforce/deploy": "file:packages/deploy",
-    "@relayfile/sdk": "0.7.23",
+    "@agent-relay/sdk": "^6.3.1",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/xterm": "^5.5.0",
@@ -28,6 +22,7 @@
     "react-dom": "^19.0.0",
     "shiki": "^4.0.2",
     "unidiff": "^1.0.4",
+    "zod": "^3.25.76",
     "zustand": "^5.0.0"
   },
   "devDependencies": {

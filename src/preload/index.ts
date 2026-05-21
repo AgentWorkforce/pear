@@ -2,35 +2,59 @@ import { contextBridge, ipcRenderer } from 'electron'
 
 export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control'
 
+type TerminalAttachMode = 'view' | 'drive' | 'passthrough'
+
+// Thin generic wrappers so each handler binds an IPC channel + return type without
+// repeating the `as Promise<T>` cast on every call site.
+function invoke<T>(channel: string, ...args: unknown[]): Promise<T> {
+  return ipcRenderer.invoke(channel, ...args) as Promise<T>
+}
+
+function subscribe<T>(channel: string, callback: (payload: T) => void): () => void {
+  const handler = (_: unknown, payload: T): void => callback(payload)
+  ipcRenderer.on(channel, handler)
+  return () => ipcRenderer.removeListener(channel, handler)
+}
+
 const api = {
+  app: {
+    confirmQuit: () => ipcRenderer.invoke('app:confirm-quit') as Promise<boolean>
+  },
   project: {
-    list: () => ipcRenderer.invoke('project:list'),
-    add: (name: string, rootPath?: string) => ipcRenderer.invoke('project:add', name, rootPath),
-    remove: (id: string) => ipcRenderer.invoke('project:remove', id),
-    setActive: (id: string | null) => ipcRenderer.invoke('project:set-active', id),
+    list: () => invoke<{ projects: unknown[]; activeId: string | null }>('project:list'),
+    add: (name: string, rootPath?: string) => invoke<unknown>('project:add', name, rootPath),
+    remove: (id: string) => invoke<void>('project:remove', id),
+    setActive: (id: string | null) => invoke<void>('project:set-active', id),
     update: (id: string, update: Record<string, unknown>) =>
-      ipcRenderer.invoke('project:update', id, update),
+      invoke<void>('project:update', id, update),
     addChannel: (projectId: string, name: string) =>
-      ipcRenderer.invoke('project:add-channel', projectId, name),
+      invoke<void>('project:add-channel', projectId, name),
     removeChannel: (projectId: string, name: string) =>
-      ipcRenderer.invoke('project:remove-channel', projectId, name),
+      invoke<void>('project:remove-channel', projectId, name),
     setChannelPeople: (projectId: string, channelName: string, people: string[]) =>
-      ipcRenderer.invoke('project:set-channel-people', projectId, channelName, people),
+      invoke<string[]>('project:set-channel-people', projectId, channelName, people),
     addRoot: (projectId: string, name?: string, rootPath?: string) =>
-      ipcRenderer.invoke('project:add-root', projectId, name, rootPath),
+      invoke<unknown>('project:add-root', projectId, name, rootPath),
     removeRoot: (projectId: string, rootId: string) =>
-      ipcRenderer.invoke('project:remove-root', projectId, rootId),
+      invoke<void>('project:remove-root', projectId, rootId),
     addIntegration: (projectId: string, name: string, type?: string) =>
-      ipcRenderer.invoke('project:add-integration', projectId, name, type),
+      invoke<unknown>('project:add-integration', projectId, name, type),
     removeIntegration: (projectId: string, integrationId: string) =>
-      ipcRenderer.invoke('project:remove-integration', projectId, integrationId)
+      invoke<void>('project:remove-integration', projectId, integrationId)
   },
   broker: {
     start: (projectId: string, cwd: string, name: string, channels?: string[]) =>
-      ipcRenderer.invoke('broker:start', projectId, cwd, name, channels) as Promise<boolean>,
+      invoke<boolean>('broker:start', projectId, cwd, name, channels),
     syncChannels: (projectId: string, channels: string[]) =>
-      ipcRenderer.invoke('broker:sync-channels', projectId, channels),
-    connectCloud: () => ipcRenderer.invoke('broker:connect-cloud') as Promise<string>,
+      invoke<void>('broker:sync-channels', projectId, channels),
+    autoFixRuntime: (
+      projectId: string,
+      cwd: string,
+      name: string,
+      channels?: string[],
+      errorMessage?: string
+    ) => invoke<{ removed: string[] }>('broker:auto-fix-runtime', projectId, cwd, name, channels, errorMessage),
+    connectCloud: () => invoke<string>('broker:connect-cloud'),
     spawnAgent: (projectId: string, input: {
       name: string
       cli: string
@@ -38,83 +62,77 @@ const api = {
       task?: string
       channels?: string[]
       cwd?: string
-    }) => ipcRenderer.invoke('broker:spawn-agent', projectId, input),
+    }) => invoke<{ name: string; runtime: string }>('broker:spawn-agent', projectId, input),
     attachTerminal: (input: {
       projectId?: string
       name: string
       rows?: number
       cols?: number
-      mode?: 'view' | 'drive' | 'passthrough'
-    }) => ipcRenderer.invoke('broker:attach-terminal', input),
-    sendInput: (projectId: string | undefined, name: string, data: string) =>
-      ipcRenderer.invoke('broker:send-input', projectId, name, data),
+      mode?: TerminalAttachMode
+    }) => invoke<unknown>('broker:attach-terminal', input),
     sendInputFast: (projectId: string | undefined, name: string, data: string) =>
       ipcRenderer.send('broker:send-input-fast', projectId, name, data),
-    setTerminalMode: (projectId: string | undefined, name: string, mode: 'view' | 'drive' | 'passthrough') =>
-      ipcRenderer.invoke('broker:set-terminal-mode', projectId, name, mode),
+    setTerminalMode: (projectId: string | undefined, name: string, mode: TerminalAttachMode) =>
+      invoke<unknown>('broker:set-terminal-mode', projectId, name, mode),
     getPending: (projectId: string | undefined, name: string) =>
-      ipcRenderer.invoke('broker:get-pending', projectId, name),
+      invoke<unknown[]>('broker:get-pending', projectId, name),
     flushPending: (projectId: string | undefined, name: string) =>
-      ipcRenderer.invoke('broker:flush-pending', projectId, name),
+      invoke<{ flushed: number }>('broker:flush-pending', projectId, name),
     resizePty: (projectId: string | undefined, name: string, rows: number, cols: number) =>
-      ipcRenderer.invoke('broker:resize-pty', projectId, name, rows, cols),
+      invoke<void>('broker:resize-pty', projectId, name, rows, cols),
     sendMessage: (projectId: string | undefined, input: { to: string; text: string; from?: string }) =>
-      ipcRenderer.invoke('broker:send-message', projectId, input),
+      invoke<void>('broker:send-message', projectId, input),
     subscribeAgentChannel: (projectId: string | undefined, name: string, channel: string) =>
-      ipcRenderer.invoke('broker:subscribe-agent-channel', projectId, name, channel),
+      invoke<void>('broker:subscribe-agent-channel', projectId, name, channel),
     unsubscribeAgentChannel: (projectId: string | undefined, name: string, channel: string) =>
-      ipcRenderer.invoke('broker:unsubscribe-agent-channel', projectId, name, channel),
+      invoke<void>('broker:unsubscribe-agent-channel', projectId, name, channel),
     releaseAgent: (projectId: string | undefined, name: string) =>
-      ipcRenderer.invoke('broker:release-agent', projectId, name),
-    listAgents: (projectId?: string) => ipcRenderer.invoke('broker:list-agents', projectId),
-    listDetails: () => ipcRenderer.invoke('broker:list-details'),
-    shutdown: () => ipcRenderer.invoke('broker:shutdown'),
-    onEvent: (callback: (event: unknown) => void) => {
-      const handler = (_: unknown, event: unknown): void => callback(event)
-      ipcRenderer.on('broker:event', handler)
-      return () => ipcRenderer.removeListener('broker:event', handler)
-    },
-    onStatus: (callback: (status: { projectId?: string; status: string; error?: string }) => void) => {
-      const handler = (_: unknown, status: { projectId?: string; status: string; error?: string }): void =>
-        callback(status)
-      ipcRenderer.on('broker:status', handler)
-      return () => ipcRenderer.removeListener('broker:status', handler)
-    }
+      invoke<void>('broker:release-agent', projectId, name),
+    listAgents: (projectId?: string) => invoke<unknown[]>('broker:list-agents', projectId),
+    listDetails: () => invoke<unknown[]>('broker:list-details'),
+    listEvents: () => invoke<unknown[]>('broker:list-events'),
+    shutdown: () => invoke<void>('broker:shutdown'),
+    onEvent: (callback: (event: unknown) => void) => subscribe<unknown>('broker:event', callback),
+    onStatus: (callback: (status: { projectId?: string; status: string; error?: string }) => void) =>
+      subscribe<{ projectId?: string; status: string; error?: string }>('broker:status', callback)
   },
   git: {
-    status: (path: string) => ipcRenderer.invoke('git:status', path),
-    diff: (path: string, file?: string) => ipcRenderer.invoke('git:diff', path, file),
+    status: (path: string) => invoke<unknown[]>('git:status', path),
+    diff: (path: string, file?: string) => invoke<string>('git:diff', path, file),
     fileContent: (path: string, file: string, revision?: string) =>
-      ipcRenderer.invoke('git:file-content', path, file, revision),
-    summary: (path: string) => ipcRenderer.invoke('git:summary', path),
-    branches: (root: string) => ipcRenderer.invoke('git:branches', root),
-    branchDetails: (root: string) => ipcRenderer.invoke('git:branch-details', root),
+      invoke<string>('git:file-content', path, file, revision),
+    summary: (path: string) => invoke<unknown>('git:summary', path),
+    branches: (root: string) => invoke<string[]>('git:branches', root),
+    branchDetails: (root: string) => invoke<unknown[]>('git:branch-details', root),
     checkoutBranch: (root: string, branch: string, options?: { stashChanges?: boolean }) =>
-      ipcRenderer.invoke('git:checkout-branch', root, branch, options),
-    branchSyncStatus: (root: string) => ipcRenderer.invoke('git:branch-sync-status', root),
-    fetchRemote: (root: string) => ipcRenderer.invoke('git:fetch-remote', root),
-    pullCurrentBranch: (root: string) => ipcRenderer.invoke('git:pull-current-branch', root),
-    pushCurrentBranch: (root: string) => ipcRenderer.invoke('git:push-current-branch', root),
-    history: (path: string, limit?: number) => ipcRenderer.invoke('git:history', path, limit),
-    show: (path: string, hash: string, file?: string) => ipcRenderer.invoke('git:show', path, hash, file),
+      invoke<unknown>('git:checkout-branch', root, branch, options),
+    branchSyncStatus: (root: string) => invoke<unknown>('git:branch-sync-status', root),
+    fetchRemote: (root: string) => invoke<unknown>('git:fetch-remote', root),
+    pullCurrentBranch: (root: string) => invoke<unknown>('git:pull-current-branch', root),
+    pushCurrentBranch: (root: string) => invoke<unknown>('git:push-current-branch', root),
+    history: (path: string, limit?: number) => invoke<unknown[]>('git:history', path, limit),
+    show: (path: string, hash: string, file?: string) => invoke<string>('git:show', path, hash, file),
+    discardFiles: (path: string, files: string[]) => invoke<void>('git:discard-files', path, files),
+    addGitignorePatterns: (path: string, patterns: string[]) =>
+      invoke<void>('git:add-gitignore-patterns', path, patterns),
     commitSelection: (path: string, input: {
       title: string
       body?: string
       wholeFiles: string[]
       patch?: string
-    }) => ipcRenderer.invoke('git:commit-selection', path, input),
+    }) => invoke<{ hash: string }>('git:commit-selection', path, input),
     generateCommitMessage: (path: string, input: { wholeFiles: string[]; patch?: string }) =>
-      ipcRenderer.invoke('git:generate-commit-message', path, input)
+      invoke<unknown>('git:generate-commit-message', path, input)
   },
   fs: {
-    listDir: (dirPath: string) => ipcRenderer.invoke('fs:list-dir', dirPath),
-    readPreview: (filePath: string) => ipcRenderer.invoke('fs:read-preview', filePath)
+    listDir: (dirPath: string) => invoke<unknown[]>('fs:list-dir', dirPath),
+    readPreview: (filePath: string) => invoke<unknown>('fs:read-preview', filePath),
+    revealPath: (filePath: string) => invoke<void>('fs:reveal-path', filePath)
   },
   auth: {
-    login: (input?: { apiUrl?: string }) =>
-      ipcRenderer.invoke('auth:login', input) as Promise<{ loggedIn: boolean; apiUrl?: string }>,
-    logout: () => ipcRenderer.invoke('auth:logout'),
-    status: () => ipcRenderer.invoke('auth:status') as Promise<{ loggedIn: boolean; apiUrl?: string }>
+    login: (input?: { apiUrl?: string }) => invoke<unknown>('auth:login', input),
+    logout: () => invoke<void>('auth:logout'),
+    status: () => invoke<unknown>('auth:status')
   },
   cloudAgent: {
     list: () => ipcRenderer.invoke('cloud-agent:list'),

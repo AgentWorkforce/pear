@@ -1,4 +1,4 @@
-import { ipcMain, dialog, BrowserWindow } from 'electron'
+import { app, ipcMain, dialog, BrowserWindow, shell } from 'electron'
 import { resolve } from 'path'
 import type { SpawnPtyInput, SendMessageInput } from '@agent-relay/sdk'
 import {
@@ -46,10 +46,34 @@ function assertPathWithinProjects(targetPath: string): void {
 }
 
 export function registerIpcHandlers(): void {
+  // Fan proactive-agent events out to all renderer windows.
   proactiveAgentManager.onEvent((event) => {
     for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send('proactive-agent:event', event)
     }
+  })
+
+  // --- App ---
+  ipcMain.handle('app:confirm-quit', async (event) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    const options: Electron.MessageBoxOptions = {
+      type: 'warning',
+      buttons: ['Close Pear', 'Cancel'],
+      defaultId: 1,
+      cancelId: 1,
+      title: 'Close Pear?',
+      message: 'Close Pear by Agent Relay?',
+      detail: 'Agent Relay will be shut down before the app closes.'
+    }
+    const result = win
+      ? await dialog.showMessageBox(win, options)
+      : await dialog.showMessageBox(options)
+
+    if (result.response !== 0) return false
+
+    await brokerManager.shutdown()
+    app.quit()
+    return true
   })
 
   // --- Project ---
@@ -150,6 +174,22 @@ export function registerIpcHandlers(): void {
     await brokerManager.syncChannels(projectId, channels)
   })
 
+  ipcMain.handle('broker:auto-fix-runtime', async (
+    event,
+    projectId: string,
+    cwd: string,
+    name: string,
+    channels?: string[],
+    errorMessage?: string
+  ) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) throw new Error('No window')
+    if (!isDirectory(cwd)) {
+      throw new Error(`Project path no longer exists: ${cwd}`)
+    }
+    return brokerManager.autoFixRuntime(projectId, cwd, name, win, channels, errorMessage)
+  })
+
   ipcMain.handle('broker:spawn-agent', async (_, projectId: string, input: SpawnPtyInput) => {
     return brokerManager.spawnAgent(projectId, input)
   })
@@ -168,10 +208,6 @@ export function registerIpcHandlers(): void {
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win) throw new Error('No window')
     return brokerManager.connectCloud('cloud', win)
-  })
-
-  ipcMain.handle('broker:send-input', async (_, projectId: string | undefined, name: string, data: string) => {
-    await brokerManager.sendInput(projectId, name, data)
   })
 
   ipcMain.on('broker:send-input-fast', (_, projectId: string | undefined, name: string, data: string) => {
@@ -216,6 +252,10 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('broker:list-details', async () => {
     return brokerManager.listBrokerDetails()
+  })
+
+  ipcMain.handle('broker:list-events', () => {
+    return brokerManager.listBrokerEvents()
   })
 
   ipcMain.handle('broker:shutdown', async () => {
@@ -301,6 +341,18 @@ export function registerIpcHandlers(): void {
     return git.getCommitDiff(path, hash, file)
   })
 
+  ipcMain.handle('git:discard-files', async (_, path: string, files: string[]) => {
+    assertPathWithinProjects(path)
+    if (!isDirectory(path)) throw new Error('Git working directory is unavailable')
+    return git.discardFiles(path, files)
+  })
+
+  ipcMain.handle('git:add-gitignore-patterns', async (_, path: string, patterns: string[]) => {
+    assertPathWithinProjects(path)
+    if (!isDirectory(path)) throw new Error('Git working directory is unavailable')
+    return git.addGitignorePatterns(path, patterns)
+  })
+
   ipcMain.handle('git:commit-selection', async (_, path: string, input: git.GitCommitSelectionInput) => {
     assertPathWithinProjects(path)
     if (!isDirectory(path)) throw new Error('Git working directory is unavailable')
@@ -325,6 +377,12 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('fs:read-preview', async (_, filePath: string) => {
     assertPathWithinProjects(filePath)
     return filesystem.readTextPreview(filePath)
+  })
+
+  ipcMain.handle('fs:reveal-path', async (_, filePath: string) => {
+    const resolvedPath = resolve(filePath)
+    assertPathWithinProjects(resolvedPath)
+    shell.showItemInFolder(resolvedPath)
   })
 
   // --- Auth ---
