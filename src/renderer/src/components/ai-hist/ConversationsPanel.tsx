@@ -1,6 +1,5 @@
 import type React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Allotment } from 'allotment'
 import { ClipboardCopy, MessageSquare, RefreshCw, Search } from 'lucide-react'
 import { pear } from '@/lib/ipc'
 import { useProjectStore, type Project } from '@/stores/project-store'
@@ -356,10 +355,8 @@ function ConversationsPanel(): React.ReactNode {
   }
 
   return (
-    <div className="flex h-full flex-col">
-      <Allotment defaultSizes={[1, 2]}>
-        <Allotment.Pane minSize={280} preferredSize={380}>
-          <div className="flex h-full flex-col border-r border-[var(--pear-border)]">
+    <div className="relative flex h-full">
+      <div className="flex w-[380px] shrink-0 flex-col border-r border-[var(--pear-border)]">
             <div className="flex flex-col gap-2 border-b border-[var(--pear-border)] p-3">
               <div className="flex items-center gap-2">
                 <div className="relative flex-1">
@@ -487,11 +484,9 @@ function ConversationsPanel(): React.ReactNode {
                 <span className="truncate" title={status.dbPath}>{shortenPath(status.dbPath)}</span>
               </div>
             )}
-          </div>
-        </Allotment.Pane>
+      </div>
 
-        <Allotment.Pane>
-          <div className="flex h-full flex-col">
+      <div className="flex min-w-0 flex-1 flex-col">
             {activeSession ? (
               <>
                 <div className="flex items-start justify-between gap-3 border-b border-[var(--pear-border)] p-3">
@@ -574,9 +569,7 @@ function ConversationsPanel(): React.ReactNode {
                 Select a conversation to view its prompts.
               </div>
             )}
-          </div>
-        </Allotment.Pane>
-      </Allotment>
+      </div>
 
       {copyHint && (
         <div className="pointer-events-none absolute bottom-4 left-1/2 -translate-x-1/2 rounded-md bg-[var(--pear-bg-overlay-strong)] px-3 py-1.5 text-xs shadow-lg">
