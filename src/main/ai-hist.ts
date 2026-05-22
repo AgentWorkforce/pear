@@ -28,9 +28,9 @@ class AiHistManager {
     if (this.loadingPromise) return this.loadingPromise
     this.loadingPromise = (async () => {
       try {
-        // Deferred require so the WASM doesn't load until first use.
-        // eslint-disable-next-line @typescript-eslint/no-var-requires
-        const mod = require('ai-hist') as typeof import('ai-hist')
+        // Deferred dynamic import — sql.js WASM doesn't load until first use.
+        // Dynamic import (not require) because the SDK ships as ESM.
+        const mod = (await import('ai-hist')) as typeof import('ai-hist')
         const inst = await mod.openAiHist()
         this.instance = inst
         this.status = { ok: true, dbPath: inst.dbPath }
@@ -81,10 +81,9 @@ class AiHistManager {
     return inst?.stats() ?? null
   }
 
-  resumeCommand(entry: { source: Source; sessionId: string | null; project: string | null }): string | null {
+  async resumeCommand(entry: { source: Source; sessionId: string | null; project: string | null }): Promise<string | null> {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-var-requires
-      const mod = require('ai-hist') as typeof import('ai-hist')
+      const mod = (await import('ai-hist')) as typeof import('ai-hist')
       return mod.resumeCommand(entry)
     } catch {
       return null
