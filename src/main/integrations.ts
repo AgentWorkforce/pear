@@ -134,7 +134,11 @@ const ACTIVE_PROVIDERS = new Set([
   'confluence',
   'gmail',
   'google-mail',
-  'google-calendar'
+  'google-calendar',
+  'hubspot',
+  'granola',
+  'fathom',
+  'docker-hub'
 ])
 
 function isActiveProvider(provider: string): boolean {
