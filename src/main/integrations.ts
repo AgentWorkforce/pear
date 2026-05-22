@@ -211,7 +211,18 @@ function normalizeAuthMethod(value: unknown): IntegrationAuthMethod {
 function normalizeAdapter(value: unknown): IntegrationAdapter | null {
   if (!isRecord(value)) return null
 
-  const provider = typeof value.provider === 'string' ? value.provider.trim() : ''
+  // Cloud's `/api/v1/integrations/catalog` response uses `id` per entry
+  // (`cloud/packages/web/app/api/v1/integrations/catalog/route.ts`);
+  // Pear's static fallback catalog uses `provider`. Accept either so the
+  // live cloud catalog is usable without breaking the static-fallback
+  // shape.
+  const providerSource =
+    typeof value.provider === 'string' && value.provider.trim()
+      ? value.provider
+      : typeof value.id === 'string'
+        ? value.id
+        : ''
+  const provider = providerSource.trim()
   const displayName = typeof value.displayName === 'string' ? value.displayName.trim() : provider
   if (!provider || !displayName) return null
 
@@ -229,13 +240,22 @@ function normalizeAdapter(value: unknown): IntegrationAdapter | null {
 }
 
 function normalizeCatalogPayload(payload: unknown): IntegrationAdapter[] {
+  // Cloud's live catalog responds with `{ providers: [...], version }`
+  // (`cloud/packages/web/app/api/v1/integrations/catalog/route.ts`);
+  // the older static and pre-1.0 shapes used `adapters` / `catalog`.
+  // Without the `providers` key here the live response is treated as
+  // empty and `listCatalog` falls back to the bundled static catalog —
+  // which silently drops every cloud-only provider (granola, docker-hub,
+  // and anything cloud adds after the last Pear release).
   const list = Array.isArray(payload)
     ? payload
-    : isRecord(payload) && Array.isArray(payload.adapters)
-      ? payload.adapters
-      : isRecord(payload) && Array.isArray(payload.catalog)
-        ? payload.catalog
-        : []
+    : isRecord(payload) && Array.isArray(payload.providers)
+      ? payload.providers
+      : isRecord(payload) && Array.isArray(payload.adapters)
+        ? payload.adapters
+        : isRecord(payload) && Array.isArray(payload.catalog)
+          ? payload.catalog
+          : []
 
   return list.map(normalizeAdapter).filter((entry): entry is IntegrationAdapter => entry !== null)
 }
