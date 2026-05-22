@@ -13,7 +13,7 @@ import {
   type MountedWorkspaceStatus,
   type MountLauncher
 } from '@relayfile/sdk'
-import { resolveCloudAuth } from './auth'
+import { getAccountWorkspaceId, resolveCloudAuth } from './auth'
 import { brokerManager } from './broker'
 import { getRelayWorkspaceManager } from './relay-workspace'
 import { loadStore, saveStore, type Project, type ProjectCloudAgent } from './store'
@@ -452,7 +452,7 @@ export class CloudAgentManager {
     if (!project || !binding) return
 
     const auth = await this.requireCloudAuth()
-    const workspaceId = await this.requireAccountWorkspaceId()
+    const workspaceId = await this.requireAccountTokenWorkspaceId()
     const url = `${auth.apiUrl}/api/v1/workspaces/${encodeURIComponent(workspaceId)}/cloud-agents/${encodeURIComponent(binding.cloudAgentId)}/box`
     const response = await fetch(url, {
       method: 'PATCH',
@@ -642,9 +642,13 @@ export class CloudAgentManager {
     return id
   }
 
+  private async requireAccountTokenWorkspaceId(): Promise<string> {
+    return getAccountWorkspaceId()
+  }
+
   private async warmBox(projectId: string, cloudAgentId: string): Promise<CloudAgentSandbox> {
     const auth = await this.requireCloudAuth()
-    const workspaceId = await this.requireAccountWorkspaceId()
+    const workspaceId = await this.requireAccountTokenWorkspaceId()
     const mountPaths = await this.integrationMountPathsFor(projectId)
     const url = `${auth.apiUrl}/api/v1/workspaces/${encodeURIComponent(workspaceId)}/cloud-agents/${encodeURIComponent(cloudAgentId)}/box`
     let sandbox = await this.fetchBox(url, auth.accessToken, 'POST', mountPaths)
@@ -705,7 +709,7 @@ export class CloudAgentManager {
     if (!project) return
 
     const auth = await this.requireCloudAuth()
-    const workspaceId = await this.requireAccountWorkspaceId()
+    const workspaceId = await this.requireAccountTokenWorkspaceId()
     const url = `${auth.apiUrl}/api/v1/workspaces/${encodeURIComponent(workspaceId)}/cloud-agents/${encodeURIComponent(binding.cloudAgentId)}/box`
     const response = await fetch(url, {
       method: 'DELETE',

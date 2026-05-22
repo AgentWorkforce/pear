@@ -23,6 +23,15 @@ interface AuthStatus {
   user?: UserInfo
 }
 
+type AccountWorkspaceCache = {
+  tokenHash: string
+  workspaceId: string
+}
+
+type AuthMeta = Pick<AuthStatus, 'apiUrl' | 'user'> & {
+  accountWorkspace?: AccountWorkspaceCache
+}
+
 const getAuthDir = (): string => {
   const dir = join(app.getPath('userData'), 'config')
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true })
@@ -127,21 +136,33 @@ function hasAvatarIdentity(user: UserInfo | undefined): boolean {
   )
 }
 
-function saveAuthMeta(tokens: Pick<StoredTokens, 'apiUrl' | 'user'>): void {
+function accountWorkspaceTokenHash(accessToken: string): string {
+  return createHash('sha256').update(accessToken).digest('hex')
+}
+
+function saveAuthMeta(tokens: Pick<StoredTokens, 'apiUrl' | 'user'> & Partial<Pick<StoredTokens, 'accessToken'>>): void {
+  const previous = loadAuthMeta()
+  const tokenHash = tokens.accessToken ? accountWorkspaceTokenHash(tokens.accessToken) : undefined
+  const accountWorkspace =
+    tokenHash && previous.accountWorkspace?.tokenHash === tokenHash
+      ? previous.accountWorkspace
+      : undefined
   const meta = {
     apiUrl: tokens.apiUrl,
-    user: tokens.user
+    user: tokens.user,
+    ...(accountWorkspace ? { accountWorkspace } : {})
   }
   writeFileSync(getAuthMetaPath(), JSON.stringify(meta, null, 2))
 }
 
-function loadAuthMeta(): Pick<AuthStatus, 'apiUrl' | 'user'> {
+function loadAuthMeta(): AuthMeta {
   try {
     const parsed = AuthMetaSchema.safeParse(JSON.parse(readFileSync(getAuthMetaPath(), 'utf8')))
     if (!parsed.success) return { apiUrl: CLOUD_API_URL }
     return {
       apiUrl: parsed.data.apiUrl?.trim() || CLOUD_API_URL,
-      user: parsed.data.user
+      user: parsed.data.user,
+      accountWorkspace: parsed.data.accountWorkspace
     }
   } catch {
     return { apiUrl: CLOUD_API_URL }
@@ -224,7 +245,7 @@ function clearTokens(): void {
   }
 }
 
-async function fetchWhoami(apiUrl: string, accessToken: string): Promise<UserInfo | undefined> {
+async function fetchWhoamiPayload(apiUrl: string, accessToken: string): Promise<unknown | undefined> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 2500)
 
@@ -234,7 +255,39 @@ async function fetchWhoami(apiUrl: string, accessToken: string): Promise<UserInf
       signal: controller.signal
     })
     if (!res.ok) return undefined
-    const data: unknown = await res.json()
+    return await res.json() as unknown
+  } catch {
+    return undefined
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+function accountWorkspaceIdFromWhoami(value: unknown): string | undefined {
+  if (!isRecord(value)) return undefined
+  return (
+    firstString(value, ['workspaceId', 'workspace_id']) ||
+    firstString(firstObject(value, ['currentWorkspace']), ['id', 'workspaceId', 'workspace_id']) ||
+    firstString(firstObject(value, ['workspace']), ['id', 'workspaceId', 'workspace_id'])
+  )
+}
+
+function saveAccountWorkspaceCache(auth: CloudAuth, workspaceId: string): void {
+  const previous = loadAuthMeta()
+  const meta = {
+    apiUrl: auth.apiUrl || previous.apiUrl?.trim() || CLOUD_API_URL,
+    user: previous.user,
+    accountWorkspace: {
+      tokenHash: accountWorkspaceTokenHash(auth.accessToken),
+      workspaceId
+    }
+  }
+  writeFileSync(getAuthMetaPath(), JSON.stringify(meta, null, 2))
+}
+
+async function fetchWhoami(apiUrl: string, accessToken: string): Promise<UserInfo | undefined> {
+  try {
+    const data = await fetchWhoamiPayload(apiUrl, accessToken)
     const record = isRecord(data) ? data : {}
     const userRecord = firstObject(record, ['user']) || record
     const organizationRecord = firstObject(record, ['organization', 'org'])
@@ -256,8 +309,6 @@ async function fetchWhoami(apiUrl: string, accessToken: string): Promise<UserInf
     })
   } catch {
     return undefined
-  } finally {
-    clearTimeout(timeout)
   }
 }
 
@@ -448,7 +499,25 @@ export async function ensureAuthenticated(apiUrl?: string): Promise<AuthStatus> 
     return { loggedIn: true, apiUrl: stored.apiUrl, user: stored.user }
   }
   if (apiUrl && stored) {
-    saveAuthMeta({ apiUrl, user: stored.user })
+    saveAuthMeta({ apiUrl, user: stored.user, accessToken: stored.accessToken })
   }
   return login()
+}
+
+export async function getAccountWorkspaceId(): Promise<string> {
+  const auth = await resolveCloudAuth()
+  if (!auth) throw new Error('cloud-auth-required')
+
+  const tokenHash = accountWorkspaceTokenHash(auth.accessToken)
+  const cached = loadAuthMeta().accountWorkspace
+  if (cached?.tokenHash === tokenHash && cached.workspaceId.trim()) {
+    return cached.workspaceId.trim()
+  }
+
+  const data = await fetchWhoamiPayload(auth.apiUrl, auth.accessToken)
+  const workspaceId = accountWorkspaceIdFromWhoami(data)
+  if (!workspaceId) throw new Error('account-workspace-required')
+
+  saveAccountWorkspaceCache(auth, workspaceId)
+  return workspaceId
 }

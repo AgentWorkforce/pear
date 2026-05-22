@@ -49,7 +49,13 @@ export type StoredTokens = z.infer<typeof StoredTokensSchema>
 export const AuthMetaSchema = z
   .object({
     apiUrl: z.string().optional(),
-    user: UserInfoSchema.optional()
+    user: UserInfoSchema.optional(),
+    accountWorkspace: z
+      .object({
+        tokenHash: trimmedString,
+        workspaceId: trimmedString
+      })
+      .optional()
   })
   .strip()
 
