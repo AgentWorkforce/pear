@@ -146,6 +146,7 @@ function ConversationsPanel(): React.ReactNode {
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [detailEntries, setDetailEntries] = useState<Entry[]>([])
   const [detailLoading, setDetailLoading] = useState(false)
+  const [detailError, setDetailError] = useState<string | null>(null)
   const [copyHint, setCopyHint] = useState<string | null>(null)
   const queryToken = useRef(0)
 
@@ -201,14 +202,24 @@ function ConversationsPanel(): React.ReactNode {
   useEffect(() => {
     if (!activeSessionId) {
       setDetailEntries([])
+      setDetailError(null)
       return
     }
     let cancelled = false
     setDetailLoading(true)
+    setDetailError(null)
     pear.aiHist
       .getSession(activeSessionId)
       .then((entries) => {
-        if (!cancelled) setDetailEntries(entries as Entry[])
+        if (cancelled) return
+        setDetailEntries(entries as Entry[])
+      })
+      .catch((err) => {
+        if (cancelled) return
+        const message = err instanceof Error ? err.message : String(err)
+        // Bubble up so the user sees why the right pane is empty instead
+        // of staring at a blank panel — this used to fail silently.
+        setDetailError(message || 'Failed to load session entries')
       })
       .finally(() => {
         if (!cancelled) setDetailLoading(false)
@@ -527,6 +538,17 @@ function ConversationsPanel(): React.ReactNode {
                 <div className="min-h-0 flex-1 overflow-y-auto p-3">
                   {detailLoading ? (
                     <div className="text-center text-xs text-[var(--pear-fg-muted)]">Loading…</div>
+                  ) : detailError ? (
+                    <div className="rounded-md bg-red-500/10 p-3 text-xs text-red-300 ring-1 ring-red-500/30">
+                      <div className="mb-1 font-medium">Couldn't load session</div>
+                      <div className="font-mono">{detailError}</div>
+                    </div>
+                  ) : detailEntries.length === 0 ? (
+                    <div className="text-center text-xs text-[var(--pear-fg-muted)]">
+                      No prompts found for session {activeSession.sessionId}.
+                      <br />
+                      (This usually means the SDK's session-id doesn't match the row's — please file a bug.)
+                    </div>
                   ) : (
                     <ul className="flex flex-col gap-2">
                       {detailEntries.map((entry) => (
