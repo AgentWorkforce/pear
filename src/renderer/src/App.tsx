@@ -7,6 +7,7 @@ import { TerminalPane } from '@/components/terminal/TerminalPane'
 import { ChatView } from '@/components/chat/ChatView'
 import { BrokerDetailsPage } from '@/components/broker/BrokerDetailsPage'
 import { DiffPane } from '@/components/diff/DiffPane'
+import ConversationsPanel from '@/components/ai-hist/ConversationsPanel'
 import { AppTopBar } from '@/components/common/AppTopBar'
 import { CommandMenu } from '@/components/common/CommandMenu'
 import { StatusBar } from '@/components/common/StatusBar'
@@ -90,6 +91,8 @@ export default function App(): React.ReactNode {
       ? <BrokerDetailsPage />
     : activeTab?.kind === 'source-control'
       ? <DiffPane />
+    : activeTab?.kind === 'ai-hist'
+      ? <ConversationsPanel />
     : activeTab?.kind === 'channel' || activeTab?.kind === 'dm'
       ? <ChatView />
       : <TerminalPane />
