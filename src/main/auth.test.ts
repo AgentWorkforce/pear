@@ -134,6 +134,26 @@ describe('getAccountWorkspaceId', () => {
     })
   })
 
+  it('prefers currentWorkspace.id over a top-level workspaceId when both are present', async () => {
+    writeAuthJson(userDataDir, {
+      accessToken: 'cld_at_both',
+      refreshToken: 'cld_rt_both',
+      apiUrl: 'https://cloud.example'
+    })
+    mock.fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({
+        workspaceId: 'ws-legacy-alias',
+        currentWorkspace: { id: 'ws-active' }
+      })
+    })
+
+    const { getAccountWorkspaceId } = await import('./auth')
+    await expect(getAccountWorkspaceId()).resolves.toBe('ws-active')
+  })
+
   it('falls back to top-level workspaceId and workspace.id when currentWorkspace is absent', async () => {
     writeAuthJson(userDataDir, {
       accessToken: 'cld_at_top',

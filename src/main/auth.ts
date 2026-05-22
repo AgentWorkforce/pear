@@ -265,9 +265,13 @@ async function fetchWhoamiPayload(apiUrl: string, accessToken: string): Promise<
 
 function accountWorkspaceIdFromWhoami(value: unknown): string | undefined {
   if (!isRecord(value)) return undefined
+  // currentWorkspace.id is the source of truth (matches what /auth/whoami
+  // returns today). The other keys are fallbacks for legacy / alternate
+  // payload shapes — checking them first would let a stale top-level alias
+  // win over the active workspace.
   return (
-    firstString(value, ['workspaceId', 'workspace_id']) ||
     firstString(firstObject(value, ['currentWorkspace']), ['id', 'workspaceId', 'workspace_id']) ||
+    firstString(value, ['workspaceId', 'workspace_id']) ||
     firstString(firstObject(value, ['workspace']), ['id', 'workspaceId', 'workspace_id'])
   )
 }
