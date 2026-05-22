@@ -22,6 +22,7 @@ import * as auth from './auth'
 import { cloudAgentManager } from './cloud-agent'
 import { proactiveAgentManager } from './proactive-agent'
 import { integrationsManager } from './integrations'
+import { aiHistManager } from './ai-hist'
 import { resetRelayWorkspaceManager } from './relay-workspace'
 import { assertDirectory, isDirectory } from './path-utils'
 import type { ProactiveAgentDraft } from './proactive-agent.types'
@@ -529,4 +530,32 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('integrations:disconnect', async (_, projectId: string, integrationId: string) => {
     return integrationsManager.disconnect(projectId, integrationId)
   })
+
+  ipcMain.handle('ai-hist:status', () => aiHistManager.getStatus())
+  ipcMain.handle('ai-hist:recent', (_, opts?: Parameters<typeof aiHistManager.recent>[0]) =>
+    aiHistManager.recent(opts)
+  )
+  ipcMain.handle('ai-hist:list-sessions', (_, opts?: Parameters<typeof aiHistManager.listSessions>[0]) =>
+    aiHistManager.listSessions(opts)
+  )
+  ipcMain.handle('ai-hist:get-session', (_, sessionId: string) =>
+    aiHistManager.getSession(sessionId)
+  )
+  ipcMain.handle(
+    'ai-hist:search',
+    (_, query: string, opts?: Parameters<typeof aiHistManager.search>[1]) =>
+      aiHistManager.search(query, opts)
+  )
+  ipcMain.handle(
+    'ai-hist:search-sessions',
+    (_, query: string, opts?: Parameters<typeof aiHistManager.searchSessions>[1]) =>
+      aiHistManager.searchSessions(query, opts)
+  )
+  ipcMain.handle('ai-hist:stats', () => aiHistManager.stats())
+  ipcMain.handle(
+    'ai-hist:resume-command',
+    (_, entry: Parameters<typeof aiHistManager.resumeCommand>[0]) =>
+      aiHistManager.resumeCommand(entry)
+  )
+  ipcMain.handle('ai-hist:reload', () => aiHistManager.reload())
 }

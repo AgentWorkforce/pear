@@ -8,6 +8,7 @@ import {
   LayoutGrid,
   LogOut,
   MessageCircle,
+  MessageSquare,
   MoreHorizontal,
   Pause,
   Plus,
@@ -961,6 +962,23 @@ function ProjectNavigation({ collapsed = false }: { collapsed?: boolean }): Reac
                 </button>
               ))
             )}
+          </div>
+        </section>
+
+        <section>
+          <SectionHeader title="Conversations" />
+          <div className="space-y-1">
+            <button
+              type="button"
+              onClick={() => openTab({ kind: 'ai-hist', projectId: activeProject.id })}
+              className={rowClass(
+                activeTab?.kind === 'ai-hist' && activeTab.projectId === activeProject.id
+              )}
+              title="Browse Claude / Codex / Cursor history scoped to this project"
+            >
+              <MessageSquare size={12} className="shrink-0" />
+              <span className="min-w-0 flex-1 truncate">Conversation history</span>
+            </button>
           </div>
         </section>
       </div>

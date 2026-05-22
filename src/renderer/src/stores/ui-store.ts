@@ -6,13 +6,13 @@ import {
   sortDirectMessageParticipants
 } from '@/lib/direct-messages'
 
-export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control'
+export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'ai-hist'
 export type DialogType = 'add-project' | 'spawn-agent' | 'spawn-local-agent' | 'cloud-agent' | 'add-channel' | 'command-menu' | null
 const ThemeSchema = z.enum(['dark', 'light'])
 const TerminalLayoutSchema = z.enum(['tabs', 'horizontal-split', 'graph'])
 export type Theme = z.infer<typeof ThemeSchema>
 export type TerminalLayout = z.infer<typeof TerminalLayoutSchema>
-export type AppTabKind = 'agents' | 'channel' | 'dm' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control'
+export type AppTabKind = 'agents' | 'channel' | 'dm' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'ai-hist'
 
 export interface AppTab {
   id: string
@@ -101,6 +101,8 @@ function getTabId(tab: AppTabInput): string {
       return `broker-details:${tab.projectId || 'global'}`
     case 'source-control':
       return `source-control:${tab.projectId || 'global'}`
+    case 'ai-hist':
+      return `ai-hist:${tab.projectId || 'global'}`
   }
 }
 
@@ -122,6 +124,8 @@ function getTabTitle(tab: AppTabInput): string {
       return 'Agent Relay Status'
     case 'source-control':
       return 'File Changes'
+    case 'ai-hist':
+      return 'Conversations'
   }
 }
 
@@ -153,6 +157,8 @@ function viewModeForTab(tab: AppTab): ViewMode {
       return 'broker-details'
     case 'source-control':
       return 'source-control'
+    case 'ai-hist':
+      return 'ai-hist'
   }
 }
 
@@ -168,6 +174,8 @@ function tabInputForViewMode(mode: ViewMode): AppTabInput {
       return { kind: 'broker-details' }
     case 'source-control':
       return { kind: 'source-control' }
+    case 'ai-hist':
+      return { kind: 'ai-hist' }
     case 'graph':
     case 'terminal':
       return { kind: 'agents' }

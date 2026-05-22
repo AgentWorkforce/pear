@@ -1,8 +1,37 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
-export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control'
+export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'ai-hist'
 
 type TerminalAttachMode = 'view' | 'drive' | 'passthrough'
+
+export type AiHistSource = 'claude' | 'codex' | 'cursor' | 'relay'
+
+export interface AiHistEntry {
+  id: number
+  source: AiHistSource
+  sessionId: string | null
+  project: string | null
+  prompt: string
+  timestampMs: number
+}
+
+export interface AiHistSession {
+  sessionId: string
+  source: AiHistSource
+  project: string | null
+  firstPrompt: string
+  firstActivityMs: number
+  lastActivityMs: number
+  promptCount: number
+}
+
+export interface AiHistStats {
+  total: number
+  bySource: Partial<Record<AiHistSource, number>>
+  byProject: Array<{ project: string; count: number }>
+  firstTimestampMs: number | null
+  lastTimestampMs: number | null
+}
 
 // Thin generic wrappers so each handler binds an IPC channel + return type without
 // repeating the `as Promise<T>` cast on every call site.
@@ -62,6 +91,7 @@ const api = {
       task?: string
       channels?: string[]
       cwd?: string
+      args?: string[]
     }) => invoke<{ name: string; runtime: string }>('broker:spawn-agent', projectId, input),
     attachTerminal: (input: {
       projectId?: string
@@ -207,6 +237,27 @@ const api = {
       ipcRenderer.on('integrations:event', handler)
       return () => ipcRenderer.removeListener('integrations:event', handler)
     }
+  },
+  aiHist: {
+    status: () =>
+      invoke<{ ok: true; dbPath: string } | { ok: false; reason: string }>('ai-hist:status'),
+    recent: (opts?: { source?: string; project?: string; limit?: number; beforeMs?: number }) =>
+      invoke<AiHistEntry[]>('ai-hist:recent', opts),
+    listSessions: (opts?: { source?: string; project?: string; limit?: number; beforeMs?: number }) =>
+      invoke<AiHistSession[]>('ai-hist:list-sessions', opts),
+    getSession: (sessionId: string) => invoke<AiHistEntry[]>('ai-hist:get-session', sessionId),
+    search: (
+      query: string,
+      opts?: { source?: string; project?: string; limit?: number; beforeMs?: number }
+    ) => invoke<AiHistEntry[]>('ai-hist:search', query, opts),
+    searchSessions: (
+      query: string,
+      opts?: { source?: string; project?: string; limit?: number; beforeMs?: number }
+    ) => invoke<AiHistSession[]>('ai-hist:search-sessions', query, opts),
+    stats: () => invoke<AiHistStats | null>('ai-hist:stats'),
+    resumeCommand: (entry: { source: string; sessionId: string | null; project: string | null }) =>
+      invoke<string | null>('ai-hist:resume-command', entry),
+    reload: () => invoke<void>('ai-hist:reload')
   },
   onMenu: (channel: string, callback: (...args: unknown[]) => void) => {
     const handler = (_: unknown, ...args: unknown[]): void => callback(...args)
