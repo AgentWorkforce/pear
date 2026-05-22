@@ -226,9 +226,18 @@ function loadTokens(): StoredTokens | null {
 }
 
 export function isTokenExpired(tokens: Pick<StoredTokens, 'expiresAt'>): boolean {
-  if (!tokens.expiresAt) return false
+  // Tokens persisted before `expiresAt` was captured on the login redirect
+  // are treated as expired: their actual lifetime (1 day from issue) is
+  // long since past for anyone who logged in before the capture went in,
+  // and the safer default is "try to refresh" rather than "return a
+  // probably-dead token". The refresh path itself handles failure
+  // (transient 5xx falls through to the stale token; 403 invalid_grant
+  // clears stored tokens so the UI prompts re-login).
+  if (!tokens.expiresAt) return true
   const expiresMs = Date.parse(tokens.expiresAt)
-  if (Number.isNaN(expiresMs)) return false
+  // Likewise, an unparseable timestamp is a state we shouldn't trust —
+  // assume expired and let the refresh path decide.
+  if (Number.isNaN(expiresMs)) return true
   return expiresMs - Date.now() < TOKEN_EXPIRY_BUFFER_MS
 }
 
