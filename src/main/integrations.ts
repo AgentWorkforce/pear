@@ -208,6 +208,55 @@ function normalizeAuthMethod(value: unknown): IntegrationAuthMethod {
   return value === 'token' || value === 'apikey' ? value : 'oauth'
 }
 
+// Static metadata keyed by provider id (lowercased). The cloud catalog
+// response only carries `id`/`displayName`/`backends`/etc.; it does NOT
+// carry `iconUrl`, `capabilities`, or `description`. Without merging in
+// the static catalog's entries for those, every cloud-catalog provider
+// renders with a generic plug icon and a "Read only" label (capabilities
+// all default to false).
+const STATIC_METADATA_BY_PROVIDER: Map<string, IntegrationAdapter> = new Map(
+  INTEGRATIONS_CATALOG.map((entry) => [entry.provider.trim().toLowerCase(), entry])
+)
+
+// Cloud's response lists each provider's `backends` (`["nango"]` and/or
+// `["composio"]`). All currently-shipped nango/composio integrations are
+// bidirectional (webhook + poll + writeback), so a missing
+// `capabilities` field is treated as "all three" rather than the
+// `normalizeCapabilities` "all three false" default. Without this
+// override, cloud-only providers (granola, docker-hub) that have no
+// static entry show as "Read only" even though they support full
+// two-way sync via Relayfile.
+function capabilitiesForCloudEntry(
+  value: Record<string, unknown>,
+  staticEntry: IntegrationAdapter | undefined,
+): IntegrationCapabilities {
+  if (isRecord(value.capabilities)) {
+    return normalizeCapabilities(value.capabilities)
+  }
+  if (staticEntry) {
+    return staticEntry.capabilities
+  }
+  const backends = stringList(value.backends)
+  const isManagedBackend = backends.some((entry) => entry === 'nango' || entry === 'composio')
+  if (isManagedBackend) {
+    return { webhook: true, poll: true, writeback: true }
+  }
+  return normalizeCapabilities(value.capabilities)
+}
+
+// Synthesize a Nango template-logo URL for cloud-only providers that
+// don't have a static-catalog entry. Pear's static catalog already
+// points iconUrl at `https://app.nango.dev/images/template-logos/{id}.svg`
+// for nango-backed providers, so reuse the same convention. Nango uses
+// underscores in some slugs (`docker_hub`); the static catalog hard-codes
+// the right URL per provider where the slug differs from cloud's id.
+function nangoTemplateLogoUrl(id: string): string | undefined {
+  const trimmed = id.trim().toLowerCase()
+  if (!trimmed) return undefined
+  const nangoSlug = trimmed === 'docker-hub' ? 'docker_hub' : trimmed
+  return `https://app.nango.dev/images/template-logos/${nangoSlug}.svg`
+}
+
 function normalizeAdapter(value: unknown): IntegrationAdapter | null {
   if (!isRecord(value)) return null
 
@@ -226,16 +275,48 @@ function normalizeAdapter(value: unknown): IntegrationAdapter | null {
   const displayName = typeof value.displayName === 'string' ? value.displayName.trim() : provider
   if (!provider || !displayName) return null
 
+  const staticEntry = STATIC_METADATA_BY_PROVIDER.get(provider.toLowerCase())
+
+  // Field-by-field merge: prefer the live cloud value when present, fall
+  // back to the static-catalog entry, then to a sensible default. Cloud's
+  // payload is authoritative for id/displayName/availability; static is
+  // authoritative for visual metadata + capabilities the cloud endpoint
+  // doesn't yet expose.
+  const iconUrl =
+    (typeof value.iconUrl === 'string' && value.iconUrl.trim() ? value.iconUrl.trim() : undefined) ??
+    staticEntry?.iconUrl ??
+    nangoTemplateLogoUrl(provider)
+  const version =
+    typeof value.version === 'string' && value.version.trim()
+      ? value.version.trim()
+      : staticEntry?.version ?? '1.0.0'
+  const description =
+    typeof value.description === 'string' && value.description.trim()
+      ? value.description
+      : staticEntry?.description ?? ''
+  const defaultMountPaths =
+    stringList(value.defaultMountPaths).length > 0
+      ? stringList(value.defaultMountPaths)
+      : staticEntry?.defaultMountPaths ?? []
+  const requiredScopes =
+    stringList(value.requiredScopes).length > 0
+      ? stringList(value.requiredScopes)
+      : staticEntry?.requiredScopes ?? []
+  const authMethod =
+    typeof value.authMethod === 'string'
+      ? normalizeAuthMethod(value.authMethod)
+      : staticEntry?.authMethod ?? 'oauth'
+
   return {
     provider,
     displayName,
-    ...(typeof value.iconUrl === 'string' && value.iconUrl.trim() ? { iconUrl: value.iconUrl.trim() } : {}),
-    version: typeof value.version === 'string' && value.version.trim() ? value.version.trim() : '1.0.0',
-    capabilities: normalizeCapabilities(value.capabilities),
-    authMethod: normalizeAuthMethod(value.authMethod),
-    requiredScopes: stringList(value.requiredScopes),
-    defaultMountPaths: stringList(value.defaultMountPaths),
-    description: typeof value.description === 'string' ? value.description : ''
+    ...(iconUrl ? { iconUrl } : {}),
+    version,
+    capabilities: capabilitiesForCloudEntry(value, staticEntry),
+    authMethod,
+    requiredScopes,
+    defaultMountPaths,
+    description
   }
 }
 
