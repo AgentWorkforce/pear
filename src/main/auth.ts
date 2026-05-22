@@ -336,6 +336,12 @@ export async function login(): Promise<AuthStatus> {
       const accessToken = url.searchParams.get('access_token')
       const refreshToken = url.searchParams.get('refresh_token')
       const apiUrl = url.searchParams.get('api_url') || CLOUD_API_URL
+      // Cloud's /api/v1/cli/login response includes `access_token_expires_at`
+      // (ISO 8601). We persist it so `isTokenExpired` can detect near-expiry
+      // and `getAccessToken` can refresh via /api/v1/auth/token/refresh before
+      // returning a dead token to callers — otherwise every API call 401s
+      // ~24h after login.
+      const expiresAt = url.searchParams.get('access_token_expires_at') ?? undefined
 
       if (!accessToken || !refreshToken) {
         res.writeHead(400, { 'Content-Type': 'text/html' })
@@ -347,7 +353,7 @@ export async function login(): Promise<AuthStatus> {
 
       // Fetch user info before resolving
       const user = await withCachedAvatar(await fetchWhoami(apiUrl, accessToken), true)
-      saveTokens({ accessToken, refreshToken, apiUrl, user })
+      saveTokens({ accessToken, refreshToken, apiUrl, user, ...(expiresAt ? { expiresAt } : {}) })
 
       res.writeHead(200, { 'Content-Type': 'text/html' })
       res.end('<html><body><h2>Logged in!</h2><p>You can close this tab and return to Pear by Agent Relay.</p></body></html>')
@@ -404,16 +410,114 @@ export async function getAuthStatus(): Promise<AuthStatus> {
 }
 
 /**
- * Get the stored access token, refreshing if near expiry.
- * Returns null if not logged in.
+ * Get the stored access token, refreshing it from `/api/v1/auth/token/refresh`
+ * if it is at or near expiry. Returns null if not logged in.
+ *
+ * Cloud-side TTLs (from `cli/login`):
+ *   - accessToken : 1 day
+ *   - refreshToken: 7 days
+ *
+ * Without refresh, every cloud call 401s ~24h after login. Refresh tokens are
+ * single-use (cloud rotates them on each refresh — see
+ * `cloud/packages/web/app/api/v1/auth/token/refresh/route.ts`), so we persist
+ * the rotated pair on success.
+ *
+ * On refresh failure (e.g. refresh token itself expired after 7 days, or
+ * revoked server-side), we return the stale access token. The caller's cloud
+ * request will then 401 and prompt the user to re-login through the normal
+ * flow — better than throwing here and breaking IPC handlers that aren't
+ * prepared for `getAccessToken` to fail.
  */
 export async function getAccessToken(): Promise<string | null> {
   const tokens = loadTokens()
   if (!tokens) return null
 
-  // TODO: check expiry and refresh via POST /api/v1/auth/token/refresh
-  // For now, return the stored token (30min TTL from login)
+  if (!isTokenExpired(tokens)) {
+    return tokens.accessToken
+  }
+
+  const refreshed = await refreshStoredTokens(tokens)
+  if (refreshed) return refreshed.accessToken
+
+  // Refresh failed — let the stale token through. The caller will see a 401
+  // and the UI can prompt re-login. Don't clear tokens here in case the
+  // failure is transient (network, brief 5xx) — the next call will retry.
   return tokens.accessToken
+}
+
+const REFRESH_REQUEST_TIMEOUT_MS = 5_000
+let inFlightRefresh: Promise<StoredTokens | null> | null = null
+
+/**
+ * Coalesce concurrent refresh requests so that bursty IPC traffic (multiple
+ * cloud-agent / integration / whoami calls firing at once) doesn't fire N
+ * parallel refreshes — only one is in flight at a time, all callers see the
+ * same result, and refresh-token rotation stays consistent.
+ */
+async function refreshStoredTokens(stored: StoredTokens): Promise<StoredTokens | null> {
+  if (inFlightRefresh) return inFlightRefresh
+  inFlightRefresh = (async (): Promise<StoredTokens | null> => {
+    try {
+      return await performTokenRefresh(stored)
+    } finally {
+      inFlightRefresh = null
+    }
+  })()
+  return inFlightRefresh
+}
+
+async function performTokenRefresh(stored: StoredTokens): Promise<StoredTokens | null> {
+  const apiUrl = normalizeCloudApiUrl(stored.apiUrl)
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), REFRESH_REQUEST_TIMEOUT_MS)
+  try {
+    const res = await fetch(`${apiUrl}/api/v1/auth/token/refresh`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken: stored.refreshToken }),
+      signal: controller.signal
+    })
+
+    if (!res.ok) {
+      // 403 invalid_grant ⇒ refresh token is permanently dead (expired or
+      // revoked). Clear stored tokens so the next getAuthStatus call returns
+      // loggedIn=false and the UI shows the login button. Returning null
+      // (without clearing) on transient 5xx lets the next refresh attempt
+      // try again with the same refresh token.
+      if (res.status === 403) {
+        clearTokens()
+      }
+      return null
+    }
+
+    const data = (await res.json()) as {
+      accessToken?: unknown
+      refreshToken?: unknown
+      accessTokenExpiresAt?: unknown
+      apiUrl?: unknown
+    }
+    const accessToken = typeof data.accessToken === 'string' ? data.accessToken.trim() : ''
+    const refreshToken = typeof data.refreshToken === 'string' ? data.refreshToken.trim() : ''
+    if (!accessToken || !refreshToken) return null
+
+    const next: StoredTokens = {
+      accessToken,
+      refreshToken,
+      apiUrl: typeof data.apiUrl === 'string' && data.apiUrl.trim()
+        ? normalizeCloudApiUrl(data.apiUrl)
+        : apiUrl,
+      user: stored.user,
+      ...(typeof data.accessTokenExpiresAt === 'string' && data.accessTokenExpiresAt.trim()
+        ? { expiresAt: data.accessTokenExpiresAt.trim() }
+        : {})
+    }
+    saveTokens(next)
+    return next
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timeout)
+  }
 }
 
 export function getApiUrl(): string {

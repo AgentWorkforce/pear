@@ -270,3 +270,159 @@ describe('getAccountWorkspaceId', () => {
     await expect(getAccountWorkspaceId()).rejects.toThrowError('account-workspace-required')
   })
 })
+
+describe('getAccessToken (refresh flow)', () => {
+  let userDataDir: string
+
+  beforeEach(() => {
+    userDataDir = mkdtempSync(join(tmpdir(), 'pear-auth-refresh-'))
+    mock.setUserDataDir(userDataDir)
+    mock.fetchMock.mockReset()
+    vi.stubGlobal('fetch', mock.fetchMock)
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    mock.clearUserDataDir()
+    rmSync(userDataDir, { recursive: true, force: true })
+  })
+
+  function readPersistedTokens(): { accessToken: string; refreshToken: string; expiresAt?: string } | null {
+    const path = join(userDataDir, 'config', 'auth.json')
+    if (!existsSync(path)) return null
+    const raw = readFileSync(path, 'utf8')
+    if (!raw.trim()) return null
+    try {
+      return JSON.parse(raw) as { accessToken: string; refreshToken: string; expiresAt?: string }
+    } catch {
+      return null
+    }
+  }
+
+  it('returns the stored access token when it is not near expiry', async () => {
+    writeAuthJson(userDataDir, {
+      accessToken: 'cld_at_fresh',
+      refreshToken: 'cld_rt_fresh',
+      apiUrl: 'https://cloud.example',
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString()
+    })
+
+    const { getAccessToken } = await import('./auth')
+    await expect(getAccessToken()).resolves.toBe('cld_at_fresh')
+    expect(mock.fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('refreshes the access token when it is near expiry and persists the rotated pair', async () => {
+    writeAuthJson(userDataDir, {
+      accessToken: 'cld_at_stale',
+      refreshToken: 'cld_rt_v1',
+      apiUrl: 'https://cloud.example',
+      expiresAt: new Date(Date.now() - 1_000).toISOString() // already expired
+    })
+    const newExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+    mock.fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({
+        accessToken: 'cld_at_new',
+        refreshToken: 'cld_rt_v2',
+        accessTokenExpiresAt: newExpiresAt,
+        apiUrl: 'https://cloud.example/'
+      })
+    })
+
+    const { getAccessToken } = await import('./auth')
+    await expect(getAccessToken()).resolves.toBe('cld_at_new')
+
+    expect(mock.fetchMock).toHaveBeenCalledTimes(1)
+    const [calledUrl, init] = mock.fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(String(calledUrl)).toBe('https://cloud.example/api/v1/auth/token/refresh')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(String(init.body))).toEqual({ refreshToken: 'cld_rt_v1' })
+
+    const persisted = readPersistedTokens()
+    expect(persisted?.accessToken).toBe('cld_at_new')
+    expect(persisted?.refreshToken).toBe('cld_rt_v2')
+    expect(persisted?.expiresAt).toBe(newExpiresAt)
+  })
+
+  it('clears stored tokens on 403 invalid_grant (refresh token dead)', async () => {
+    writeAuthJson(userDataDir, {
+      accessToken: 'cld_at_stale',
+      refreshToken: 'cld_rt_dead',
+      apiUrl: 'https://cloud.example',
+      expiresAt: new Date(Date.now() - 1_000).toISOString()
+    })
+    mock.fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 403,
+      statusText: 'Forbidden',
+      json: async () => ({ error: 'invalid_grant' })
+    })
+
+    const { getAccessToken } = await import('./auth')
+    // Falls back to the stale token so the in-flight call can complete its
+    // 401 path; subsequent loadTokens returns null because clearTokens ran.
+    await expect(getAccessToken()).resolves.toBe('cld_at_stale')
+
+    const persisted = readPersistedTokens()
+    expect(persisted).toBeNull()
+  })
+
+  it('keeps stored tokens on transient 5xx (so the next call can retry)', async () => {
+    writeAuthJson(userDataDir, {
+      accessToken: 'cld_at_stale',
+      refreshToken: 'cld_rt_keep',
+      apiUrl: 'https://cloud.example',
+      expiresAt: new Date(Date.now() - 1_000).toISOString()
+    })
+    mock.fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 503,
+      statusText: 'Service Unavailable',
+      json: async () => ({ error: 'unavailable' })
+    })
+
+    const { getAccessToken } = await import('./auth')
+    await expect(getAccessToken()).resolves.toBe('cld_at_stale')
+
+    const persisted = readPersistedTokens()
+    expect(persisted?.refreshToken).toBe('cld_rt_keep')
+  })
+
+  it('coalesces concurrent refreshes into a single network call', async () => {
+    writeAuthJson(userDataDir, {
+      accessToken: 'cld_at_stale',
+      refreshToken: 'cld_rt_v1',
+      apiUrl: 'https://cloud.example',
+      expiresAt: new Date(Date.now() - 1_000).toISOString()
+    })
+    let resolveFetch: ((value: unknown) => void) | null = null
+    mock.fetchMock.mockImplementationOnce(() => new Promise((resolve) => {
+      resolveFetch = resolve
+    }))
+
+    const { getAccessToken } = await import('./auth')
+    const a = getAccessToken()
+    const b = getAccessToken()
+    // Both calls observe the same in-flight refresh; only one fetch fires.
+    expect(mock.fetchMock).toHaveBeenCalledTimes(1)
+
+    resolveFetch?.({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({
+        accessToken: 'cld_at_new',
+        refreshToken: 'cld_rt_v2',
+        accessTokenExpiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+      })
+    })
+
+    await expect(a).resolves.toBe('cld_at_new')
+    await expect(b).resolves.toBe('cld_at_new')
+    expect(mock.fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
