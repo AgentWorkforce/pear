@@ -60,9 +60,19 @@ vi.mock('./avatar-cache', () => ({
 function writeAuthJson(userDataDir: string, tokens: StoredTokens): void {
   const configDir = join(userDataDir, 'config')
   if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true })
-  // Mirror what saveTokens does: JSON → safeStorage.encryptString.
-  // Our mocked safeStorage just utf8-encodes, so we write the raw JSON bytes.
-  writeFileSync(join(configDir, 'auth.json'), Buffer.from(JSON.stringify(tokens), 'utf8'))
+  // Default to a future expiresAt so tests that aren't exercising the
+  // refresh path don't accidentally trip it (post-PR isTokenExpired
+  // treats missing/invalid expiresAt as expired). Tests that DO want
+  // to exercise refresh pass an explicit past expiresAt — or omit
+  // expiresAt entirely to model legacy stored state.
+  // Either an explicit string OR an explicit `undefined` (model legacy
+  // stored state) suppresses the default. JSON.stringify drops undefined
+  // values, so passing `expiresAt: undefined` ends up persisting auth.json
+  // with no expiresAt key — exactly what pre-capture login produced.
+  const withExpiry: StoredTokens = 'expiresAt' in tokens
+    ? tokens
+    : { ...tokens, expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString() }
+  writeFileSync(join(configDir, 'auth.json'), Buffer.from(JSON.stringify(withExpiry), 'utf8'))
 }
 
 function readMeta(userDataDir: string): Record<string, unknown> | null {
@@ -311,6 +321,38 @@ describe('getAccessToken (refresh flow)', () => {
     const { getAccessToken } = await import('./auth')
     await expect(getAccessToken()).resolves.toBe('cld_at_fresh')
     expect(mock.fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('treats tokens without expiresAt as expired and refreshes them (legacy state)', async () => {
+    // Tokens persisted before `access_token_expires_at` was captured on
+    // the login redirect have no expiresAt field. The actual access-token
+    // TTL is 1 day from issue, so for any pre-capture user this token is
+    // dead. The refresh path should fire and store a fresh pair.
+    writeAuthJson(userDataDir, {
+      accessToken: 'cld_at_legacy',
+      refreshToken: 'cld_rt_legacy',
+      apiUrl: 'https://cloud.example',
+      expiresAt: undefined // explicit legacy-state signal — see writeAuthJson
+    })
+    const newExpiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString()
+    mock.fetchMock.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({
+        accessToken: 'cld_at_post_legacy',
+        refreshToken: 'cld_rt_post_legacy',
+        accessTokenExpiresAt: newExpiresAt
+      })
+    })
+
+    const { getAccessToken } = await import('./auth')
+    await expect(getAccessToken()).resolves.toBe('cld_at_post_legacy')
+    expect(mock.fetchMock).toHaveBeenCalledTimes(1)
+
+    const persisted = readPersistedTokens()
+    expect(persisted?.refreshToken).toBe('cld_rt_post_legacy')
+    expect(persisted?.expiresAt).toBe(newExpiresAt)
   })
 
   it('refreshes the access token when it is near expiry and persists the rotated pair', async () => {
