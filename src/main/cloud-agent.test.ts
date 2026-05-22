@@ -14,6 +14,7 @@ const mock = vi.hoisted(() => {
 
   const fetchCalls: Array<{ url: string; init?: RequestInit }> = []
   const mountInputs: MountInput[] = []
+  const boxResponses: Array<Record<string, unknown>> = []
   let currentAuth: MockCloudAuth | null = null
 
   const project = {
@@ -39,6 +40,7 @@ const mock = vi.hoisted(() => {
   return {
     fetchCalls,
     mountInputs,
+    boxResponses,
     project,
     get currentAuth() {
       return currentAuth
@@ -66,12 +68,14 @@ const mock = vi.hoisted(() => {
           json: async () => ({ currentWorkspace: { id: 'account-workspace-id' } })
         }
       }
-      if (normalizedUrl.endsWith('/api/v1/workspaces/account-workspace-id/cloud-agents/cloud-agent-1/box')) {
+      const parsedUrl = new URL(normalizedUrl)
+      if (parsedUrl.pathname.endsWith('/api/v1/workspaces/account-workspace-id/cloud-agents/cloud-agent-1/box')) {
+        const queued = boxResponses.shift()
         return {
           ok: true,
           status: 200,
           statusText: 'OK',
-          json: async () => ({
+          json: async () => queued ?? ({
             sandboxId: 'sandbox-1',
             execUrl: 'https://sandbox.example',
             relayfileToken: 'relayfile-token',
@@ -167,6 +171,7 @@ describe('CloudAgentManager', () => {
     mock.fetch.mockClear()
     mock.fetchCalls.splice(0)
     mock.mountInputs.splice(0)
+    mock.boxResponses.splice(0)
     mock.browserWindow.getAllWindows.mockClear()
     mock.brokerManager.onBrokerEvent.mockClear()
     mock.brokerManager.attachCloudSandbox.mockClear()
@@ -181,6 +186,7 @@ describe('CloudAgentManager', () => {
   })
 
   afterEach(() => {
+    vi.useRealTimers()
     vi.unstubAllGlobals()
     mock.currentAuth = null
   })
@@ -192,10 +198,54 @@ describe('CloudAgentManager', () => {
 
     const boxPost = mock.fetchCalls.find((call) => call.init?.method === 'POST')
     expect(boxPost?.url).toBe(
-      'https://cloud.example/api/v1/workspaces/account-workspace-id/cloud-agents/cloud-agent-1/box'
+      'https://cloud.example/api/v1/workspaces/account-workspace-id/cloud-agents/cloud-agent-1/box?async=true'
     )
     expect(boxPost?.url).not.toContain('relay-workspace-id')
     expect(mock.fetchCalls.filter((call) => call.url.endsWith('/api/v1/auth/whoami'))).toHaveLength(1)
     expect(mock.mountInputs[0]?.workspaceId).toBe('relay-workspace-id')
+  })
+
+  it('polls async box warm until the sandbox is ready', async () => {
+    vi.useFakeTimers()
+    mock.boxResponses.push(
+      {
+        sandboxId: 'sandbox-1',
+        relayfileToken: 'relayfile-token',
+        relayfileMountPath: '/remote/project-1',
+        status: 'warming'
+      },
+      {
+        sandboxId: 'sandbox-1',
+        execUrl: 'https://sandbox.example',
+        relayfileToken: 'relayfile-token',
+        relayfileMountPath: '/remote/project-1',
+        status: 'ready'
+      }
+    )
+    const manager = new CloudAgentManager()
+
+    const attach = manager.attach('project-1', 'cloud-agent-1')
+    await vi.runOnlyPendingTimersAsync()
+    await attach
+
+    const boxCalls = mock.fetchCalls.filter((call) => call.url.includes('/cloud-agents/cloud-agent-1/box'))
+    expect(boxCalls.map((call) => [call.init?.method, call.url])).toEqual([
+      ['POST', 'https://cloud.example/api/v1/workspaces/account-workspace-id/cloud-agents/cloud-agent-1/box?async=true'],
+      ['GET', 'https://cloud.example/api/v1/workspaces/account-workspace-id/cloud-agents/cloud-agent-1/box']
+    ])
+    vi.useRealTimers()
+  })
+
+  it('surfaces async box warm failures from the status response', async () => {
+    mock.boxResponses.push({
+      sandboxId: 'sandbox-1',
+      relayfileToken: 'relayfile-token',
+      relayfileMountPath: '/remote/project-1',
+      status: 'failed',
+      error: 'broker failed to start'
+    })
+    const manager = new CloudAgentManager()
+
+    await expect(manager.attach('project-1', 'cloud-agent-1')).rejects.toThrow('broker failed to start')
   })
 })

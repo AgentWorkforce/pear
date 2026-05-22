@@ -191,7 +191,7 @@ export type CreateCloudAgentInput = {
   model: string
 }
 
-export type CloudAgentSandboxStatus = 'warming' | 'ready' | 'stopping' | 'stopped'
+export type CloudAgentSandboxStatus = 'warming' | 'ready' | 'failed' | 'stopping' | 'stopped'
 
 export type CloudAgentBinding = {
   projectId: string

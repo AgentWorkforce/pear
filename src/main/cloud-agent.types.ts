@@ -24,9 +24,10 @@ export type CloudAgentSandbox = {
   relayfileMountPath: string
   status: CloudAgentSandboxStatus
   apiKey?: string
+  error?: string
 }
 
-export type CloudAgentSandboxStatus = 'warming' | 'ready' | 'stopping' | 'stopped'
+export type CloudAgentSandboxStatus = 'warming' | 'ready' | 'failed' | 'stopping' | 'stopped'
 
 export type CloudAgentBinding = {
   projectId: string

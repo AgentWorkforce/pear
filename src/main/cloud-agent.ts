@@ -31,7 +31,7 @@ import type {
 
 const execFileAsync = promisify(execFile)
 const WARM_POLL_MS = 2_000
-const WARM_TIMEOUT_MS = 60_000
+const WARM_TIMEOUT_MS = 5 * 60_000
 const RUN_END_PULL_DELAY_MS = 30_000
 const LOCAL_PRIORITY_IDLE_MS = 5_000
 
@@ -46,6 +46,7 @@ type CloudAgentBoxResponse = Partial<CloudAgentSandbox> & {
   baseUrl?: string
   url?: string
   mountPath?: string
+  expectedReadyBy?: string
 }
 
 type CloudAgentListResponse = ProactiveAgentRecord[] | {
@@ -116,22 +117,27 @@ function normalizeSandbox(payload: CloudAgentBoxResponse): CloudAgentSandbox {
   const relayfileMountPath = payload.relayfileMountPath || payload.mountPath
   const status = payload.status || 'warming'
 
-  if (!sandboxId || !execUrl || !payload.relayfileToken || !relayfileMountPath) {
+  if (!['warming', 'ready', 'failed', 'stopping', 'stopped'].includes(status)) {
+    throw new Error(`Unsupported cloud agent sandbox status: ${status}`)
+  }
+
+  if (!sandboxId || !payload.relayfileToken || !relayfileMountPath) {
     throw new Error('Cloud agent box response is missing required sandbox or relayfile fields')
   }
 
-  if (!['warming', 'ready', 'stopping', 'stopped'].includes(status)) {
-    throw new Error(`Unsupported cloud agent sandbox status: ${status}`)
+  if (status === 'ready' && !execUrl) {
+    throw new Error('Cloud agent box response is missing required sandbox or relayfile fields')
   }
 
   return {
     sandboxId,
-    execUrl,
+    execUrl: execUrl || '',
     filesUrl: payload.filesUrl || '',
     relayfileToken: payload.relayfileToken,
     relayfileMountPath,
     status: status as CloudAgentSandboxStatus,
-    apiKey: payload.apiKey
+    apiKey: payload.apiKey,
+    error: payload.error
   }
 }
 
@@ -169,6 +175,12 @@ function toProactiveDeployInput(input: CreateCloudAgentInput): CompatibleDeployI
 
 function buildCloudApiUrl(auth: CloudAuth, path: string): string {
   return new URL(path.replace(/^\/+/, ''), `${auth.apiUrl}/`).toString()
+}
+
+function withAsyncWarm(url: string): string {
+  const parsed = new URL(url)
+  parsed.searchParams.set('async', 'true')
+  return parsed.toString()
 }
 
 function isUnsupportedCloudEndpoint(response: Response): boolean {
@@ -665,6 +677,10 @@ export class CloudAgentManager {
       this.emit({ type: 'sandbox-status', projectId, status: sandbox.status })
     }
 
+    if (sandbox.status === 'failed') {
+      throw new Error(sandbox.error || `Cloud agent sandbox ${sandbox.sandboxId} failed to warm`)
+    }
+
     if (sandbox.status !== 'ready') {
       throw new Error(`Cloud agent sandbox ${sandbox.sandboxId} is ${sandbox.status}`)
     }
@@ -686,7 +702,8 @@ export class CloudAgentManager {
     const body = method === 'POST'
       ? JSON.stringify({ relayfileMountPaths: normalizeMountPaths(mountPaths || []) })
       : undefined
-    const response = await fetch(url, {
+    const requestUrl = method === 'POST' ? withAsyncWarm(url) : url
+    const response = await fetch(requestUrl, {
       method,
       headers: {
         Authorization: `Bearer ${accessToken}`,
