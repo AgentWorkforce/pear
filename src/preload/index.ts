@@ -250,6 +250,10 @@ const api = {
       query: string,
       opts?: { source?: string; project?: string; limit?: number; beforeMs?: number }
     ) => invoke<AiHistEntry[]>('ai-hist:search', query, opts),
+    searchSessions: (
+      query: string,
+      opts?: { source?: string; project?: string; limit?: number; beforeMs?: number }
+    ) => invoke<AiHistSession[]>('ai-hist:search-sessions', query, opts),
     stats: () => invoke<AiHistStats | null>('ai-hist:stats'),
     resumeCommand: (entry: { source: string; sessionId: string | null; project: string | null }) =>
       invoke<string | null>('ai-hist:resume-command', entry),

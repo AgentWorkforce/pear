@@ -141,6 +141,7 @@ function ConversationsPanel(): React.ReactNode {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [query, setQuery] = useState('')
+  const [debouncedQuery, setDebouncedQuery] = useState('')
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all')
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null)
   const [detailEntries, setDetailEntries] = useState<Entry[]>([])
@@ -166,12 +167,9 @@ function ConversationsPanel(): React.ReactNode {
         // discarded after the SDK call.
         const opts = source === 'all' ? { limit: 500 } : { source, limit: 500 }
         if (currentQuery.trim()) {
-          const hits = (await pear.aiHist.search(currentQuery, opts)) as Entry[]
+          const all = (await pear.aiHist.searchSessions(currentQuery, opts)) as Session[]
           if (token !== queryToken.current) return
-          const hitSessionIds = new Set(hits.map((h) => h.sessionId).filter(Boolean) as string[])
-          const all = (await pear.aiHist.listSessions(opts)) as Session[]
-          if (token !== queryToken.current) return
-          setSessions(all.filter((sess) => hitSessionIds.has(sess.sessionId)))
+          setSessions(all)
         } else {
           const all = (await pear.aiHist.listSessions(opts)) as Session[]
           if (token !== queryToken.current) return
@@ -185,8 +183,13 @@ function ConversationsPanel(): React.ReactNode {
   )
 
   useEffect(() => {
-    void loadSessions(query, sourceFilter)
-  }, [loadSessions, query, sourceFilter])
+    const timeoutId = window.setTimeout(() => setDebouncedQuery(query), 150)
+    return () => window.clearTimeout(timeoutId)
+  }, [query])
+
+  useEffect(() => {
+    void loadSessions(debouncedQuery, sourceFilter)
+  }, [loadSessions, debouncedQuery, sourceFilter])
 
   const refresh = useCallback(async (): Promise<void> => {
     setRefreshing(true)

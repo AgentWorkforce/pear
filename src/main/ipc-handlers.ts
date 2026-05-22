@@ -546,6 +546,11 @@ export function registerIpcHandlers(): void {
     (_, query: string, opts?: Parameters<typeof aiHistManager.search>[1]) =>
       aiHistManager.search(query, opts)
   )
+  ipcMain.handle(
+    'ai-hist:search-sessions',
+    (_, query: string, opts?: Parameters<typeof aiHistManager.searchSessions>[1]) =>
+      aiHistManager.searchSessions(query, opts)
+  )
   ipcMain.handle('ai-hist:stats', () => aiHistManager.stats())
   ipcMain.handle(
     'ai-hist:resume-command',

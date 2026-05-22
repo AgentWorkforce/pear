@@ -550,6 +550,10 @@ export interface PearAPI {
       query: string,
       opts?: { source?: string; project?: string; limit?: number; beforeMs?: number }
     ) => Promise<AiHistEntry[]>
+    searchSessions: (
+      query: string,
+      opts?: { source?: string; project?: string; limit?: number; beforeMs?: number }
+    ) => Promise<AiHistSession[]>
     stats: () => Promise<AiHistStats | null>
     resumeCommand: (entry: { source: string; sessionId: string | null; project: string | null }) => Promise<string | null>
     reload: () => Promise<void>
