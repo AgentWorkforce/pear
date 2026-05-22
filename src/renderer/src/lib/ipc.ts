@@ -416,6 +416,7 @@ export interface PearAPI {
       task?: string
       channels?: string[]
       cwd?: string
+      args?: string[]
     }) => Promise<{ name: string; runtime: string }>
     attachTerminal: (input: {
       projectId?: string
@@ -540,7 +541,49 @@ export interface PearAPI {
     disconnect: (projectId: string, integrationId: string) => Promise<void>
     onEvent: (callback: (event: IntegrationsEvent) => void) => () => void
   }
+  aiHist: {
+    status: () => Promise<{ ok: true; dbPath: string } | { ok: false; reason: string }>
+    recent: (opts?: { source?: string; project?: string; limit?: number; beforeMs?: number }) => Promise<AiHistEntry[]>
+    listSessions: (opts?: { source?: string; project?: string; limit?: number; beforeMs?: number }) => Promise<AiHistSession[]>
+    getSession: (sessionId: string) => Promise<AiHistEntry[]>
+    search: (
+      query: string,
+      opts?: { source?: string; project?: string; limit?: number; beforeMs?: number }
+    ) => Promise<AiHistEntry[]>
+    stats: () => Promise<AiHistStats | null>
+    resumeCommand: (entry: { source: string; sessionId: string | null; project: string | null }) => Promise<string | null>
+    reload: () => Promise<void>
+  }
   onMenu: (channel: string, callback: (...args: unknown[]) => void) => () => void
+}
+
+export type AiHistSource = 'claude' | 'codex' | 'cursor' | 'relay'
+
+export interface AiHistEntry {
+  id: number
+  source: AiHistSource
+  sessionId: string | null
+  project: string | null
+  prompt: string
+  timestampMs: number
+}
+
+export interface AiHistSession {
+  sessionId: string
+  source: AiHistSource
+  project: string | null
+  firstPrompt: string
+  firstActivityMs: number
+  lastActivityMs: number
+  promptCount: number
+}
+
+export interface AiHistStats {
+  total: number
+  bySource: Partial<Record<AiHistSource, number>>
+  byProject: Array<{ project: string; count: number }>
+  firstTimestampMs: number | null
+  lastTimestampMs: number | null
 }
 
 declare global {

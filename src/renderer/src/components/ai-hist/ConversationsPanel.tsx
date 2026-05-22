@@ -3,6 +3,9 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Allotment } from 'allotment'
 import { ClipboardCopy, MessageSquare, RefreshCw, Search } from 'lucide-react'
 import { pear } from '@/lib/ipc'
+import { useProjectStore, type Project } from '@/stores/project-store'
+import { useUIStore } from '@/stores/ui-store'
+import { useAgentStore, getAgentKey } from '@/stores/agent-store'
 
 type Source = 'claude' | 'codex' | 'cursor' | 'relay'
 
@@ -62,7 +65,78 @@ function shortenPath(path: string | null): string {
   return `…/${segments.slice(-2).join('/')}`
 }
 
+// Map an ai-hist session to the cli + args that the broker should spawn to
+// resume it. Returns null for sources without a resume affordance (relay).
+function resumeAgentSpec(
+  session: { source: Source; sessionId: string; project: string | null }
+): { cli: string; args: string[]; cwd?: string } | null {
+  switch (session.source) {
+    case 'claude':
+      return {
+        cli: 'claude',
+        args: ['--resume', session.sessionId],
+        cwd: session.project ?? undefined
+      }
+    case 'codex':
+      return {
+        cli: 'codex',
+        args: ['resume', session.sessionId],
+        cwd: session.project ?? undefined
+      }
+    case 'cursor':
+      return {
+        cli: 'cursor-agent',
+        args: [`--resume=${session.sessionId}`],
+        cwd: session.project ?? undefined
+      }
+    case 'relay':
+      return null
+  }
+}
+
+// Pick the project to host the spawned resume agent. Prefers the explicitly
+// scoped project (the one whose Conversations tab the user is on); otherwise
+// matches by session.project path against every pear project's roots.
+function pickHostProject(
+  scopedProject: Project | null,
+  sessionProject: string | null,
+  allProjects: Project[]
+): Project | null {
+  if (scopedProject) return scopedProject
+  if (!sessionProject) return null
+  return (
+    allProjects.find((p) =>
+      p.roots.some(
+        (r) => sessionProject === r.path || sessionProject.startsWith(`${r.path}/`)
+      )
+    ) ?? null
+  )
+}
+
+// A session belongs to a root if its `project` path equals or descends from the
+// root's `path`. Comparing on normalized prefix + boundary so `/foo/bar-baz`
+// isn't treated as a descendant of `/foo/bar`.
+function sessionMatchesRoot(sessionProject: string | null, rootPath: string): boolean {
+  if (!sessionProject) return false
+  if (sessionProject === rootPath) return true
+  const prefix = rootPath.endsWith('/') ? rootPath : `${rootPath}/`
+  return sessionProject.startsWith(prefix)
+}
+
+interface SessionGroup {
+  label: string
+  rootPath: string | null  // null = "Other" group (no matching root)
+  sessions: Session[]
+}
+
 function ConversationsPanel(): React.ReactNode {
+  const activeTab = useUIStore((s) => s.tabs.find((tab) => tab.id === s.activeTabId))
+  const projects = useProjectStore((s) => s.projects)
+  const scopedProject: Project | null = useMemo(() => {
+    if (activeTab?.kind !== 'ai-hist' || !activeTab.projectId) return null
+    return projects.find((p) => p.id === activeTab.projectId) ?? null
+  }, [activeTab, projects])
+
   const [status, setStatus] = useState<Status | null>(null)
   const [sessions, setSessions] = useState<Session[]>([])
   const [loading, setLoading] = useState(true)
@@ -87,13 +161,11 @@ function ConversationsPanel(): React.ReactNode {
           setSessions([])
           return
         }
-        const opts = source === 'all' ? { limit: 100 } : { source, limit: 100 }
+        // Pull a larger window when we're going to filter client-side by
+        // project roots — sessions from other projects/paths will be
+        // discarded after the SDK call.
+        const opts = source === 'all' ? { limit: 500 } : { source, limit: 500 }
         if (currentQuery.trim()) {
-          // Search returns flat HistoryEntries; we still want session
-          // grouping in the list, so fall back to listSessions and then
-          // filter client-side by whether ANY entry in the session matches.
-          // For very large datasets that gets expensive — at the ai-hist
-          // scale (tens of thousands of rows) it's fine.
           const hits = (await pear.aiHist.search(currentQuery, opts)) as Entry[]
           if (token !== queryToken.current) return
           const hitSessionIds = new Set(hits.map((h) => h.sessionId).filter(Boolean) as string[])
@@ -126,7 +198,6 @@ function ConversationsPanel(): React.ReactNode {
     }
   }, [loadSessions, query, sourceFilter])
 
-  // Load detail when a session is selected.
   useEffect(() => {
     if (!activeSessionId) {
       setDetailEntries([])
@@ -152,6 +223,84 @@ function ConversationsPanel(): React.ReactNode {
     [sessions, activeSessionId]
   )
 
+  // Bucket sessions by project root. When scopedProject is set we only show
+  // sessions matching its roots (everything else is hidden). Without a
+  // scoped project we just show every root + an "Other" bucket for sessions
+  // whose project path didn't match any pear project root.
+  const groups = useMemo<SessionGroup[]>(() => {
+    if (sessions.length === 0) return []
+    if (scopedProject) {
+      const buckets: SessionGroup[] = scopedProject.roots.map((root) => ({
+        label: root.name,
+        rootPath: root.path,
+        sessions: sessions.filter((s) => sessionMatchesRoot(s.project, root.path))
+      }))
+      return buckets.filter((b) => b.sessions.length > 0)
+    }
+    // No scoped project: group by every pear project root, plus "Other".
+    const allRoots = projects.flatMap((p) =>
+      p.roots.map((root) => ({
+        label: p.roots.length > 1 ? `${p.name} · ${root.name}` : p.name,
+        rootPath: root.path
+      }))
+    )
+    const matchedSessionIds = new Set<string>()
+    const buckets: SessionGroup[] = []
+    for (const r of allRoots) {
+      const bucket = sessions.filter((s) => sessionMatchesRoot(s.project, r.rootPath))
+      if (bucket.length === 0) continue
+      for (const s of bucket) matchedSessionIds.add(s.sessionId)
+      buckets.push({ label: r.label, rootPath: r.rootPath, sessions: bucket })
+    }
+    const other = sessions.filter((s) => !matchedSessionIds.has(s.sessionId))
+    if (other.length > 0) {
+      buckets.push({ label: 'Other', rootPath: null, sessions: other })
+    }
+    return buckets
+  }, [sessions, scopedProject, projects])
+
+  const totalShown = groups.reduce((acc, g) => acc + g.sessions.length, 0)
+
+  const openTab = useUIStore((s) => s.openTab)
+  const setActiveAgentKey = useAgentStore((s) => s.setActiveAgentKey)
+
+  const resumeAndOpen = useCallback(
+    async (sess: Session): Promise<void> => {
+      const spec = resumeAgentSpec({
+        source: sess.source,
+        sessionId: sess.sessionId,
+        project: sess.project
+      })
+      if (!spec) {
+        setCopyHint('No resume command for this source')
+        window.setTimeout(() => setCopyHint(null), 2000)
+        return
+      }
+      const host = pickHostProject(scopedProject, sess.project, projects)
+      if (!host) {
+        setCopyHint('No matching pear project — add the session path as a root first')
+        window.setTimeout(() => setCopyHint(null), 3500)
+        return
+      }
+      try {
+        const spawned = await pear.broker.spawnAgent(host.id, {
+          name: `resume-${sess.source}-${sess.sessionId.slice(0, 8)}`,
+          cli: spec.cli,
+          args: spec.args,
+          cwd: spec.cwd,
+          channels: host.channels
+        })
+        setActiveAgentKey(getAgentKey(host.id, spawned.name))
+        openTab({ kind: 'agents', projectId: host.id })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        setCopyHint(`Resume failed: ${message}`)
+        window.setTimeout(() => setCopyHint(null), 4000)
+      }
+    },
+    [scopedProject, projects, openTab, setActiveAgentKey]
+  )
+
   const copyResume = useCallback(async (sess: Session): Promise<void> => {
     const cmd = await pear.aiHist.resumeCommand({
       source: sess.source,
@@ -172,7 +321,6 @@ function ConversationsPanel(): React.ReactNode {
     window.setTimeout(() => setCopyHint(null), 2500)
   }, [])
 
-  // Status banner — DB missing / load failed.
   if (status && !status.ok) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
@@ -199,7 +347,7 @@ function ConversationsPanel(): React.ReactNode {
   return (
     <div className="flex h-full flex-col">
       <Allotment defaultSizes={[1, 2]}>
-        <Allotment.Pane minSize={280} preferredSize={360}>
+        <Allotment.Pane minSize={280} preferredSize={380}>
           <div className="flex h-full flex-col border-r border-[var(--pear-border)]">
             <div className="flex flex-col gap-2 border-b border-[var(--pear-border)] p-3">
               <div className="flex items-center gap-2">
@@ -210,7 +358,7 @@ function ConversationsPanel(): React.ReactNode {
                   />
                   <input
                     type="text"
-                    placeholder="Search prompts…"
+                    placeholder={scopedProject ? `Search ${scopedProject.name}…` : 'Search prompts…'}
                     value={query}
                     onChange={(e) => setQuery(e.target.value)}
                     className="w-full rounded-md bg-[var(--pear-bg-overlay)] py-1.5 pl-7 pr-2 text-xs outline-none ring-1 ring-transparent focus:ring-[var(--pear-accent)]"
@@ -239,55 +387,87 @@ function ConversationsPanel(): React.ReactNode {
                   </button>
                 ))}
               </div>
+              {scopedProject && (
+                <div className="text-[10px] text-[var(--pear-fg-muted)]">
+                  Scoped to <span className="text-[var(--pear-fg)]">{scopedProject.name}</span> ·{' '}
+                  {scopedProject.roots.length} root{scopedProject.roots.length === 1 ? '' : 's'}
+                </div>
+              )}
             </div>
             <div className="min-h-0 flex-1 overflow-y-auto">
               {loading && sessions.length === 0 ? (
                 <div className="p-6 text-center text-xs text-[var(--pear-fg-muted)]">Loading…</div>
-              ) : sessions.length === 0 ? (
+              ) : totalShown === 0 ? (
                 <div className="p-6 text-center text-xs text-[var(--pear-fg-muted)]">
                   {query.trim()
                     ? 'No matches.'
-                    : status?.ok
-                      ? 'No sessions yet. Run `ai-hist sync` first.'
-                      : ''}
+                    : scopedProject
+                      ? `No conversations found under ${scopedProject.name}'s roots.`
+                      : status?.ok
+                        ? 'No sessions yet. Run `ai-hist sync` first.'
+                        : ''}
                 </div>
               ) : (
-                <ul className="divide-y divide-[var(--pear-border)]">
-                  {sessions.map((sess) => {
-                    const isActive = sess.sessionId === activeSessionId
-                    return (
-                      <li key={sess.sessionId}>
-                        <button
-                          onClick={() => setActiveSessionId(sess.sessionId)}
-                          className={`flex w-full flex-col gap-1 px-3 py-2.5 text-left transition-colors ${
-                            isActive
-                              ? 'bg-[var(--pear-bg-overlay-strong)]'
-                              : 'hover:bg-[var(--pear-bg-overlay)]'
-                          }`}
+                <ul className="flex flex-col">
+                  {groups.map((group) => (
+                    <li key={group.rootPath ?? group.label} className="border-b border-[var(--pear-border)] last:border-b-0">
+                      <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-[var(--pear-bg-raised)] px-3 py-1.5">
+                        <span className="truncate text-[10px] font-medium uppercase tracking-wider text-[var(--pear-fg-muted)]">
+                          {group.label}
+                        </span>
+                        <span className="text-[10px] text-[var(--pear-fg-muted)]">
+                          {group.sessions.length}
+                        </span>
+                      </div>
+                      {group.rootPath && (
+                        <div
+                          className="truncate px-3 pb-1 font-mono text-[9px] text-[var(--pear-fg-muted)]/70"
+                          title={group.rootPath}
                         >
-                          <div className="flex items-center justify-between gap-2">
-                            <span
-                              className={`inline-block rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider ring-1 ${SOURCE_CHIP_STYLES[sess.source]}`}
-                            >
-                              {SOURCE_LABELS[sess.source]}
-                            </span>
-                            <span className="text-[10px] text-[var(--pear-fg-muted)]">
-                              {formatRelative(sess.lastActivityMs)}
-                            </span>
-                          </div>
-                          <div className="line-clamp-2 text-xs text-[var(--pear-fg)]">
-                            {sess.firstPrompt || '(empty prompt)'}
-                          </div>
-                          <div className="flex items-center justify-between gap-2 text-[10px] text-[var(--pear-fg-muted)]">
-                            <span className="truncate" title={sess.project || ''}>
-                              {shortenPath(sess.project)}
-                            </span>
-                            <span>{sess.promptCount} prompt{sess.promptCount === 1 ? '' : 's'}</span>
-                          </div>
-                        </button>
-                      </li>
-                    )
-                  })}
+                          {shortenPath(group.rootPath)}
+                        </div>
+                      )}
+                      <ul className="divide-y divide-[var(--pear-border)]">
+                        {group.sessions.map((sess) => {
+                          const isActive = sess.sessionId === activeSessionId
+                          return (
+                            <li key={sess.sessionId}>
+                              <button
+                                onClick={() => setActiveSessionId(sess.sessionId)}
+                                onDoubleClick={() => void resumeAndOpen(sess)}
+                                title="Click to view transcript · Double-click to resume in pear"
+                                className={`flex w-full flex-col gap-1 px-3 py-2.5 text-left transition-colors ${
+                                  isActive
+                                    ? 'bg-[var(--pear-bg-overlay-strong)]'
+                                    : 'hover:bg-[var(--pear-bg-overlay)]'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between gap-2">
+                                  <span
+                                    className={`inline-block rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider ring-1 ${SOURCE_CHIP_STYLES[sess.source]}`}
+                                  >
+                                    {SOURCE_LABELS[sess.source]}
+                                  </span>
+                                  <span className="text-[10px] text-[var(--pear-fg-muted)]">
+                                    {formatRelative(sess.lastActivityMs)}
+                                  </span>
+                                </div>
+                                <div className="line-clamp-2 text-xs text-[var(--pear-fg)]">
+                                  {sess.firstPrompt || '(empty prompt)'}
+                                </div>
+                                <div className="flex items-center justify-between gap-2 text-[10px] text-[var(--pear-fg-muted)]">
+                                  <span className="truncate" title={sess.project || ''}>
+                                    {shortenPath(sess.project)}
+                                  </span>
+                                  <span>{sess.promptCount} prompt{sess.promptCount === 1 ? '' : 's'}</span>
+                                </div>
+                              </button>
+                            </li>
+                          )
+                        })}
+                      </ul>
+                    </li>
+                  ))}
                 </ul>
               )}
             </div>
@@ -326,13 +506,23 @@ function ConversationsPanel(): React.ReactNode {
                       {activeSession.sessionId}
                     </div>
                   </div>
-                  <button
-                    onClick={() => copyResume(activeSession)}
-                    className="inline-flex items-center gap-1.5 rounded-md bg-[var(--pear-bg-overlay)] px-2.5 py-1.5 text-xs hover:bg-[var(--pear-bg-overlay-strong)]"
-                  >
-                    <ClipboardCopy size={12} />
-                    Copy resume command
-                  </button>
+                  <div className="flex shrink-0 items-center gap-1.5">
+                    <button
+                      onClick={() => void resumeAndOpen(activeSession)}
+                      className="inline-flex items-center gap-1.5 rounded-md bg-[var(--pear-accent)] px-2.5 py-1.5 text-xs text-white hover:bg-[var(--pear-accent-bright)]"
+                      title="Spawn this session as an agent in pear"
+                    >
+                      Resume in pear
+                    </button>
+                    <button
+                      onClick={() => copyResume(activeSession)}
+                      className="inline-flex items-center gap-1.5 rounded-md bg-[var(--pear-bg-overlay)] px-2.5 py-1.5 text-xs hover:bg-[var(--pear-bg-overlay-strong)]"
+                      title="Copy the shell command to resume manually"
+                    >
+                      <ClipboardCopy size={12} />
+                      Copy
+                    </button>
+                  </div>
                 </div>
                 <div className="min-h-0 flex-1 overflow-y-auto p-3">
                   {detailLoading ? (

@@ -91,6 +91,7 @@ const api = {
       task?: string
       channels?: string[]
       cwd?: string
+      args?: string[]
     }) => invoke<{ name: string; runtime: string }>('broker:spawn-agent', projectId, input),
     attachTerminal: (input: {
       projectId?: string

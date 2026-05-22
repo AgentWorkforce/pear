@@ -102,7 +102,7 @@ function getTabId(tab: AppTabInput): string {
     case 'source-control':
       return `source-control:${tab.projectId || 'global'}`
     case 'ai-hist':
-      return 'ai-hist'
+      return `ai-hist:${tab.projectId || 'global'}`
   }
 }
 
