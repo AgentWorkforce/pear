@@ -226,7 +226,7 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.on('broker:send-input-fast', (_, projectId: string | undefined, name: string, data: string) => {
-    brokerManager.queueInput(projectId, name, data)
+    brokerManager.sendInputFireAndForget(projectId, name, data)
   })
 
   ipcMain.handle('broker:set-terminal-mode', async (_, projectId: string | undefined, name: string, mode: 'view' | 'drive' | 'passthrough') => {
