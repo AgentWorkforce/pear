@@ -58,7 +58,12 @@ export function useBrokerEvents(): void {
   useEffect(() => {
     const unsubEvent = pear.broker.onEvent((event) => {
       const brokerEvent = event as Parameters<typeof handleBrokerEvent>[0] & BrokerEventLike
-      recordBrokerEvent(brokerEvent)
+      // worker_stream is high-volume (one per PTY chunk) and never shown in the
+      // broker events log. Skip the record-into-history work entirely so typing
+      // latency isn't paying for an O(n log n) sort per character.
+      if (brokerEvent.kind !== 'worker_stream') {
+        recordBrokerEvent(brokerEvent)
+      }
       handleBrokerEvent(brokerEvent)
 
       if (brokerEvent.kind === 'channel_subscribed' || brokerEvent.kind === 'agent_spawned') {

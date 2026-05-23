@@ -1248,16 +1248,22 @@ export class BrokerManager {
       return
     }
 
-    // Coalesce only once ≥2 bytes have stacked up; a single keystroke gets sent
-    // on the next tick so interactive typing doesn't pay an extra 4ms per char.
-    const delay = queue.data.length >= 2 ? 4 : 0
+    // For a single buffered byte (the typical typing case), kick the flush off
+    // synchronously — even setTimeout(0) clamps to 1ms in Node. We only fall
+    // back to the 4ms coalescing window once ≥2 bytes have stacked up, which
+    // implies bursty input where merging is worthwhile.
+    if (queue.data.length < 2) {
+      void this.flushQueuedInput(key)
+      return
+    }
+
     queue.timer = setTimeout(() => {
       const currentQueue = this.inputQueues.get(key)
       if (currentQueue) {
         currentQueue.timer = null
       }
       void this.flushQueuedInput(key)
-    }, delay)
+    }, 4)
   }
 
   private async flushQueuedInput(key: string): Promise<void> {
