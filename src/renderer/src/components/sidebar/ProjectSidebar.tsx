@@ -22,7 +22,8 @@ import {
   getDirectMessageRoomId,
   type DirectMessageRoom
 } from '@/lib/direct-messages'
-import { getAgentKeyForAgent, isAgentTyping, useAgentStore, type Agent } from '@/stores/agent-store'
+import { getAgentKeyForAgent, useAgentStore, type Agent } from '@/stores/agent-store'
+import { useIsAgentTyping } from '@/stores/typing-store'
 import { useProjectStore, type Project } from '@/stores/project-store'
 import { useUIStore, type AppTab, type AppTabInput } from '@/stores/ui-store'
 import { pear, type AuthUser } from '@/lib/ipc'
@@ -421,6 +422,7 @@ function EmptySection({ label }: { label: string }): React.ReactNode {
 }
 
 function AgentActivityIndicator({ agent }: { agent: Agent }): React.ReactNode {
+  const typing = useIsAgentTyping(agent)
   if (agent.terminalMode === 'drive' || agent.currentState === 'blocked_on_send') {
     const label = agent.currentState === 'blocked_on_send' ? 'Blocked on send' : 'Holding messages'
     return (
@@ -434,7 +436,7 @@ function AgentActivityIndicator({ agent }: { agent: Agent }): React.ReactNode {
     )
   }
 
-  if (isAgentTyping(agent)) {
+  if (typing) {
     return (
       <span
         className="flex h-4 w-6 shrink-0 items-center justify-center gap-0.5 rounded-full border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35 opacity-75"

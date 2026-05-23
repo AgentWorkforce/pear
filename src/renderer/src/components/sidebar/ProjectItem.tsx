@@ -8,7 +8,8 @@ import {
   type DirectMessageRoom
 } from '@/lib/direct-messages'
 import { formatGitDiffLineCount } from '@/lib/format'
-import { getAgentKeyForAgent, isAgentTyping, useAgentStore, type Agent } from '@/stores/agent-store'
+import { getAgentKeyForAgent, useAgentStore, type Agent } from '@/stores/agent-store'
+import { useIsAgentTyping } from '@/stores/typing-store'
 import { useGitStore, type GitSummary } from '@/stores/git-store'
 import { useProjectStore, type Project, type ProjectRoot } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
@@ -83,6 +84,7 @@ function ProjectMeta({
 }
 
 function AgentActivityIndicator({ agent }: { agent: Agent }): React.ReactNode {
+  const typing = useIsAgentTyping(agent)
   if (agent.terminalMode === 'drive' || agent.currentState === 'blocked_on_send') {
     const label = agent.currentState === 'blocked_on_send' ? 'Blocked on send' : 'Holding messages'
     return (
@@ -96,7 +98,7 @@ function AgentActivityIndicator({ agent }: { agent: Agent }): React.ReactNode {
     )
   }
 
-  if (isAgentTyping(agent)) {
+  if (typing) {
     return (
       <span
         className="flex h-4 w-6 shrink-0 items-center justify-center gap-0.5 rounded-full border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35 opacity-70"

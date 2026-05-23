@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
+import { WebglAddon } from '@xterm/addon-webgl'
 import { pear, type TerminalAttachMode } from '@/lib/ipc'
 import { useAgentStore } from '@/stores/agent-store'
 import { useUIStore, type Theme } from '@/stores/ui-store'
@@ -217,20 +218,27 @@ export function useTerminal(
     const subscribeToBuffer = (targetTerm: Terminal): void => {
       if (unsubStore) return
 
-      const writeNewChunks = (state = useAgentStore.getState()): void => {
-        const agent = state.agents.find((a) => a.name === agentName && a.projectId === projectId)
-        if (!agent) return
-        const newChunks = agent.ptyBuffer.slice(writtenChunksRef.current)
-        if (newChunks.length > 0) {
-          for (const chunk of newChunks) {
-            targetTerm.write(chunk)
-          }
-          writtenChunksRef.current = agent.ptyBuffer.length
+      const writeFromBuffer = (ptyBuffer: string[] | undefined): void => {
+        if (!ptyBuffer) return
+        if (ptyBuffer.length < writtenChunksRef.current) {
+          // Buffer was trimmed past our cursor; replay everything we still have.
+          writtenChunksRef.current = 0
         }
+        const newChunks = ptyBuffer.slice(writtenChunksRef.current)
+        if (newChunks.length === 0) return
+        for (const chunk of newChunks) {
+          targetTerm.write(chunk)
+        }
+        writtenChunksRef.current = ptyBuffer.length
       }
 
-      unsubStore = useAgentStore.subscribe(writeNewChunks)
-      writeNewChunks()
+      unsubStore = useAgentStore.subscribe(
+        (state) => state.agents.find((a) => a.name === agentName && a.projectId === projectId)?.ptyBuffer,
+        writeFromBuffer
+      )
+      writeFromBuffer(
+        useAgentStore.getState().agents.find((a) => a.name === agentName && a.projectId === projectId)?.ptyBuffer
+      )
     }
 
     const attachAndSeedTerminal = async (
@@ -279,7 +287,7 @@ export function useTerminal(
         theme: getXtermTheme(theme),
         fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, monospace",
         fontSize: 13,
-        lineHeight: 1.3,
+        lineHeight: 1,
         cursorBlink: true,
         allowProposedApi: true
       })
@@ -287,6 +295,20 @@ export function useTerminal(
       fitAddon = new FitAddon()
       term.loadAddon(fitAddon)
       term.loadAddon(new WebLinksAddon())
+
+      // GPU-accelerated renderer: dramatically faster than the default DOM
+      // renderer that emits one element per cell. Fall back silently if the
+      // host can't initialize WebGL (Electron contexts without GL, headless
+      // CI, etc.) — xterm will keep using the DOM renderer in that case.
+      try {
+        const webgl = new WebglAddon()
+        webgl.onContextLoss(() => {
+          webgl.dispose()
+        })
+        term.loadAddon(webgl)
+      } catch (err) {
+        console.warn('[terminal] WebGL renderer unavailable, falling back to DOM:', err)
+      }
 
       // Forward keystrokes + terminal protocol responses to PTY
       term.onData((data) => {

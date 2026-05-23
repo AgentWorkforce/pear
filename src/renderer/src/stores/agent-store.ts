@@ -1,4 +1,5 @@
 import { create } from 'zustand'
+import { subscribeWithSelector } from 'zustand/middleware'
 import type {
   AgentCurrentState,
   BrokerDetails,
@@ -12,6 +13,7 @@ import {
   compactBrokerEvent as compactBrokerEventPayload,
   normalizeEventTimestamp
 } from '@shared/lib/broker-events'
+import { useTypingStore } from '@/stores/typing-store'
 
 export interface Agent {
   name: string
@@ -20,8 +22,6 @@ export interface Agent {
   status: 'running' | 'exited'
   activity: 'idle' | 'active'
   currentState: AgentCurrentState
-  lastActivityAtMs?: number
-  typingUntilMs?: number
   projectId?: string
   rootPath?: string
   rootId?: string
@@ -83,7 +83,6 @@ const HUMAN_SENDER_NAME = 'human'
 const SYSTEM_NOTICE_SENDER_NAME = 'system'
 const HUMAN_MESSAGE_DEDUPE_WINDOW_MS = 10_000
 const JOIN_NOTICE_DEDUPE_WINDOW_MS = 30_000
-const TYPING_ACTIVITY_WINDOW_MS = 12_000
 
 export function getAgentKey(projectId: string | undefined, name: string): string {
   return `${projectId || 'unknown'}:${name}`
@@ -91,15 +90,6 @@ export function getAgentKey(projectId: string | undefined, name: string): string
 
 export function getAgentKeyForAgent(agent: Pick<Agent, 'projectId' | 'name'>): string {
   return getAgentKey(agent.projectId, agent.name)
-}
-
-export function isAgentTyping(
-  agent: Pick<Agent, 'currentState' | 'typingUntilMs'>,
-  now = Date.now()
-): boolean {
-  return agent.currentState === 'working' &&
-    typeof agent.typingUntilMs === 'number' &&
-    now < agent.typingUntilMs
 }
 
 function matchesAgent(agent: Agent, projectId: string | undefined, name: string): boolean {
@@ -174,16 +164,6 @@ function getActivityTimestampMs(
 
   return lastActivityMs > 1_000_000_000_000 ? lastActivityMs : now - lastActivityMs
 }
-
-function getTypingUntilMs(currentState: AgentCurrentState, lastActivityAtMs?: number): number | undefined {
-  if (currentState !== 'working' || typeof lastActivityAtMs !== 'number') {
-    return undefined
-  }
-  const typingUntilMs = lastActivityAtMs + TYPING_ACTIVITY_WINDOW_MS
-  return typingUntilMs > Date.now() ? typingUntilMs : undefined
-}
-
-const typingExpiryTimers = new Map<string, number>()
 
 function addPendingDelivery(agent: Agent, eventId?: string): Agent {
   if (!eventId || agent.pendingDeliveryIds.includes(eventId)) {
@@ -372,37 +352,7 @@ interface AgentState {
   getAgentBuffer: (projectId: string | undefined, name: string) => string[]
 }
 
-function scheduleTypingExpiry(
-  key: string,
-  typingUntilMs: number | undefined,
-  set: (updater: (state: AgentState) => Partial<AgentState>) => void
-): void {
-  const existingTimer = typingExpiryTimers.get(key)
-  if (existingTimer) {
-    window.clearTimeout(existingTimer)
-    typingExpiryTimers.delete(key)
-  }
-
-  if (!typingUntilMs) return
-
-  const delay = typingUntilMs - Date.now()
-  if (delay <= 0) return
-
-  const timer = window.setTimeout(() => {
-    typingExpiryTimers.delete(key)
-    set((state) => ({
-      agents: state.agents.map((agent) =>
-        getAgentKeyForAgent(agent) === key && agent.typingUntilMs === typingUntilMs
-          ? { ...agent, typingUntilMs: undefined }
-          : agent
-      )
-    }))
-  }, delay + 50)
-
-  typingExpiryTimers.set(key, timer as unknown as number)
-}
-
-export const useAgentStore = create<AgentState>((set, get) => ({
+export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, get) => ({
   agents: [],
   activeAgentKey: null,
   messages: [],
@@ -427,7 +377,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
     const currentState = options?.currentState || 'idle'
     const activity = activityFromCurrentState(currentState)
     const lastActivityAtMs = getActivityTimestampMs(options?.lastActivityAt, options?.lastActivityMs)
-    const typingUntilMs = getTypingUntilMs(currentState, lastActivityAtMs)
     const channels = normalizeChannelList(options?.channels)
     set((state) => ({
       agents: state.agents.some((a) => matchesAgent(a, projectId, name))
@@ -441,8 +390,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                   cli: cli || a.cli,
                   currentState,
                   activity,
-                  lastActivityAtMs: lastActivityAtMs ?? a.lastActivityAtMs,
-                  typingUntilMs,
                   channels: channels ?? a.channels,
                   terminalMode: options?.terminalMode || a.terminalMode
                 }
@@ -456,8 +403,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
               status: 'running',
               activity,
               currentState,
-              lastActivityAtMs,
-              typingUntilMs,
               projectId,
               rootId,
               rootPath,
@@ -468,7 +413,7 @@ export const useAgentStore = create<AgentState>((set, get) => ({
             }
           ]
     }))
-    scheduleTypingExpiry(getAgentKey(projectId, name), typingUntilMs, set)
+    useTypingStore.getState().setFromState(getAgentKey(projectId, name), currentState, lastActivityAtMs)
   },
 
   syncBrokerAgents: (liveAgents) => {
@@ -489,9 +434,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           liveAgent.last_activity_ms,
           now
         )
-        const typingUntilMs = getTypingUntilMs(currentState, lastActivityAtMs)
         const terminalMode = terminalModeFromInboundDeliveryMode(liveAgent.inboundDeliveryMode)
-        scheduleTypingExpiry(getAgentKeyForAgent(agent), typingUntilMs, set)
+        useTypingStore.getState().setFromState(getAgentKeyForAgent(agent), currentState, lastActivityAtMs)
 
         return {
           ...agent,
@@ -499,8 +443,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           model: liveAgent.model || agent.model,
           currentState,
           activity: activityFromCurrentState(currentState),
-          lastActivityAtMs: lastActivityAtMs ?? agent.lastActivityAtMs,
-          typingUntilMs,
           channels,
           parent: liveAgent.parent || agent.parent,
           terminalMode: terminalMode || agent.terminalMode
@@ -513,9 +455,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
 
         const currentState = liveAgent.current_state || 'idle'
         const lastActivityAtMs = getActivityTimestampMs(liveAgent.last_activity_at, liveAgent.last_activity_ms, now)
-        const typingUntilMs = getTypingUntilMs(currentState, lastActivityAtMs)
         const channels = normalizeChannelList(liveAgent.channels)
-        scheduleTypingExpiry(key, typingUntilMs, set)
+        useTypingStore.getState().setFromState(key, currentState, lastActivityAtMs)
         nextAgents.push({
           name: liveAgent.name,
           cli: liveAgent.cli || 'unknown',
@@ -523,8 +464,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           status: 'running',
           activity: activityFromCurrentState(currentState),
           currentState,
-          lastActivityAtMs,
-          typingUntilMs,
           projectId: liveAgent.projectId,
           channels,
           parent: liveAgent.parent,
@@ -627,7 +566,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                       status: 'running',
                       activity: activityFromCurrentState(currentState),
                       currentState,
-                      lastActivityAtMs: a.lastActivityAtMs,
                       channels: channels ?? a.channels,
                       projectId: a.projectId || projectId,
                       rootId: a.rootId || rootId,
@@ -646,7 +584,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                   status: 'running',
                   activity: activityFromCurrentState(currentState),
                   currentState,
-                  lastActivityAtMs: undefined,
                   channels,
                   projectId,
                   rootId,
@@ -705,13 +642,14 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         }
       })
     } else if ((kind === 'agent_exited' || kind === 'agent_released') && event.name) {
+      const removedKeyForExpiry = getAgentKey(event.projectId, event.name!)
       set((state) => {
         const removed = state.agents.find((a) => matchesAgent(a, event.projectId, event.name!))
-        const removedKey = removed ? getAgentKeyForAgent(removed) : getAgentKey(event.projectId, event.name!)
+        const removedKey = removed ? getAgentKeyForAgent(removed) : removedKeyForExpiry
         const remaining = state.agents.filter((a) => !matchesAgent(a, event.projectId, event.name!))
         const needNewActive = state.activeAgentKey === removedKey
         const nextActiveAgent = remaining.find((a) => a.status === 'running') || remaining[0]
-        scheduleTypingExpiry(removedKey, undefined, set)
+        useTypingStore.getState().clear(removedKey)
         return {
           agents: remaining,
           activeAgentKey: needNewActive && nextActiveAgent
@@ -722,22 +660,22 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         }
       })
     } else if (kind === 'worker_stream' && event.name && event.chunk) {
+      useTypingStore.getState().noteActivity(getAgentKey(event.projectId, event.name))
       set((state) => ({
         agents: state.agents.map((a) => {
           if (!matchesAgent(a, event.projectId, event.name!)) return a
-          const lastActivityAtMs = Date.now()
-          const typingUntilMs = lastActivityAtMs + TYPING_ACTIVITY_WINDOW_MS
-          scheduleTypingExpiry(getAgentKeyForAgent(a), typingUntilMs, set)
           const buffer = [...a.ptyBuffer, event.chunk!]
+          const trimmedBuffer = buffer.length > MAX_PTY_BUFFER_CHUNKS
+            ? buffer.slice(buffer.length - MAX_PTY_BUFFER_CHUNKS)
+            : buffer
+          if (a.activity === 'active' && a.currentState === 'working') {
+            return { ...a, ptyBuffer: trimmedBuffer }
+          }
           return {
             ...a,
             activity: 'active',
             currentState: 'working',
-            lastActivityAtMs,
-            typingUntilMs,
-            ptyBuffer: buffer.length > MAX_PTY_BUFFER_CHUNKS
-              ? buffer.slice(buffer.length - MAX_PTY_BUFFER_CHUNKS)
-              : buffer
+            ptyBuffer: trimmedBuffer
           }
         })
       }))
@@ -754,18 +692,14 @@ export const useAgentStore = create<AgentState>((set, get) => ({
         )
       }))
     } else if (kind === 'delivery_active' && event.name) {
+      useTypingStore.getState().noteActivity(getAgentKey(event.projectId, event.name))
       set((state) => ({
         agents: state.agents.map((a) => {
           if (!matchesAgent(a, event.projectId, event.name!)) return a
-          const lastActivityAtMs = Date.now()
-          const typingUntilMs = lastActivityAtMs + TYPING_ACTIVITY_WINDOW_MS
-          scheduleTypingExpiry(getAgentKeyForAgent(a), typingUntilMs, set)
           return {
             ...addPendingDelivery(a, event.event_id),
             activity: 'active',
-            currentState: 'working',
-            lastActivityAtMs,
-            typingUntilMs
+            currentState: 'working'
           }
         })
       }))
@@ -773,17 +707,18 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       ['delivery_injected', 'delivery_verified', 'delivery_ack', 'delivery_failed', 'message_delivery_confirmed', 'message_delivery_failed'].includes(kind) &&
       event.name
     ) {
+      const startsActivity = ['delivery_injected', 'delivery_verified', 'message_delivery_confirmed'].includes(kind)
+      if (startsActivity) {
+        useTypingStore.getState().noteActivity(getAgentKey(event.projectId, event.name))
+      }
       set((state) => ({
         agents: state.agents.map((a) => {
           if (!matchesAgent(a, event.projectId, event.name!)) return a
           const nextAgent = clearPendingDeliveries(a, event.event_id)
-          if (!['delivery_injected', 'delivery_verified', 'message_delivery_confirmed'].includes(kind)) {
+          if (!startsActivity) {
             return nextAgent
           }
-          const lastActivityAtMs = Date.now()
-          const typingUntilMs = lastActivityAtMs + TYPING_ACTIVITY_WINDOW_MS
-          scheduleTypingExpiry(getAgentKeyForAgent(a), typingUntilMs, set)
-          return { ...nextAgent, activity: 'active', currentState: 'working', lastActivityAtMs, typingUntilMs }
+          return { ...nextAgent, activity: 'active', currentState: 'working' }
         })
       }))
     } else if (kind === 'agent_pending_drained' && event.name) {
@@ -835,10 +770,8 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           agents: state.agents.map((a) => {
             const nextAgent = matchesAgent(a, projectId, eventFrom) ? clearPendingDeliveries(a) : a
             if (targetName && matchesAgent(nextAgent, projectId, targetName) && nextAgent.terminalMode !== 'drive') {
-              const lastActivityAtMs = Date.now()
-              const typingUntilMs = lastActivityAtMs + TYPING_ACTIVITY_WINDOW_MS
-              scheduleTypingExpiry(getAgentKeyForAgent(nextAgent), typingUntilMs, set)
-              return { ...nextAgent, activity: 'active', currentState: 'working', lastActivityAtMs, typingUntilMs }
+              useTypingStore.getState().noteActivity(getAgentKeyForAgent(nextAgent))
+              return { ...nextAgent, activity: 'active', currentState: 'working' }
             }
             return nextAgent
           }),
@@ -850,16 +783,16 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       set((state) => ({
         agents: state.agents.map((a) => {
           if (!matchesAgent(a, event.projectId, event.name!)) return a
-          scheduleTypingExpiry(getAgentKeyForAgent(a), undefined, set)
-          return { ...a, activity: 'active', currentState: 'blocked_on_send', lastActivityAtMs: Date.now(), typingUntilMs: undefined }
+          useTypingStore.getState().clear(getAgentKeyForAgent(a))
+          return { ...a, activity: 'active', currentState: 'blocked_on_send' }
         })
       }))
     } else if (kind === 'agent_idle' && event.name) {
       set((state) => ({
         agents: state.agents.map((a) => {
           if (!matchesAgent(a, event.projectId, event.name!)) return a
-          scheduleTypingExpiry(getAgentKeyForAgent(a), undefined, set)
-          return { ...clearPendingDeliveries(a), activity: 'idle', currentState: 'idle', typingUntilMs: undefined }
+          useTypingStore.getState().clear(getAgentKeyForAgent(a))
+          return { ...clearPendingDeliveries(a), activity: 'idle', currentState: 'idle' }
         })
       }))
     }
@@ -1071,4 +1004,4 @@ export const useAgentStore = create<AgentState>((set, get) => ({
   getAgentBuffer: (projectId, name) => {
     return get().agents.find((a) => matchesAgent(a, projectId, name))?.ptyBuffer || []
   }
-}))
+})))
