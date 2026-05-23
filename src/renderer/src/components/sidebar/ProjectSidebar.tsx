@@ -196,14 +196,6 @@ function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNod
     setMenuOpen(false)
   }, [])
 
-  const openAccountSettings = useCallback(() => {
-    openTab({
-      kind: 'account-settings',
-      title: 'Account settings'
-    })
-    setMenuOpen(false)
-  }, [openTab])
-
   if (!auth.loggedIn) {
     return (
       <button
