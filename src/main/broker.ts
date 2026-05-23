@@ -1248,13 +1248,16 @@ export class BrokerManager {
       return
     }
 
+    // Coalesce only once ≥2 bytes have stacked up; a single keystroke gets sent
+    // on the next tick so interactive typing doesn't pay an extra 4ms per char.
+    const delay = queue.data.length >= 2 ? 4 : 0
     queue.timer = setTimeout(() => {
       const currentQueue = this.inputQueues.get(key)
       if (currentQueue) {
         currentQueue.timer = null
       }
       void this.flushQueuedInput(key)
-    }, 4)
+    }, delay)
   }
 
   private async flushQueuedInput(key: string): Promise<void> {

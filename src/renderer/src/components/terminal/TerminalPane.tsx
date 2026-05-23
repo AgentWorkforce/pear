@@ -5,7 +5,8 @@ import { AgentHarnessIcon, ClaudeIcon, CodexIcon } from '@/components/common/Age
 import { GraphView } from '@/components/graph/GraphView'
 import { spawnProjectAgent, type SpawnAgentCli } from '@/lib/spawn-agent'
 import { pear, type TerminalAttachMode } from '@/lib/ipc'
-import { getAgentKeyForAgent, isAgentTyping, type Agent, useAgentStore } from '@/stores/agent-store'
+import { getAgentKeyForAgent, type Agent, useAgentStore } from '@/stores/agent-store'
+import { useIsAgentTyping } from '@/stores/typing-store'
 import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 import { PendingMessagesMenu, type QueueDeliveryMode } from './PendingMessagesPane'
@@ -108,6 +109,7 @@ function SplitTerminalTile({
   onActivate,
   onDeliveryModeChange
 }: SplitTerminalTileProps): React.ReactNode {
+  const typing = useIsAgentTyping(agent)
   return (
     <div
       className={`flex min-h-0 min-w-0 flex-col overflow-hidden border bg-[var(--pear-bg)] ${
@@ -139,7 +141,7 @@ function SplitTerminalTile({
         <div className="flex min-w-0 flex-1 items-baseline gap-2">
           <span className="min-w-0 truncate font-medium">{agent.name}</span>
         </div>
-        {isAgentTyping(agent) && <TypingDots />}
+        {typing && <TypingDots />}
         {visible && (
           <PendingMessagesMenu
             projectId={agent.projectId}
@@ -158,6 +160,66 @@ function SplitTerminalTile({
           onActivate={onActivate}
         />
       </div>
+    </div>
+  )
+}
+
+interface AgentTabProps {
+  agent: Agent
+  active: boolean
+  onActivate: () => void
+}
+
+function AgentTab({ agent, active, onActivate }: AgentTabProps): React.ReactNode {
+  const typing = useIsAgentTyping(agent)
+  return (
+    <div
+      key={getAgentKeyForAgent(agent)}
+      role="tab"
+      tabIndex={0}
+      aria-selected={active}
+      onClick={onActivate}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          onActivate()
+        }
+      }}
+      className={`group my-1 flex cursor-pointer items-center gap-2.5 rounded-xl border border-transparent px-4 py-3 text-sm transition-colors ${
+        active
+          ? 'bg-[var(--pear-bg)] text-[var(--pear-text)] shadow-sm'
+          : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)]'
+      }`}
+    >
+      <span
+        className="flex h-4 w-4 shrink-0 items-center justify-center"
+        title={agent.cli}
+        aria-label={agent.cli}
+      >
+        <AgentHarnessIcon
+          cli={agent.cli}
+          className={`h-4 w-4 ${
+            agent.status === 'running' ? 'text-[var(--pear-text-dim)]' : 'text-[var(--pear-text-faint)]'
+          }`}
+        />
+      </span>
+      <div className="flex items-center gap-2">
+        <span className="max-w-[120px] truncate">{agent.name}</span>
+        {typing && <TypingDots />}
+      </div>
+      {agent.status === 'running' && (
+        <button
+          onClick={(e) => {
+            e.stopPropagation()
+            pear.broker.releaseAgent(agent.projectId, agent.name)
+          }}
+          className="ml-1 rounded-md p-1 opacity-0 hover:bg-[var(--pear-bg-overlay)] group-hover:opacity-100"
+          title="Release agent"
+          aria-label={`Release agent ${agent.name}`}
+        >
+          <X size={12} />
+        </button>
+      )}
     </div>
   )
 }
@@ -393,56 +455,17 @@ export function TerminalPane(): React.ReactNode {
               )
             })
           ) : (
-            agents.map((agent) => (
-              <div
-                key={getAgentKeyForAgent(agent)}
-                role="tab"
-                tabIndex={0}
-                aria-selected={activeAgentKey === getAgentKeyForAgent(agent)}
-                onClick={() => setActiveAgentKey(getAgentKeyForAgent(agent))}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' || e.key === ' ') {
-                    e.preventDefault()
-                    setActiveAgentKey(getAgentKeyForAgent(agent))
-                  }
-                }}
-                className={`group my-1 flex cursor-pointer items-center gap-2.5 rounded-xl border border-transparent px-4 py-3 text-sm transition-colors ${
-                  activeAgentKey === getAgentKeyForAgent(agent)
-                    ? 'bg-[var(--pear-bg)] text-[var(--pear-text)] shadow-sm'
-                    : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)]'
-                }`}
-              >
-                <span
-                  className="flex h-4 w-4 shrink-0 items-center justify-center"
-                  title={agent.cli}
-                  aria-label={agent.cli}
-                >
-                  <AgentHarnessIcon
-                    cli={agent.cli}
-                    className={`h-4 w-4 ${
-                      agent.status === 'running' ? 'text-[var(--pear-text-dim)]' : 'text-[var(--pear-text-faint)]'
-                    }`}
-                  />
-                </span>
-                <div className="flex items-center gap-2">
-                  <span className="max-w-[120px] truncate">{agent.name}</span>
-                  {isAgentTyping(agent) && <TypingDots />}
-                </div>
-                {agent.status === 'running' && (
-                  <button
-                    onClick={(e) => {
-                      e.stopPropagation()
-                      pear.broker.releaseAgent(agent.projectId, agent.name)
-                    }}
-                    className="ml-1 rounded-md p-1 opacity-0 hover:bg-[var(--pear-bg-overlay)] group-hover:opacity-100"
-                    title="Release agent"
-                    aria-label={`Release agent ${agent.name}`}
-                  >
-                    <X size={12} />
-                  </button>
-                )}
-              </div>
-            ))
+            agents.map((agent) => {
+              const agentKey = getAgentKeyForAgent(agent)
+              return (
+                <AgentTab
+                  key={agentKey}
+                  agent={agent}
+                  active={activeAgentKey === agentKey}
+                  onActivate={() => setActiveAgentKey(agentKey)}
+                />
+              )
+            })
           )}
         </div>
         {!splitEnabled && activeAgent && (
