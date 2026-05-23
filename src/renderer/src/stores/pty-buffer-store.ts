@@ -15,19 +15,14 @@ export function getPtyChunks(key: string): string[] {
 }
 
 export function appendPtyChunk(key: string, chunk: string): void {
-  const existing = buffers.get(key)
-  let next: string[]
-  if (existing) {
-    if (existing.length >= MAX_PTY_BUFFER_CHUNKS) {
-      next = existing.slice(existing.length - MAX_PTY_BUFFER_CHUNKS + 1)
-      next.push(chunk)
-    } else {
-      existing.push(chunk)
-      next = existing
-    }
-  } else {
-    next = [chunk]
-  }
+  // Always allocate a fresh array so React subscribers (e.g. AgentNode's
+  // useState) don't bail out on Object.is reference equality and freeze
+  // the preview tile after the first chunk.
+  const existing = buffers.get(key) ?? []
+  const trimmed = existing.length >= MAX_PTY_BUFFER_CHUNKS
+    ? existing.slice(existing.length - MAX_PTY_BUFFER_CHUNKS + 1)
+    : existing
+  const next = [...trimmed, chunk]
   buffers.set(key, next)
 
   const keyListeners = listeners.get(key)
