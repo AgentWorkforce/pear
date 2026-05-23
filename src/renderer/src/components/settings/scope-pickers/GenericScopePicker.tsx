@@ -1,5 +1,5 @@
 import type React from 'react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 export type IntegrationAccessibleResource = {
   id?: string
@@ -98,6 +98,13 @@ export function GenericScopePicker({
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set(initialSelectedIds || []))
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
+  const onChangeRef = useRef(onChange)
+  const getResourceMountSegmentRef = useRef(getResourceMountSegment)
+  const getResourceScopeIdRef = useRef(getResourceScopeId)
+
+  onChangeRef.current = onChange
+  getResourceMountSegmentRef.current = getResourceMountSegment
+  getResourceScopeIdRef.current = getResourceScopeId
 
   useEffect(() => {
     let cancelled = false
@@ -130,41 +137,48 @@ export function GenericScopePicker({
     }
   }, [initialSelectedIds, listAccessibleResources])
 
-  const selectedResources = useMemo(
-    () => resources.filter((resource, index) => selectedIds.has(resourceId(resource, index))),
+  const selectedResourceEntries = useMemo(
+    () =>
+      resources
+        .map((resource, index) => ({ resource, index }))
+        .filter(({ resource, index }) => selectedIds.has(resourceId(resource, index))),
     [resources, selectedIds]
   )
 
   useEffect(() => {
+    if (loading) return
+
     if (resources.length === 0) {
-      onChange({
+      onChangeRef.current({
         scope: { provider, selection: 'all', [scopeKey]: [] },
         mountPaths: [baseMountPath]
       })
       return
     }
 
-    onChange({
+    onChangeRef.current({
       scope: {
         provider,
         selection: 'selected',
-        [scopeKey]: selectedResources.map(getResourceScopeId).filter(Boolean),
-        resources: selectedResources.map(buildResourceSummary)
+        [scopeKey]: selectedResourceEntries
+          .map(({ resource }) => getResourceScopeIdRef.current(resource))
+          .filter(Boolean),
+        resources: selectedResourceEntries.map(({ resource, index }) =>
+          buildResourceSummary(resource, index)
+        )
       },
-      mountPaths: selectedResources
-        .map(getResourceMountSegment)
+      mountPaths: selectedResourceEntries
+        .map(({ resource }) => getResourceMountSegmentRef.current(resource))
         .filter(Boolean)
         .map((segment) => `${baseMountPath}/${normalizeMountSegment(segment)}`)
     })
   }, [
     baseMountPath,
-    getResourceMountSegment,
-    getResourceScopeId,
-    onChange,
+    loading,
     provider,
     resources.length,
     scopeKey,
-    selectedResources
+    selectedResourceEntries
   ])
 
   const toggleResource = useCallback((id: string) => {
@@ -179,7 +193,7 @@ export function GenericScopePicker({
     })
   }, [])
 
-  const allSelected = resources.length > 0 && selectedResources.length === resources.length
+  const allSelected = resources.length > 0 && selectedResourceEntries.length === resources.length
 
   return (
     <div className="rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] p-4">
@@ -187,7 +201,7 @@ export function GenericScopePicker({
         <div>
           <div className="text-sm font-medium text-[var(--pear-text)]">{title || `Choose ${resourceNoun}`}</div>
           <div className="mt-0.5 text-xs text-[var(--pear-text-faint)]">
-            {loading ? 'Loading' : resources.length === 0 ? 'All selected' : `${selectedResources.length} selected`}
+            {loading ? 'Loading' : resources.length === 0 ? 'All selected' : `${selectedResourceEntries.length} selected`}
           </div>
         </div>
         <button
