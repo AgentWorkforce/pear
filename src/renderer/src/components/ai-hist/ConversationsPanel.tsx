@@ -1,6 +1,7 @@
 import type React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ClipboardCopy, MessageSquare, RefreshCw, Search } from 'lucide-react'
+import { AgentHarnessIcon } from '@/components/common/AgentIcons'
 import { pear } from '@/lib/ipc'
 import { useProjectStore, type Project } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
@@ -38,11 +39,18 @@ const SOURCE_LABELS: Record<Source, string> = {
   relay: 'Relay'
 }
 
-const SOURCE_CHIP_STYLES: Record<Source, string> = {
-  claude: 'bg-amber-500/15 text-amber-300 ring-amber-400/30',
-  codex: 'bg-emerald-500/15 text-emerald-300 ring-emerald-400/30',
-  cursor: 'bg-sky-500/15 text-sky-300 ring-sky-400/30',
-  relay: 'bg-fuchsia-500/15 text-fuchsia-300 ring-fuchsia-400/30'
+const SOURCE_COLORS: Record<Source, string> = {
+  claude: '#D97757',
+  codex: '#10A37F',
+  cursor: '#FFFFFF',
+  relay: '#D493BE'
+}
+
+const SOURCE_ICON_CLI: Record<Source, string> = {
+  claude: 'claude',
+  codex: 'codex',
+  cursor: 'cursor',
+  relay: 'relay'
 }
 
 function formatRelative(timestampMs: number): string {
@@ -62,6 +70,62 @@ function shortenPath(path: string | null): string {
   const segments = path.split('/').filter(Boolean)
   if (segments.length <= 3) return path
   return `…/${segments.slice(-2).join('/')}`
+}
+
+function nextSessionId(sessionIds: string[], currentId: string | null, direction: 1 | -1): string | null {
+  if (sessionIds.length === 0) return null
+
+  const currentIndex = currentId ? sessionIds.indexOf(currentId) : -1
+  if (currentIndex === -1) {
+    return direction === 1 ? sessionIds[0] : sessionIds[sessionIds.length - 1]
+  }
+
+  const nextIndex = (currentIndex + direction + sessionIds.length) % sessionIds.length
+  return sessionIds[nextIndex] || null
+}
+
+function scrollSessionRowIntoView(container: HTMLElement | null, sessionId: string | null): void {
+  if (!container || !sessionId) return
+
+  const row = Array.from(container.querySelectorAll<HTMLElement>('[data-conversation-session-id]'))
+    .find((element) => element.dataset.conversationSessionId === sessionId)
+
+  row?.scrollIntoView({ block: 'nearest', inline: 'nearest' })
+}
+
+function conversationRowClass(active: boolean): string {
+  if (active) return 'bg-[var(--pear-selection-blue)] text-white'
+  return 'text-[var(--pear-text-secondary)] hover:bg-[var(--pear-bg-surface-hover)]'
+}
+
+function conversationMutedTextClass(active: boolean): string {
+  return active ? 'text-white/90' : 'text-[var(--pear-text-faint)]'
+}
+
+function conversationPrimaryTextClass(active: boolean): string {
+  return active ? 'text-white' : 'text-[var(--pear-text)]'
+}
+
+function SourceHarnessBadge({ source, active }: { source: Source; active: boolean }): React.ReactNode {
+  const color = SOURCE_COLORS[source]
+
+  return (
+    <span
+      className={`inline-flex min-w-0 items-center gap-1.5 rounded px-1.5 py-0.5 text-[10px] font-semibold leading-4 ring-1 ${
+        active ? 'bg-white/15 text-white ring-white/20' : 'bg-[var(--pear-bg-overlay)] ring-[var(--pear-border)]'
+      }`}
+    >
+      <span className="shrink-0" style={{ color }}>
+        <AgentHarnessIcon
+          cli={SOURCE_ICON_CLI[source]}
+          className="h-3.5 w-3.5 [&_*]:fill-current"
+        />
+      </span>
+      <span className={active ? 'text-white' : 'text-[var(--pear-text)]'}>
+        {SOURCE_LABELS[source]}
+      </span>
+    </span>
+  )
 }
 
 // Map an ai-hist session to the cli + args that the broker should spawn to
@@ -149,6 +213,7 @@ function ConversationsPanel(): React.ReactNode {
   const [detailError, setDetailError] = useState<string | null>(null)
   const [copyHint, setCopyHint] = useState<string | null>(null)
   const queryToken = useRef(0)
+  const sessionListRef = useRef<HTMLDivElement>(null)
 
   const loadSessions = useCallback(
     async (currentQuery: string, source: SourceFilter): Promise<void> => {
@@ -273,9 +338,40 @@ function ConversationsPanel(): React.ReactNode {
   }, [sessions, scopedProject, projects])
 
   const totalShown = groups.reduce((acc, g) => acc + g.sessions.length, 0)
+  const visibleSessions = useMemo(() => groups.flatMap((group) => group.sessions), [groups])
+  const visibleSessionIds = useMemo(
+    () => visibleSessions.map((session) => session.sessionId),
+    [visibleSessions]
+  )
 
   const openTab = useUIStore((s) => s.openTab)
   const setActiveAgentKey = useAgentStore((s) => s.setActiveAgentKey)
+
+  useEffect(() => {
+    if (activeTab?.kind !== 'ai-hist') return
+
+    window.requestAnimationFrame(() => {
+      sessionListRef.current?.focus({ preventScroll: true })
+    })
+  }, [activeTab?.id, activeTab?.kind])
+
+  useEffect(() => {
+    if (loading) return
+
+    const firstSessionId = visibleSessionIds[0] || null
+    if (!firstSessionId) {
+      if (activeSessionId) setActiveSessionId(null)
+      return
+    }
+
+    if (!activeSessionId || !visibleSessionIds.includes(activeSessionId)) {
+      setActiveSessionId(firstSessionId)
+    }
+  }, [activeSessionId, loading, visibleSessionIds])
+
+  useEffect(() => {
+    scrollSessionRowIntoView(sessionListRef.current, activeSessionId)
+  }, [activeSessionId, visibleSessionIds])
 
   const resumeAndOpen = useCallback(
     async (sess: Session): Promise<void> => {
@@ -334,13 +430,34 @@ function ConversationsPanel(): React.ReactNode {
     window.setTimeout(() => setCopyHint(null), 2500)
   }, [])
 
+  function handleSessionListKeyDown(event: React.KeyboardEvent): void {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault()
+      const sessionId = nextSessionId(
+        visibleSessionIds,
+        activeSessionId,
+        event.key === 'ArrowDown' ? 1 : -1
+      )
+      if (sessionId) setActiveSessionId(sessionId)
+      return
+    }
+
+    if (event.key === 'Enter') {
+      event.preventDefault()
+      event.stopPropagation()
+      if (activeSessionId && visibleSessionIds.includes(activeSessionId)) {
+        setActiveSessionId(activeSessionId)
+      }
+    }
+  }
+
   if (status && !status.ok) {
     return (
       <div className="flex h-full flex-col items-center justify-center gap-3 p-8 text-center">
-        <MessageSquare className="text-[var(--pear-fg-muted)]" size={32} />
+        <MessageSquare className="text-[var(--pear-text-faint)]" size={32} />
         <h2 className="text-base font-medium">ai-hist not available</h2>
-        <p className="max-w-md text-sm text-[var(--pear-fg-muted)]">{status.reason}</p>
-        <p className="max-w-md text-xs text-[var(--pear-fg-muted)]">
+        <p className="max-w-md text-sm text-[var(--pear-text-faint)]">{status.reason}</p>
+        <p className="max-w-md text-xs text-[var(--pear-text-faint)]">
           Install ai-hist (see{' '}
           <code className="rounded bg-[var(--pear-bg-overlay)] px-1 py-0.5">github.com/khaliqgant/ai-hist</code>),
           run <code className="rounded bg-[var(--pear-bg-overlay)] px-1 py-0.5">ai-hist sync</code> once, then
@@ -348,7 +465,7 @@ function ConversationsPanel(): React.ReactNode {
         </p>
         <button
           onClick={refresh}
-          className="mt-2 inline-flex items-center gap-1.5 rounded-md bg-[var(--pear-bg-overlay)] px-3 py-1.5 text-xs hover:bg-[var(--pear-bg-overlay-strong)]"
+          className="mt-2 inline-flex items-center gap-1.5 rounded-md bg-[var(--pear-bg-overlay)] px-3 py-1.5 text-xs hover:bg-[var(--pear-bg-surface-hover)]"
         >
           <RefreshCw size={12} className={refreshing ? 'animate-spin' : ''} />
           Try again
@@ -365,7 +482,7 @@ function ConversationsPanel(): React.ReactNode {
                 <div className="relative flex-1">
                   <Search
                     size={12}
-                    className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--pear-fg-muted)]"
+                    className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--pear-text-faint)]"
                   />
                   <input
                     type="text"
@@ -391,7 +508,7 @@ function ConversationsPanel(): React.ReactNode {
                     className={`rounded px-2 py-0.5 text-[10px] uppercase tracking-wide transition-colors ${
                       sourceFilter === s
                         ? 'bg-[var(--pear-accent)] text-white'
-                        : 'bg-[var(--pear-bg-overlay)] text-[var(--pear-fg-muted)] hover:text-[var(--pear-fg)]'
+                        : 'bg-[var(--pear-bg-overlay)] text-[var(--pear-text-faint)] hover:text-[var(--pear-text)]'
                     }`}
                   >
                     {s === 'all' ? 'All' : SOURCE_LABELS[s]}
@@ -399,17 +516,24 @@ function ConversationsPanel(): React.ReactNode {
                 ))}
               </div>
               {scopedProject && (
-                <div className="text-[10px] text-[var(--pear-fg-muted)]">
-                  Scoped to <span className="text-[var(--pear-fg)]">{scopedProject.name}</span> ·{' '}
+                <div className="text-[10px] text-[var(--pear-text-faint)]">
+                  Scoped to <span className="text-[var(--pear-text)]">{scopedProject.name}</span> ·{' '}
                   {scopedProject.roots.length} root{scopedProject.roots.length === 1 ? '' : 's'}
                 </div>
               )}
             </div>
-            <div className="min-h-0 flex-1 overflow-y-auto">
+            <div
+              ref={sessionListRef}
+              data-focus-ring="none"
+              className="min-h-0 flex-1 overflow-y-auto"
+              tabIndex={0}
+              onKeyDown={handleSessionListKeyDown}
+              aria-label="Conversation history"
+            >
               {loading && sessions.length === 0 ? (
-                <div className="p-6 text-center text-xs text-[var(--pear-fg-muted)]">Loading…</div>
+                <div className="p-6 text-center text-xs text-[var(--pear-text-faint)]">Loading…</div>
               ) : totalShown === 0 ? (
-                <div className="p-6 text-center text-xs text-[var(--pear-fg-muted)]">
+                <div className="p-6 text-center text-xs text-[var(--pear-text-faint)]">
                   {query.trim()
                     ? 'No matches.'
                     : scopedProject
@@ -423,50 +547,50 @@ function ConversationsPanel(): React.ReactNode {
                   {groups.map((group) => (
                     <li key={group.rootPath ?? group.label} className="border-b border-[var(--pear-border)] last:border-b-0">
                       <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-[var(--pear-bg-raised)] px-3 py-1.5">
-                        <span className="truncate text-[10px] font-medium uppercase tracking-wider text-[var(--pear-fg-muted)]">
+                        <span className="truncate text-[10px] font-medium uppercase tracking-wider text-[var(--pear-text-faint)]">
                           {group.label}
                         </span>
-                        <span className="text-[10px] text-[var(--pear-fg-muted)]">
+                        <span className="text-[10px] text-[var(--pear-text-faint)]">
                           {group.sessions.length}
                         </span>
                       </div>
                       {group.rootPath && (
                         <div
-                          className="truncate px-3 pb-1 font-mono text-[9px] text-[var(--pear-fg-muted)]/70"
+                          className="truncate px-3 pb-1 font-mono text-[9px] text-[var(--pear-text-faint)]/70"
                           title={group.rootPath}
                         >
                           {shortenPath(group.rootPath)}
                         </div>
                       )}
-                      <ul className="divide-y divide-[var(--pear-border)]">
+                      <ul>
                         {group.sessions.map((sess) => {
                           const isActive = sess.sessionId === activeSessionId
+                          const mutedTextClass = conversationMutedTextClass(isActive)
                           return (
                             <li key={sess.sessionId}>
                               <button
+                                type="button"
+                                tabIndex={-1}
+                                data-conversation-session-id={sess.sessionId}
                                 onClick={() => setActiveSessionId(sess.sessionId)}
                                 onDoubleClick={() => void resumeAndOpen(sess)}
                                 title="Click to view transcript · Double-click to resume in pear"
-                                className={`flex w-full flex-col gap-1 px-3 py-2.5 text-left transition-colors ${
-                                  isActive
-                                    ? 'bg-[var(--pear-bg-overlay-strong)]'
-                                    : 'hover:bg-[var(--pear-bg-overlay)]'
+                                className={`flex w-full flex-col gap-1 border-b border-[var(--pear-border-subtle)] px-3 py-2.5 text-left outline-none transition-colors last:border-b-0 focus:outline-none focus-visible:outline-none ${
+                                  conversationRowClass(isActive)
                                 }`}
                               >
                                 <div className="flex items-center justify-between gap-2">
-                                  <span
-                                    className={`inline-block rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider ring-1 ${SOURCE_CHIP_STYLES[sess.source]}`}
-                                  >
-                                    {SOURCE_LABELS[sess.source]}
-                                  </span>
-                                  <span className="text-[10px] text-[var(--pear-fg-muted)]">
+                                  <SourceHarnessBadge source={sess.source} active={isActive} />
+                                  <span className={`text-[10px] ${mutedTextClass}`}>
                                     {formatRelative(sess.lastActivityMs)}
                                   </span>
                                 </div>
-                                <div className="line-clamp-2 text-xs text-[var(--pear-fg)]">
+                                <div className={`line-clamp-2 text-xs ${conversationPrimaryTextClass(isActive)}`}>
                                   {sess.firstPrompt || '(empty prompt)'}
                                 </div>
-                                <div className="flex items-center justify-between gap-2 text-[10px] text-[var(--pear-fg-muted)]">
+                                <div
+                                  className={`flex items-center justify-between gap-2 text-[10px] ${mutedTextClass}`}
+                                >
                                   <span className="truncate" title={sess.project || ''}>
                                     {shortenPath(sess.project)}
                                   </span>
@@ -483,7 +607,7 @@ function ConversationsPanel(): React.ReactNode {
               )}
             </div>
             {status?.ok && (
-              <div className="border-t border-[var(--pear-border)] px-3 py-1.5 text-[10px] text-[var(--pear-fg-muted)]">
+              <div className="border-t border-[var(--pear-border)] px-3 py-1.5 text-[10px] text-[var(--pear-text-faint)]">
                 <span className="truncate" title={status.dbPath}>{shortenPath(status.dbPath)}</span>
               </div>
             )}
@@ -495,23 +619,19 @@ function ConversationsPanel(): React.ReactNode {
                 <div className="flex items-start justify-between gap-3 border-b border-[var(--pear-border)] p-3">
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <span
-                        className={`inline-block rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wider ring-1 ${SOURCE_CHIP_STYLES[activeSession.source]}`}
-                      >
-                        {SOURCE_LABELS[activeSession.source]}
-                      </span>
-                      <span className="text-[11px] text-[var(--pear-fg-muted)]">
+                      <SourceHarnessBadge source={activeSession.source} active={false} />
+                      <span className="text-[11px] text-[var(--pear-text-faint)]">
                         {activeSession.promptCount} prompt{activeSession.promptCount === 1 ? '' : 's'} · started{' '}
                         {formatRelative(activeSession.firstActivityMs)}
                       </span>
                     </div>
                     <div
-                      className="mt-1 truncate text-xs text-[var(--pear-fg-muted)]"
+                      className="mt-1 truncate text-xs text-[var(--pear-text-faint)]"
                       title={activeSession.project || ''}
                     >
                       {activeSession.project || '(no project)'}
                     </div>
-                    <div className="mt-0.5 truncate font-mono text-[10px] text-[var(--pear-fg-muted)]/70">
+                    <div className="mt-0.5 truncate font-mono text-[10px] text-[var(--pear-text-faint)]/70">
                       {activeSession.sessionId}
                     </div>
                   </div>
@@ -525,7 +645,7 @@ function ConversationsPanel(): React.ReactNode {
                     </button>
                     <button
                       onClick={() => copyResume(activeSession)}
-                      className="inline-flex items-center gap-1.5 rounded-md bg-[var(--pear-bg-overlay)] px-2.5 py-1.5 text-xs hover:bg-[var(--pear-bg-overlay-strong)]"
+                      className="inline-flex items-center gap-1.5 rounded-md bg-[var(--pear-bg-overlay)] px-2.5 py-1.5 text-xs hover:bg-[var(--pear-bg-surface-hover)]"
                       title="Copy the shell command to resume manually"
                     >
                       <ClipboardCopy size={12} />
@@ -535,14 +655,14 @@ function ConversationsPanel(): React.ReactNode {
                 </div>
                 <div className="min-h-0 flex-1 overflow-y-auto p-3">
                   {detailLoading ? (
-                    <div className="text-center text-xs text-[var(--pear-fg-muted)]">Loading…</div>
+                    <div className="text-center text-xs text-[var(--pear-text-faint)]">Loading…</div>
                   ) : detailError ? (
                     <div className="rounded-md bg-red-500/10 p-3 text-xs text-red-300 ring-1 ring-red-500/30">
                       <div className="mb-1 font-medium">Couldn't load session</div>
                       <div className="font-mono">{detailError}</div>
                     </div>
                   ) : detailEntries.length === 0 ? (
-                    <div className="text-center text-xs text-[var(--pear-fg-muted)]">
+                    <div className="text-center text-xs text-[var(--pear-text-faint)]">
                       No prompts found for session {activeSession.sessionId}.
                       <br />
                       (This usually means the SDK's session-id doesn't match the row's — please file a bug.)
@@ -554,11 +674,11 @@ function ConversationsPanel(): React.ReactNode {
                           key={entry.id}
                           className="rounded-md bg-[var(--pear-bg-overlay)] p-2.5"
                         >
-                          <div className="mb-1 flex items-center justify-between text-[10px] text-[var(--pear-fg-muted)]">
+                          <div className="mb-1 flex items-center justify-between text-[10px] text-[var(--pear-text-faint)]">
                             <span>{new Date(entry.timestampMs).toLocaleString()}</span>
                             <span>#{entry.id}</span>
                           </div>
-                          <pre className="whitespace-pre-wrap font-mono text-xs leading-snug text-[var(--pear-fg)]">
+                          <pre className="whitespace-pre-wrap font-mono text-xs leading-snug text-[var(--pear-text)]">
                             {entry.prompt}
                           </pre>
                         </li>
@@ -568,14 +688,14 @@ function ConversationsPanel(): React.ReactNode {
                 </div>
               </>
             ) : (
-              <div className="flex h-full items-center justify-center text-xs text-[var(--pear-fg-muted)]">
+              <div className="flex h-full items-center justify-center text-xs text-[var(--pear-text-faint)]">
                 Select a conversation to view its prompts.
               </div>
             )}
       </div>
 
       {copyHint && (
-        <div className="pointer-events-none absolute bottom-4 left-1/2 -translate-x-1/2 rounded-md bg-[var(--pear-bg-overlay-strong)] px-3 py-1.5 text-xs shadow-lg">
+        <div className="pointer-events-none absolute bottom-4 left-1/2 -translate-x-1/2 rounded-md bg-[var(--pear-bg-surface-hover)] px-3 py-1.5 text-xs shadow-lg">
           {copyHint}
         </div>
       )}

@@ -23,6 +23,7 @@ import { cloudAgentManager } from './cloud-agent'
 import { proactiveAgentManager } from './proactive-agent'
 import { integrationsManager } from './integrations'
 import { aiHistManager } from './ai-hist'
+import { burnManager, type BurnAgentInput } from './burn'
 import { resetRelayWorkspaceManager } from './relay-workspace'
 import { assertDirectory, isDirectory } from './path-utils'
 import type { ProactiveAgentDraft } from './proactive-agent.types'
@@ -275,6 +276,15 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('broker:shutdown', async () => {
     await brokerManager.shutdown()
+  })
+
+  // --- Burn ---
+  ipcMain.handle('burn:list-agent-summaries', async (_, agents: BurnAgentInput[]) => {
+    return burnManager.listAgentSummaries(agents)
+  })
+
+  ipcMain.handle('burn:get-agent-breakdown', async (_, agent: BurnAgentInput) => {
+    return burnManager.getAgentBreakdown(agent)
   })
 
   // --- Git ---

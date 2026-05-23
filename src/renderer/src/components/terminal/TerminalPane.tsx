@@ -1,10 +1,11 @@
 import type React from 'react'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { ChevronLeft, ChevronRight, Columns2, Network, PanelTop, X } from 'lucide-react'
 import { AgentHarnessIcon, ClaudeIcon, CodexIcon } from '@/components/common/AgentIcons'
 import { GraphView } from '@/components/graph/GraphView'
 import { spawnProjectAgent, type SpawnAgentCli } from '@/lib/spawn-agent'
-import { pear, type TerminalAttachMode } from '@/lib/ipc'
+import { formatTokenCount } from '@/lib/format'
+import { pear, type BurnAgentInput, type BurnAgentSummary, type TerminalAttachMode } from '@/lib/ipc'
 import { getAgentKeyForAgent, type Agent, useAgentStore } from '@/stores/agent-store'
 import { useIsAgentTyping } from '@/stores/typing-store'
 import { useProjectStore } from '@/stores/project-store'
@@ -61,6 +62,47 @@ function TypingDots({ className = '' }: { className?: string }): React.ReactNode
   )
 }
 
+function getBurnInputForAgent(agent: Agent): BurnAgentInput {
+  return {
+    name: agent.name,
+    projectId: agent.projectId,
+    cwd: agent.rootPath,
+    cli: agent.cli
+  }
+}
+
+function BurnTokenBadge({
+  summary,
+  onClick,
+  compact = false
+}: {
+  summary?: BurnAgentSummary
+  onClick: () => void
+  compact?: boolean
+}): React.ReactNode {
+  const tokens = formatTokenCount(summary?.totalTokens ?? 0)
+  const title = summary?.status === 'unavailable' && summary.error
+    ? `Burn unavailable: ${summary.error}`
+    : 'Open burn breakdown'
+
+  return (
+    <button
+      type="button"
+      onClick={(event) => {
+        event.stopPropagation()
+        onClick()
+      }}
+      className={`shrink-0 rounded-full border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-overlay)] text-[var(--pear-accent-bright)] transition-colors hover:border-[var(--pear-accent-dim)] hover:bg-[var(--pear-bg-surface-hover)] ${
+        compact ? 'px-1.5 py-0.5 text-[10px]' : 'px-2 py-0.5 text-[11px]'
+      }`}
+      title={title}
+      aria-label="Open burn breakdown"
+    >
+      {tokens} tokens
+    </button>
+  )
+}
+
 interface TerminalProjectProps {
   agent: Agent
   visible: boolean
@@ -94,20 +136,24 @@ function TerminalProject({
 
 interface SplitTerminalTileProps {
   agent: Agent
+  burnSummary?: BurnAgentSummary
   visible: boolean
   active: boolean
   className?: string
   onActivate: () => void
   onDeliveryModeChange: (agent: Agent, mode: QueueDeliveryMode) => void
+  onOpenBurn: (agent: Agent) => void
 }
 
 function SplitTerminalTile({
   agent,
+  burnSummary,
   visible,
   active,
   className = '',
   onActivate,
-  onDeliveryModeChange
+  onDeliveryModeChange,
+  onOpenBurn
 }: SplitTerminalTileProps): React.ReactNode {
   const typing = useIsAgentTyping(agent)
   return (
@@ -140,6 +186,7 @@ function SplitTerminalTile({
         </span>
         <div className="flex min-w-0 flex-1 items-baseline gap-2">
           <span className="min-w-0 truncate font-medium">{agent.name}</span>
+          <BurnTokenBadge summary={burnSummary} compact onClick={() => onOpenBurn(agent)} />
         </div>
         {typing && <TypingDots />}
         {visible && (
@@ -166,11 +213,13 @@ function SplitTerminalTile({
 
 interface AgentTabProps {
   agent: Agent
+  burnSummary?: BurnAgentSummary
   active: boolean
   onActivate: () => void
+  onOpenBurn: (agent: Agent) => void
 }
 
-function AgentTab({ agent, active, onActivate }: AgentTabProps): React.ReactNode {
+function AgentTab({ agent, burnSummary, active, onActivate, onOpenBurn }: AgentTabProps): React.ReactNode {
   const typing = useIsAgentTyping(agent)
   return (
     <div
@@ -205,6 +254,7 @@ function AgentTab({ agent, active, onActivate }: AgentTabProps): React.ReactNode
       </span>
       <div className="flex items-center gap-2">
         <span className="max-w-[120px] truncate">{agent.name}</span>
+        <BurnTokenBadge summary={burnSummary} onClick={() => onOpenBurn(agent)} />
         {typing && <TypingDots />}
       </div>
       {agent.status === 'running' && (
@@ -226,18 +276,22 @@ function AgentTab({ agent, active, onActivate }: AgentTabProps): React.ReactNode
 
 interface SplitTerminalPageProps {
   agents: Agent[]
+  burnSummariesByAgentKey: Record<string, BurnAgentSummary>
   visible: boolean
   activeAgentKey: string | null
   onActivateAgent: (key: string) => void
   onDeliveryModeChange: (agent: Agent, mode: QueueDeliveryMode) => void
+  onOpenBurn: (agent: Agent) => void
 }
 
 function SplitTerminalPage({
   agents,
+  burnSummariesByAgentKey,
   visible,
   activeAgentKey,
   onActivateAgent,
-  onDeliveryModeChange
+  onDeliveryModeChange,
+  onOpenBurn
 }: SplitTerminalPageProps): React.ReactNode {
   return (
     <div className={`grid h-full gap-1 p-1 ${getSplitPageGridClass(agents.length)}`}>
@@ -248,11 +302,13 @@ function SplitTerminalPage({
           <SplitTerminalTile
             key={agentKey}
             agent={agent}
+            burnSummary={burnSummariesByAgentKey[agentKey]}
             visible={visible}
             active={active}
             className={getSplitTileClass(agents.length, index)}
             onActivate={() => onActivateAgent(agentKey)}
             onDeliveryModeChange={onDeliveryModeChange}
+            onOpenBurn={onOpenBurn}
           />
         )
       })}
@@ -272,10 +328,12 @@ export function TerminalPane(): React.ReactNode {
   const setActiveAgentKey = useAgentStore((s) => s.setActiveAgentKey)
   const setAgentTerminalMode = useAgentStore((s) => s.setAgentTerminalMode)
   const openDialog = useUIStore((s) => s.openDialog)
+  const openTab = useUIStore((s) => s.openTab)
   const terminalLayout = useUIStore((s) => s.terminalLayout)
   const setTerminalLayout = useUIStore((s) => s.setTerminalLayout)
   const [spawningCli, setSpawningCli] = useState<SpawnAgentCli | null>(null)
   const [spawnError, setSpawnError] = useState<string | null>(null)
+  const [burnSummariesByAgentKey, setBurnSummariesByAgentKey] = useState<Record<string, BurnAgentSummary>>({})
   const [splitPage, setSplitPage] = useState(0)
   const graphEnabled = terminalLayout === 'graph'
   const splitEnabled = terminalLayout === 'horizontal-split' && agents.length > 1
@@ -288,6 +346,11 @@ export function TerminalPane(): React.ReactNode {
       ? 'Show split terminal pages'
       : 'Start another agent to split terminals'
   const graphButtonTitle = graphEnabled ? 'Show terminal tabs' : 'Show agent graph'
+  const burnInputs = useMemo(() => agents.map(getBurnInputForAgent), [agents])
+  const burnInputsKey = useMemo(
+    () => burnInputs.map((agent) => `${agent.projectId || 'unknown'}:${agent.name}:${agent.cwd || ''}:${agent.cli || ''}`).join('|'),
+    [burnInputs]
+  )
 
   const handleSpawn = async (cli: SpawnAgentCli): Promise<void> => {
     if (!activeProject) {
@@ -334,6 +397,45 @@ export function TerminalPane(): React.ReactNode {
       setActiveAgentKey(getAgentKeyForAgent(nextAgent))
     }
   }
+
+  const openBurnDetails = (agent: Agent): void => {
+    openTab({
+      kind: 'burn-session',
+      projectId: agent.projectId,
+      burnAgent: getBurnInputForAgent(agent)
+    })
+  }
+
+  useEffect(() => {
+    let cancelled = false
+
+    const loadBurnSummaries = async (): Promise<void> => {
+      if (burnInputs.length === 0) {
+        setBurnSummariesByAgentKey({})
+        return
+      }
+
+      try {
+        const summaries = await pear.burn.listAgentSummaries(burnInputs)
+        if (cancelled) return
+        setBurnSummariesByAgentKey(Object.fromEntries(
+          summaries.map((summary) => [summary.agentKey, summary])
+        ))
+      } catch {
+        if (!cancelled) setBurnSummariesByAgentKey({})
+      }
+    }
+
+    void loadBurnSummaries()
+    const interval = window.setInterval(() => {
+      void loadBurnSummaries()
+    }, 30_000)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [burnInputsKey])
 
   useEffect(() => {
     if (agents.length === 0) {
@@ -461,8 +563,10 @@ export function TerminalPane(): React.ReactNode {
                 <AgentTab
                   key={agentKey}
                   agent={agent}
+                  burnSummary={burnSummariesByAgentKey[agentKey]}
                   active={activeAgentKey === agentKey}
                   onActivate={() => setActiveAgentKey(agentKey)}
+                  onOpenBurn={openBurnDetails}
                 />
               )
             })
@@ -531,10 +635,12 @@ export function TerminalPane(): React.ReactNode {
               >
                 <SplitTerminalPage
                   agents={pageAgents}
+                  burnSummariesByAgentKey={burnSummariesByAgentKey}
                   visible={visible}
                   activeAgentKey={activeAgentKey}
                   onActivateAgent={setActiveAgentKey}
                   onDeliveryModeChange={(agent, mode) => void handleDeliveryModeChange(agent, mode)}
+                  onOpenBurn={openBurnDetails}
                 />
               </div>
             )

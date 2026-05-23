@@ -7,6 +7,16 @@ export function formatGitDiffLineCount(count: number): string {
   return compactCountFormatter.format(count).toLowerCase()
 }
 
+export function formatTokenCount(count: number): string {
+  return compactCountFormatter.format(Math.max(0, count)).toLowerCase()
+}
+
+export function formatUsd(value: number): string {
+  if (!Number.isFinite(value) || value <= 0) return '$0.00'
+  if (value < 0.01) return `$${value.toFixed(4)}`
+  return `$${value.toFixed(2)}`
+}
+
 export function formatClockTime(timestamp: number): string {
   return new Date(timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
 }

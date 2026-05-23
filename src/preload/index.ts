@@ -1,6 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron'
 
-export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'ai-hist'
+export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'ai-hist' | 'burn-session'
 
 type TerminalAttachMode = 'view' | 'drive' | 'passthrough'
 
@@ -31,6 +31,43 @@ export interface AiHistStats {
   byProject: Array<{ project: string; count: number }>
   firstTimestampMs: number | null
   lastTimestampMs: number | null
+}
+
+export interface BurnAgentInput {
+  projectId?: string
+  name: string
+  cwd?: string
+  cli?: string
+}
+
+export interface BurnAgentSummary {
+  projectId?: string
+  name: string
+  agentKey: string
+  totalTokens: number
+  totalCost: number
+  turnCount: number
+  byModel: Array<{ model: string; tokens: number; cost: number }>
+  byTool: Array<{ tool: string; tokens: number; cost: number; count: number }>
+  sessionIds: Array<{ sessionId: string; ts?: string }>
+  updatedAt: number
+  status: 'ok' | 'unavailable'
+  error?: string
+}
+
+export interface BurnAgentBreakdown extends BurnAgentSummary {
+  primarySessionId?: string
+  hotspots?: {
+    sessionId?: string
+    grandTotal: number
+    attributedTotal: number
+    unattributedTotal: number
+    attributionDegraded: boolean
+    files: Array<{ path: string; initialTokens: number; persistenceTokens: number; ridingTurns: number; totalCost: number }>
+    bashVerbs: Array<{ verb: string; callCount: number; distinctCommands: number; initialTokens: number; persistenceTokens: number; avgPersistenceTurns: number; totalCost: number; topExamples: string[] }>
+    bash: Array<{ command?: string; callCount: number; initialTokens: number; persistenceTokens: number; totalCost: number }>
+    subagents: Array<{ subagentType: string; callCount: number; initialTokens: number; persistenceTokens: number; totalCost: number }>
+  }
 }
 
 // Thin generic wrappers so each handler binds an IPC channel + return type without
@@ -131,6 +168,12 @@ const api = {
     },
     onStatus: (callback: (status: { projectId?: string; status: string; error?: string }) => void) =>
       subscribe<{ projectId?: string; status: string; error?: string }>('broker:status', callback)
+  },
+  burn: {
+    listAgentSummaries: (agents: BurnAgentInput[]) =>
+      invoke<BurnAgentSummary[]>('burn:list-agent-summaries', agents),
+    getAgentBreakdown: (agent: BurnAgentInput) =>
+      invoke<BurnAgentBreakdown>('burn:get-agent-breakdown', agent)
   },
   git: {
     status: (path: string) => invoke<unknown[]>('git:status', path),

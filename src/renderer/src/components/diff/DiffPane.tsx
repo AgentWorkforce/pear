@@ -817,6 +817,7 @@ function CommitAuthorAvatar({ user }: { user: AuthUser | null }): React.ReactNod
 function CoAuthorPicker({
   coAuthors,
   inputRef,
+  panelRef,
   inputValue,
   suggestions,
   selectedSuggestionIndex,
@@ -828,6 +829,7 @@ function CoAuthorPicker({
 }: {
   coAuthors: CoAuthor[]
   inputRef: React.Ref<HTMLInputElement>
+  panelRef: React.Ref<HTMLDivElement>
   inputValue: string
   suggestions: CoAuthor[]
   selectedSuggestionIndex: number
@@ -838,7 +840,7 @@ function CoAuthorPicker({
   onRemoveCoAuthor: (username: string) => void
 }): React.ReactNode {
   return (
-    <div className="flex min-h-10 items-center gap-2 border-t border-[var(--pear-border-subtle)] px-2.5 py-2">
+    <div ref={panelRef} className="flex min-h-10 items-center gap-2 border-t border-[var(--pear-border-subtle)] px-2.5 py-2">
       <span className="shrink-0 text-[13px] font-medium text-[var(--pear-text-secondary)]">Co-Authors</span>
       <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
         {coAuthors.map((coAuthor) => (
@@ -1762,6 +1764,8 @@ export function DiffPane(): React.ReactNode {
   const [fileContextMenu, setFileContextMenu] = useState<FileContextMenuState | null>(null)
   const [fileRowSelection, setFileRowSelection] = useState<Set<string>>(new Set())
   const [fileRowSelectionAnchor, setFileRowSelectionAnchor] = useState<string | null>(null)
+  const coAuthorTriggerRef = useRef<HTMLButtonElement>(null)
+  const coAuthorPanelRef = useRef<HTMLDivElement>(null)
   const coAuthorInputRef = useRef<HTMLInputElement>(null)
   const changedFilesListRef = useRef<HTMLDivElement>(null)
   const historyCommitListRef = useRef<HTMLDivElement>(null)
@@ -1996,6 +2000,25 @@ export function DiffPane(): React.ReactNode {
     window.requestAnimationFrame(() => {
       coAuthorInputRef.current?.focus()
     })
+  }, [coAuthorPanelOpen])
+
+  useEffect(() => {
+    if (!coAuthorPanelOpen) return
+
+    function handlePointerDown(event: PointerEvent): void {
+      const target = event.target
+      if (!(target instanceof Node)) return
+      if (coAuthorTriggerRef.current?.contains(target)) return
+      if (coAuthorPanelRef.current?.contains(target)) return
+
+      setCoAuthorPanelOpen(false)
+      setCoAuthorInput('')
+    }
+
+    window.addEventListener('pointerdown', handlePointerDown, true)
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown, true)
+    }
   }, [coAuthorPanelOpen])
 
   useEffect(() => {
@@ -2891,6 +2914,7 @@ export function DiffPane(): React.ReactNode {
                 />
                 <div className="flex h-8 items-center gap-2 px-2.5 pb-2">
                   <button
+                    ref={coAuthorTriggerRef}
                     type="button"
                     onClick={handleAddCoAuthor}
                     className={`flex h-7 w-7 items-center justify-center rounded-md transition-colors ${
@@ -2920,6 +2944,7 @@ export function DiffPane(): React.ReactNode {
                   <CoAuthorPicker
                     coAuthors={coAuthors}
                     inputRef={coAuthorInputRef}
+                    panelRef={coAuthorPanelRef}
                     inputValue={coAuthorInput}
                     suggestions={coAuthorSuggestions}
                     selectedSuggestionIndex={selectedCoAuthorSuggestionIndex}

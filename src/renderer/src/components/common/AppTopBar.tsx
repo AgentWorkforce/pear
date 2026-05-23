@@ -4,6 +4,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock3,
+  Flame,
   GitPullRequest,
   Hash,
   LayoutGrid,
@@ -31,6 +32,10 @@ function TabIcon({ tab, className = '' }: { tab: AppTab; className?: string }): 
       return <Server size={14} className={iconClassName} />
     case 'source-control':
       return <GitPullRequest size={14} className={iconClassName} />
+    case 'ai-hist':
+      return <Clock3 size={14} className={iconClassName} />
+    case 'burn-session':
+      return <Flame size={14} className={iconClassName} />
     case 'agents':
       return <LayoutGrid size={14} className={iconClassName} />
   }
@@ -50,6 +55,10 @@ function tabSubtitle(tab: AppTab, projectNameById: Map<string, string>): string 
       return projectName ? `${projectName} relay` : 'Connection status'
     case 'source-control':
       return projectName ? `${projectName} changes` : 'File changes'
+    case 'ai-hist':
+      return projectName ? `${projectName} history` : 'Conversation history'
+    case 'burn-session':
+      return projectName ? `${projectName} burn` : 'Burn breakdown'
     case 'agents':
       return projectName ? `${projectName} agents` : 'Agent quadrants'
   }

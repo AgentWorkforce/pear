@@ -5,15 +5,16 @@ import {
   getDirectMessageRoomTitle,
   sortDirectMessageParticipants
 } from '@/lib/direct-messages'
+import type { BurnAgentInput } from '@/lib/ipc'
 
-export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'ai-hist'
+export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'ai-hist' | 'burn-session'
 export type DialogType = 'add-project' | 'spawn-agent' | 'spawn-local-agent' | 'cloud-agent' | 'add-channel' | 'command-menu' | null
 const ThemeSchema = z.enum(['dark', 'light'])
 const TerminalLayoutSchema = z.enum(['tabs', 'horizontal-split', 'graph'])
 const BooleanPreferenceSchema = z.enum(['true', 'false']).transform((value) => value === 'true')
 export type Theme = z.infer<typeof ThemeSchema>
 export type TerminalLayout = z.infer<typeof TerminalLayoutSchema>
-export type AppTabKind = 'agents' | 'channel' | 'dm' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'ai-hist'
+export type AppTabKind = 'agents' | 'channel' | 'dm' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'ai-hist' | 'burn-session'
 
 export interface AppTab {
   id: string
@@ -22,6 +23,7 @@ export interface AppTab {
   projectId?: string
   channelName?: string
   dmParticipants?: string[]
+  burnAgent?: BurnAgentInput
 }
 
 export type AppTabInput = Omit<AppTab, 'id' | 'title'> & {
@@ -108,6 +110,8 @@ function getTabId(tab: AppTabInput): string {
       return `source-control:${tab.projectId || 'global'}`
     case 'ai-hist':
       return `ai-hist:${tab.projectId || 'global'}`
+    case 'burn-session':
+      return `burn-session:${tab.burnAgent?.projectId || tab.projectId || 'unknown'}:${tab.burnAgent?.name || 'agent'}`
   }
 }
 
@@ -131,6 +135,8 @@ function getTabTitle(tab: AppTabInput): string {
       return 'File Changes'
     case 'ai-hist':
       return 'Conversations'
+    case 'burn-session':
+      return tab.burnAgent?.name ? `${tab.burnAgent.name} burn` : 'Burn'
   }
 }
 
@@ -143,7 +149,8 @@ function createTab(input: AppTabInput): AppTab {
     channelName: normalizeChannelForTab(input.channelName),
     dmParticipants: input.kind === 'dm'
       ? sortDirectMessageParticipants(input.dmParticipants || [])
-      : undefined
+      : undefined,
+    burnAgent: input.kind === 'burn-session' ? input.burnAgent : undefined
   }
 }
 
@@ -164,6 +171,8 @@ function viewModeForTab(tab: AppTab): ViewMode {
       return 'source-control'
     case 'ai-hist':
       return 'ai-hist'
+    case 'burn-session':
+      return 'burn-session'
   }
 }
 
@@ -181,6 +190,8 @@ function tabInputForViewMode(mode: ViewMode): AppTabInput {
       return { kind: 'source-control' }
     case 'ai-hist':
       return { kind: 'ai-hist' }
+    case 'burn-session':
+      return { kind: 'agents' }
     case 'graph':
     case 'terminal':
       return { kind: 'agents' }

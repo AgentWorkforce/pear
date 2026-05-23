@@ -3,6 +3,43 @@ export type InboundDeliveryMode = 'auto_inject' | 'manual_flush'
 export type MessageInjectionMode = 'wait' | 'steer'
 export type AgentCurrentState = 'working' | 'idle' | 'blocked_on_send'
 
+export interface BurnAgentInput {
+  projectId?: string
+  name: string
+  cwd?: string
+  cli?: string
+}
+
+export interface BurnAgentSummary {
+  projectId?: string
+  name: string
+  agentKey: string
+  totalTokens: number
+  totalCost: number
+  turnCount: number
+  byModel: Array<{ model: string; tokens: number; cost: number }>
+  byTool: Array<{ tool: string; tokens: number; cost: number; count: number }>
+  sessionIds: Array<{ sessionId: string; ts?: string }>
+  updatedAt: number
+  status: 'ok' | 'unavailable'
+  error?: string
+}
+
+export interface BurnAgentBreakdown extends BurnAgentSummary {
+  primarySessionId?: string
+  hotspots?: {
+    sessionId?: string
+    grandTotal: number
+    attributedTotal: number
+    unattributedTotal: number
+    attributionDegraded: boolean
+    files: Array<{ path: string; initialTokens: number; persistenceTokens: number; ridingTurns: number; totalCost: number }>
+    bashVerbs: Array<{ verb: string; callCount: number; distinctCommands: number; initialTokens: number; persistenceTokens: number; avgPersistenceTurns: number; totalCost: number; topExamples: string[] }>
+    bash: Array<{ command?: string; callCount: number; initialTokens: number; persistenceTokens: number; totalCost: number }>
+    subagents: Array<{ subagentType: string; callCount: number; initialTokens: number; persistenceTokens: number; totalCost: number }>
+  }
+}
+
 export interface PendingRelayMessage {
   from: string
   body: string
@@ -457,6 +494,10 @@ export interface PearAPI {
     onEvent: (callback: (event: unknown) => void) => () => void
     onPtyChunk: (callback: (projectId: string, name: string, chunk: string) => void) => () => void
     onStatus: (callback: (status: { projectId?: string; status: string; error?: string }) => void) => () => void
+  }
+  burn: {
+    listAgentSummaries: (agents: BurnAgentInput[]) => Promise<BurnAgentSummary[]>
+    getAgentBreakdown: (agent: BurnAgentInput) => Promise<BurnAgentBreakdown>
   }
   git: {
     status: (path: string) => Promise<GitFileStatus[]>

@@ -6,6 +6,7 @@ import { AccountSettings } from '@/components/settings/AccountSettings'
 import { TerminalPane } from '@/components/terminal/TerminalPane'
 import { ChatView } from '@/components/chat/ChatView'
 import { BrokerDetailsPage } from '@/components/broker/BrokerDetailsPage'
+import { BurnSessionPage } from '@/components/burn/BurnSessionPage'
 import { DiffPane } from '@/components/diff/DiffPane'
 import ConversationsPanel from '@/components/ai-hist/ConversationsPanel'
 import { AppTopBar } from '@/components/common/AppTopBar'
@@ -96,6 +97,8 @@ export default function App(): React.ReactNode {
       ? <DiffPane />
     : activeTab?.kind === 'ai-hist'
       ? <ConversationsPanel />
+    : activeTab?.kind === 'burn-session'
+      ? <BurnSessionPage />
     : activeTab?.kind === 'channel' || activeTab?.kind === 'dm'
       ? <ChatView />
       : <TerminalPane />

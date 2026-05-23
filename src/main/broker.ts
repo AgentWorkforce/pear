@@ -17,6 +17,7 @@ import {
 import { getAccessToken, getApiUrl } from './auth'
 import { assertDirectory } from './path-utils'
 import { createPearBurnSpawnListener } from './burn-spawn-hook'
+import { getBurnLedgerHome, getPearBurnAgentKey } from './burn'
 import {
   BrokerConnectionFileSchema,
   GeneratedCommitDraftSchema,
@@ -843,7 +844,12 @@ export class BrokerManager {
     // signature in @agent-relay/sdk@7.0.0 doesn't carry that exception (a
     // follow-up minor will add the overload), so cast at the call site here.
     const burnHandler = createPearBurnSpawnListener({
+      ledgerHome: getBurnLedgerHome(),
       enrich: (ctx) => ({
+        pear_project_id: projectId,
+        pear_agent_name: ctx.input.name,
+        pear_agent_key: getPearBurnAgentKey(projectId, ctx.input.name),
+        ...(('cwd' in ctx.input && ctx.input.cwd) ? { pear_cwd: ctx.input.cwd } : {}),
         ...(ctx.input.team ? { relay_team: ctx.input.team } : {}),
         ...(ctx.input.model ? { model_requested: ctx.input.model } : {})
       })
