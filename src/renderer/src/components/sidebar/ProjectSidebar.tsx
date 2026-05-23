@@ -176,11 +176,19 @@ function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNod
     setLoading(true)
     try {
       const result = await pear.auth.login()
-      setAuth(result)
+      setAuth(result.loggedIn ? await pear.auth.status() : result)
     } finally {
       setLoading(false)
     }
   }, [])
+
+  const openAccountSettings = useCallback(() => {
+    openTab({
+      kind: 'account-settings',
+      title: 'Account settings'
+    })
+    setMenuOpen(false)
+  }, [openTab])
 
   const handleLogout = useCallback(async () => {
     await pear.auth.logout()
@@ -240,7 +248,7 @@ function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNod
         <>
           <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
           <div className={`absolute z-50 mb-1 rounded-lg border border-[var(--pear-border)] bg-[var(--pear-bg-surface)] py-1 shadow-lg ${
-            compact ? 'bottom-0 left-full ml-2 w-36' : 'bottom-full left-2 right-2'
+            compact ? 'bottom-0 left-full ml-2 w-44' : 'bottom-full left-2 right-2'
           }`}>
             <button
               type="button"
@@ -462,15 +470,18 @@ function AgentActivityIndicator({ agent }: { agent: Agent }): React.ReactNode {
 }
 
 function ProjectSwitcher({ collapsed = false }: { collapsed?: boolean }): React.ReactNode {
-  const [open, setOpen] = useState(false)
+  const [compactOpen, setCompactOpen] = useState(false)
   const [query, setQuery] = useState('')
   const switcherRef = useRef<HTMLDivElement | null>(null)
   const projects = useProjectStore((s) => s.projects)
   const activeProjectId = useProjectStore((s) => s.activeProjectId)
   const setActiveProject = useProjectStore((s) => s.setActiveProject)
+  const projectSwitcherExpanded = useUIStore((s) => s.projectSwitcherExpanded)
+  const setProjectSwitcherExpanded = useUIStore((s) => s.setProjectSwitcherExpanded)
   const activeTab = useUIStore((s) => s.tabs.find((tab) => tab.id === s.activeTabId))
   const openTab = useUIStore((s) => s.openTab)
   const openDialog = useUIStore((s) => s.openDialog)
+  const open = collapsed ? compactOpen : projectSwitcherExpanded
   const sortedProjects = useMemo(
     () => [...projects].sort((left, right) =>
       left.name.localeCompare(right.name, undefined, { sensitivity: 'base', numeric: true })
@@ -485,27 +496,38 @@ function ProjectSwitcher({ collapsed = false }: { collapsed?: boolean }): React.
   }, [query, sortedProjects])
 
   useEffect(() => {
-    if (projects.length === 0) {
-      setOpen(false)
-      setQuery('')
-    }
+    if (projects.length > 0) return
+
+    setCompactOpen(false)
+    setQuery('')
   }, [projects.length])
 
   useEffect(() => {
-    if (!open) return
+    if (!collapsed || !open) return
 
     function closeOnOutsideClick(event: PointerEvent): void {
       const target = event.target
       if (target instanceof Node && switcherRef.current?.contains(target)) return
-      setOpen(false)
+      setCompactOpen(false)
     }
 
     document.addEventListener('pointerdown', closeOnOutsideClick, true)
     return () => document.removeEventListener('pointerdown', closeOnOutsideClick, true)
-  }, [open])
+  }, [collapsed, open])
+
+  function toggleOpen(): void {
+    const nextOpen = !open
+    if (!nextOpen) setQuery('')
+
+    if (collapsed) {
+      setCompactOpen(nextOpen)
+    } else {
+      setProjectSwitcherExpanded(nextOpen)
+    }
+  }
 
   function selectProject(project: Project): void {
-    setOpen(false)
+    if (collapsed) setCompactOpen(false)
     setQuery('')
     openTab(tabAfterProjectSwitch(project, activeTab))
     setActiveProject(project.id).catch((error) => {
@@ -514,7 +536,7 @@ function ProjectSwitcher({ collapsed = false }: { collapsed?: boolean }): React.
   }
 
   function openProjectSettingsForProject(project: Project): void {
-    setOpen(false)
+    if (collapsed) setCompactOpen(false)
     setQuery('')
     openTab({ kind: 'project-settings', projectId: project.id })
     setActiveProject(project.id).catch((error) => {
@@ -523,7 +545,7 @@ function ProjectSwitcher({ collapsed = false }: { collapsed?: boolean }): React.
   }
 
   function openAddProject(): void {
-    setOpen(false)
+    if (collapsed) setCompactOpen(false)
     setQuery('')
     openDialog('add-project')
   }
@@ -559,7 +581,7 @@ function ProjectSwitcher({ collapsed = false }: { collapsed?: boolean }): React.
   const switcherButton = collapsed ? (
     <button
       type="button"
-      onClick={() => setOpen((value) => !value)}
+      onClick={toggleOpen}
       className={collapsedButtonClass(open)}
       title={`Switch project: ${activeProject.name}`}
       aria-label={`Switch project: ${activeProject.name}`}
@@ -570,7 +592,7 @@ function ProjectSwitcher({ collapsed = false }: { collapsed?: boolean }): React.
   ) : (
     <button
       type="button"
-      onClick={() => setOpen((value) => !value)}
+      onClick={toggleOpen}
       className={`project-switcher-trigger flex h-[52px] w-full items-center gap-2.5 px-5 text-left transition-colors ${
         open ? 'is-open' : ''
       }`}
@@ -592,22 +614,21 @@ function ProjectSwitcher({ collapsed = false }: { collapsed?: boolean }): React.
   )
 
   return (
-    <div ref={switcherRef} className="relative z-50">
+    <div ref={switcherRef} className={collapsed ? 'relative z-50' : 'relative'}>
       {switcherButton}
 
       {open && (
         <div
-          className={`project-switcher-dropdown absolute z-50 overflow-hidden rounded-lg border border-[var(--pear-border)] p-3 ${
-            collapsed
-              ? 'left-[calc(100%+8px)] top-0 w-[300px]'
-              : 'left-0 right-0 top-[calc(100%+8px)]'
-          }`}
+          className={collapsed
+            ? 'project-switcher-dropdown absolute left-[calc(100%+8px)] top-0 z-50 w-[300px] overflow-hidden rounded-lg border border-[var(--pear-border)] p-3'
+            : 'project-switcher-panel overflow-hidden border-b border-[var(--pear-border-subtle)] pb-3 pt-2'
+          }
         >
-          <div className="mb-2 flex items-center gap-2">
+          <div className="mb-2 flex items-center gap-2 px-3">
             <label className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md border border-transparent bg-[var(--pear-bg)] px-2.5 text-[12px] text-[var(--pear-text-secondary)] transition-colors focus-within:border-[#0166D6]">
               <Search size={12} className="shrink-0 text-[var(--pear-text-faint)]" />
               <input
-                autoFocus
+                autoFocus={collapsed}
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder="Filter projects"
@@ -635,7 +656,7 @@ function ProjectSwitcher({ collapsed = false }: { collapsed?: boolean }): React.
             </button>
           </div>
 
-          <div className="max-h-[300px] overflow-y-auto">
+          <div className="max-h-[300px] overflow-y-auto px-3">
             {filteredProjects.length === 0 ? (
               <div className="px-3 py-4 text-xs text-[var(--pear-text-faint)]">No projects match</div>
             ) : (

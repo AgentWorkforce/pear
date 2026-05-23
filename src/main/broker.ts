@@ -16,6 +16,7 @@ import {
 } from '@agent-relay/sdk'
 import { getAccessToken, getApiUrl } from './auth'
 import { assertDirectory } from './path-utils'
+import { createPearBurnSpawnListener } from './burn-spawn-hook'
 import {
   BrokerConnectionFileSchema,
   GeneratedCommitDraftSchema,
@@ -253,13 +254,17 @@ function compactCommitDiff(diff: string): string {
 
 function buildCommitDraftTask(diff: string): string {
   return [
-    'Generate a commit message for the selected git diff below.',
-    'Use only the diff. Do not inspect files, edit files, run commands, or create commits.',
-    'Return exactly one JSON object and no markdown, code fence, commentary, or surrounding text.',
-    'The JSON schema is: {"title":"string","body":"string"}',
-    'Rules:',
-    '- title: imperative Git commit summary, under 72 characters, no trailing period.',
-    '- body: concise commit body, or an empty string if the title is enough.',
+    'Write a Git commit message for the diff below.',
+    'You may read repository files for context, but do not edit files, run git commands, or create commits.',
+    '',
+    'Your FINAL message (and only your final message) must be a single JSON object on its own — no markdown fence, no prose before or after, no code block. Example of the exact output shape:',
+    '{"title":"Fix race in lease renewal","body":"Renewals could fire after shutdown and resurrect a dead client. Guard the timer with the shutdown flag."}',
+    '',
+    'Fields:',
+    '- title: imperative summary of the actual change, under 72 characters, no trailing period. Must describe THIS diff — never literally the word "string".',
+    '- body: short paragraph explaining WHY (intent, constraint, context). Use "" when the title alone is enough. Never literally the word "string".',
+    '',
+    'Focus on intent, not a file-by-file enumeration. Derive title and body from the actual diff content.',
     '',
     'Selected diff:',
     '--- DIFF START ---',
@@ -267,6 +272,7 @@ function buildCommitDraftTask(diff: string): string {
     '--- DIFF END ---'
   ].join('\n')
 }
+
 
 function getJsonObjectCandidates(text: string): string[] {
   const candidates: string[] = []
@@ -835,7 +841,25 @@ export class BrokerManager {
   }
 
   private attachClient(projectId: string, client: AgentRelayClient, win?: BrowserWindow): () => void {
-    return client.onEvent((event: BrokerEvent) => {
+    // Stamp every spawn this session does so burn can attribute Pear sessions
+    // via `burn summary --tags spawner=pear`. The listener returns a SpawnPatch
+    // for Claude (injects --session-id so burn can stamp by exact id), and
+    // falls back to writePendingStamp for other launchers.
+    // `addListener` is typed to expect `(ctx) => void | Promise<void>`, but
+    // `beforeAgentSpawn` handlers are uniquely allowed to return a `SpawnPatch`
+    // — the SDK's internal `runBeforeSpawn` reads each listener's return value
+    // and folds it into the resolved input before POSTing. The public type
+    // signature in @agent-relay/sdk@7.0.0 doesn't carry that exception (a
+    // follow-up minor will add the overload), so cast at the call site here.
+    const burnHandler = createPearBurnSpawnListener({
+      enrich: (ctx) => ({
+        ...(ctx.input.team ? { relay_team: ctx.input.team } : {}),
+        ...(ctx.input.model ? { model_requested: ctx.input.model } : {})
+      })
+    }) as Parameters<typeof client.addListener<'beforeAgentSpawn'>>[1]
+    const unsubBurn = client.addListener('beforeAgentSpawn', burnHandler)
+
+    const unsubEvent = client.onEvent((event: BrokerEvent) => {
       this.publishBrokerEvent(projectId, win, event as unknown as BrokerEventRecordPayload)
 
       if (event.kind === 'agent_spawned' && event.name) {
@@ -865,6 +889,11 @@ export class BrokerManager {
         }
       }
     })
+
+    return () => {
+      unsubBurn()
+      unsubEvent()
+    }
   }
 
   private publishBrokerEvent(
@@ -1037,6 +1066,8 @@ export class BrokerManager {
       ...(model ? { model } : {})
     })
 
+    // data callback — capture streaming PTY chunks as the agent works, so
+    // we have the full transcript to scan for the final JSON object.
     const chunks: string[] = []
     const unsubscribe = session.client.onEvent((event) => {
       if (event.kind === 'worker_stream' && event.name === spawned.name) {
@@ -1050,12 +1081,8 @@ export class BrokerManager {
       return parseGeneratedCommitDraft(output)
     } finally {
       unsubscribe()
-      try {
-        await session.client.release(spawned.name, 'commit draft generated')
-      } catch (err) {
-        console.warn(`[broker] Failed to release commit draft agent ${spawned.name}:`, err)
-      }
-      this.forgetAgentProject(spawned.name, session.projectId)
+      // Leave the spawned commit-draft agent running so the user can inspect
+      // or reuse it. Release is up to the renderer (or explicit cleanup).
     }
   }
 

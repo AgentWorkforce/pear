@@ -1788,6 +1788,11 @@ export function DiffPane(): React.ReactNode {
   const selectCommitFile = useGitStore((s) => s.selectCommitFile)
   const commitSelection = useGitStore((s) => s.commitSelection)
   const generateCommitMessage = useGitStore((s) => s.generateCommitMessage)
+  const commitDraftStatus = useGitStore((s) => (root ? s.commitDraftStatusByRoot[root.path] : undefined))
+  const commitDraftError = useGitStore((s) => (root ? s.commitDraftErrorByRoot[root.path] : undefined))
+  const pendingCommitDraft = useGitStore((s) => (root ? s.commitDraftByRoot[root.path] : undefined))
+  const consumeCommitDraft = useGitStore((s) => s.consumeCommitDraft)
+  const clearCommitDraftError = useGitStore((s) => s.clearCommitDraftError)
   const fetchStatus = useGitStore((s) => s.fetchStatus)
   const fetchSummary = useGitStore((s) => s.fetchSummary)
   const fetchHistory = useGitStore((s) => s.fetchHistory)
@@ -2091,6 +2096,24 @@ export function DiffPane(): React.ReactNode {
       changedFilesListRef.current?.focus({ preventScroll: true })
     })
   }, [activeTab, hasActiveGitRoot, root?.path])
+
+  // Drain any commit draft that arrived while DiffPane was unmounted (e.g.
+  // user clicked Generate, switched tabs, then came back). The store holds
+  // the draft until it's consumed here.
+  useEffect(() => {
+    if (!root || !pendingCommitDraft) return
+    const draft = consumeCommitDraft(root.path)
+    if (!draft) return
+    setTitle(draft.title)
+    setBody(draft.body)
+    setMessage('Generated commit message.')
+  }, [root, pendingCommitDraft, consumeCommitDraft])
+
+  useEffect(() => {
+    if (!root || !commitDraftError) return
+    setMessage(commitDraftError)
+    clearCommitDraftError(root.path)
+  }, [root, commitDraftError, clearCommitDraftError])
 
   useEffect(() => {
     if (activeTab !== 'history' || !hasActiveGitRoot) return
@@ -2487,15 +2510,15 @@ export function DiffPane(): React.ReactNode {
   async function handleGenerate(): Promise<void> {
     setMessage(null)
     try {
-      const draft = await generateCommitMessage(root.path, {
+      await generateCommitMessage(root.path, {
         wholeFiles: selectedFileList,
         patch: selectedPatchInput()
       })
-      setTitle(draft.title)
-      setBody(draft.body)
-      setMessage('Generated commit message.')
-    } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Unable to generate commit message')
+      // The draft is consumed by the useEffect below — works even if the
+      // user navigated away from this tab while the agent was running, since
+      // the draft sits in the store until DiffPane mounts and drains it.
+    } catch {
+      // Error is surfaced via the store; the effect below shows it.
     }
   }
 
@@ -2885,12 +2908,12 @@ export function DiffPane(): React.ReactNode {
                   <button
                     type="button"
                     onClick={handleGenerate}
-                    disabled={selectedCommitFileCount === 0 || actionLoading}
+                    disabled={selectedCommitFileCount === 0 || commitDraftStatus === 'generating'}
                     className="flex h-7 w-7 items-center justify-center rounded-md text-[var(--pear-text-secondary)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)] disabled:opacity-40"
                     title="Generate commit message"
                     aria-label="Generate commit message"
                   >
-                    {actionLoading ? <Loader2 size={15} className="animate-spin" /> : <WandSparkles size={16} />}
+                    {commitDraftStatus === 'generating' ? <Loader2 size={15} className="animate-spin" /> : <WandSparkles size={16} />}
                   </button>
                 </div>
                 {coAuthorPanelVisible && (

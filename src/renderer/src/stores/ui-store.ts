@@ -10,6 +10,7 @@ export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'acc
 export type DialogType = 'add-project' | 'spawn-agent' | 'spawn-local-agent' | 'cloud-agent' | 'add-channel' | 'command-menu' | null
 const ThemeSchema = z.enum(['dark', 'light'])
 const TerminalLayoutSchema = z.enum(['tabs', 'horizontal-split', 'graph'])
+const BooleanPreferenceSchema = z.enum(['true', 'false']).transform((value) => value === 'true')
 export type Theme = z.infer<typeof ThemeSchema>
 export type TerminalLayout = z.infer<typeof TerminalLayoutSchema>
 export type AppTabKind = 'agents' | 'channel' | 'dm' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'ai-hist'
@@ -40,6 +41,7 @@ interface UIState {
   recentTabs: RecentTab[]
   activeDialog: DialogType
   sidebarCollapsed: boolean
+  projectSwitcherExpanded: boolean
   theme: Theme
   terminalLayout: TerminalLayout
 
@@ -53,6 +55,8 @@ interface UIState {
   openDialog: (dialog: DialogType) => void
   closeDialog: () => void
   toggleSidebar: () => void
+  setProjectSwitcherExpanded: (expanded: boolean) => void
+  toggleProjectSwitcher: () => void
   setTheme: (theme: Theme) => void
   toggleTheme: () => void
   setTerminalLayout: (layout: TerminalLayout) => void
@@ -64,7 +68,7 @@ function applyTheme(theme: Theme): void {
   localStorage.setItem('pear-theme', theme)
 }
 
-function readStored<T>(key: string, schema: z.ZodType<T>, fallback: T): T {
+function readStored<T>(key: string, schema: z.ZodType<T, z.ZodTypeDef, unknown>, fallback: T): T {
   if (typeof localStorage === 'undefined') return fallback
   const parsed = schema.safeParse(localStorage.getItem(key))
   return parsed.success ? parsed.data : fallback
@@ -72,6 +76,7 @@ function readStored<T>(key: string, schema: z.ZodType<T>, fallback: T): T {
 
 const initialTheme = readStored('pear-theme', ThemeSchema, 'dark')
 const initialTerminalLayout = readStored('pear-terminal-layout', TerminalLayoutSchema, 'horizontal-split')
+const initialProjectSwitcherExpanded = readStored('pear-project-switcher-expanded', BooleanPreferenceSchema, false)
 
 // Apply on load
 if (typeof document !== 'undefined') {
@@ -193,6 +198,7 @@ export const useUIStore = create<UIState>((set, get) => ({
   recentTabs: [{ ...initialTab, viewedAt: Date.now() }],
   activeDialog: null,
   sidebarCollapsed: false,
+  projectSwitcherExpanded: initialProjectSwitcherExpanded,
   theme: initialTheme,
   terminalLayout: initialTerminalLayout,
 
@@ -340,6 +346,15 @@ export const useUIStore = create<UIState>((set, get) => ({
   openDialog: (dialog) => set({ activeDialog: dialog }),
   closeDialog: () => set({ activeDialog: null }),
   toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
+  setProjectSwitcherExpanded: (expanded) => {
+    localStorage.setItem('pear-project-switcher-expanded', String(expanded))
+    set({ projectSwitcherExpanded: expanded })
+  },
+  toggleProjectSwitcher: () => {
+    const next = !get().projectSwitcherExpanded
+    localStorage.setItem('pear-project-switcher-expanded', String(next))
+    set({ projectSwitcherExpanded: next })
+  },
   setTheme: (theme) => {
     applyTheme(theme)
     set({ theme })

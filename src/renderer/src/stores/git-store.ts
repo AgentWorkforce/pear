@@ -25,6 +25,8 @@ export interface ProjectGitSummary {
   rootPathKey: string
 }
 
+export type CommitDraftStatus = 'idle' | 'generating' | 'ready' | 'error'
+
 interface GitState {
   files: FileStatus[]
   projectFiles: ProjectFileStatus[]
@@ -41,6 +43,13 @@ interface GitState {
   actionLoading: boolean
   pollInterval: ReturnType<typeof setInterval> | null
 
+  // Commit-draft generation state, keyed by rootPath, so a draft kicked off
+  // from the file-changes tab still lands here if the user navigates away
+  // before the agent submits its result.
+  commitDraftByRoot: Record<string, GitCommitDraft | undefined>
+  commitDraftStatusByRoot: Record<string, CommitDraftStatus | undefined>
+  commitDraftErrorByRoot: Record<string, string | undefined>
+
   fetchStatus: (path: string) => Promise<void>
   fetchSummary: (path: string) => Promise<void>
   fetchProjectStatus: (paths: string[]) => Promise<void>
@@ -53,6 +62,8 @@ interface GitState {
     rootPath: string,
     input: { wholeFiles: string[]; patch?: string }
   ) => Promise<GitCommitDraft>
+  consumeCommitDraft: (rootPath: string) => GitCommitDraft | null
+  clearCommitDraftError: (rootPath: string) => void
   selectFile: (file: string | null, rootPath: string) => void
   startPolling: (rootPath: string | null, projectRootPaths?: string[]) => void
   stopPolling: () => void
@@ -127,6 +138,9 @@ export const useGitStore = create<GitState>((set, get) => ({
   historyLoading: false,
   actionLoading: false,
   pollInterval: null,
+  commitDraftByRoot: {},
+  commitDraftStatusByRoot: {},
+  commitDraftErrorByRoot: {},
 
   fetchStatus: async (path) => {
     if (statusRequests.has(path)) return
@@ -293,15 +307,51 @@ export const useGitStore = create<GitState>((set, get) => ({
   },
 
   generateCommitMessage: async (rootPath, input) => {
-    set({ actionLoading: true })
+    set((state) => ({
+      actionLoading: true,
+      commitDraftStatusByRoot: { ...state.commitDraftStatusByRoot, [rootPath]: 'generating' },
+      commitDraftErrorByRoot: { ...state.commitDraftErrorByRoot, [rootPath]: undefined }
+    }))
     try {
       const result = await pear.git.generateCommitMessage(rootPath, input)
-      set({ actionLoading: false })
+      set((state) => ({
+        actionLoading: false,
+        commitDraftByRoot: { ...state.commitDraftByRoot, [rootPath]: result },
+        commitDraftStatusByRoot: { ...state.commitDraftStatusByRoot, [rootPath]: 'ready' }
+      }))
       return result
     } catch (error) {
-      set({ actionLoading: false })
+      const message = error instanceof Error ? error.message : 'Unable to generate commit message'
+      set((state) => ({
+        actionLoading: false,
+        commitDraftStatusByRoot: { ...state.commitDraftStatusByRoot, [rootPath]: 'error' },
+        commitDraftErrorByRoot: { ...state.commitDraftErrorByRoot, [rootPath]: message }
+      }))
       throw error
     }
+  },
+
+  consumeCommitDraft: (rootPath) => {
+    const draft = get().commitDraftByRoot[rootPath]
+    if (!draft) return null
+    set((state) => {
+      const nextDrafts = { ...state.commitDraftByRoot }
+      delete nextDrafts[rootPath]
+      const nextStatus = { ...state.commitDraftStatusByRoot }
+      delete nextStatus[rootPath]
+      return { commitDraftByRoot: nextDrafts, commitDraftStatusByRoot: nextStatus }
+    })
+    return draft
+  },
+
+  clearCommitDraftError: (rootPath) => {
+    set((state) => {
+      const nextErrors = { ...state.commitDraftErrorByRoot }
+      delete nextErrors[rootPath]
+      const nextStatus = { ...state.commitDraftStatusByRoot }
+      if (nextStatus[rootPath] === 'error') delete nextStatus[rootPath]
+      return { commitDraftErrorByRoot: nextErrors, commitDraftStatusByRoot: nextStatus }
+    })
   },
 
   selectFile: (file, rootPath) => {
