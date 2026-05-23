@@ -4,7 +4,8 @@ import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { pear, type TerminalAttachMode } from '@/lib/ipc'
-import { useAgentStore } from '@/stores/agent-store'
+import { useAgentStore, getAgentKey } from '@/stores/agent-store'
+import { getPtyChunks, subscribePtyBuffer } from '@/stores/pty-buffer-store'
 import { useUIStore, type Theme } from '@/stores/ui-store'
 
 const DARK_THEME = {
@@ -218,8 +219,7 @@ export function useTerminal(
     const subscribeToBuffer = (targetTerm: Terminal): void => {
       if (unsubStore) return
 
-      const writeFromBuffer = (ptyBuffer: string[] | undefined): void => {
-        if (!ptyBuffer) return
+      const writeFromBuffer = (ptyBuffer: string[]): void => {
         if (ptyBuffer.length < writtenChunksRef.current) {
           // Buffer was trimmed past our cursor; replay everything we still have.
           writtenChunksRef.current = 0
@@ -232,13 +232,9 @@ export function useTerminal(
         writtenChunksRef.current = ptyBuffer.length
       }
 
-      unsubStore = useAgentStore.subscribe(
-        (state) => state.agents.find((a) => a.name === agentName && a.projectId === projectId)?.ptyBuffer,
-        writeFromBuffer
-      )
-      writeFromBuffer(
-        useAgentStore.getState().agents.find((a) => a.name === agentName && a.projectId === projectId)?.ptyBuffer
-      )
+      const bufferKey = getAgentKey(projectId, agentName!)
+      unsubStore = subscribePtyBuffer(bufferKey, writeFromBuffer)
+      writeFromBuffer(getPtyChunks(bufferKey))
     }
 
     const attachAndSeedTerminal = async (

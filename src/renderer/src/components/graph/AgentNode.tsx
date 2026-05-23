@@ -1,8 +1,10 @@
 import type React from 'react'
+import { useEffect, useState } from 'react'
 import { Handle, Position, type NodeProps } from '@xyflow/react'
 import { Bot, GitBranch } from 'lucide-react'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
-import type { Agent } from '@/stores/agent-store'
+import { getAgentKeyForAgent, type Agent } from '@/stores/agent-store'
+import { getPtyChunks, subscribePtyBuffer } from '@/stores/pty-buffer-store'
 
 interface AgentNodeData {
   agent: Agent
@@ -22,8 +24,8 @@ function cleanTerminalText(value: string): string {
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
 }
 
-function getTerminalPreviewLines(agent: Agent): string[] {
-  const text = cleanTerminalText(agent.ptyBuffer.slice(-80).join(''))
+function getTerminalPreviewLines(chunks: string[]): string[] {
+  const text = cleanTerminalText(chunks.slice(-80).join(''))
   const lines = text
     .split('\n')
     .map((line) => line.replace(/\t/g, '  '))
@@ -33,11 +35,22 @@ function getTerminalPreviewLines(agent: Agent): string[] {
   return lines.length > 0 ? lines : ['No terminal output yet']
 }
 
+function useAgentPreviewChunks(agent: Agent): string[] {
+  const key = getAgentKeyForAgent(agent)
+  const [chunks, setChunks] = useState<string[]>(() => getPtyChunks(key))
+  useEffect(() => {
+    setChunks(getPtyChunks(key))
+    return subscribePtyBuffer(key, (next) => setChunks(next))
+  }, [key])
+  return chunks
+}
+
 export function AgentNode({ data }: NodeProps): React.ReactNode {
   const { agent, active } = data as AgentNodeData
   const statusColor =
     agent.status === 'running' ? 'var(--pear-accent-bright)' : 'var(--pear-text-faint)'
-  const previewLines = getTerminalPreviewLines(agent)
+  const chunks = useAgentPreviewChunks(agent)
+  const previewLines = getTerminalPreviewLines(chunks)
 
   return (
     <>

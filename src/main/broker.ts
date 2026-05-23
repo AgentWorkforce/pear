@@ -66,14 +66,6 @@ function resolveBundledBrokerBinary(): string {
 
 type TerminalAttachMode = 'view' | 'drive' | 'passthrough'
 
-interface QueuedInput {
-  projectId: string
-  name: string
-  data: string
-  timer: NodeJS.Timeout | null
-  flushing: boolean
-}
-
 export interface CloudAgentSandboxHandle {
   sandboxId: string
   execUrl: string
@@ -490,7 +482,6 @@ export class BrokerManager {
   private sessions = new Map<string, BrokerSession>()
   private startPromises = new Map<string, Promise<void>>()
   private agentProjects = new Map<string, Set<string>>()
-  private inputQueues = new Map<string, QueuedInput>()
   private inputStreams = new Map<string, PtyInputStream>()
   private inputStreamFallbacks = new Set<string>()
   private eventObservers = new Set<BrokerEventObserver>()
@@ -1224,71 +1215,19 @@ export class BrokerManager {
     return session.client.sendInput(trimmedName, data)
   }
 
-  queueInput(projectId: string | undefined, name: string, data: string): void {
+  // Fire-and-forget input for interactive typing. We don't await the PTY
+  // ack because we don't need backpressure for human keystrokes — and the
+  // extra round-trip latency shows up as a sticky-typing feel. Errors get
+  // logged and the broker's existing stream-fallback logic in sendInput
+  // takes care of reopening a broken stream.
+  sendInputFireAndForget(projectId: string | undefined, name: string, data: string): void {
     const trimmedName = typeof name === 'string' ? name.trim() : ''
     if (!trimmedName || typeof data !== 'string' || data.length === 0) {
       return
     }
-
-    const session = this.getSessionForAgent(trimmedName, projectId)
-    const key = `${session.projectId}:${trimmedName}`
-    let queue = this.inputQueues.get(key)
-    if (!queue) {
-      queue = { projectId: session.projectId, name: trimmedName, data: '', timer: null, flushing: false }
-      this.inputQueues.set(key, queue)
-    }
-
-    queue.data += data
-    this.scheduleInputFlush(key)
-  }
-
-  private scheduleInputFlush(key: string): void {
-    const queue = this.inputQueues.get(key)
-    if (!queue || queue.timer || queue.flushing) {
-      return
-    }
-
-    // For a single buffered byte (the typical typing case), kick the flush off
-    // synchronously — even setTimeout(0) clamps to 1ms in Node. We only fall
-    // back to the 4ms coalescing window once ≥2 bytes have stacked up, which
-    // implies bursty input where merging is worthwhile.
-    if (queue.data.length < 2) {
-      void this.flushQueuedInput(key)
-      return
-    }
-
-    queue.timer = setTimeout(() => {
-      const currentQueue = this.inputQueues.get(key)
-      if (currentQueue) {
-        currentQueue.timer = null
-      }
-      void this.flushQueuedInput(key)
-    }, 4)
-  }
-
-  private async flushQueuedInput(key: string): Promise<void> {
-    const queue = this.inputQueues.get(key)
-    if (!queue || queue.flushing) {
-      return
-    }
-
-    queue.flushing = true
-    try {
-      while (queue.data.length > 0) {
-        const data = queue.data
-        queue.data = ''
-        await this.sendInput(queue.projectId, queue.name, data)
-      }
-    } catch (err) {
-      console.error(`[broker] Failed to send queued input for ${queue.name}:`, err)
-    } finally {
-      queue.flushing = false
-      if (queue.data.length > 0) {
-        this.scheduleInputFlush(key)
-      } else if (!queue.timer) {
-        this.inputQueues.delete(key)
-      }
-    }
+    this.sendInput(projectId, trimmedName, data).catch((err) => {
+      console.warn(`[broker] sendInputFireAndForget failed for ${trimmedName}:`, err)
+    })
   }
 
   async setTerminalMode(
@@ -1558,13 +1497,6 @@ export class BrokerManager {
   async shutdown(projectId?: string): Promise<void> {
     const targetProjectIds = projectId ? [projectId] : Array.from(this.sessions.keys())
     for (const targetProjectId of targetProjectIds) {
-      for (const [key, queue] of Array.from(this.inputQueues.entries())) {
-        if (queue.projectId !== targetProjectId) continue
-        if (queue.timer) {
-          clearTimeout(queue.timer)
-        }
-        this.inputQueues.delete(key)
-      }
       this.closeInputStreamsForProject(targetProjectId)
 
       const session = this.sessions.get(targetProjectId)

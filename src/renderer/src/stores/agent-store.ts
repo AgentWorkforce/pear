@@ -14,6 +14,7 @@ import {
   normalizeEventTimestamp
 } from '@shared/lib/broker-events'
 import { useTypingStore } from '@/stores/typing-store'
+import { appendPtyChunk, clearPtyBuffer, getPtyChunks } from '@/stores/pty-buffer-store'
 
 export interface Agent {
   name: string
@@ -28,7 +29,6 @@ export interface Agent {
   parent?: string
   channels?: string[]
   terminalMode: TerminalAttachMode
-  ptyBuffer: string[]
   pendingDeliveryIds: string[]
 }
 
@@ -75,7 +75,6 @@ export interface BrokerErrorEntry {
   projectId?: string
 }
 
-const MAX_PTY_BUFFER_CHUNKS = 10_000
 const MAX_BROKER_ERRORS = 12
 const MAX_BROKER_EVENTS = 3_000
 const BROKER_EVENT_RETENTION_MS = 12 * 60 * 60 * 1_000
@@ -408,7 +407,6 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
               rootPath,
               channels,
               terminalMode: options?.terminalMode || 'passthrough',
-              ptyBuffer: [],
               pendingDeliveryIds: []
             }
           ]
@@ -468,7 +466,6 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
           channels,
           parent: liveAgent.parent,
           terminalMode: terminalModeFromInboundDeliveryMode(liveAgent.inboundDeliveryMode) || 'passthrough',
-          ptyBuffer: [],
           pendingDeliveryIds: []
         })
       }
@@ -590,7 +587,6 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
                   rootPath,
                   parent: event.parent,
                   terminalMode: 'passthrough',
-                  ptyBuffer: [],
                   pendingDeliveryIds: []
                 }
               ],
@@ -650,6 +646,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
         const needNewActive = state.activeAgentKey === removedKey
         const nextActiveAgent = remaining.find((a) => a.status === 'running') || remaining[0]
         useTypingStore.getState().clear(removedKey)
+        clearPtyBuffer(removedKey)
         return {
           agents: remaining,
           activeAgentKey: needNewActive && nextActiveAgent
@@ -660,25 +657,24 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
         }
       })
     } else if (kind === 'worker_stream' && event.name && event.chunk) {
-      useTypingStore.getState().noteActivity(getAgentKey(event.projectId, event.name))
-      set((state) => ({
-        agents: state.agents.map((a) => {
-          if (!matchesAgent(a, event.projectId, event.name!)) return a
-          const buffer = [...a.ptyBuffer, event.chunk!]
-          const trimmedBuffer = buffer.length > MAX_PTY_BUFFER_CHUNKS
-            ? buffer.slice(buffer.length - MAX_PTY_BUFFER_CHUNKS)
-            : buffer
-          if (a.activity === 'active' && a.currentState === 'working') {
-            return { ...a, ptyBuffer: trimmedBuffer }
-          }
-          return {
-            ...a,
-            activity: 'active',
-            currentState: 'working',
-            ptyBuffer: trimmedBuffer
-          }
-        })
-      }))
+      const agentKey = getAgentKey(event.projectId, event.name)
+      // Stream the chunk into the per-agent PTY buffer (lives outside zustand
+      // so consumers can subscribe by key without waking every component that
+      // reads the agents array). Only touch zustand state when the agent's
+      // activity actually needs to flip — otherwise typing echoes would rebuild
+      // the agents array on every keystroke.
+      appendPtyChunk(agentKey, event.chunk)
+      useTypingStore.getState().noteActivity(agentKey)
+      const target = get().agents.find((a) => matchesAgent(a, event.projectId, event.name!))
+      if (target && (target.activity !== 'active' || target.currentState !== 'working')) {
+        set((state) => ({
+          agents: state.agents.map((a) =>
+            matchesAgent(a, event.projectId, event.name!)
+              ? { ...a, activity: 'active', currentState: 'working' }
+              : a
+          )
+        }))
+      }
     } else if (kind === 'delivery_queued' && event.name) {
       set((state) => ({
         agents: state.agents.map((a) =>
@@ -1001,7 +997,5 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
       brokerEvents: []
     }),
 
-  getAgentBuffer: (projectId, name) => {
-    return get().agents.find((a) => matchesAgent(a, projectId, name))?.ptyBuffer || []
-  }
+  getAgentBuffer: (projectId, name) => getPtyChunks(getAgentKey(projectId, name))
 })))
