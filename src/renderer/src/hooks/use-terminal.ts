@@ -6,6 +6,7 @@ import { WebglAddon } from '@xterm/addon-webgl'
 import { pear, type TerminalAttachMode } from '@/lib/ipc'
 import { useAgentStore, getAgentKey } from '@/stores/agent-store'
 import { getPtyChunks, subscribePtyBuffer } from '@/stores/pty-buffer-store'
+import { recordChunkEchoed, recordKeystrokeSent } from '@/lib/typing-trace'
 import { useUIStore, type Theme } from '@/stores/ui-store'
 
 const DARK_THEME = {
@@ -179,6 +180,7 @@ export function useTerminal(
 
     const sendInput = (data: string): void => {
       if (terminalModeRef.current === 'view') return
+      recordKeystrokeSent(data)
       pear.broker.sendInputFast(projectId, agentName!, data)
     }
 
@@ -227,6 +229,7 @@ export function useTerminal(
         const newChunks = ptyBuffer.slice(writtenChunksRef.current)
         if (newChunks.length === 0) return
         for (const chunk of newChunks) {
+          recordChunkEchoed(chunk)
           targetTerm.write(chunk)
         }
         writtenChunksRef.current = ptyBuffer.length

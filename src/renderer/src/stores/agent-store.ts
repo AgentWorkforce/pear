@@ -14,7 +14,7 @@ import {
   normalizeEventTimestamp
 } from '@shared/lib/broker-events'
 import { useTypingStore } from '@/stores/typing-store'
-import { appendPtyChunk, clearPtyBuffer, getPtyChunks } from '@/stores/pty-buffer-store'
+import { clearPtyBuffer, getPtyChunks } from '@/stores/pty-buffer-store'
 
 export interface Agent {
   name: string
@@ -321,6 +321,7 @@ interface AgentState {
   brokerEvents: BrokerEventRecord[]
 
   setActiveAgentKey: (key: string | null) => void
+  markAgentActive: (projectId: string | undefined, name: string) => void
   setAgentTerminalMode: (projectId: string | undefined, name: string, mode: TerminalAttachMode) => void
   trackSpawnedAgent: (
     name: string,
@@ -362,6 +363,22 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
   brokerEvents: [],
 
   setActiveAgentKey: (key) => set({ activeAgentKey: key }),
+
+  // Used by the PTY-chunk fast path to flip an agent into active/working on
+  // the first chunk after idle, without sending a full handleBrokerEvent
+  // through the regular pipeline.
+  markAgentActive: (projectId, name) => {
+    const agent = get().agents.find((a) => matchesAgent(a, projectId, name))
+    if (!agent) return
+    if (agent.activity === 'active' && agent.currentState === 'working') return
+    set((state) => ({
+      agents: state.agents.map((a) =>
+        matchesAgent(a, projectId, name)
+          ? { ...a, activity: 'active', currentState: 'working' }
+          : a
+      )
+    }))
+  },
 
   setAgentTerminalMode: (projectId, name, mode) => {
     set((state) => ({
@@ -656,25 +673,9 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
               : state.activeAgentKey
         }
       })
-    } else if (kind === 'worker_stream' && event.name && event.chunk) {
-      const agentKey = getAgentKey(event.projectId, event.name)
-      // Stream the chunk into the per-agent PTY buffer (lives outside zustand
-      // so consumers can subscribe by key without waking every component that
-      // reads the agents array). Only touch zustand state when the agent's
-      // activity actually needs to flip — otherwise typing echoes would rebuild
-      // the agents array on every keystroke.
-      appendPtyChunk(agentKey, event.chunk)
-      useTypingStore.getState().noteActivity(agentKey)
-      const target = get().agents.find((a) => matchesAgent(a, event.projectId, event.name!))
-      if (target && (target.activity !== 'active' || target.currentState !== 'working')) {
-        set((state) => ({
-          agents: state.agents.map((a) =>
-            matchesAgent(a, event.projectId, event.name!)
-              ? { ...a, activity: 'active', currentState: 'working' }
-              : a
-          )
-        }))
-      }
+    } else if (kind === 'worker_stream') {
+      // worker_stream is delivered out-of-band via broker:pty-chunk for typing
+      // latency reasons; nothing to do here.
     } else if (kind === 'delivery_queued' && event.name) {
       set((state) => ({
         agents: state.agents.map((a) =>

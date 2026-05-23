@@ -1,7 +1,9 @@
 import { useCallback, useEffect } from 'react'
 import { pear, type BrokerListAgent } from '@/lib/ipc'
-import { getAgentKeyForAgent, useAgentStore } from '@/stores/agent-store'
+import { getAgentKey, getAgentKeyForAgent, useAgentStore } from '@/stores/agent-store'
+import { appendPtyChunk } from '@/stores/pty-buffer-store'
 import { useProjectStore } from '@/stores/project-store'
+import { useTypingStore } from '@/stores/typing-store'
 import { useUIStore } from '@/stores/ui-store'
 
 type BrokerEventLike = Record<string, unknown> & {
@@ -58,12 +60,7 @@ export function useBrokerEvents(): void {
   useEffect(() => {
     const unsubEvent = pear.broker.onEvent((event) => {
       const brokerEvent = event as Parameters<typeof handleBrokerEvent>[0] & BrokerEventLike
-      // worker_stream is high-volume (one per PTY chunk) and never shown in the
-      // broker events log. Skip the record-into-history work entirely so typing
-      // latency isn't paying for an O(n log n) sort per character.
-      if (brokerEvent.kind !== 'worker_stream') {
-        recordBrokerEvent(brokerEvent)
-      }
+      recordBrokerEvent(brokerEvent)
       handleBrokerEvent(brokerEvent)
 
       if (brokerEvent.kind === 'channel_subscribed' || brokerEvent.kind === 'agent_spawned') {
@@ -72,6 +69,15 @@ export function useBrokerEvents(): void {
       if (brokerEvent.kind && CHANNEL_SNAPSHOT_EVENT_KINDS.has(brokerEvent.kind)) {
         void syncBrokerSnapshot(brokerEvent.projectId)
       }
+    })
+
+    // PTY chunks ride a dedicated lightweight channel so per-character typing
+    // doesn't pay for the broker:event metadata spread / structured clone.
+    const unsubPtyChunk = pear.broker.onPtyChunk((projectId, name, chunk) => {
+      const key = getAgentKey(projectId, name)
+      appendPtyChunk(key, chunk)
+      useTypingStore.getState().noteActivity(key)
+      useAgentStore.getState().markAgentActive(projectId, name)
     })
 
     const unsubStatus = pear.broker.onStatus((status) => {
@@ -104,6 +110,7 @@ export function useBrokerEvents(): void {
 
     return () => {
       unsubEvent()
+      unsubPtyChunk()
       unsubStatus()
       unsubNewWs()
       unsubSpawn()
