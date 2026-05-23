@@ -523,10 +523,10 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
       if (state.brokerEvents.some((candidate) => candidate.id === entry.id)) {
         return {}
       }
+      // Broker events arrive in order, so append; BrokerDetailsPage sorts at
+      // display time and we don't want to pay O(n log n) on every event.
       return {
-        brokerEvents: pruneBrokerEvents(
-          [...state.brokerEvents, entry].sort((left, right) => left.timestamp - right.timestamp)
-        )
+        brokerEvents: pruneBrokerEvents([...state.brokerEvents, entry])
       }
     })
   },

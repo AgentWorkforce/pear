@@ -40,10 +40,16 @@ function scheduleExpiry(
   expiryTimers.set(key, timer as unknown as number)
 }
 
-export const useTypingStore = create<TypingState>((set) => ({
+export const useTypingStore = create<TypingState>((set, get) => ({
   entries: {},
 
   noteActivity: (key, now = Date.now()) => {
+    // Bursty PTY output can produce 100+ chunks/sec; only refresh the typing
+    // entry once per second so we don't pay for a state rebuild + timer
+    // reschedule per character.
+    const existing = get().entries[key]
+    if (existing && now - existing.lastActivityAtMs < 1_000) return
+
     const typingUntilMs = now + TYPING_ACTIVITY_WINDOW_MS
     set((state) => ({
       entries: { ...state.entries, [key]: { lastActivityAtMs: now, typingUntilMs } }
