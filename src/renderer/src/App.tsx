@@ -21,6 +21,9 @@ import { useUIStore } from '@/stores/ui-store'
 import { useBrokerEvents } from '@/hooks/use-broker-events'
 import { useGitStatus } from '@/hooks/use-git-status'
 import { useAgentStore } from '@/stores/agent-store'
+import { initTypingTrace } from '@/lib/typing-trace'
+
+initTypingTrace()
 
 export default function App(): React.ReactNode {
   const activeDialog = useUIStore((s) => s.activeDialog)

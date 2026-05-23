@@ -851,6 +851,28 @@ export class BrokerManager {
     const unsubBurn = client.addListener('beforeAgentSpawn', burnHandler)
 
     const unsubEvent = client.onEvent((event: BrokerEvent) => {
+      // Fast path for PTY chunks: ship just (projectId, name, chunk) over a
+      // dedicated channel so typing latency doesn't pay for compactBrokerEvent,
+      // the broker:event metadata spread, or pushing into eventHistory per
+      // character. Activity bookkeeping (rememberAgentProject + cloud sandbox
+      // observers) still runs.
+      if (
+        event.kind === 'worker_stream' &&
+        'name' in event && typeof event.name === 'string' &&
+        'chunk' in event && typeof event.chunk === 'string'
+      ) {
+        if (win && !win.isDestroyed()) {
+          win.webContents.send('broker:pty-chunk', projectId, event.name, event.chunk)
+        }
+        this.rememberAgentProject(event.name, projectId)
+        if (this.sessions.get(projectId)?.cloudSandboxId) {
+          for (const observer of Array.from(this.eventObservers)) {
+            observer(projectId, event)
+          }
+        }
+        return
+      }
+
       this.publishBrokerEvent(projectId, win, event as unknown as BrokerEventRecordPayload)
 
       if (event.kind === 'agent_spawned' && event.name) {

@@ -455,6 +455,7 @@ export interface PearAPI {
     listEvents: () => Promise<BrokerEventRecord[]>
     shutdown: () => Promise<void>
     onEvent: (callback: (event: unknown) => void) => () => void
+    onPtyChunk: (callback: (projectId: string, name: string, chunk: string) => void) => () => void
     onStatus: (callback: (status: { projectId?: string; status: string; error?: string }) => void) => () => void
   }
   git: {

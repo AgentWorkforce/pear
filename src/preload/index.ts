@@ -123,6 +123,12 @@ const api = {
     listEvents: () => invoke<unknown[]>('broker:list-events'),
     shutdown: () => invoke<void>('broker:shutdown'),
     onEvent: (callback: (event: unknown) => void) => subscribe<unknown>('broker:event', callback),
+    onPtyChunk: (callback: (projectId: string, name: string, chunk: string) => void) => {
+      const handler = (_: unknown, projectId: string, name: string, chunk: string): void =>
+        callback(projectId, name, chunk)
+      ipcRenderer.on('broker:pty-chunk', handler)
+      return () => ipcRenderer.removeListener('broker:pty-chunk', handler)
+    },
     onStatus: (callback: (status: { projectId?: string; status: string; error?: string }) => void) =>
       subscribe<{ projectId?: string; status: string; error?: string }>('broker:status', callback)
   },
