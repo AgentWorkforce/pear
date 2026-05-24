@@ -210,10 +210,10 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', async () => {
-  await shutdownAppOnce()
+  await shutdownBrokerOnce()
   if (process.platform !== 'darwin') app.quit()
 })
 
 app.on('before-quit', async () => {
-  await shutdownAppOnce()
+  await shutdownBrokerOnce()
 })
