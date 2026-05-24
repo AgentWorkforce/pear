@@ -872,6 +872,21 @@ export class BrokerManager {
     win: BrowserWindow | undefined,
     event: BrokerEventRecordPayload
   ): BrokerEventRecord {
+    // Raw PTY output (worker_stream) is the highest-volume event by far. It is
+    // streamed on a dedicated channel straight to the renderer's terminal
+    // buffer and deliberately kept out of the broker event history/timeline,
+    // which is reserved for control-plane events. Recording every chunk here
+    // (and shipping it as a broker:event) used to saturate the renderer.
+    const eventRecord = event as Record<string, unknown>
+    if (eventRecord.kind === 'worker_stream') {
+      const name = typeof eventRecord.name === 'string' ? eventRecord.name : undefined
+      const chunk = typeof eventRecord.chunk === 'string' ? eventRecord.chunk : undefined
+      if (name && chunk && win && !win.isDestroyed()) {
+        win.webContents.send('broker:pty', { projectId, name, chunk })
+      }
+      return this.buildBrokerEventRecord(projectId, event)
+    }
+
     const record = this.recordBrokerEvent(projectId, event)
     if (win && !win.isDestroyed()) {
       win.webContents.send('broker:event', {
@@ -884,16 +899,19 @@ export class BrokerManager {
     return record
   }
 
-  private recordBrokerEvent(projectId: string, event: BrokerEventRecordPayload): BrokerEventRecord {
+  private buildBrokerEventRecord(projectId: string, event: BrokerEventRecordPayload): BrokerEventRecord {
     const eventRecord = event as Record<string, unknown>
     const timestamp = normalizeEventTimestamp(eventRecord.timestamp) ?? Date.now()
-    const record: BrokerEventRecord = {
+    return {
       id: `${projectId}:${++this.eventSerial}`,
       projectId,
       timestamp,
       event: compactBrokerEvent(event)
     }
+  }
 
+  private recordBrokerEvent(projectId: string, event: BrokerEventRecordPayload): BrokerEventRecord {
+    const record = this.buildBrokerEventRecord(projectId, event)
     this.eventHistory.push(record)
     this.pruneBrokerEventHistory()
     return record

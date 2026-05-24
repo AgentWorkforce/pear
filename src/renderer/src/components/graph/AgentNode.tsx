@@ -2,6 +2,7 @@ import type React from 'react'
 import { Handle, Position, type NodeProps } from '@xyflow/react'
 import { Bot, GitBranch } from 'lucide-react'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
+import { usePtyTail } from '@/hooks/use-pty-tail'
 import type { Agent } from '@/stores/agent-store'
 
 interface AgentNodeData {
@@ -22,8 +23,8 @@ function cleanTerminalText(value: string): string {
     .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, '')
 }
 
-function getTerminalPreviewLines(agent: Agent): string[] {
-  const text = cleanTerminalText(agent.ptyBuffer.slice(-80).join(''))
+function getTerminalPreviewLines(rawText: string): string[] {
+  const text = cleanTerminalText(rawText)
   const lines = text
     .split('\n')
     .map((line) => line.replace(/\t/g, '  '))
@@ -37,7 +38,8 @@ export function AgentNode({ data }: NodeProps): React.ReactNode {
   const { agent, active } = data as AgentNodeData
   const statusColor =
     agent.status === 'running' ? 'var(--pear-accent-bright)' : 'var(--pear-text-faint)'
-  const previewLines = getTerminalPreviewLines(agent)
+  const terminalTail = usePtyTail(agent.projectId, agent.name)
+  const previewLines = getTerminalPreviewLines(terminalTail)
 
   return (
     <>

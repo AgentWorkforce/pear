@@ -3,6 +3,9 @@ import { pear, type BrokerListAgent } from '@/lib/ipc'
 import { getAgentKeyForAgent, useAgentStore } from '@/stores/agent-store'
 import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
+import { clearPtyBuffer, startPtyStream, stopPtyStream } from '@/lib/pty-stream'
+
+const AGENT_GONE_EVENT_KINDS = new Set(['agent_exit', 'agent_exited', 'agent_released'])
 
 type BrokerEventLike = Record<string, unknown> & {
   kind?: string
@@ -56,6 +59,10 @@ export function useBrokerEvents(): void {
   }, [rememberDiscoveredChannels, syncBrokerAgents])
 
   useEffect(() => {
+    // Raw PTY output arrives on its own channel and is buffered outside React;
+    // the store only learns that an agent is actively streaming (throttled).
+    startPtyStream((projectId, name) => useAgentStore.getState().markAgentStreaming(projectId, name))
+
     const unsubEvent = pear.broker.onEvent((event) => {
       const brokerEvent = event as Parameters<typeof handleBrokerEvent>[0] & BrokerEventLike
       recordBrokerEvent(brokerEvent)
@@ -66,6 +73,13 @@ export function useBrokerEvents(): void {
       }
       if (brokerEvent.kind && CHANNEL_SNAPSHOT_EVENT_KINDS.has(brokerEvent.kind)) {
         void syncBrokerSnapshot(brokerEvent.projectId)
+      }
+      if (
+        brokerEvent.kind &&
+        AGENT_GONE_EVENT_KINDS.has(brokerEvent.kind) &&
+        typeof brokerEvent.name === 'string'
+      ) {
+        clearPtyBuffer(brokerEvent.projectId, brokerEvent.name)
       }
     })
 
@@ -98,6 +112,7 @@ export function useBrokerEvents(): void {
     })
 
     return () => {
+      stopPtyStream()
       unsubEvent()
       unsubStatus()
       unsubNewWs()

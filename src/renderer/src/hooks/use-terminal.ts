@@ -3,7 +3,7 @@ import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
 import { pear, type TerminalAttachMode } from '@/lib/ipc'
-import { useAgentStore } from '@/stores/agent-store'
+import { getPtyChunks, subscribePty } from '@/lib/pty-stream'
 import { useUIStore, type Theme } from '@/stores/ui-store'
 
 const DARK_THEME = {
@@ -217,19 +217,18 @@ export function useTerminal(
     const subscribeToBuffer = (targetTerm: Terminal): void => {
       if (unsubStore) return
 
-      const writeNewChunks = (state = useAgentStore.getState()): void => {
-        const agent = state.agents.find((a) => a.name === agentName && a.projectId === projectId)
-        if (!agent) return
-        const newChunks = agent.ptyBuffer.slice(writtenChunksRef.current)
+      const writeNewChunks = (): void => {
+        const chunks = getPtyChunks(projectId, agentName!)
+        const newChunks = chunks.slice(writtenChunksRef.current)
         if (newChunks.length > 0) {
           for (const chunk of newChunks) {
             targetTerm.write(chunk)
           }
-          writtenChunksRef.current = agent.ptyBuffer.length
+          writtenChunksRef.current = chunks.length
         }
       }
 
-      unsubStore = useAgentStore.subscribe(writeNewChunks)
+      unsubStore = subscribePty(projectId, agentName!, writeNewChunks)
       writeNewChunks()
     }
 
@@ -252,7 +251,7 @@ export function useTerminal(
 
         if (result.snapshot?.screen && hasVisibleTerminalContent(result.snapshot.screen)) {
           targetTerm.write(result.snapshot.screen)
-          writtenChunksRef.current = useAgentStore.getState().getAgentBuffer(projectId, agentName!).length
+          writtenChunksRef.current = getPtyChunks(projectId, agentName!).length
           shouldReplayBuffer = false
         }
       } catch (err) {

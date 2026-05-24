@@ -28,7 +28,6 @@ export interface Agent {
   parent?: string
   channels?: string[]
   terminalMode: TerminalAttachMode
-  ptyBuffer: string[]
   pendingDeliveryIds: string[]
 }
 
@@ -75,7 +74,6 @@ export interface BrokerErrorEntry {
   projectId?: string
 }
 
-const MAX_PTY_BUFFER_CHUNKS = 10_000
 const MAX_BROKER_ERRORS = 12
 const MAX_BROKER_EVENTS = 3_000
 const BROKER_EVENT_RETENTION_MS = 12 * 60 * 60 * 1_000
@@ -369,7 +367,7 @@ interface AgentState {
     subscribed: boolean
   ) => void
   clearAll: () => void
-  getAgentBuffer: (projectId: string | undefined, name: string) => string[]
+  markAgentStreaming: (projectId: string | undefined, name: string) => void
 }
 
 function scheduleTypingExpiry(
@@ -402,7 +400,7 @@ function scheduleTypingExpiry(
   typingExpiryTimers.set(key, timer as unknown as number)
 }
 
-export const useAgentStore = create<AgentState>((set, get) => ({
+export const useAgentStore = create<AgentState>((set) => ({
   agents: [],
   activeAgentKey: null,
   messages: [],
@@ -463,7 +461,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
               rootPath,
               channels,
               terminalMode: options?.terminalMode || 'passthrough',
-              ptyBuffer: [],
               pendingDeliveryIds: []
             }
           ]
@@ -529,7 +526,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
           channels,
           parent: liveAgent.parent,
           terminalMode: terminalModeFromInboundDeliveryMode(liveAgent.inboundDeliveryMode) || 'passthrough',
-          ptyBuffer: [],
           pendingDeliveryIds: []
         })
       }
@@ -653,7 +649,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
                   rootPath,
                   parent: event.parent,
                   terminalMode: 'passthrough',
-                  ptyBuffer: [],
                   pendingDeliveryIds: []
                 }
               ],
@@ -721,26 +716,6 @@ export const useAgentStore = create<AgentState>((set, get) => ({
               : state.activeAgentKey
         }
       })
-    } else if (kind === 'worker_stream' && event.name && event.chunk) {
-      set((state) => ({
-        agents: state.agents.map((a) => {
-          if (!matchesAgent(a, event.projectId, event.name!)) return a
-          const lastActivityAtMs = Date.now()
-          const typingUntilMs = lastActivityAtMs + TYPING_ACTIVITY_WINDOW_MS
-          scheduleTypingExpiry(getAgentKeyForAgent(a), typingUntilMs, set)
-          const buffer = [...a.ptyBuffer, event.chunk!]
-          return {
-            ...a,
-            activity: 'active',
-            currentState: 'working',
-            lastActivityAtMs,
-            typingUntilMs,
-            ptyBuffer: buffer.length > MAX_PTY_BUFFER_CHUNKS
-              ? buffer.slice(buffer.length - MAX_PTY_BUFFER_CHUNKS)
-              : buffer
-          }
-        })
-      }))
     } else if (kind === 'delivery_queued' && event.name) {
       set((state) => ({
         agents: state.agents.map((a) =>
@@ -1068,7 +1043,27 @@ export const useAgentStore = create<AgentState>((set, get) => ({
       brokerEvents: []
     }),
 
-  getAgentBuffer: (projectId, name) => {
-    return get().agents.find((a) => matchesAgent(a, projectId, name))?.ptyBuffer || []
+  // Called (throttled) by the PTY stream as raw terminal output arrives, so the
+  // agent shows as actively working/typing without the per-chunk store churn
+  // that used to live in the worker_stream handler.
+  markAgentStreaming: (projectId, name) => {
+    set((state) => {
+      if (!state.agents.some((a) => matchesAgent(a, projectId, name))) return {}
+      return {
+        agents: state.agents.map((a) => {
+          if (!matchesAgent(a, projectId, name)) return a
+          const lastActivityAtMs = Date.now()
+          const typingUntilMs = lastActivityAtMs + TYPING_ACTIVITY_WINDOW_MS
+          scheduleTypingExpiry(getAgentKeyForAgent(a), typingUntilMs, set)
+          return {
+            ...a,
+            activity: 'active',
+            currentState: 'working',
+            lastActivityAtMs,
+            typingUntilMs
+          }
+        })
+      }
+    })
   }
 }))

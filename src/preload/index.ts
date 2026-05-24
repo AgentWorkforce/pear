@@ -123,6 +123,8 @@ const api = {
     listEvents: () => invoke<unknown[]>('broker:list-events'),
     shutdown: () => invoke<void>('broker:shutdown'),
     onEvent: (callback: (event: unknown) => void) => subscribe<unknown>('broker:event', callback),
+    onPty: (callback: (data: { projectId?: string; name: string; chunk: string }) => void) =>
+      subscribe<{ projectId?: string; name: string; chunk: string }>('broker:pty', callback),
     onStatus: (callback: (status: { projectId?: string; status: string; error?: string }) => void) =>
       subscribe<{ projectId?: string; status: string; error?: string }>('broker:status', callback)
   },
