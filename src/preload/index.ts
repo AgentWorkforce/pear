@@ -21,9 +21,6 @@ import type {
   BurnAgentBreakdown,
   BurnAgentInput,
   BurnAgentSummary,
-  BurnProjectBreakdown,
-  BurnProjectInput,
-  BurnSessionLookup,
   CloudAgentBinding,
   CloudAgentEvent,
   CloudAgentRecord,
@@ -83,11 +80,6 @@ export type {
   BurnAgentBreakdown,
   BurnAgentInput,
   BurnAgentSummary,
-  BurnProjectAgentRollup,
-  BurnProjectBreakdown,
-  BurnProjectInput,
-  BurnSessionAgentRef,
-  BurnSessionLookup,
   CloudAgentBinding,
   CloudAgentEvent,
   CloudAgentMountStatus,
@@ -240,11 +232,7 @@ const api = {
     listAgentSummaries: (agents: BurnAgentInput[]) =>
       invoke<BurnAgentSummary[]>('burn:list-agent-summaries', agents),
     getAgentBreakdown: (agent: BurnAgentInput) =>
-      invoke<BurnAgentBreakdown>('burn:get-agent-breakdown', agent),
-    getProjectBreakdown: (input: BurnProjectInput) =>
-      invoke<BurnProjectBreakdown>('burn:get-project-breakdown', input),
-    lookupSessions: (sessionIds: string[]) =>
-      invoke<Record<string, BurnSessionLookup>>('burn:lookup-sessions', sessionIds)
+      invoke<BurnAgentBreakdown>('burn:get-agent-breakdown', agent)
   },
   git: {
     status: (path: string) => invoke<GitFileStatus[]>('git:status', path),

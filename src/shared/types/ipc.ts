@@ -86,54 +86,6 @@ export interface BurnAgentBreakdown extends BurnAgentSummary {
   }
 }
 
-export interface BurnSessionAgentRef {
-  projectId?: string
-  name: string
-  agentKey: string
-  cli?: string
-  cwd?: string
-}
-
-export interface BurnSessionLookup {
-  sessionId: string
-  totalTokens: number
-  totalCost: number
-  turnCount: number
-  agent?: BurnSessionAgentRef
-  status: 'ok' | 'unavailable'
-  error?: string
-}
-
-export interface BurnProjectInput {
-  projectId: string
-}
-
-export interface BurnProjectAgentRollup {
-  name: string
-  agentKey: string
-  totalTokens: number
-  totalCost: number
-  turnCount: number
-  sessionCount: number
-  cli?: string
-  cwd?: string
-  lastTs?: string
-}
-
-export interface BurnProjectBreakdown {
-  projectId: string
-  totalTokens: number
-  totalCost: number
-  turnCount: number
-  byModel: Array<{ model: string; tokens: number; cost: number }>
-  byTool: Array<{ tool: string; tokens: number; cost: number; count: number }>
-  byAgent: BurnProjectAgentRollup[]
-  sessionIds: Array<{ sessionId: string; ts?: string }>
-  updatedAt: number
-  status: 'ok' | 'unavailable'
-  error?: string
-}
-
 export interface PendingRelayMessage {
   from: string
   body: string
@@ -677,8 +629,6 @@ export interface PearAPI {
   burn: {
     listAgentSummaries: (agents: BurnAgentInput[]) => Promise<BurnAgentSummary[]>
     getAgentBreakdown: (agent: BurnAgentInput) => Promise<BurnAgentBreakdown>
-    getProjectBreakdown: (input: BurnProjectInput) => Promise<BurnProjectBreakdown>
-    lookupSessions: (sessionIds: string[]) => Promise<Record<string, BurnSessionLookup>>
   }
   git: {
     status: (path: string) => Promise<GitFileStatus[]>
