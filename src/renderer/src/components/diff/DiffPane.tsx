@@ -8,7 +8,6 @@ import {
   Copy,
   Expand,
   FileDiff,
-  Filter,
   FolderGit2,
   GitBranch,
   GitCommitHorizontal,
@@ -41,6 +40,7 @@ import {
   fileChangeStatusLabel
 } from './FileChangeLabel'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
+import { FilterInput, PaneSidebar } from '@/components/common/PaneShell'
 import { DiffViewer } from './DiffViewer'
 import { getAgentKey, useAgentStore, type Agent } from '@/stores/agent-store'
 import { formatGitDiffLineCount } from '@/lib/format'
@@ -2754,10 +2754,7 @@ export function DiffPane(): React.ReactNode {
       </div>
 
       <div className="flex min-h-0 flex-1">
-        <aside
-          className="flex h-full shrink-0 flex-col border-r border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)]"
-          style={{ width: leftSidebarWidth }}
-        >
+        <PaneSidebar width={leftSidebarWidth}>
           <div className="grid h-11 shrink-0 grid-cols-2 border-b border-[var(--pear-border-subtle)]">
             <button
               type="button"
@@ -2791,15 +2788,7 @@ export function DiffPane(): React.ReactNode {
           {activeTab === 'changes' ? (
             <>
               <div className="shrink-0 border-b border-[var(--pear-border-subtle)] px-2 py-2">
-                <label className="flex h-8 items-center gap-2 rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-2.5 text-[13px] text-[var(--pear-text-secondary)]">
-                  <Filter size={14} className="text-[var(--pear-text-faint)]" />
-                  <input
-                    value={filter}
-                    onChange={(event) => setFilter(event.target.value)}
-                    placeholder="Filter"
-                    className="min-w-0 flex-1 border-0 bg-transparent text-[13px] outline-none placeholder:text-[var(--pear-text-faint)]"
-                  />
-                </label>
+                <FilterInput value={filter} onChange={setFilter} ariaLabel="Filter changed files" />
               </div>
 
             <div
@@ -3014,7 +3003,7 @@ export function DiffPane(): React.ReactNode {
             </div>
           </div>
         )}
-      </aside>
+      </PaneSidebar>
 
       <button
         type="button"
@@ -3096,10 +3085,7 @@ export function DiffPane(): React.ReactNode {
           </div>
 
           <div className="flex min-h-0 flex-1">
-            <aside
-              className="flex h-full shrink-0 flex-col border-r border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)]"
-              style={{ width: historyFilesWidth }}
-            >
+            <PaneSidebar width={historyFilesWidth}>
               <div className="flex h-8 shrink-0 items-center justify-center border-b border-[var(--pear-border-subtle)] text-[13px] font-semibold text-[var(--pear-text)]">
                 {selectedCommit?.files.length || 0} changed file{selectedCommit?.files.length === 1 ? '' : 's'}
               </div>
@@ -3140,7 +3126,7 @@ export function DiffPane(): React.ReactNode {
                   <div className="px-3 py-6 text-[13px] text-[var(--pear-text-faint)]">No commit selected</div>
                 )}
               </div>
-            </aside>
+            </PaneSidebar>
             <button
               type="button"
               tabIndex={-1}

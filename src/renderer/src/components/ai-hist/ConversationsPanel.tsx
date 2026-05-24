@@ -2,6 +2,7 @@ import type React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ClipboardCopy, MessageSquare, RefreshCw, Search } from 'lucide-react'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
+import { FilterInput, PaneSidebar } from '@/components/common/PaneShell'
 import { pear } from '@/lib/ipc'
 import { useProjectStore, type Project } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
@@ -475,29 +476,25 @@ function ConversationsPanel(): React.ReactNode {
   }
 
   return (
-    <div className="relative flex h-full">
-      <div className="flex w-[380px] shrink-0 flex-col border-r border-[var(--pear-border)]">
-            <div className="flex flex-col gap-2 border-b border-[var(--pear-border)] p-3">
+    <div className="relative flex h-full bg-[var(--pear-bg)]">
+      <PaneSidebar width={380}>
+            <div className="flex flex-col gap-2 border-b border-[var(--pear-border-subtle)] p-2">
               <div className="flex items-center gap-2">
-                <div className="relative flex-1">
-                  <Search
-                    size={12}
-                    className="pointer-events-none absolute left-2 top-1/2 -translate-y-1/2 text-[var(--pear-text-faint)]"
-                  />
-                  <input
-                    type="text"
-                    placeholder={scopedProject ? `Search ${scopedProject.name}…` : 'Search prompts…'}
+                <div className="min-w-0 flex-1">
+                  <FilterInput
                     value={query}
-                    onChange={(e) => setQuery(e.target.value)}
-                    className="w-full rounded-md bg-[var(--pear-bg-overlay)] py-1.5 pl-7 pr-2 text-xs outline-none ring-1 ring-transparent focus:ring-[var(--pear-accent)]"
+                    onChange={setQuery}
+                    placeholder={scopedProject ? `Search ${scopedProject.name}…` : 'Search prompts…'}
+                    icon={Search}
+                    ariaLabel="Search conversations"
                   />
                 </div>
                 <button
                   onClick={refresh}
                   title="Reload (re-reads the SQLite file)"
-                  className="inline-flex h-7 w-7 items-center justify-center rounded-md hover:bg-[var(--pear-bg-overlay)]"
+                  className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] text-[var(--pear-text-secondary)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
                 >
-                  <RefreshCw size={12} className={refreshing ? 'animate-spin' : ''} />
+                  <RefreshCw size={13} className={refreshing ? 'animate-spin' : ''} />
                 </button>
               </div>
               <div className="flex flex-wrap gap-1">
@@ -505,10 +502,10 @@ function ConversationsPanel(): React.ReactNode {
                   <button
                     key={s}
                     onClick={() => setSourceFilter(s)}
-                    className={`rounded px-2 py-0.5 text-[10px] uppercase tracking-wide transition-colors ${
+                    className={`rounded-md border px-2 py-0.5 text-[10px] uppercase tracking-wide transition-colors ${
                       sourceFilter === s
-                        ? 'bg-[var(--pear-accent)] text-white'
-                        : 'bg-[var(--pear-bg-overlay)] text-[var(--pear-text-faint)] hover:text-[var(--pear-text)]'
+                        ? 'border-transparent bg-[var(--pear-selection-blue)] text-white'
+                        : 'border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] text-[var(--pear-text-faint)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]'
                     }`}
                   >
                     {s === 'all' ? 'All' : SOURCE_LABELS[s]}
@@ -545,8 +542,8 @@ function ConversationsPanel(): React.ReactNode {
               ) : (
                 <ul className="flex flex-col">
                   {groups.map((group) => (
-                    <li key={group.rootPath ?? group.label} className="border-b border-[var(--pear-border)] last:border-b-0">
-                      <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-[var(--pear-bg-raised)] px-3 py-1.5">
+                    <li key={group.rootPath ?? group.label} className="border-b border-[var(--pear-border-subtle)] last:border-b-0">
+                      <div className="sticky top-0 z-10 flex items-center justify-between gap-2 border-b border-[var(--pear-border-subtle)] bg-[var(--pear-bg-surface)] px-3 py-1.5">
                         <span className="truncate text-[10px] font-medium uppercase tracking-wider text-[var(--pear-text-faint)]">
                           {group.label}
                         </span>
@@ -607,16 +604,16 @@ function ConversationsPanel(): React.ReactNode {
               )}
             </div>
             {status?.ok && (
-              <div className="border-t border-[var(--pear-border)] px-3 py-1.5 text-[10px] text-[var(--pear-text-faint)]">
+              <div className="border-t border-[var(--pear-border-subtle)] px-3 py-1.5 text-[10px] text-[var(--pear-text-faint)]">
                 <span className="truncate" title={status.dbPath}>{shortenPath(status.dbPath)}</span>
               </div>
             )}
-      </div>
+      </PaneSidebar>
 
-      <div className="flex min-w-0 flex-1 flex-col">
+      <div className="flex min-w-0 flex-1 flex-col bg-[var(--pear-bg)]">
             {activeSession ? (
               <>
-                <div className="flex items-start justify-between gap-3 border-b border-[var(--pear-border)] p-3">
+                <div className="flex items-start justify-between gap-3 border-b border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] p-3">
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
                       <SourceHarnessBadge source={activeSession.source} active={false} />
@@ -638,7 +635,7 @@ function ConversationsPanel(): React.ReactNode {
                   <div className="flex shrink-0 items-center gap-1.5">
                     <button
                       onClick={() => void resumeAndOpen(activeSession)}
-                      className="inline-flex items-center gap-1.5 rounded-md bg-[var(--pear-accent)] px-2.5 py-1.5 text-xs text-white hover:bg-[var(--pear-accent-bright)]"
+                      className="inline-flex items-center gap-1.5 rounded-md bg-[var(--pear-selection-blue)] px-2.5 py-1.5 text-xs text-white hover:brightness-110"
                       title="Spawn this session as an agent in pear"
                     >
                       Resume in pear
@@ -672,7 +669,7 @@ function ConversationsPanel(): React.ReactNode {
                       {detailEntries.map((entry) => (
                         <li
                           key={entry.id}
-                          className="rounded-md bg-[var(--pear-bg-overlay)] p-2.5"
+                          className="rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] p-2.5"
                         >
                           <div className="mb-1 flex items-center justify-between text-[10px] text-[var(--pear-text-faint)]">
                             <span>{new Date(entry.timestampMs).toLocaleString()}</span>
