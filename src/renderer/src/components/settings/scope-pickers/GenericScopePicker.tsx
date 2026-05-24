@@ -101,24 +101,31 @@ export function GenericScopePicker({
   const onChangeRef = useRef(onChange)
   const getResourceMountSegmentRef = useRef(getResourceMountSegment)
   const getResourceScopeIdRef = useRef(getResourceScopeId)
+  const listAccessibleResourcesRef = useRef(listAccessibleResources)
+  const initialSelectedIdsRef = useRef(initialSelectedIds)
 
-  onChangeRef.current = onChange
-  getResourceMountSegmentRef.current = getResourceMountSegment
-  getResourceScopeIdRef.current = getResourceScopeId
+  useEffect(() => {
+    onChangeRef.current = onChange
+    getResourceMountSegmentRef.current = getResourceMountSegment
+    getResourceScopeIdRef.current = getResourceScopeId
+    listAccessibleResourcesRef.current = listAccessibleResources
+    initialSelectedIdsRef.current = initialSelectedIds
+  })
 
   useEffect(() => {
     let cancelled = false
 
     setLoading(true)
     setError(null)
-    void listAccessibleResources()
+    void listAccessibleResourcesRef.current()
       .then((nextResources) => {
         if (cancelled) return
+        const seeds = initialSelectedIdsRef.current
         setResources(nextResources)
         setSelectedIds(
           new Set(
-            initialSelectedIds && initialSelectedIds.length > 0
-              ? initialSelectedIds
+            seeds && seeds.length > 0
+              ? seeds
               : nextResources.map(resourceId)
           )
         )
@@ -135,7 +142,7 @@ export function GenericScopePicker({
     return () => {
       cancelled = true
     }
-  }, [initialSelectedIds, listAccessibleResources])
+  }, [provider])
 
   const selectedResourceEntries = useMemo(
     () =>
