@@ -51,7 +51,8 @@ import type {
   ProactiveAgentRunsPage,
   ProactiveAgentTranscript,
   ProjectListResult,
-  TerminalAttachMode
+  TerminalAttachMode,
+  WorkforcePersona
 } from '../shared/types/ipc'
 
 export type {
@@ -128,7 +129,8 @@ export type {
   ProactiveAgentWatchEventKind,
   ProjectListResult,
   TerminalAttachMode,
-  ViewMode
+  ViewMode,
+  WorkforcePersona
 } from '../shared/types/ipc'
 
 // Thin generic wrappers so each handler binds an IPC channel + return type without
@@ -192,6 +194,10 @@ const api = {
     connectCloud: () => invoke<string>('broker:connect-cloud'),
     spawnAgent: (projectId: string, input: BrokerSpawnAgentInput) =>
       invoke<BrokerSpawnAgentResult>('broker:spawn-agent', projectId, input),
+    listPersonas: (projectId: string) =>
+      invoke<WorkforcePersona[]>('broker:list-personas', projectId),
+    spawnPersona: (projectId: string, personaId: string) =>
+      invoke<BrokerSpawnAgentResult>('broker:spawn-persona', projectId, personaId),
     attachTerminal: (input: BrokerAttachTerminalInput) =>
       invoke<BrokerAttachTerminalResult>('broker:attach-terminal', input),
     sendInputFast: (projectId: string | undefined, name: string, data: string): void => {

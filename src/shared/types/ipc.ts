@@ -191,6 +191,15 @@ export interface BrokerSpawnAgentInput {
 export interface BrokerSpawnAgentResult {
   name: string
   runtime: string
+  cli?: string
+}
+
+export interface WorkforcePersona {
+  id: string
+  description?: string
+  harness?: string
+  tags?: string[]
+  source?: string
 }
 
 export interface BrokerAttachTerminalInput {
@@ -604,6 +613,8 @@ export interface PearAPI {
     ) => Promise<{ removed: string[] }>
     connectCloud: () => Promise<string>
     spawnAgent: (projectId: string, input: BrokerSpawnAgentInput) => Promise<BrokerSpawnAgentResult>
+    listPersonas: (projectId: string) => Promise<WorkforcePersona[]>
+    spawnPersona: (projectId: string, personaId: string) => Promise<BrokerSpawnAgentResult>
     attachTerminal: (input: BrokerAttachTerminalInput) => Promise<BrokerAttachTerminalResult>
     sendInputFast: (projectId: string | undefined, name: string, data: string) => void
     setTerminalMode: (

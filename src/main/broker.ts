@@ -1,6 +1,7 @@
-import { existsSync, readFileSync } from 'fs'
+import { accessSync, constants, existsSync, readFileSync } from 'fs'
 import { rm } from 'fs/promises'
-import { basename, join } from 'path'
+import { delimiter, basename, dirname, join } from 'path'
+import { execFileSync } from 'child_process'
 import { BrowserWindow } from 'electron'
 import {
   AgentRelayClient,
@@ -12,7 +13,10 @@ import {
   type ListAgent,
   type InboundDeliveryMode,
   type PendingRelayMessage,
-  type PtyInputStream
+  type PtyInputStream,
+  findPersona,
+  loadPersona,
+  listPersonas
 } from '@agent-relay/sdk'
 import { getAccessToken, getApiUrl } from './auth'
 import { assertDirectory } from './path-utils'
@@ -24,6 +28,7 @@ import {
   type GeneratedCommitDraft
 } from './schemas'
 import { compactBrokerEvent, normalizeEventTimestamp } from '../shared/lib/broker-events'
+import type { WorkforcePersona } from '../shared/types/ipc'
 
 function isShellLikeCommand(cli: string): boolean {
   const normalized = basename(cli).toLowerCase()
@@ -41,6 +46,85 @@ function resolveShellCommand(): string {
   }
 
   return '/bin/zsh'
+}
+
+function canExecute(filePath: string): boolean {
+  try {
+    accessSync(filePath, constants.X_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function resolveCommandOnPath(command: string): string | undefined {
+  const pathValue = process.env.PATH || ''
+  const extensions = process.platform === 'win32'
+    ? ['', '.cmd', '.exe', '.bat']
+    : ['']
+
+  for (const dir of pathValue.split(delimiter)) {
+    if (!dir) continue
+    for (const extension of extensions) {
+      const candidate = join(dir, `${command}${extension}`)
+      if (canExecute(candidate)) return candidate
+    }
+  }
+
+  try {
+    const resolved = execFileSync(process.platform === 'win32' ? 'where' : 'which', [command], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).split(/\r?\n/)[0]?.trim()
+    return resolved || undefined
+  } catch {
+    return undefined
+  }
+}
+
+function resolvePackageBin(packageName: string, binName: string): string | undefined {
+  try {
+    const packageJsonPath = require.resolve(`${packageName}/package.json`)
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as {
+      bin?: string | Record<string, string>
+    }
+    const binPath = typeof packageJson.bin === 'string'
+      ? packageJson.bin
+      : packageJson.bin?.[binName]
+    if (!binPath) return undefined
+
+    const candidate = join(dirname(packageJsonPath), binPath)
+    return canExecute(candidate) ? candidate : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function resolveAgentWorkforceCommand(cwd: string): { cli: string; args: string[] } {
+  const binaryName = process.platform === 'win32' ? 'agentworkforce.cmd' : 'agentworkforce'
+  const localCandidates = [
+    join(cwd, 'node_modules', '.bin', binaryName),
+    join(process.cwd(), 'node_modules', '.bin', binaryName)
+  ]
+
+  for (const candidate of localCandidates) {
+    if (canExecute(candidate)) return { cli: candidate, args: [] }
+  }
+
+  const packageCommand = resolvePackageBin('agentworkforce', 'agentworkforce')
+  if (packageCommand) {
+    if (process.platform !== 'win32') return { cli: packageCommand, args: [] }
+    const nodeCommand = resolveCommandOnPath('node')
+    if (nodeCommand) return { cli: nodeCommand, args: [packageCommand] }
+  }
+
+  const pathCommand = resolveCommandOnPath('agentworkforce')
+  if (pathCommand) return { cli: pathCommand, args: [] }
+
+  const npxCommand = resolveCommandOnPath('npx')
+  if (npxCommand) return { cli: npxCommand, args: ['-y', `agentworkforce@${AGENTWORKFORCE_CLI_VERSION}`] }
+
+  throw new Error('AgentWorkforce CLI not found — install it to launch personas')
 }
 
 // Resolve the broker binary bundled inside @agent-relay/sdk.
@@ -114,6 +198,9 @@ const BROKER_EVENT_HISTORY_TTL_MS = 12 * 60 * 60 * 1_000
 // After this many consecutive failures to open a PTY input stream, give up on
 // the WS fast path for that agent and send over HTTP until it re-attaches.
 const MAX_INPUT_STREAM_OPEN_FAILURES = 3
+const PERSONA_REGISTRATION_TIMEOUT_MS = 5_000
+const PERSONA_REGISTRATION_STABILITY_MS = 1_000
+const AGENTWORKFORCE_CLI_VERSION = '3.0.22'
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -1120,6 +1207,133 @@ export class BrokerManager {
     }
 
     throw new Error(`Unable to allocate an agent name for ${relayAwareInput.name}`)
+  }
+
+  async listPersonas(projectId: string): Promise<WorkforcePersona[]> {
+    const session = this.getSessionForProject(projectId)
+
+    try {
+      return listPersonas({ cwd: session.cwd }).map((persona) => ({
+        id: persona.id,
+        description: persona.spec.description,
+        harness: persona.spec.harness,
+        tags: persona.spec.tags,
+        source: persona.path
+      }))
+    } catch (err) {
+      console.warn(`[broker] Failed to list workforce personas for project ${projectId}:`, err)
+      return []
+    }
+  }
+
+  async spawnPersona(projectId: string, personaId: string): Promise<{ name: string; runtime: string; cli?: string }> {
+    const session = this.getSessionForProject(projectId)
+    const trimmedPersonaId = personaId.trim()
+    if (!trimmedPersonaId) {
+      throw new Error('Persona id is required')
+    }
+
+    const persona = findPersona(trimmedPersonaId, { cwd: session.cwd })
+    if (!persona) {
+      throw new Error(`Workforce persona not found: ${trimmedPersonaId}`)
+    }
+
+    const resolvedPersona = loadPersona(trimmedPersonaId, { cwd: session.cwd })
+    const command = resolveAgentWorkforceCommand(session.cwd)
+    const spawned = await this.spawnPersonaWithMode(session, {
+      personaId: trimmedPersonaId,
+      baseName: persona.id,
+      command,
+      resolvedHarness: resolvedPersona.harness
+    })
+    const registeredAgent = await this.verifyPersonaBrokerRegistration(session, spawned.name)
+    if (registeredAgent) {
+      console.info('[broker] Workforce persona broker registration verified', {
+        projectId: session.projectId,
+        personaId: trimmedPersonaId,
+        name: spawned.name,
+        mode: 'cli-install-in-repo',
+        runtime: registeredAgent.runtime,
+        cli: registeredAgent.cli,
+        currentState: registeredAgent.current_state
+      })
+      return spawned
+    }
+
+    await session.client.release(spawned.name, 'persona broker registration verification failed').catch((err) => {
+      if (!isMissingAgentError(err)) {
+        console.warn(`[broker] Failed to release unverified persona agent ${spawned.name}:`, err)
+      }
+    })
+    throw new Error(
+      `Workforce persona ${trimmedPersonaId} launched but did not stay registered with the broker`
+    )
+  }
+
+  private async spawnPersonaWithMode(
+    session: BrokerSession,
+    input: {
+      personaId: string
+      baseName: string
+      command: { cli: string; args: string[] }
+      resolvedHarness: string
+    }
+  ): Promise<{ name: string; runtime: string; cli?: string }> {
+    const existingNames = new Set(
+      (await session.client.listAgents()).map((agent) => agent.name)
+    )
+    const personaArgs = ['agent', '--install-in-repo', input.personaId]
+    let nextInput: SpawnPtyInput = {
+      name: getAvailableAgentName(input.baseName, existingNames),
+      cli: input.command.cli,
+      args: [...input.command.args, ...personaArgs],
+      cwd: session.cwd,
+      channels: session.channels,
+      skipRelayPrompt: true
+    }
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        const spawned = await session.client.spawnPty(nextInput)
+        this.rememberAgentProject(spawned.name || nextInput.name, session.projectId)
+        return { ...spawned, cli: input.resolvedHarness }
+      } catch (err) {
+        if (!isAgentNameConflict(err)) {
+          throw err
+        }
+        existingNames.add(nextInput.name)
+        nextInput = {
+          ...nextInput,
+          name: getAvailableAgentName(nextInput.name, existingNames)
+        }
+      }
+    }
+
+    throw new Error(`Unable to allocate an agent name for ${input.baseName}`)
+  }
+
+  private async verifyPersonaBrokerRegistration(session: BrokerSession, name: string): Promise<ListAgent | null> {
+    const deadline = Date.now() + PERSONA_REGISTRATION_TIMEOUT_MS
+    let agent: ListAgent | undefined
+
+    while (Date.now() < deadline) {
+      agent = (await session.client.listAgents()).find((candidate) => candidate.name === name)
+      if (agent) break
+      await delay(250)
+    }
+
+    if (!agent) {
+      return null
+    }
+
+    await delay(PERSONA_REGISTRATION_STABILITY_MS)
+    const stableAgent = (await session.client.listAgents()).find((candidate) => candidate.name === name)
+    if (!stableAgent) {
+      return null
+    }
+
+    this.rememberAgentProject(stableAgent.name, session.projectId)
+    return stableAgent
   }
 
   async generateCommitDraft(projectId: string, diff: string): Promise<GeneratedCommitDraft> {

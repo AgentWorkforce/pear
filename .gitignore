@@ -7,4 +7,5 @@ dist/
 /.agent-relay
 *.tsbuildinfo
 .relay/
+relayfile-mount/
 .workflow-artifacts/

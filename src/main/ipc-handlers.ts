@@ -210,6 +210,14 @@ export function registerIpcHandlers(): void {
     return brokerManager.spawnAgent(projectId, input)
   })
 
+  ipcMain.handle('broker:list-personas', async (_, projectId: string) => {
+    return brokerManager.listPersonas(projectId)
+  })
+
+  ipcMain.handle('broker:spawn-persona', async (_, projectId: string, personaId: string) => {
+    return brokerManager.spawnPersona(projectId, personaId)
+  })
+
   ipcMain.handle('broker:attach-terminal', async (_, input: {
     projectId?: string
     name: string
