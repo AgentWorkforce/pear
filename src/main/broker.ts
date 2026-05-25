@@ -1026,6 +1026,15 @@ export class BrokerManager {
         // A stream that never opens (e.g. broker never sends pty_input_ready)
         // would otherwise be re-opened on every keystroke. Stop trying the WS
         // after a few failures and ride HTTP until the terminal re-attaches.
+        // This is the one case worth surfacing: transient not-ready is normal,
+        // but a *persistently* unopenable stream means the low-latency fast path
+        // is off for this agent — log it once rather than hiding it.
+        if (failures >= MAX_INPUT_STREAM_OPEN_FAILURES && !this.inputStreamFallbacks.has(key)) {
+          console.warn(
+            `[broker] PTY input stream for ${name} failed to open ${failures}x; ` +
+            `routing input over HTTP for this agent until the terminal re-attaches`
+          )
+        }
         if (failures >= MAX_INPUT_STREAM_OPEN_FAILURES) {
           this.inputStreamFallbacks.add(key)
         }
