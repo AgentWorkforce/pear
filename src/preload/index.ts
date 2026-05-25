@@ -1,74 +1,135 @@
 import { contextBridge, ipcRenderer } from 'electron'
+import type {
+  AiHistEntry,
+  AiHistRecentOptions,
+  AiHistResumeEntry,
+  AiHistSession,
+  AiHistStats,
+  AiHistStatusResponse,
+  AuthLoginInput,
+  AuthStatus,
+  BrokerAttachTerminalInput,
+  BrokerAttachTerminalResult,
+  BrokerDetails,
+  BrokerEventRecord,
+  BrokerListAgent,
+  BrokerSendMessageInput,
+  BrokerSetTerminalModeResult,
+  BrokerSpawnAgentInput,
+  BrokerSpawnAgentResult,
+  BrokerStatusEvent,
+  BurnAgentBreakdown,
+  BurnAgentInput,
+  BurnAgentSummary,
+  CloudAgentBinding,
+  CloudAgentEvent,
+  CloudAgentRecord,
+  CloudAgentStatus,
+  ConnectedIntegration,
+  CreateCloudAgentInput,
+  FsDirEntry,
+  FsReadPreviewResult,
+  GitBranchInfo,
+  GitBranchSyncStatus,
+  GitCheckoutBranchOptions,
+  GitCommitDraft,
+  GitCommitSelectionInput,
+  GitFileStatus,
+  GitGenerateCommitMessageInput,
+  GitHistoryCommit,
+  GitSummary,
+  IntegrationAdapter,
+  IntegrationConnectSession,
+  IntegrationsEvent,
+  PearAPI,
+  PendingRelayMessage,
+  ProactiveAgentBinding,
+  ProactiveAgentDeployResult,
+  ProactiveAgentDraft,
+  ProactiveAgentEvent,
+  ProactiveAgentRunsOptions,
+  ProactiveAgentRunsPage,
+  ProactiveAgentTranscript,
+  ProjectListResult,
+  TerminalAttachMode
+} from '../shared/types/ipc'
 
-export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'ai-hist' | 'burn-session'
-
-type TerminalAttachMode = 'view' | 'drive' | 'passthrough'
-
-export type AiHistSource = 'claude' | 'codex' | 'cursor' | 'relay'
-
-export interface AiHistEntry {
-  id: number
-  source: AiHistSource
-  sessionId: string | null
-  project: string | null
-  prompt: string
-  timestampMs: number
-}
-
-export interface AiHistSession {
-  sessionId: string
-  source: AiHistSource
-  project: string | null
-  firstPrompt: string
-  firstActivityMs: number
-  lastActivityMs: number
-  promptCount: number
-}
-
-export interface AiHistStats {
-  total: number
-  bySource: Partial<Record<AiHistSource, number>>
-  byProject: Array<{ project: string; count: number }>
-  firstTimestampMs: number | null
-  lastTimestampMs: number | null
-}
-
-export interface BurnAgentInput {
-  projectId?: string
-  name: string
-  cwd?: string
-  cli?: string
-}
-
-export interface BurnAgentSummary {
-  projectId?: string
-  name: string
-  agentKey: string
-  totalTokens: number
-  totalCost: number
-  turnCount: number
-  byModel: Array<{ model: string; tokens: number; cost: number }>
-  byTool: Array<{ tool: string; tokens: number; cost: number; count: number }>
-  sessionIds: Array<{ sessionId: string; ts?: string }>
-  updatedAt: number
-  status: 'ok' | 'unavailable'
-  error?: string
-}
-
-export interface BurnAgentBreakdown extends BurnAgentSummary {
-  primarySessionId?: string
-  hotspots?: {
-    sessionId?: string
-    grandTotal: number
-    attributedTotal: number
-    unattributedTotal: number
-    attributionDegraded: boolean
-    files: Array<{ path: string; initialTokens: number; persistenceTokens: number; ridingTurns: number; totalCost: number }>
-    bashVerbs: Array<{ verb: string; callCount: number; distinctCommands: number; initialTokens: number; persistenceTokens: number; avgPersistenceTurns: number; totalCost: number; topExamples: string[] }>
-    bash: Array<{ command?: string; callCount: number; initialTokens: number; persistenceTokens: number; totalCost: number }>
-    subagents: Array<{ subagentType: string; callCount: number; initialTokens: number; persistenceTokens: number; totalCost: number }>
-  }
-}
+export type {
+  AiHistEntry,
+  AiHistRecentOptions,
+  AiHistResumeEntry,
+  AiHistSession,
+  AiHistSource,
+  AiHistStats,
+  AiHistStatusResponse,
+  AgentCurrentState,
+  AuthLoginInput,
+  AuthStatus,
+  AuthUser,
+  BrokerAgentDetails,
+  BrokerAttachTerminalInput,
+  BrokerAttachTerminalResult,
+  BrokerDetails,
+  BrokerEventRecord,
+  BrokerListAgent,
+  BrokerSendMessageInput,
+  BrokerSetTerminalModeResult,
+  BrokerSpawnAgentInput,
+  BrokerSpawnAgentResult,
+  BrokerStatusEvent,
+  BurnAgentBreakdown,
+  BurnAgentInput,
+  BurnAgentSummary,
+  CloudAgentBinding,
+  CloudAgentEvent,
+  CloudAgentMountStatus,
+  CloudAgentRecord,
+  CloudAgentSandboxStatus,
+  CloudAgentStatus,
+  CloudAgentSyncMode,
+  ConnectedIntegration,
+  CreateCloudAgentInput,
+  FsDirEntry,
+  FsReadPreviewResult,
+  GitBranchInfo,
+  GitBranchSyncStatus,
+  GitCheckoutBranchOptions,
+  GitCommitDraft,
+  GitCommitSelectionInput,
+  GitFileStatus,
+  GitFileStatusKind,
+  GitGenerateCommitMessageInput,
+  GitHistoryCoAuthor,
+  GitHistoryCommit,
+  GitHistoryFile,
+  GitSummary,
+  InboundDeliveryMode,
+  IntegrationAdapter,
+  IntegrationAuthMethod,
+  IntegrationCapabilities,
+  IntegrationConnectSession,
+  IntegrationConnectStatus,
+  IntegrationsEvent,
+  MessageInjectionMode,
+  PearAPI,
+  PendingRelayMessage,
+  ProactiveAgentBinding,
+  ProactiveAgentDeployResult,
+  ProactiveAgentDraft,
+  ProactiveAgentEvent,
+  ProactiveAgentHarness,
+  ProactiveAgentRun,
+  ProactiveAgentRunMode,
+  ProactiveAgentRunStatus,
+  ProactiveAgentRunsOptions,
+  ProactiveAgentRunsPage,
+  ProactiveAgentStatus,
+  ProactiveAgentTranscript,
+  ProactiveAgentWatchEventKind,
+  ProjectListResult,
+  TerminalAttachMode,
+  ViewMode
+} from '../shared/types/ipc'
 
 // Thin generic wrappers so each handler binds an IPC channel + return type without
 // repeating the `as Promise<T>` cast on every call site.
@@ -84,10 +145,10 @@ function subscribe<T>(channel: string, callback: (payload: T) => void): () => vo
 
 const api = {
   app: {
-    confirmQuit: () => ipcRenderer.invoke('app:confirm-quit') as Promise<boolean>
+    confirmQuit: () => invoke<boolean>('app:confirm-quit')
   },
   project: {
-    list: () => invoke<{ projects: unknown[]; activeId: string | null }>('project:list'),
+    list: () => invoke<ProjectListResult>('project:list'),
     add: (name: string, rootPath?: string) => invoke<unknown>('project:add', name, rootPath),
     remove: (id: string) => invoke<void>('project:remove', id),
     setActive: (id: string | null) => invoke<void>('project:set-active', id),
@@ -119,35 +180,32 @@ const api = {
       name: string,
       channels?: string[],
       errorMessage?: string
-    ) => invoke<{ removed: string[] }>('broker:auto-fix-runtime', projectId, cwd, name, channels, errorMessage),
+    ) =>
+      invoke<{ removed: string[] }>(
+        'broker:auto-fix-runtime',
+        projectId,
+        cwd,
+        name,
+        channels,
+        errorMessage
+      ),
     connectCloud: () => invoke<string>('broker:connect-cloud'),
-    spawnAgent: (projectId: string, input: {
-      name: string
-      cli: string
-      model?: string
-      task?: string
-      channels?: string[]
-      cwd?: string
-      args?: string[]
-    }) => invoke<{ name: string; runtime: string }>('broker:spawn-agent', projectId, input),
-    attachTerminal: (input: {
-      projectId?: string
-      name: string
-      rows?: number
-      cols?: number
-      mode?: TerminalAttachMode
-    }) => invoke<unknown>('broker:attach-terminal', input),
-    sendInputFast: (projectId: string | undefined, name: string, data: string) =>
-      ipcRenderer.send('broker:send-input-fast', projectId, name, data),
+    spawnAgent: (projectId: string, input: BrokerSpawnAgentInput) =>
+      invoke<BrokerSpawnAgentResult>('broker:spawn-agent', projectId, input),
+    attachTerminal: (input: BrokerAttachTerminalInput) =>
+      invoke<BrokerAttachTerminalResult>('broker:attach-terminal', input),
+    sendInputFast: (projectId: string | undefined, name: string, data: string): void => {
+      ipcRenderer.send('broker:send-input-fast', projectId, name, data)
+    },
     setTerminalMode: (projectId: string | undefined, name: string, mode: TerminalAttachMode) =>
-      invoke<unknown>('broker:set-terminal-mode', projectId, name, mode),
+      invoke<BrokerSetTerminalModeResult>('broker:set-terminal-mode', projectId, name, mode),
     getPending: (projectId: string | undefined, name: string) =>
-      invoke<unknown[]>('broker:get-pending', projectId, name),
+      invoke<PendingRelayMessage[]>('broker:get-pending', projectId, name),
     flushPending: (projectId: string | undefined, name: string) =>
       invoke<{ flushed: number }>('broker:flush-pending', projectId, name),
     resizePty: (projectId: string | undefined, name: string, rows: number, cols: number) =>
       invoke<void>('broker:resize-pty', projectId, name, rows, cols),
-    sendMessage: (projectId: string | undefined, input: { to: string; text: string; from?: string }) =>
+    sendMessage: (projectId: string | undefined, input: BrokerSendMessageInput) =>
       invoke<void>('broker:send-message', projectId, input),
     subscribeAgentChannel: (projectId: string | undefined, name: string, channel: string) =>
       invoke<void>('broker:subscribe-agent-channel', projectId, name, channel),
@@ -155,9 +213,10 @@ const api = {
       invoke<void>('broker:unsubscribe-agent-channel', projectId, name, channel),
     releaseAgent: (projectId: string | undefined, name: string) =>
       invoke<void>('broker:release-agent', projectId, name),
-    listAgents: (projectId?: string) => invoke<unknown[]>('broker:list-agents', projectId),
-    listDetails: () => invoke<unknown[]>('broker:list-details'),
-    listEvents: () => invoke<unknown[]>('broker:list-events'),
+    listAgents: (projectId?: string) =>
+      invoke<BrokerListAgent[]>('broker:list-agents', projectId),
+    listDetails: () => invoke<BrokerDetails[]>('broker:list-details'),
+    listEvents: () => invoke<BrokerEventRecord[]>('broker:list-events'),
     shutdown: () => invoke<void>('broker:shutdown'),
     onEvent: (callback: (event: unknown) => void) => subscribe<unknown>('broker:event', callback),
     onPtyChunk: (callback: (projectId: string, name: string, chunk: string) => void) => {
@@ -166,8 +225,8 @@ const api = {
       ipcRenderer.on('broker:pty-chunk', handler)
       return () => ipcRenderer.removeListener('broker:pty-chunk', handler)
     },
-    onStatus: (callback: (status: { projectId?: string; status: string; error?: string }) => void) =>
-      subscribe<{ projectId?: string; status: string; error?: string }>('broker:status', callback)
+    onStatus: (callback: (status: BrokerStatusEvent) => void) =>
+      subscribe<BrokerStatusEvent>('broker:status', callback)
   },
   burn: {
     listAgentSummaries: (agents: BurnAgentInput[]) =>
@@ -176,135 +235,131 @@ const api = {
       invoke<BurnAgentBreakdown>('burn:get-agent-breakdown', agent)
   },
   git: {
-    status: (path: string) => invoke<unknown[]>('git:status', path),
+    status: (path: string) => invoke<GitFileStatus[]>('git:status', path),
     diff: (path: string, file?: string) => invoke<string>('git:diff', path, file),
     fileContent: (path: string, file: string, revision?: string) =>
       invoke<string>('git:file-content', path, file, revision),
-    summary: (path: string) => invoke<unknown>('git:summary', path),
+    summary: (path: string) => invoke<GitSummary | null>('git:summary', path),
     branches: (root: string) => invoke<string[]>('git:branches', root),
-    branchDetails: (root: string) => invoke<unknown[]>('git:branch-details', root),
-    checkoutBranch: (root: string, branch: string, options?: { stashChanges?: boolean }) =>
-      invoke<unknown>('git:checkout-branch', root, branch, options),
-    branchSyncStatus: (root: string) => invoke<unknown>('git:branch-sync-status', root),
-    fetchRemote: (root: string) => invoke<unknown>('git:fetch-remote', root),
-    pullCurrentBranch: (root: string) => invoke<unknown>('git:pull-current-branch', root),
-    pushCurrentBranch: (root: string) => invoke<unknown>('git:push-current-branch', root),
-    history: (path: string, limit?: number) => invoke<unknown[]>('git:history', path, limit),
-    show: (path: string, hash: string, file?: string) => invoke<string>('git:show', path, hash, file),
-    discardFiles: (path: string, files: string[]) => invoke<void>('git:discard-files', path, files),
+    branchDetails: (root: string) => invoke<GitBranchInfo[]>('git:branch-details', root),
+    checkoutBranch: (root: string, branch: string, options?: GitCheckoutBranchOptions) =>
+      invoke<GitBranchSyncStatus>('git:checkout-branch', root, branch, options),
+    branchSyncStatus: (root: string) => invoke<GitBranchSyncStatus>('git:branch-sync-status', root),
+    fetchRemote: (root: string) => invoke<GitBranchSyncStatus>('git:fetch-remote', root),
+    pullCurrentBranch: (root: string) =>
+      invoke<GitBranchSyncStatus>('git:pull-current-branch', root),
+    pushCurrentBranch: (root: string) =>
+      invoke<GitBranchSyncStatus>('git:push-current-branch', root),
+    history: (path: string, limit?: number) =>
+      invoke<GitHistoryCommit[]>('git:history', path, limit),
+    show: (path: string, hash: string, file?: string) =>
+      invoke<string>('git:show', path, hash, file),
+    discardFiles: (path: string, files: string[]) =>
+      invoke<void>('git:discard-files', path, files),
     addGitignorePatterns: (path: string, patterns: string[]) =>
       invoke<void>('git:add-gitignore-patterns', path, patterns),
-    commitSelection: (path: string, input: {
-      title: string
-      body?: string
-      wholeFiles: string[]
-      patch?: string
-    }) => invoke<{ hash: string }>('git:commit-selection', path, input),
-    generateCommitMessage: (path: string, input: { wholeFiles: string[]; patch?: string }) =>
-      invoke<unknown>('git:generate-commit-message', path, input)
+    commitSelection: (path: string, input: GitCommitSelectionInput) =>
+      invoke<{ hash: string }>('git:commit-selection', path, input),
+    generateCommitMessage: (path: string, input: GitGenerateCommitMessageInput) =>
+      invoke<GitCommitDraft>('git:generate-commit-message', path, input)
   },
   fs: {
-    listDir: (dirPath: string) => invoke<unknown[]>('fs:list-dir', dirPath),
-    readPreview: (filePath: string) => invoke<unknown>('fs:read-preview', filePath),
+    listDir: (dirPath: string) => invoke<FsDirEntry[]>('fs:list-dir', dirPath),
+    readPreview: (filePath: string) => invoke<FsReadPreviewResult>('fs:read-preview', filePath),
     revealPath: (filePath: string) => invoke<void>('fs:reveal-path', filePath)
   },
   auth: {
-    login: (input?: { apiUrl?: string }) => invoke<unknown>('auth:login', input),
+    login: (input?: AuthLoginInput) => invoke<AuthStatus>('auth:login', input),
     logout: () => invoke<void>('auth:logout'),
-    status: () => invoke<unknown>('auth:status')
+    status: () => invoke<AuthStatus>('auth:status')
   },
   cloudAgent: {
-    list: () => ipcRenderer.invoke('cloud-agent:list'),
-    create: (input: { name: string; harness: string; model: string }) =>
-      ipcRenderer.invoke('cloud-agent:create', input),
-    delete: (id: string) => ipcRenderer.invoke('cloud-agent:delete', id),
+    list: () => invoke<CloudAgentRecord[]>('cloud-agent:list'),
+    create: (input: CreateCloudAgentInput) =>
+      invoke<CloudAgentRecord>('cloud-agent:create', input),
+    delete: (id: string) => invoke<void>('cloud-agent:delete', id),
     attach: (projectId: string, cloudAgentId: string) =>
-      ipcRenderer.invoke('cloud-agent:attach', projectId, cloudAgentId),
-    detach: (projectId: string) => ipcRenderer.invoke('cloud-agent:detach', projectId),
-    status: (projectId: string) => ipcRenderer.invoke('cloud-agent:status', projectId),
-    onEvent: (callback: (event: unknown) => void) => {
-      const handler = (_: unknown, event: unknown): void => callback(event)
-      ipcRenderer.on('cloud-agent:event', handler)
-      return () => ipcRenderer.removeListener('cloud-agent:event', handler)
-    }
+      invoke<CloudAgentBinding>('cloud-agent:attach', projectId, cloudAgentId),
+    detach: (projectId: string) => invoke<void>('cloud-agent:detach', projectId),
+    status: (projectId: string) =>
+      invoke<CloudAgentStatus | null>('cloud-agent:status', projectId),
+    onEvent: (callback: (event: CloudAgentEvent) => void) =>
+      subscribe<CloudAgentEvent>('cloud-agent:event', callback)
   },
   proactiveAgent: {
-    list: (projectId: string) => ipcRenderer.invoke('proactive-agent:list', projectId),
-    create: (projectId: string, draft: unknown) =>
-      ipcRenderer.invoke('proactive-agent:create', projectId, draft),
-    update: (projectId: string, personaId: string, draft: unknown) =>
-      ipcRenderer.invoke('proactive-agent:update', projectId, personaId, draft),
+    list: (projectId: string) =>
+      invoke<ProactiveAgentBinding[]>('proactive-agent:list', projectId),
+    create: (projectId: string, draft: ProactiveAgentDraft) =>
+      invoke<ProactiveAgentBinding>('proactive-agent:create', projectId, draft),
+    update: (projectId: string, personaId: string, draft: ProactiveAgentDraft) =>
+      invoke<ProactiveAgentBinding>('proactive-agent:update', projectId, personaId, draft),
     deploy: (projectId: string, personaId: string) =>
-      ipcRenderer.invoke('proactive-agent:deploy', projectId, personaId),
+      invoke<ProactiveAgentDeployResult>('proactive-agent:deploy', projectId, personaId),
     pause: (projectId: string, personaId: string) =>
-      ipcRenderer.invoke('proactive-agent:pause', projectId, personaId),
+      invoke<void>('proactive-agent:pause', projectId, personaId),
     resume: (projectId: string, personaId: string) =>
-      ipcRenderer.invoke('proactive-agent:resume', projectId, personaId),
+      invoke<void>('proactive-agent:resume', projectId, personaId),
     undeploy: (projectId: string, personaId: string) =>
-      ipcRenderer.invoke('proactive-agent:undeploy', projectId, personaId),
-    runs: (projectId: string, personaId: string, opts?: { limit?: number; cursor?: string }) =>
-      ipcRenderer.invoke('proactive-agent:runs', projectId, personaId, opts),
+      invoke<void>('proactive-agent:undeploy', projectId, personaId),
+    runs: (projectId: string, personaId: string, opts?: ProactiveAgentRunsOptions) =>
+      invoke<ProactiveAgentRunsPage>('proactive-agent:runs', projectId, personaId, opts),
     runTranscript: (runId: string) =>
-      ipcRenderer.invoke('proactive-agent:run-transcript', runId),
-    onEvent: (callback: (event: unknown) => void) => {
-      const handler = (_: unknown, event: unknown): void => callback(event)
-      ipcRenderer.on('proactive-agent:event', handler)
-      return () => ipcRenderer.removeListener('proactive-agent:event', handler)
-    }
+      invoke<ProactiveAgentTranscript>('proactive-agent:run-transcript', runId),
+    onEvent: (callback: (event: ProactiveAgentEvent) => void) =>
+      subscribe<ProactiveAgentEvent>('proactive-agent:event', callback)
   },
   integrations: {
-    catalog: () => ipcRenderer.invoke('integrations:catalog'),
-    list: (projectId: string) => ipcRenderer.invoke('integrations:list', projectId),
+    catalog: () => invoke<IntegrationAdapter[]>('integrations:catalog'),
+    list: (projectId: string) => invoke<ConnectedIntegration[]>('integrations:list', projectId),
     startConnect: (projectId: string, provider: string) =>
-      ipcRenderer.invoke('integrations:start-connect', projectId, provider),
+      invoke<IntegrationConnectSession>('integrations:start-connect', projectId, provider),
     pollConnect: (sessionId: string) =>
-      ipcRenderer.invoke('integrations:poll-connect', sessionId),
+      invoke<IntegrationConnectSession>('integrations:poll-connect', sessionId),
     completeConnect: (
       projectId: string,
       sessionId: string,
       scope: Record<string, unknown>,
       mountPaths: string[],
       notifyAgent: boolean
-    ) => ipcRenderer.invoke(
-      'integrations:complete-connect',
-      projectId,
-      sessionId,
-      scope,
-      mountPaths,
-      notifyAgent
-    ),
+    ) =>
+      invoke<ConnectedIntegration>(
+        'integrations:complete-connect',
+        projectId,
+        sessionId,
+        scope,
+        mountPaths,
+        notifyAgent
+      ),
     updateScope: (
       projectId: string,
       integrationId: string,
       scope: Record<string, unknown>,
       mountPaths: string[]
-    ) => ipcRenderer.invoke('integrations:update-scope', projectId, integrationId, scope, mountPaths),
+    ) =>
+      invoke<ConnectedIntegration>(
+        'integrations:update-scope',
+        projectId,
+        integrationId,
+        scope,
+        mountPaths
+      ),
     disconnect: (projectId: string, integrationId: string) =>
-      ipcRenderer.invoke('integrations:disconnect', projectId, integrationId),
-    onEvent: (callback: (event: unknown) => void) => {
-      const handler = (_: unknown, event: unknown): void => callback(event)
-      ipcRenderer.on('integrations:event', handler)
-      return () => ipcRenderer.removeListener('integrations:event', handler)
-    }
+      invoke<void>('integrations:disconnect', projectId, integrationId),
+    onEvent: (callback: (event: IntegrationsEvent) => void) =>
+      subscribe<IntegrationsEvent>('integrations:event', callback)
   },
   aiHist: {
-    status: () =>
-      invoke<{ ok: true; dbPath: string } | { ok: false; reason: string }>('ai-hist:status'),
-    recent: (opts?: { source?: string; project?: string; limit?: number; beforeMs?: number }) =>
-      invoke<AiHistEntry[]>('ai-hist:recent', opts),
-    listSessions: (opts?: { source?: string; project?: string; limit?: number; beforeMs?: number }) =>
+    status: () => invoke<AiHistStatusResponse>('ai-hist:status'),
+    recent: (opts?: AiHistRecentOptions) => invoke<AiHistEntry[]>('ai-hist:recent', opts),
+    listSessions: (opts?: AiHistRecentOptions) =>
       invoke<AiHistSession[]>('ai-hist:list-sessions', opts),
     getSession: (sessionId: string) => invoke<AiHistEntry[]>('ai-hist:get-session', sessionId),
-    search: (
-      query: string,
-      opts?: { source?: string; project?: string; limit?: number; beforeMs?: number }
-    ) => invoke<AiHistEntry[]>('ai-hist:search', query, opts),
-    searchSessions: (
-      query: string,
-      opts?: { source?: string; project?: string; limit?: number; beforeMs?: number }
-    ) => invoke<AiHistSession[]>('ai-hist:search-sessions', query, opts),
+    search: (query: string, opts?: AiHistRecentOptions) =>
+      invoke<AiHistEntry[]>('ai-hist:search', query, opts),
+    searchSessions: (query: string, opts?: AiHistRecentOptions) =>
+      invoke<AiHistSession[]>('ai-hist:search-sessions', query, opts),
     stats: () => invoke<AiHistStats | null>('ai-hist:stats'),
-    resumeCommand: (entry: { source: string; sessionId: string | null; project: string | null }) =>
+    resumeCommand: (entry: AiHistResumeEntry) =>
       invoke<string | null>('ai-hist:resume-command', entry),
     reload: () => invoke<void>('ai-hist:reload')
   },
@@ -313,8 +368,6 @@ const api = {
     ipcRenderer.on(channel, handler)
     return () => ipcRenderer.removeListener(channel, handler)
   }
-}
+} satisfies PearAPI
 
 contextBridge.exposeInMainWorld('pear', api)
-
-export type PearAPI = typeof api
