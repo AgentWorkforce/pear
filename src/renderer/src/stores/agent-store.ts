@@ -78,6 +78,12 @@ export interface BrokerErrorEntry {
 const MAX_BROKER_ERRORS = 12
 const MAX_BROKER_EVENTS = 3_000
 const BROKER_EVENT_RETENTION_MS = 12 * 60 * 60 * 1_000
+// Chat + relay history are display/graph buffers, not a source of truth, so cap
+// them the same way broker events are capped. Without this they grow for the
+// life of the session (one entry per relay_inbound), which is the dominant
+// renderer memory leak behind long-session crashes.
+const MAX_CHAT_MESSAGES = 5_000
+const MAX_RELAY_MESSAGES = 5_000
 const HUMAN_SENDER_NAME = 'human'
 const SYSTEM_NOTICE_SENDER_NAME = 'system'
 const HUMAN_MESSAGE_DEDUPE_WINDOW_MS = 10_000
@@ -202,6 +208,10 @@ function compactBrokerEvent(event: Record<string, unknown>): BrokerEventRecord['
   return compactBrokerEventPayload(event) as BrokerEventRecord['event']
 }
 
+function capByCount<T>(items: T[], max: number): T[] {
+  return items.length > max ? items.slice(items.length - max) : items
+}
+
 function pruneBrokerEvents(events: BrokerEventRecord[], now = Date.now()): BrokerEventRecord[] {
   const cutoff = now - BROKER_EVENT_RETENTION_MS
   return events
@@ -307,7 +317,7 @@ function appendJoinNotices(messages: ChatMessage[], notices: ChatMessage[]): Cha
     nextMessages = [...nextMessages, notice]
   }
 
-  return nextMessages
+  return capByCount(nextMessages, MAX_CHAT_MESSAGES)
 }
 
 interface AgentState {
@@ -761,7 +771,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
         const targetName = eventTarget.startsWith('#') ? null : normalizeMessageTarget(eventTarget)
         const messages = isHuman && isDuplicateHumanEcho(state.messages, msg)
           ? state.messages
-          : [...state.messages, msg]
+          : capByCount([...state.messages, msg], MAX_CHAT_MESSAGES)
 
         return {
           agents: state.agents.map((a) => {
@@ -773,7 +783,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
             return nextAgent
           }),
           messages,
-          relayMessages: [...state.relayMessages, relay]
+          relayMessages: capByCount([...state.relayMessages, relay], MAX_RELAY_MESSAGES)
         }
       })
     } else if (kind === 'agent_blocked_on_send' && event.name) {
@@ -850,7 +860,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
     set((state) => ({
       messages: isDuplicateHumanEcho(state.messages, msg)
         ? state.messages
-        : [...state.messages, msg]
+        : capByCount([...state.messages, msg], MAX_CHAT_MESSAGES)
     }))
   },
 
