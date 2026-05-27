@@ -15,7 +15,6 @@ import {
   type PendingRelayMessage,
   type PtyInputStream,
   findPersona,
-  loadPersona,
   listPersonas
 } from '@agent-relay/sdk'
 import { getAccessToken, getApiUrl } from './auth'
@@ -1238,13 +1237,20 @@ export class BrokerManager {
       throw new Error(`Workforce persona not found: ${trimmedPersonaId}`)
     }
 
-    const resolvedPersona = loadPersona(trimmedPersonaId, { cwd: session.cwd })
+    // Resolve the harness straight from the discovered spec rather than
+    // loadPersona(): loadPersona throws when a persona has no `systemPrompt`,
+    // but personas that drive the prompt via `agentsMdContent` (e.g.
+    // nango-integrations) legitimately leave systemPrompt empty. The actual
+    // spawn is delegated to the workforce CLI (`agent --install-in-repo`),
+    // which reads the full persona itself, so the broker only needs the harness
+    // for the informational `cli` field it returns.
+    const resolvedHarness = persona.spec.harness ?? 'claude'
     const command = resolveAgentWorkforceCommand(session.cwd)
     const spawned = await this.spawnPersonaWithMode(session, {
       personaId: trimmedPersonaId,
       baseName: persona.id,
       command,
-      resolvedHarness: resolvedPersona.harness
+      resolvedHarness
     })
     const registeredAgent = await this.verifyPersonaBrokerRegistration(session, spawned.name)
     if (registeredAgent) {
