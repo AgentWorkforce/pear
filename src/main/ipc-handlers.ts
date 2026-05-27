@@ -512,8 +512,8 @@ export function registerIpcHandlers(): void {
     return integrationsManager.listCatalog()
   })
 
-  ipcMain.handle('integrations:list', (_, projectId: string) => {
-    return integrationsManager.listConnected(projectId)
+  ipcMain.handle('integrations:list', async (_, projectId: string) => {
+    return integrationsManager.listConnectedForSettings(projectId)
   })
 
   ipcMain.handle('integrations:start-connect', async (_, projectId: string, provider: string) => {
@@ -542,6 +542,13 @@ export function registerIpcHandlers(): void {
     'integrations:update-scope',
     async (_, projectId: string, integrationId: string, scope: Record<string, unknown>, mountPaths: string[]) => {
       return integrationsManager.updateScope(projectId, integrationId, scope, mountPaths)
+    }
+  )
+
+  ipcMain.handle(
+    'integrations:update-subscription',
+    async (_, projectId: string, integrationId: string, subscribeAgent: boolean) => {
+      return integrationsManager.updateSubscription(projectId, integrationId, subscribeAgent)
     }
   )
 

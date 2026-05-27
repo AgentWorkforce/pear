@@ -25,6 +25,8 @@ export type ConnectedIntegration = {
   mountPaths: string[]
   connectedAt: string
   notifyAgent: boolean
+  subscribeAgent?: boolean
+  localMountPaths?: string[]
   lastSyncAt?: string
   lastError?: string
 }

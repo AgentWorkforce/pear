@@ -2,7 +2,10 @@ import { randomUUID } from 'node:crypto'
 import { BrowserWindow, shell } from 'electron'
 import type { WorkspaceHandle } from '@relayfile/sdk'
 import { getApiUrl, resolveCloudAuth } from './auth'
+import { brokerManager } from './broker'
 import { cloudAgentManager } from './cloud-agent'
+import { integrationEventBridge, integrationSubscriptionSummaries } from './integration-event-bridge'
+import { integrationMountManager } from './integration-mounts'
 import { INTEGRATIONS_CATALOG } from './integrations.catalog'
 import { getRelayWorkspaceManager } from './relay-workspace'
 import { loadStore, saveStore, type ProjectIntegration } from './store'
@@ -34,6 +37,8 @@ export type ConnectedIntegration = {
   mountPaths: string[]
   connectedAt: string
   notifyAgent: boolean
+  subscribeAgent?: boolean
+  localMountPaths?: string[]
   lastSyncAt?: string
   lastError?: string
 }
@@ -107,9 +112,42 @@ type IntegrationStatusPayload = {
   }
 }
 
+type WorkspaceIntegrationPayload = {
+  provider?: unknown
+  id?: unknown
+  integrationId?: unknown
+  connectionId?: unknown
+  currentConnectionId?: unknown
+  providerConfigKey?: unknown
+  status?: unknown
+  state?: unknown
+  connectedAt?: unknown
+  createdAt?: unknown
+  updatedAt?: unknown
+  webhookHealth?: {
+    healthy?: unknown
+    lastError?: unknown
+    lastEventAt?: unknown
+  }
+}
+
 type CloudAgentIntegrationsBridge = {
-  injectSystemMessage: (projectId: string, message: string) => Promise<void> | void
   updateMountPaths: (projectId: string, paths: string[]) => Promise<void> | void
+}
+
+type IntegrationSystemMessageBridge = {
+  listAgents: (projectId?: string) => Promise<Array<{ name: string; projectId?: string }>>
+  sendMessage: (
+    projectId: string,
+    input: {
+      to: string
+      text: string
+      from?: string
+      data?: Record<string, unknown>
+      priority?: number
+      mode?: 'wait' | 'steer'
+    }
+  ) => Promise<void> | void
 }
 
 const POLL_INTERVAL_MS = 2_000
@@ -411,7 +449,11 @@ function normalizeConnectedIntegration(value: unknown): ConnectedIntegration | n
     ? value.integrationId.trim()
     : typeof value.id === 'string' && value.id.trim()
       ? value.id.trim()
-      : ''
+      : typeof value.connectionId === 'string' && value.connectionId.trim()
+        ? value.connectionId.trim()
+        : typeof value.currentConnectionId === 'string' && value.currentConnectionId.trim()
+          ? value.currentConnectionId.trim()
+          : ''
 
   if (!provider || !integrationId) return null
 
@@ -424,9 +466,17 @@ function normalizeConnectedIntegration(value: unknown): ConnectedIntegration | n
       ? value.connectedAt.trim()
       : new Date(0).toISOString(),
     notifyAgent: typeof value.notifyAgent === 'boolean' ? value.notifyAgent : true,
+    subscribeAgent: typeof value.subscribeAgent === 'boolean' ? value.subscribeAgent : false,
+    localMountPaths: Array.isArray(value.localMountPaths)
+      ? value.localMountPaths.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+      : [],
     ...(typeof value.lastSyncAt === 'string' ? { lastSyncAt: value.lastSyncAt } : {}),
     ...(typeof value.lastError === 'string' ? { lastError: value.lastError } : {})
   }
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
 
 function toStoredIntegration(integration: ConnectedIntegration, displayName?: string): StoredIntegration {
@@ -440,6 +490,7 @@ function toStoredIntegration(integration: ConnectedIntegration, displayName?: st
     mountPaths: integration.mountPaths,
     connectedAt: integration.connectedAt,
     notifyAgent: integration.notifyAgent,
+    subscribeAgent: integration.subscribeAgent === true,
     ...(integration.lastSyncAt ? { lastSyncAt: integration.lastSyncAt } : {}),
     ...(integration.lastError ? { lastError: integration.lastError } : {})
   }
@@ -525,6 +576,33 @@ export class IntegrationsManager {
     return project.integrations
       .map((integration) => normalizeConnectedIntegration(integration))
       .filter((integration): integration is ConnectedIntegration => integration !== null)
+  }
+
+  async listConnectedForSettings(projectId: string): Promise<ConnectedIntegration[]> {
+    const local = this.listConnected(projectId)
+    const project = this.findProject(projectId)
+    if (!project) return this.withLocalMountPaths(local)
+
+    try {
+      const cloud = await this.listCloudWorkspaceIntegrations()
+      if (cloud.length === 0) return this.withLocalMountPaths(local)
+      return this.withLocalMountPaths(await this.mergeCloudIntegrationsIntoProject(projectId, cloud))
+    } catch (error) {
+      console.warn('[integrations] Failed to hydrate cloud workspace integrations:', toErrorMessage(error))
+      return this.withLocalMountPaths(local)
+    }
+  }
+
+  async startLocalMountDaemon(): Promise<void> {
+    await this.syncLocalMounts()
+    await this.syncAllEventSubscriptions()
+  }
+
+  async shutdownLocalMounts(): Promise<void> {
+    await Promise.all([
+      integrationMountManager.stop(),
+      integrationEventBridge.closeAll()
+    ])
   }
 
   async startConnect(projectId: string, provider: string): Promise<IntegrationConnectSession> {
@@ -629,7 +707,8 @@ export class IntegrationsManager {
       scope,
       mountPaths,
       connectedAt: new Date().toISOString(),
-      notifyAgent
+      notifyAgent,
+      subscribeAgent: false
     }
 
     await this.persistIntegration(projectId, integration)
@@ -649,11 +728,29 @@ export class IntegrationsManager {
       ...existing,
       scope,
       mountPaths,
-      notifyAgent: existing.notifyAgent
+      notifyAgent: existing.notifyAgent,
+      subscribeAgent: existing.subscribeAgent === true
     }
 
     await this.persistIntegration(projectId, integration)
     await this.syncAgentState(projectId, integration.notifyAgent)
+    this.emit({ type: 'integration-added', projectId, integration })
+    return integration
+  }
+
+  async updateSubscription(
+    projectId: string,
+    integrationId: string,
+    subscribeAgent: boolean
+  ): Promise<ConnectedIntegration> {
+    const existing = this.requireConnectedIntegration(projectId, integrationId)
+    const integration: ConnectedIntegration = {
+      ...existing,
+      subscribeAgent
+    }
+
+    await this.persistIntegration(projectId, integration)
+    await this.syncAgentState(projectId, true)
     this.emit({ type: 'integration-added', projectId, integration })
     return integration
   }
@@ -665,11 +762,13 @@ export class IntegrationsManager {
 
     this.removePersistedIntegration(projectId, existing.integrationId)
     await this.syncAgentState(projectId, existing.notifyAgent)
+    await this.syncEventSubscriptions(projectId)
     this.emit({ type: 'integration-removed', projectId, integrationId: existing.integrationId })
   }
 
   async hydrateProject(projectId: string): Promise<void> {
     await this.syncAgentState(projectId, true)
+    await this.syncEventSubscriptions(projectId)
   }
 
   private emit(event: IntegrationsEvent): void {
@@ -747,6 +846,71 @@ export class IntegrationsManager {
       await handle.refreshToken()
       return request()
     }
+  }
+
+  private async listCloudWorkspaceIntegrations(): Promise<ConnectedIntegration[]> {
+    return this.withWorkspaceHandle(async (handle) => {
+      const payload = await handle.requestJson({
+        operation: 'listIntegrations',
+        method: 'GET',
+        path: `api/v1/workspaces/${handle.workspaceId}/integrations`
+      })
+      return this.normalizeWorkspaceIntegrationList(payload)
+    })
+  }
+
+  private async normalizeWorkspaceIntegrationList(payload: unknown): Promise<ConnectedIntegration[]> {
+    const entries = Array.isArray(payload)
+      ? payload
+      : isRecord(payload) && Array.isArray(payload.integrations)
+        ? payload.integrations
+        : isRecord(payload) && Array.isArray(payload.data)
+          ? payload.data
+          : []
+
+    const catalog = await this.listCatalog()
+    const adapterByProvider = new Map(catalog.map((adapter) => [toRelayfileProvider(adapter.provider), adapter]))
+    const integrations: ConnectedIntegration[] = []
+
+    for (const entry of entries) {
+      if (!isRecord(entry)) continue
+      const payloadEntry = entry as WorkspaceIntegrationPayload
+      const provider = readString(payloadEntry.provider)
+      const integrationId =
+        readString(payloadEntry.integrationId) ||
+        readString(payloadEntry.id) ||
+        readString(payloadEntry.connectionId) ||
+        readString(payloadEntry.currentConnectionId)
+
+      if (!provider || !integrationId) continue
+      if (!this.statusPayloadReady(payloadEntry)) continue
+
+      const adapter = adapterByProvider.get(toRelayfileProvider(provider))
+      const providerConfigKey = readString(payloadEntry.providerConfigKey)
+      const lastError =
+        payloadEntry.webhookHealth?.healthy === false
+          ? readString(payloadEntry.webhookHealth.lastError)
+          : undefined
+
+      integrations.push({
+        provider,
+        integrationId,
+        scope: {
+          provider,
+          ...(providerConfigKey ? { providerConfigKey } : {})
+        },
+        mountPaths: adapter?.defaultMountPaths ?? [`/integrations/${toRelayfileProvider(provider)}`],
+        connectedAt:
+          readString(payloadEntry.connectedAt) ||
+          readString(payloadEntry.createdAt) ||
+          readString(payloadEntry.updatedAt) ||
+          new Date(0).toISOString(),
+        notifyAgent: true,
+        ...(lastError ? { lastError } : {})
+      })
+    }
+
+    return integrations
   }
 
   private async deleteIntegrationConnection(relayfileProvider: string): Promise<void> {
@@ -857,6 +1021,62 @@ export class IntegrationsManager {
 
   private findProject(projectId: string) {
     return loadStore().projects.find((project) => project.id === projectId) || null
+  }
+
+  private async mergeCloudIntegrationsIntoProject(
+    projectId: string,
+    cloudIntegrations: ConnectedIntegration[]
+  ): Promise<ConnectedIntegration[]> {
+    const data = loadStore()
+    const project = data.projects.find((entry) => entry.id === projectId)
+    if (!project) return this.listConnected(projectId)
+
+    const catalog = await this.listCatalog()
+    const displayNameByProvider = new Map(catalog.map((adapter) => [adapter.provider, adapter.displayName]))
+    const existing = project.integrations
+      .map((integration) => normalizeConnectedIntegration(integration))
+      .filter((integration): integration is ConnectedIntegration => integration !== null)
+    const existingById = new Map(existing.map((integration) => [integration.integrationId, integration]))
+    const existingByProvider = new Map(existing.map((integration) => [toRelayfileProvider(integration.provider), integration]))
+    let changed = false
+
+    for (const cloudIntegration of cloudIntegrations) {
+      const existingIntegration =
+        existingById.get(cloudIntegration.integrationId) ||
+        existingByProvider.get(toRelayfileProvider(cloudIntegration.provider))
+      const merged: ConnectedIntegration = existingIntegration
+        ? {
+            ...cloudIntegration,
+            scope: Object.keys(existingIntegration.scope).length > 0 ? existingIntegration.scope : cloudIntegration.scope,
+            mountPaths: existingIntegration.mountPaths.length > 0 ? existingIntegration.mountPaths : cloudIntegration.mountPaths,
+            notifyAgent: existingIntegration.notifyAgent,
+            subscribeAgent: existingIntegration.subscribeAgent === true,
+            connectedAt: existingIntegration.connectedAt || cloudIntegration.connectedAt,
+            ...(cloudIntegration.lastError ? { lastError: cloudIntegration.lastError } : {})
+          }
+        : cloudIntegration
+      const stored = toStoredIntegration(merged, displayNameByProvider.get(merged.provider) || merged.provider)
+      const currentIndex = project.integrations.findIndex((entry) => {
+        const current = normalizeConnectedIntegration(entry)
+        return current?.integrationId === merged.integrationId ||
+          (current ? toRelayfileProvider(current.provider) === toRelayfileProvider(merged.provider) : false)
+      })
+
+      if (currentIndex >= 0) {
+        const current = JSON.stringify(project.integrations[currentIndex])
+        const next = JSON.stringify(stored)
+        if (current !== next) {
+          project.integrations[currentIndex] = stored
+          changed = true
+        }
+      } else {
+        project.integrations.push(stored)
+        changed = true
+      }
+    }
+
+    if (changed) saveStore(data)
+    return this.listConnected(projectId)
   }
 
   private startPolling(sessionId: string): void {
@@ -991,15 +1211,18 @@ export class IntegrationsManager {
   }
 
   private async syncAgentState(projectId: string, notifyAgent: boolean): Promise<void> {
-    const integrations = this.listConnected(projectId)
+    let integrations = this.listConnected(projectId)
+    await this.syncLocalMounts()
+    integrations = await this.withLocalMountPaths(integrations)
     await this.safeUpdateMountPaths(projectId, this.mountPathsFor(projectId))
+    const subscriptionsReady = await this.syncEventSubscriptions(projectId)
 
     if (notifyAgent) {
-      await this.safeInjectSystemMessage(projectId, this.buildSystemMessageSnippet(integrations))
+      await this.safeInjectSystemMessage(projectId, this.buildSystemMessageSnippet(integrations, subscriptionsReady))
     }
   }
 
-  private buildSystemMessageSnippet(integrations: ConnectedIntegration[]): string {
+  private buildSystemMessageSnippet(integrations: ConnectedIntegration[], subscriptionsReady: boolean): string {
     const lines = [
       '<integrations-update>',
       'The user has connected the following integrations to this project:'
@@ -1015,8 +1238,29 @@ export class IntegrationsManager {
         const mountClause = mountPaths.length > 0
           ? ` (mounted at ${mountPaths.join(', ')})`
           : ' (no mount paths configured)'
-        lines.push(`- ${integration.provider}: ${scopeSummary}${mountClause}`)
+        lines.push(`- ${integration.provider}: ${scopeSummary}${mountClause}.`)
       }
+    }
+
+    const subscriptions = integrationSubscriptionSummaries(integrations)
+    lines.push('')
+    if (!subscriptionsReady && subscriptions.length > 0) {
+      lines.push('Integration event subscriptions are requested for this project, but Pear could not register them with the event gateway yet.')
+      lines.push('Do not assume notifications will arrive until a later integrations update confirms active subscriptions; read the mounted integration files when the user asks for current state.')
+    } else if (subscriptions.length === 0) {
+      lines.push('No integration event subscriptions are active for this project.')
+    } else {
+      lines.push('Active integration event subscriptions for this project:')
+      for (const subscription of subscriptions) {
+        const parts = [
+          subscription.watches.length > 0 ? `file changes at ${subscription.watches.join(', ')}` : '',
+          subscription.inboxes.length > 0 ? `inbox messages at ${subscription.inboxes.join(', ')}` : ''
+        ].filter(Boolean)
+        lines.push(`- ${subscription.provider}: ${parts.join('; ')}`)
+      }
+      lines.push(
+        'You will receive <integration-event> system messages for these subscribed changes. Do not poll these integrations for background changes; wait for the event notification, then read the mounted files for context if needed.'
+      )
     }
 
     lines.push(
@@ -1036,8 +1280,23 @@ export class IntegrationsManager {
 
   private async safeInjectSystemMessage(projectId: string, message: string): Promise<void> {
     try {
-      const bridge: CloudAgentIntegrationsBridge = cloudAgentManager
-      await bridge.injectSystemMessage(projectId, message)
+      const bridge = brokerManager as unknown as IntegrationSystemMessageBridge
+      const agents = await bridge.listAgents(projectId)
+      await Promise.all(
+        agents
+          .filter((agent) => agent.projectId === undefined || agent.projectId === projectId)
+          .map((agent) => bridge.sendMessage(projectId, {
+            to: agent.name,
+            from: 'system',
+            text: message,
+            priority: 0,
+            mode: 'steer',
+            data: {
+              kind: 'integrations-update',
+              system: true
+            }
+          }))
+      )
     } catch (error) {
       console.warn('[integrations] Failed to inject integration system message:', toErrorMessage(error))
     }
@@ -1050,6 +1309,51 @@ export class IntegrationsManager {
     } catch (error) {
       console.warn('[integrations] Failed to update integration mount paths:', toErrorMessage(error))
     }
+  }
+
+  private async syncEventSubscriptions(projectId: string): Promise<boolean> {
+    try {
+      await integrationEventBridge.reconcile(projectId, this.listConnected(projectId))
+      return true
+    } catch (error) {
+      console.warn('[integrations] Failed to reconcile integration event subscriptions:', toErrorMessage(error))
+      return false
+    }
+  }
+
+  private async syncAllEventSubscriptions(): Promise<void> {
+    await Promise.all(loadStore().projects.map((project) => this.syncEventSubscriptions(project.id)))
+  }
+
+  private async syncLocalMounts(): Promise<void> {
+    const localIntegrations = loadStore().projects.flatMap((project) => this.listConnected(project.id))
+    const cloudIntegrations = await this.listCloudWorkspaceIntegrations().catch(() => [])
+    const byProvider = new Map<string, ConnectedIntegration>()
+    for (const integration of [...localIntegrations, ...cloudIntegrations]) {
+      byProvider.set(`${toRelayfileProvider(integration.provider)}:${integration.integrationId}`, integration)
+    }
+    const integrations = Array.from(byProvider.values())
+    try {
+      await integrationMountManager.ensureMounted(integrations.map((integration) => ({
+        provider: integration.provider,
+        mountPaths: this.canonicalMountPathsForIntegration(integration)
+      })))
+    } catch (error) {
+      console.warn('[integrations] Failed to reconcile local integration mount:', toErrorMessage(error))
+    }
+  }
+
+  private async withLocalMountPaths(integrations: ConnectedIntegration[]): Promise<ConnectedIntegration[]> {
+    await this.syncLocalMounts()
+    const workspaceId = integrationMountManager.currentWorkspaceId()
+    if (!workspaceId) return integrations
+    return integrations.map((integration) => ({
+      ...integration,
+      localMountPaths: integrationMountManager.localPathsFor(workspaceId, {
+        provider: integration.provider,
+        mountPaths: this.canonicalMountPathsForIntegration(integration)
+      })
+    }))
   }
 }
 

@@ -31,6 +31,17 @@ export type ProjectCloudAgent = {
   relayfileMountPath: string
   attachedAt: string
   autoPullAfterRun: boolean
+  workspaceSource?: {
+    kind: 'relayfile'
+  } | {
+    kind: 'git'
+    remoteUrl: string
+    ref?: string
+    commit?: string
+    shallow?: boolean
+    targetDir?: string
+    largeReason?: string
+  }
 }
 
 export interface RelayWorkspace {
@@ -256,4 +267,3 @@ export function updateProject(id: string, update: Partial<Project>): void {
   data.projects[idx] = next
   saveStore(data)
 }
-

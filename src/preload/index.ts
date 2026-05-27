@@ -349,6 +349,13 @@ const api = {
         scope,
         mountPaths
       ),
+    updateSubscription: (projectId: string, integrationId: string, subscribeAgent: boolean) =>
+      invoke<ConnectedIntegration>(
+        'integrations:update-subscription',
+        projectId,
+        integrationId,
+        subscribeAgent
+      ),
     disconnect: (projectId: string, integrationId: string) =>
       invoke<void>('integrations:disconnect', projectId, integrationId),
     onEvent: (callback: (event: IntegrationsEvent) => void) =>
