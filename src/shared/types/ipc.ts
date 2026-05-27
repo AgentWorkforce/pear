@@ -504,6 +504,9 @@ export type ConnectedIntegration = {
   mountPaths: string[]
   connectedAt: string
   notifyAgent: boolean
+  subscribeAgent?: boolean
+  visibleInProject?: boolean
+  localMountPaths?: string[]
   lastSyncAt?: string
   lastError?: string
 }
@@ -723,6 +726,11 @@ export interface PearAPI {
       integrationId: string,
       scope: Record<string, unknown>,
       mountPaths: string[]
+    ) => Promise<ConnectedIntegration>
+    updateSubscription: (
+      projectId: string,
+      integrationId: string,
+      subscribeAgent: boolean
     ) => Promise<ConnectedIntegration>
     disconnect: (projectId: string, integrationId: string) => Promise<void>
     onEvent: (callback: (event: IntegrationsEvent) => void) => () => void

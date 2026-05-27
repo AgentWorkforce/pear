@@ -4,6 +4,7 @@ import { join } from 'path'
 import { registerIpcHandlers } from './ipc-handlers'
 import { brokerManager } from './broker'
 import { cloudAgentManager } from './cloud-agent'
+import { integrationsManager } from './integrations'
 import { registerAvatarCacheProtocol } from './avatar-cache'
 
 const APP_NAME = 'Pear by Agent Relay'
@@ -23,6 +24,7 @@ protocol.registerSchemesAsPrivileged([
 
 let mainWindow: BrowserWindow | null = null
 let shutdownPromise: Promise<void> | null = null
+let quitAfterShutdown = false
 
 function getAppIconPath(): string {
   const iconPaths = app.isPackaged
@@ -201,6 +203,9 @@ app.whenReady().then(() => {
 
   registerAvatarCacheProtocol()
   registerIpcHandlers()
+  void integrationsManager.startLocalMountDaemon().catch((error) => {
+    console.warn('[integrations] Failed to start local integration mount daemon:', error instanceof Error ? error.message : String(error))
+  })
   createMenu()
   createWindow()
 
@@ -214,6 +219,29 @@ app.on('window-all-closed', async () => {
   if (process.platform !== 'darwin') app.quit()
 })
 
-app.on('before-quit', async () => {
-  await shutdownBrokerOnce()
+app.on('before-quit', async (event) => {
+  if (!quitAfterShutdown) {
+    event.preventDefault()
+    const results = await Promise.allSettled([
+      integrationsManager.shutdownLocalMounts(),
+      shutdownBrokerOnce()
+    ])
+    for (const result of results) {
+      if (result.status === 'rejected') {
+        console.warn('[shutdown] Cleanup failed:', result.reason instanceof Error ? result.reason.message : String(result.reason))
+      }
+    }
+    quitAfterShutdown = true
+    app.quit()
+    return
+  }
+  const results = await Promise.allSettled([
+    integrationsManager.shutdownLocalMounts(),
+    shutdownBrokerOnce()
+  ])
+  for (const result of results) {
+    if (result.status === 'rejected') {
+      console.warn('[shutdown] Cleanup failed:', result.reason instanceof Error ? result.reason.message : String(result.reason))
+    }
+  }
 })

@@ -2,6 +2,8 @@ import type React from 'react'
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   AlertTriangle,
+  Bell,
+  BellOff,
   Bot,
   Check,
   Eye,
@@ -228,6 +230,27 @@ function IntegrationVisibilitySection({ projectId }: { projectId: string }): Rea
     }
   }, [projectId])
 
+  const setSubscription = useCallback(async (integration: ConnectedIntegration, subscribeAgent: boolean) => {
+    setBusyIntegrationId(integration.integrationId)
+    setError(null)
+    try {
+      const nextIntegration = await pear.integrations.updateSubscription(
+        projectId,
+        integration.integrationId,
+        subscribeAgent
+      )
+      setIntegrations((current) =>
+        current.map((entry) =>
+          entry.integrationId === nextIntegration.integrationId ? nextIntegration : entry
+        )
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusyIntegrationId(null)
+    }
+  }, [projectId])
+
   return (
     <Section
       title="Integration visibility"
@@ -246,7 +269,8 @@ function IntegrationVisibilitySection({ projectId }: { projectId: string }): Rea
         ) : (
           integrations.map((integration) => {
             const visibility = projectVisibilityFromScope(integration.scope)
-            const visible = visibility.visible !== false
+            const visible = integration.visibleInProject !== false
+            const subscribed = integration.subscribeAgent === true
             const busy = busyIntegrationId === integration.integrationId
 
             return (
@@ -262,7 +286,27 @@ function IntegrationVisibilitySection({ projectId }: { projectId: string }): Rea
                       ? visibilityMountPaths(integration, visibility).join(', ')
                       : providerMountRoot(integration.provider)}
                   </div>
+                  {integration.localMountPaths && integration.localMountPaths.length > 0 && (
+                    <div className="truncate text-[11px] text-[var(--pear-text-faint)]">
+                      {integration.localMountPaths.join(', ')}
+                    </div>
+                  )}
                 </div>
+                <button
+                  type="button"
+                  disabled={busy}
+                  onClick={() => void setSubscription(integration, !subscribed)}
+                  className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md border transition-colors disabled:opacity-40 ${
+                    subscribed
+                      ? 'border-[var(--pear-accent-dim)] text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)]'
+                      : 'border-[var(--pear-border)] text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]'
+                  }`}
+                  aria-pressed={subscribed}
+                  title={subscribed ? 'Stop sending events to agents' : 'Send events to agents'}
+                  aria-label={subscribed ? 'Stop sending events to agents' : 'Send events to agents'}
+                >
+                  {subscribed ? <Bell size={13} /> : <BellOff size={13} />}
+                </button>
                 <button
                   type="button"
                   disabled={busy}

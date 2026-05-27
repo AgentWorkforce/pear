@@ -1,4 +1,6 @@
 import { execFile } from 'node:child_process'
+import { stat } from 'node:fs/promises'
+import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { BrowserWindow } from 'electron'
 import {
@@ -34,6 +36,9 @@ const WARM_POLL_MS = 2_000
 const WARM_TIMEOUT_MS = 5 * 60_000
 const RUN_END_PULL_DELAY_MS = 30_000
 const LOCAL_PRIORITY_IDLE_MS = 5_000
+const DIRECT_GIT_FILE_THRESHOLD = 5_000
+const DIRECT_GIT_BYTES_THRESHOLD = 200 * 1024 * 1024
+const SANDBOX_WORKSPACE_PATH = '/workspace'
 
 type CloudAuth = {
   accessToken: string
@@ -48,6 +53,18 @@ type CloudAgentBoxResponse = Partial<CloudAgentSandbox> & {
   mountPath?: string
   expectedReadyBy?: string
 }
+
+type CloudAgentWorkspaceSource =
+  | { kind: 'relayfile' }
+  | {
+    kind: 'git'
+    remoteUrl: string
+    ref?: string
+    commit?: string
+    shallow?: boolean
+    targetDir?: string
+    largeReason?: string
+  }
 
 type CloudAgentListResponse = ProactiveAgentRecord[] | {
   agents?: ProactiveAgentRecord[]
@@ -70,6 +87,11 @@ type CloudBrokerSystemMessageAdapter = {
     data?: Record<string, unknown>
     mode?: 'wait' | 'steer'
   }) => Promise<void>
+}
+
+type CloudAgentInjectedMessageOptions = {
+  from?: string
+  data?: Record<string, unknown>
 }
 
 type CompatibleDeployInput = {
@@ -323,6 +345,30 @@ function normalizeMountPaths(paths: string[]): string[] {
   return Array.from(new Set(paths.map((path) => path.trim()).filter(Boolean))).sort()
 }
 
+function isExecFailure(error: unknown): error is Error {
+  return error instanceof Error
+}
+
+function normalizeHttpsGitRemote(rawUrl: string): string | null {
+  try {
+    const url = new URL(rawUrl.trim())
+    if (url.protocol !== 'https:') return null
+    url.username = ''
+    url.password = ''
+    url.search = ''
+    url.hash = ''
+    return url.toString()
+  } catch {
+    return null
+  }
+}
+
+function normalizeWorkspaceSource(source: CloudAgentWorkspaceSource | undefined): CloudAgentWorkspaceSource | undefined {
+  if (source?.kind !== 'git') return source
+  const remoteUrl = normalizeHttpsGitRemote(source.remoteUrl)
+  return remoteUrl ? { ...source, remoteUrl } : { kind: 'relayfile' }
+}
+
 export class CloudAgentManager {
   private bindings = new Map<string, CloudAgentBinding>()
   private sandboxes = new Map<string, CloudAgentSandbox>()
@@ -334,6 +380,7 @@ export class CloudAgentManager {
   private syncModeTimers = new Map<string, NodeJS.Timeout>()
   private appliedConflictPolicies = new Map<string, ConflictPolicy>()
   private mountRestartPromises = new Map<string, Promise<void>>()
+  private workspaceSources = new Map<string, CloudAgentWorkspaceSource>()
   private eventHandlers = new Set<(event: CloudAgentEvent) => void>()
 
   constructor() {
@@ -431,6 +478,7 @@ export class CloudAgentManager {
     this.inflightToolCalls.delete(normalizedProjectId)
     this.lastSettledAt.delete(normalizedProjectId)
     this.appliedConflictPolicies.delete(normalizedProjectId)
+    this.workspaceSources.delete(normalizedProjectId)
     this.persistCloudAgent(normalizedProjectId, null)
     this.emit({ type: 'mount-status', projectId: normalizedProjectId, mount: toMountStatus(null) })
   }
@@ -466,13 +514,24 @@ export class CloudAgentManager {
     const auth = await this.requireCloudAuth()
     const workspaceId = await this.requireAccountTokenWorkspaceId()
     const url = `${auth.apiUrl}/api/v1/workspaces/${encodeURIComponent(workspaceId)}/cloud-agents/${encodeURIComponent(binding.cloudAgentId)}/box`
+    const workspaceSource = normalizeWorkspaceSource(
+      this.workspaceSources.get(normalizedProjectId) || project.cloudAgent?.workspaceSource
+    )
     const response = await fetch(url, {
       method: 'PATCH',
       headers: {
         Authorization: `Bearer ${auth.accessToken}`,
         'Content-Type': 'application/json'
       },
-      body: JSON.stringify({ relayfileMountPaths: normalizeMountPaths(paths) })
+      body: JSON.stringify({
+        relayfileMountPaths: normalizeMountPaths([
+          ...(workspaceSource?.kind === 'git' ? [] : [SANDBOX_WORKSPACE_PATH]),
+          ...paths
+        ]),
+        ...(workspaceSource?.kind === 'git'
+          ? { workspaceSource }
+          : {})
+      })
     })
     const payload = await response.json().catch(() => null) as unknown
 
@@ -496,7 +555,11 @@ export class CloudAgentManager {
     }
   }
 
-  async injectSystemMessage(projectId: string, message: string): Promise<void> {
+  async injectSystemMessage(
+    projectId: string,
+    message: string,
+    options: CloudAgentInjectedMessageOptions = {}
+  ): Promise<void> {
     const normalizedProjectId = projectId.trim()
     if (!normalizedProjectId) throw new Error('Project id is required')
     if (!message.trim()) return
@@ -513,11 +576,11 @@ export class CloudAgentManager {
         .filter((agent) => agent.projectId === undefined || agent.projectId === normalizedProjectId)
         .map((agent) => broker.sendMessage(normalizedProjectId, {
           to: agent.name,
-          from: 'system',
+          from: options.from || 'system',
           text: message,
           priority: 0,
           mode: 'steer',
-          data: {
+          data: options.data || {
             kind: 'integrations-update',
             system: true
           }
@@ -615,10 +678,16 @@ export class CloudAgentManager {
 
     await this.requireCloudAuth()
     const project = this.requireProject(projectId)
-    const sandbox = await this.warmBox(projectId, cloudAgentId)
+    const workspaceSource = await this.resolveWorkspaceSource(project)
+    const sandbox = await this.warmBox(projectId, cloudAgentId, workspaceSource)
 
     try {
-      await this.startMount(projectId, project, sandbox)
+      if (workspaceSource.kind === 'relayfile') {
+        await this.startMount(projectId, project, sandbox)
+      } else {
+        await this.stopMount(projectId)
+        this.emit({ type: 'mount-status', projectId, mount: toMountStatus(null) })
+      }
       await this.connectBroker(projectId, sandbox, win)
     } catch (error) {
       await this.stopMount(projectId)
@@ -629,17 +698,111 @@ export class CloudAgentManager {
     const binding = toBinding(projectId, cloudAgentId, sandbox)
     this.bindings.set(projectId, binding)
     this.sandboxes.set(projectId, sandbox)
+    this.workspaceSources.set(projectId, workspaceSource)
     this.persistCloudAgent(projectId, {
       id: cloudAgentId,
       sandboxId: sandbox.sandboxId,
       relayfileMountPath: sandbox.relayfileMountPath,
       attachedAt: binding.attachedAt,
-      autoPullAfterRun: project.cloudAgent?.autoPullAfterRun ?? true
+      autoPullAfterRun: project.cloudAgent?.autoPullAfterRun ?? true,
+      workspaceSource
     })
     this.emit({ type: 'sandbox-status', projectId, status: sandbox.status })
     const currentStatus = await this.status(projectId)
     if (currentStatus) this.emit({ type: 'mount-status', projectId, mount: currentStatus.mount })
     return binding
+  }
+
+  private async resolveWorkspaceSource(project: Project): Promise<CloudAgentWorkspaceSource> {
+    try {
+      const repoRoot = (await execFileAsync('git', ['rev-parse', '--show-toplevel'], {
+        cwd: project.rootPath
+      })).stdout.trim()
+      if (!repoRoot || resolve(repoRoot) !== resolve(project.rootPath)) {
+        return { kind: 'relayfile' }
+      }
+
+      const status = (await execFileAsync('git', ['status', '--porcelain'], {
+        cwd: project.rootPath
+      })).stdout.trim()
+      if (status) {
+        return { kind: 'relayfile' }
+      }
+
+      const branch = (await execFileAsync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
+        cwd: project.rootPath
+      })).stdout.trim()
+      if (!branch || branch === 'HEAD') {
+        return { kind: 'relayfile' }
+      }
+      const upstreamRef = (await execFileAsync('git', ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], {
+        cwd: project.rootPath
+      })).stdout.trim()
+      const [upstreamRemote, ...upstreamBranchParts] = upstreamRef.split('/')
+      const upstreamBranch = upstreamBranchParts.join('/')
+      if (!upstreamRemote || !upstreamBranch) {
+        return { kind: 'relayfile' }
+      }
+      const rawRemoteUrl = (await execFileAsync('git', ['remote', 'get-url', upstreamRemote], {
+        cwd: project.rootPath
+      })).stdout.trim()
+      const remoteUrl = normalizeHttpsGitRemote(rawRemoteUrl)
+      if (!remoteUrl) {
+        return { kind: 'relayfile' }
+      }
+      const upstream = (await execFileAsync('git', ['rev-parse', '@{u}'], {
+        cwd: project.rootPath
+      })).stdout.trim()
+      const commit = (await execFileAsync('git', ['rev-parse', 'HEAD'], {
+        cwd: project.rootPath
+      })).stdout.trim()
+      if (!commit || upstream !== commit) {
+        return { kind: 'relayfile' }
+      }
+
+      const tracked = (await execFileAsync('git', ['ls-files', '-z'], {
+        cwd: project.rootPath,
+        maxBuffer: 50 * 1024 * 1024
+      })).stdout.split('\0').filter(Boolean)
+      const fileCount = tracked.length
+      let trackedBytes = 0
+      if (fileCount <= DIRECT_GIT_FILE_THRESHOLD) {
+        for (const relativePath of tracked) {
+          if (trackedBytes > DIRECT_GIT_BYTES_THRESHOLD) break
+          try {
+            const file = await stat(join(repoRoot, relativePath))
+            if (file.isFile()) trackedBytes += file.size
+          } catch {
+            // A clean index should keep these paths present, but sparse checkouts
+            // can omit working-tree files. Missing stats should not force a full
+            // Relayfile sync for otherwise cloneable repos.
+          }
+        }
+      }
+
+      const reasons = [
+        fileCount > DIRECT_GIT_FILE_THRESHOLD ? `${fileCount} tracked files` : '',
+        trackedBytes > DIRECT_GIT_BYTES_THRESHOLD ? `${Math.round(trackedBytes / 1024 / 1024)} MiB tracked files` : ''
+      ].filter(Boolean)
+      if (reasons.length === 0) {
+        return { kind: 'relayfile' }
+      }
+
+      return {
+        kind: 'git',
+        remoteUrl,
+        ref: upstreamBranch,
+        commit,
+        shallow: true,
+        targetDir: SANDBOX_WORKSPACE_PATH,
+        largeReason: reasons.join(', ')
+      }
+    } catch (error) {
+      if (!isExecFailure(error)) {
+        throw error
+      }
+      return { kind: 'relayfile' }
+    }
   }
 
   private async requireCloudAuth(): Promise<CloudAuth> {
@@ -658,12 +821,19 @@ export class CloudAgentManager {
     return getAccountWorkspaceId()
   }
 
-  private async warmBox(projectId: string, cloudAgentId: string): Promise<CloudAgentSandbox> {
+  private async warmBox(
+    projectId: string,
+    cloudAgentId: string,
+    workspaceSource: CloudAgentWorkspaceSource
+  ): Promise<CloudAgentSandbox> {
     const auth = await this.requireCloudAuth()
     const workspaceId = await this.requireAccountTokenWorkspaceId()
-    const mountPaths = await this.integrationMountPathsFor(projectId)
+    const integrationMountPaths = await this.integrationMountPathsFor(projectId)
+    const mountPaths = workspaceSource.kind === 'git'
+      ? integrationMountPaths
+      : [SANDBOX_WORKSPACE_PATH, ...integrationMountPaths]
     const url = `${auth.apiUrl}/api/v1/workspaces/${encodeURIComponent(workspaceId)}/cloud-agents/${encodeURIComponent(cloudAgentId)}/box`
-    let sandbox = await this.fetchBox(url, auth.accessToken, 'POST', mountPaths)
+    let sandbox = await this.fetchBox(url, auth.accessToken, 'POST', mountPaths, workspaceSource)
     this.emit({ type: 'sandbox-status', projectId, status: sandbox.status })
 
     const startedAt = Date.now()
@@ -697,10 +867,14 @@ export class CloudAgentManager {
     url: string,
     accessToken: string,
     method: 'GET' | 'POST',
-    mountPaths?: string[]
+    mountPaths?: string[],
+    workspaceSource?: CloudAgentWorkspaceSource
   ): Promise<CloudAgentSandbox> {
     const body = method === 'POST'
-      ? JSON.stringify({ relayfileMountPaths: normalizeMountPaths(mountPaths || []) })
+      ? JSON.stringify({
+        relayfileMountPaths: normalizeMountPaths(mountPaths || []),
+        ...(workspaceSource && workspaceSource.kind !== 'relayfile' ? { workspaceSource } : {})
+      })
       : undefined
     const requestUrl = method === 'POST' ? withAsyncWarm(url) : url
     const response = await fetch(requestUrl, {

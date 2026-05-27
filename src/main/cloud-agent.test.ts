@@ -200,6 +200,9 @@ describe('CloudAgentManager', () => {
     expect(boxPost?.url).toBe(
       'https://cloud.example/api/v1/workspaces/account-workspace-id/cloud-agents/cloud-agent-1/box?async=true'
     )
+    expect(JSON.parse(String(boxPost?.init?.body))).toEqual({
+      relayfileMountPaths: ['/integrations/github', '/workspace']
+    })
     expect(boxPost?.url).not.toContain('relay-workspace-id')
     expect(mock.fetchCalls.filter((call) => call.url.endsWith('/api/v1/auth/whoami'))).toHaveLength(1)
     expect(mock.mountInputs[0]?.workspaceId).toBe('relay-workspace-id')
