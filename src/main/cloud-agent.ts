@@ -722,14 +722,6 @@ export class CloudAgentManager {
         return { kind: 'relayfile' }
       }
 
-      const rawRemoteUrl = (await execFileAsync('git', ['remote', 'get-url', 'origin'], {
-        cwd: project.rootPath
-      })).stdout.trim()
-      const remoteUrl = normalizeHttpsGitRemote(rawRemoteUrl)
-      if (!remoteUrl) {
-        return { kind: 'relayfile' }
-      }
-
       const status = (await execFileAsync('git', ['status', '--porcelain'], {
         cwd: project.rootPath
       })).stdout.trim()
@@ -741,6 +733,21 @@ export class CloudAgentManager {
         cwd: project.rootPath
       })).stdout.trim()
       if (!branch || branch === 'HEAD') {
+        return { kind: 'relayfile' }
+      }
+      const upstreamRef = (await execFileAsync('git', ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{u}'], {
+        cwd: project.rootPath
+      })).stdout.trim()
+      const [upstreamRemote, ...upstreamBranchParts] = upstreamRef.split('/')
+      const upstreamBranch = upstreamBranchParts.join('/')
+      if (!upstreamRemote || !upstreamBranch) {
+        return { kind: 'relayfile' }
+      }
+      const rawRemoteUrl = (await execFileAsync('git', ['remote', 'get-url', upstreamRemote], {
+        cwd: project.rootPath
+      })).stdout.trim()
+      const remoteUrl = normalizeHttpsGitRemote(rawRemoteUrl)
+      if (!remoteUrl) {
         return { kind: 'relayfile' }
       }
       const upstream = (await execFileAsync('git', ['rev-parse', '@{u}'], {
@@ -784,7 +791,7 @@ export class CloudAgentManager {
       return {
         kind: 'git',
         remoteUrl,
-        ref: branch,
+        ref: upstreamBranch,
         commit,
         shallow: true,
         targetDir: SANDBOX_WORKSPACE_PATH,
@@ -836,7 +843,7 @@ export class CloudAgentManager {
       }
 
       await delay(WARM_POLL_MS)
-      sandbox = await this.fetchBox(url, auth.accessToken, 'POST', mountPaths, workspaceSource)
+      sandbox = await this.fetchBox(url, auth.accessToken, 'GET')
       this.emit({ type: 'sandbox-status', projectId, status: sandbox.status })
     }
 

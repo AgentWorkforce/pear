@@ -38,6 +38,7 @@ export type ConnectedIntegration = {
   connectedAt: string
   notifyAgent: boolean
   subscribeAgent?: boolean
+  visibleInProject?: boolean
   localMountPaths?: string[]
   lastSyncAt?: string
   lastError?: string
@@ -467,6 +468,9 @@ function normalizeConnectedIntegration(value: unknown): ConnectedIntegration | n
       : new Date(0).toISOString(),
     notifyAgent: typeof value.notifyAgent === 'boolean' ? value.notifyAgent : true,
     subscribeAgent: typeof value.subscribeAgent === 'boolean' ? value.subscribeAgent : false,
+    visibleInProject: typeof value.visibleInProject === 'boolean'
+      ? value.visibleInProject
+      : visibleFromScope(normalizeScope(value.scope)),
     localMountPaths: Array.isArray(value.localMountPaths)
       ? value.localMountPaths.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
       : [],
@@ -491,9 +495,17 @@ function toStoredIntegration(integration: ConnectedIntegration, displayName?: st
     connectedAt: integration.connectedAt,
     notifyAgent: integration.notifyAgent,
     subscribeAgent: integration.subscribeAgent === true,
+    visibleInProject: integration.visibleInProject !== false,
     ...(integration.lastSyncAt ? { lastSyncAt: integration.lastSyncAt } : {}),
     ...(integration.lastError ? { lastError: integration.lastError } : {})
   }
+}
+
+function visibleFromScope(scope: Record<string, unknown>): boolean {
+  const visibility = scope.projectVisibility
+  if (!visibility || typeof visibility !== 'object' || Array.isArray(visibility)) return true
+  const visible = (visibility as Record<string, unknown>).visible
+  return typeof visible === 'boolean' ? visible : true
 }
 
 function getPayloadMessage(payload: unknown, fallback: string): string {
@@ -729,7 +741,8 @@ export class IntegrationsManager {
       scope,
       mountPaths,
       notifyAgent: existing.notifyAgent,
-      subscribeAgent: existing.subscribeAgent === true
+      subscribeAgent: existing.subscribeAgent === true,
+      visibleInProject: visibleFromScope(scope)
     }
 
     await this.persistIntegration(projectId, integration)
@@ -760,10 +773,11 @@ export class IntegrationsManager {
 
     await this.deleteIntegrationConnection(toRelayfileProvider(existing.provider))
 
-    this.removePersistedIntegration(projectId, existing.integrationId)
-    await this.syncAgentState(projectId, existing.notifyAgent)
-    await this.syncEventSubscriptions(projectId)
-    this.emit({ type: 'integration-removed', projectId, integrationId: existing.integrationId })
+    const affectedProjectIds = this.removePersistedIntegrationEverywhere(existing)
+    await Promise.all(affectedProjectIds.map((affectedProjectId) => this.syncAgentState(affectedProjectId, true)))
+    for (const affectedProjectId of affectedProjectIds) {
+      this.emit({ type: 'integration-removed', projectId: affectedProjectId, integrationId: existing.integrationId })
+    }
   }
 
   async hydrateProject(projectId: string): Promise<void> {
@@ -1044,13 +1058,17 @@ export class IntegrationsManager {
       const existingIntegration =
         existingById.get(cloudIntegration.integrationId) ||
         existingByProvider.get(toRelayfileProvider(cloudIntegration.provider))
+      const existingVisible = existingIntegration?.visibleInProject !== false
       const merged: ConnectedIntegration = existingIntegration
         ? {
             ...cloudIntegration,
             scope: Object.keys(existingIntegration.scope).length > 0 ? existingIntegration.scope : cloudIntegration.scope,
-            mountPaths: existingIntegration.mountPaths.length > 0 ? existingIntegration.mountPaths : cloudIntegration.mountPaths,
+            mountPaths: existingVisible && existingIntegration.mountPaths.length === 0
+              ? cloudIntegration.mountPaths
+              : existingIntegration.mountPaths,
             notifyAgent: existingIntegration.notifyAgent,
             subscribeAgent: existingIntegration.subscribeAgent === true,
+            visibleInProject: existingVisible,
             connectedAt: existingIntegration.connectedAt || cloudIntegration.connectedAt,
             ...(cloudIntegration.lastError ? { lastError: cloudIntegration.lastError } : {})
           }
@@ -1180,16 +1198,24 @@ export class IntegrationsManager {
     saveStore(data)
   }
 
-  private removePersistedIntegration(projectId: string, integrationId: string): void {
+  private removePersistedIntegrationEverywhere(integration: ConnectedIntegration): string[] {
     const data = loadStore()
-    const project = data.projects.find((entry) => entry.id === projectId)
-    if (!project) throw new Error(`Project not found: ${projectId}`)
+    const affectedProjectIds: string[] = []
+    const provider = toRelayfileProvider(integration.provider)
 
-    project.integrations = project.integrations.filter((entry) => {
-      const current = normalizeConnectedIntegration(entry)
-      return current?.integrationId !== integrationId
-    })
-    saveStore(data)
+    for (const project of data.projects) {
+      const before = project.integrations.length
+      project.integrations = project.integrations.filter((entry) => {
+        const current = normalizeConnectedIntegration(entry)
+        if (!current) return true
+        return current.integrationId !== integration.integrationId &&
+          toRelayfileProvider(current.provider) !== provider
+      })
+      if (project.integrations.length !== before) affectedProjectIds.push(project.id)
+    }
+
+    if (affectedProjectIds.length > 0) saveStore(data)
+    return affectedProjectIds
   }
 
   private async displayNameForProvider(provider: string): Promise<string> {
@@ -1205,13 +1231,13 @@ export class IntegrationsManager {
     )
   }
 
-  private isVisibleInProject(_projectId: string, _integrationId: string): boolean {
-    // TODO(coordinate with update-store): read the project visibility map once that sibling lands.
-    return true
+  private isVisibleInProject(projectId: string, integrationId: string): boolean {
+    const integration = this.listConnected(projectId).find((entry) => entry.integrationId === integrationId)
+    return integration?.visibleInProject !== false
   }
 
   private async syncAgentState(projectId: string, notifyAgent: boolean): Promise<void> {
-    let integrations = this.listConnected(projectId)
+    let integrations = this.visibleIntegrationsForProject(projectId)
     await this.syncLocalMounts()
     integrations = await this.withLocalMountPaths(integrations)
     await this.safeUpdateMountPaths(projectId, this.mountPathsFor(projectId))
@@ -1313,7 +1339,7 @@ export class IntegrationsManager {
 
   private async syncEventSubscriptions(projectId: string): Promise<boolean> {
     try {
-      await integrationEventBridge.reconcile(projectId, this.listConnected(projectId))
+      await integrationEventBridge.reconcile(projectId, this.visibleIntegrationsForProject(projectId))
       return true
     } catch (error) {
       console.warn('[integrations] Failed to reconcile integration event subscriptions:', toErrorMessage(error))
@@ -1326,10 +1352,23 @@ export class IntegrationsManager {
   }
 
   private async syncLocalMounts(): Promise<void> {
-    const localIntegrations = loadStore().projects.flatMap((project) => this.listConnected(project.id))
+    const localEntries = loadStore().projects.flatMap((project) =>
+      this.listConnected(project.id).map((integration) => ({
+        projectId: project.id,
+        integration
+      }))
+    )
     const cloudIntegrations = await this.listCloudWorkspaceIntegrations().catch(() => [])
     const byProvider = new Map<string, ConnectedIntegration>()
-    for (const integration of [...localIntegrations, ...cloudIntegrations]) {
+    const configuredKeys = new Set(localEntries.map(({ integration }) =>
+      `${toRelayfileProvider(integration.provider)}:${integration.integrationId}`
+    ))
+    for (const integration of cloudIntegrations) {
+      const key = `${toRelayfileProvider(integration.provider)}:${integration.integrationId}`
+      if (!configuredKeys.has(key)) byProvider.set(key, integration)
+    }
+    for (const { projectId, integration } of localEntries) {
+      if (!this.isVisibleInProject(projectId, integration.integrationId)) continue
       byProvider.set(`${toRelayfileProvider(integration.provider)}:${integration.integrationId}`, integration)
     }
     const integrations = Array.from(byProvider.values())
@@ -1354,6 +1393,11 @@ export class IntegrationsManager {
         mountPaths: this.canonicalMountPathsForIntegration(integration)
       })
     }))
+  }
+
+  private visibleIntegrationsForProject(projectId: string): ConnectedIntegration[] {
+    return this.listConnected(projectId)
+      .filter((integration) => integration.visibleInProject !== false)
   }
 }
 

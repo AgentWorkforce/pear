@@ -269,7 +269,7 @@ function IntegrationVisibilitySection({ projectId }: { projectId: string }): Rea
         ) : (
           integrations.map((integration) => {
             const visibility = projectVisibilityFromScope(integration.scope)
-            const visible = visibility.visible !== false
+            const visible = integration.visibleInProject !== false
             const subscribed = integration.subscribeAgent === true
             const busy = busyIntegrationId === integration.integrationId
 

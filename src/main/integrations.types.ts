@@ -26,6 +26,7 @@ export type ConnectedIntegration = {
   connectedAt: string
   notifyAgent: boolean
   subscribeAgent?: boolean
+  visibleInProject?: boolean
   localMountPaths?: string[]
   lastSyncAt?: string
   lastError?: string
