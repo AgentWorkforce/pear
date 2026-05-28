@@ -36,9 +36,13 @@ function IntegrationLogo({ iconUrl, label }: { iconUrl?: string; label: string }
 // Relaycast/Nango return connections under auth-template keys
 // ("github-app-oauth", "slack-bot", "linear-oauth"), but the catalog uses the
 // product slug ("github", "slack", "linear"). Strip the auth suffix so the two
-// align.
+// align. Also map gmail → google-mail to mirror toRelayfileProvider in the
+// main process (integrations.ts) — the static catalog uses "gmail" while the
+// live cloud catalog uses "google-mail", and the tile lookup needs both to
+// collapse to the same key.
 function canonicalProviderKey(provider: string): string {
-  return provider.trim().toLowerCase().replace(/-(app-oauth|app|oauth|bot-oauth|bot|api-key|apikey)$/, '')
+  const normalized = provider.trim().toLowerCase().replace(/-(app-oauth|app|oauth|bot-oauth|bot|api-key|apikey)$/, '')
+  return normalized === 'gmail' ? 'google-mail' : normalized
 }
 
 function capabilityLabel(adapter: IntegrationAdapter): string {
