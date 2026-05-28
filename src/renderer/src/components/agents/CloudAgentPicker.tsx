@@ -3,6 +3,30 @@ import { useEffect, useMemo, useState } from 'react'
 import { AlertTriangle, Cloud, Loader2, Plus, Trash2 } from 'lucide-react'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
 import { pear, type CloudAgentBinding, type CloudAgentRecord } from '@/lib/ipc'
+import {
+  useCloudAgentStore,
+  type CloudAgentAttachProgress
+} from '@/stores/cloud-agent-store'
+
+function phaseLabel(progress: CloudAgentAttachProgress | undefined, elapsedSec: number): string {
+  if (!progress) return elapsedSec > 1 ? `Starting attach… (${elapsedSec}s)` : 'Starting attach…'
+  const elapsed = `(${elapsedSec}s)`
+  switch (progress.phase) {
+    case 'warming-sandbox':
+      return `Warming sandbox ${elapsed}`
+    case 'mounting':
+      return `Mounting workspace ${elapsed}`
+    case 'connecting-broker':
+      return `Connecting to broker ${elapsed}`
+    case 'done':
+      return 'Ready'
+    case 'error':
+      return progress.message || 'Attach failed'
+    case 'idle':
+    default:
+      return `Working… ${elapsed}`
+  }
+}
 
 export type CloudAgentPickerProps = {
   projectId?: string
@@ -101,6 +125,23 @@ export default function CloudAgentPicker({
   const [createHarness, setCreateHarness] = useState('claude')
   const [createModel, setCreateModel] = useState('claude-opus-4-7')
   const [busy, setBusy] = useState(false)
+  const [nowMs, setNowMs] = useState(() => Date.now())
+
+  const attachProgress = useCloudAgentStore(
+    (state) => projectId ? state.attachProgress[projectId] : undefined
+  )
+  const setAttachProgress = useCloudAgentStore((s) => s.setAttachProgress)
+
+  // Tick once a second while attaching so the elapsed timer counts up.
+  useEffect(() => {
+    if (!busy) return
+    const interval = window.setInterval(() => setNowMs(Date.now()), 1000)
+    return () => window.clearInterval(interval)
+  }, [busy])
+
+  const attachElapsedSec = busy && attachProgress
+    ? Math.max(1, Math.round((nowMs - attachProgress.startedAt) / 1000))
+    : 0
 
   const selectedAgent = useMemo(
     () => agents.find((agent) => agent.id === selectedId) || null,
@@ -202,8 +243,19 @@ export default function CloudAgentPicker({
 
     setBusy(true)
     setError(null)
+    // Seed an immediate progress row so the UI doesn't show a blank "busy"
+    // state for the few hundred ms before the first sandbox-status event
+    // arrives. The main process overwrites this once events flow.
+    if (projectId) {
+      setAttachProgress(projectId, {
+        phase: 'warming-sandbox',
+        message: 'Requesting cloud sandbox',
+        startedAt: Date.now()
+      })
+    }
     try {
       const binding = projectId ? await pear.cloudAgent.attach(projectId, selectedId) : undefined
+      if (projectId) setAttachProgress(projectId, null)
       await onAttach(selectedId, binding)
     } catch (err) {
       if (isAuthRequiredError(err)) {
@@ -211,6 +263,13 @@ export default function CloudAgentPicker({
         return
       }
       setError(getErrorMessage(err))
+      if (projectId) {
+        setAttachProgress(projectId, {
+          phase: 'error',
+          message: getErrorMessage(err),
+          startedAt: attachProgress?.startedAt ?? Date.now()
+        })
+      }
     } finally {
       setBusy(false)
     }
@@ -424,8 +483,19 @@ export default function CloudAgentPicker({
       </div>
 
       <footer className="flex items-center justify-between gap-3 border-t border-[var(--pear-border-subtle)] px-5 py-4">
-        <div className="min-w-0 text-xs text-[var(--pear-text-faint)]">
-          {selectedAgent ? `Selected: ${getAgentTitle(selectedAgent)}` : 'Select an agent to attach'}
+        <div className="min-w-0 flex items-center gap-2 text-xs text-[var(--pear-text-faint)]">
+          {busy ? (
+            <>
+              <Loader2 size={13} className="shrink-0 animate-spin text-[var(--pear-accent)]" />
+              <span className="truncate text-[var(--pear-text-dim)]">
+                {phaseLabel(attachProgress, attachElapsedSec)}
+              </span>
+            </>
+          ) : selectedAgent ? (
+            <span className="truncate">Selected: {getAgentTitle(selectedAgent)}</span>
+          ) : (
+            <span>Select an agent to attach</span>
+          )}
         </div>
         <div className="flex shrink-0 items-center gap-2">
           <button
@@ -443,7 +513,7 @@ export default function CloudAgentPicker({
             className="flex h-9 items-center gap-2 rounded-md bg-[var(--pear-accent)] px-3 text-sm font-medium text-white hover:bg-[var(--pear-accent-bright)] disabled:opacity-40"
           >
             {busy && <Loader2 size={14} className="animate-spin" />}
-            Attach to project
+            {busy ? 'Attaching…' : 'Attach to project'}
           </button>
         </div>
       </footer>
