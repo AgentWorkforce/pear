@@ -593,15 +593,28 @@ export class IntegrationsManager {
   async listConnectedForSettings(projectId: string): Promise<ConnectedIntegration[]> {
     const local = this.listConnected(projectId)
     const project = this.findProject(projectId)
-    if (!project) return this.withLocalMountPaths(local)
+    if (!project) {
+      console.warn(`[integrations] listConnectedForSettings: project ${projectId} not found in local store; returning local list only (${local.length} items)`)
+      return this.withLocalMountPaths(local)
+    }
 
     try {
       const cloud = await this.listCloudWorkspaceIntegrations()
-      if (cloud.length === 0) return this.withLocalMountPaths(local)
+      if (cloud.length === 0) {
+        console.log(`[integrations] listConnectedForSettings: cloud returned 0 integrations for workspace; using local list only (${local.length} items)`)
+        return this.withLocalMountPaths(local)
+      }
       return this.withLocalMountPaths(await this.mergeCloudIntegrationsIntoProject(projectId, cloud))
     } catch (error) {
-      console.warn('[integrations] Failed to hydrate cloud workspace integrations:', toErrorMessage(error))
-      return this.withLocalMountPaths(local)
+      // Surface the failure to the renderer instead of silently downgrading to
+      // an empty list. The UI catches and renders this in the error banner so
+      // the user can see "cloud-auth-required" (restart needed) vs "network"
+      // vs "workspace mismatch" instead of staring at an empty Connected
+      // section with no explanation. Local list is still saved on disk and
+      // surfaced through the project-scoped APIs.
+      const message = toErrorMessage(error)
+      console.warn('[integrations] Failed to hydrate cloud workspace integrations:', message)
+      throw new Error(`Cloud integrations unavailable: ${message}`)
     }
   }
 
