@@ -133,15 +133,34 @@ export const useCloudAgentStore = create<CloudAgentState>((set, get) => ({
 
     switch (event.type) {
       case 'sandbox-status': {
-        if (!current) return {}
+        // The attach flow emits sandbox-status events from the very first POST
+        // response, before any persisted CloudAgentStatus row exists. Always
+        // surface the latest status into attachProgress so the picker can show
+        // "Warming sandbox… / Connecting broker… / Ready" instead of an opaque
+        // spinner. Then merge into the persisted status row if we have one.
+        const existingProgress = state.attachProgress[event.projectId]
+        const startedAt = existingProgress?.startedAt ?? Date.now()
+        const phase: CloudAgentAttachProgress['phase'] =
+          event.status === 'ready' ? 'connecting-broker'
+          : event.status === 'failed' ? 'error'
+          : event.status === 'stopping' || event.status === 'stopped' ? 'idle'
+          : 'warming-sandbox'
+        const nextProgress: CloudAgentAttachProgress = {
+          phase,
+          message: `Sandbox ${event.status}`,
+          startedAt
+        }
         return {
-          statuses: {
-            ...state.statuses,
-            [event.projectId]: {
-              ...current,
-              sandbox: { ...current.sandbox, status: event.status }
+          attachProgress: { ...state.attachProgress, [event.projectId]: nextProgress },
+          ...(current ? {
+            statuses: {
+              ...state.statuses,
+              [event.projectId]: {
+                ...current,
+                sandbox: { ...current.sandbox, status: event.status }
+              }
             }
-          }
+          } : {})
         }
       }
 
