@@ -34,7 +34,7 @@ export type ProjectCloudAgent = {
   workspaceSource?: {
     kind: 'relayfile'
   } | {
-    kind: 'git'
+    kind: 'git' | 'git-overlay'
     remoteUrl: string
     ref?: string
     commit?: string
@@ -263,6 +263,11 @@ export function updateProject(id: string, update: Partial<Project>): void {
   const next = { ...data.projects[idx] }
   if (typeof update.name === 'string' && update.name.trim()) {
     next.name = update.name.trim()
+  }
+  const workspaceMode = (update as { cloudAgentWorkspaceMode?: unknown }).cloudAgentWorkspaceMode
+  if (workspaceMode === 'git-overlay' || workspaceMode === 'git' || workspaceMode === 'relayfile') {
+    const nextWithWorkspaceMode = next as { cloudAgentWorkspaceMode?: typeof workspaceMode }
+    nextWithWorkspaceMode.cloudAgentWorkspaceMode = workspaceMode
   }
   data.projects[idx] = next
   saveStore(data)

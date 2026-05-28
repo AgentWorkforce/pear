@@ -21,7 +21,12 @@ import { AgentHarnessIcon } from '@/components/common/AgentIcons'
 import { ProactiveAgentsSection } from '@/components/proactive/ProactiveAgentsSection'
 import { pear, type ConnectedIntegration } from '@/lib/ipc'
 import { useAgentStore } from '@/stores/agent-store'
-import { normalizeChannelName, useProjectStore, type ProjectRoot } from '@/stores/project-store'
+import {
+  normalizeChannelName,
+  useProjectStore,
+  type CloudAgentWorkspaceMode,
+  type ProjectRoot
+} from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 
 function StatPill({
@@ -160,6 +165,12 @@ function projectVisibilityFromScope(scope: Record<string, unknown>): ProjectVisi
 
 function providerMountRoot(provider: string): string {
   return `/integrations/${provider}`
+}
+
+function cloudAgentWorkspaceMode(project: { cloudAgentWorkspaceMode?: unknown }): CloudAgentWorkspaceMode {
+  return project.cloudAgentWorkspaceMode === 'git' || project.cloudAgentWorkspaceMode === 'relayfile'
+    ? project.cloudAgentWorkspaceMode
+    : 'git-overlay'
 }
 
 function visibilityMountPaths(integration: ConnectedIntegration, visibility: ProjectVisibilityMetadata): string[] {
@@ -440,30 +451,51 @@ export function ProjectSettings(): React.ReactNode {
         )}
 
         <Section title="General">
-          <form
-            className="flex max-w-2xl items-end gap-3"
-            onSubmit={(event) => {
-              event.preventDefault()
-              void run(() => updateProject(project.id, { name: draftName.trim() }))
-            }}
-          >
-            <label className="min-w-0 flex-1">
-              <span className="mb-1.5 block text-xs text-[var(--pear-text-faint)]">Name</span>
-              <input
-                value={draftName}
-                onChange={(event) => setDraftName(event.target.value)}
-                className="h-10 w-full rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-3 text-sm text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent-dim)]"
-              />
-            </label>
-            <button
-              type="submit"
-              disabled={!nameChanged}
-              className="flex h-10 items-center gap-2 rounded-lg border border-[var(--pear-border)] px-3 text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:opacity-40"
+          <div className="grid max-w-2xl gap-4">
+            <form
+              className="flex items-end gap-3"
+              onSubmit={(event) => {
+                event.preventDefault()
+                void run(() => updateProject(project.id, { name: draftName.trim() }))
+              }}
             >
-              <Check size={14} />
-              Save
-            </button>
-          </form>
+              <label className="min-w-0 flex-1">
+                <span className="mb-1.5 block text-xs text-[var(--pear-text-faint)]">Name</span>
+                <input
+                  value={draftName}
+                  onChange={(event) => setDraftName(event.target.value)}
+                  className="h-10 w-full rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-3 text-sm text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent-dim)]"
+                />
+              </label>
+              <button
+                type="submit"
+                disabled={!nameChanged}
+                className="flex h-10 items-center gap-2 rounded-lg border border-[var(--pear-border)] px-3 text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:opacity-40"
+              >
+                <Check size={14} />
+                Save
+              </button>
+            </form>
+
+            <label className="max-w-sm">
+              <span className="mb-1.5 block text-xs text-[var(--pear-text-faint)]">Cloud agent workspace</span>
+              <select
+                value={cloudAgentWorkspaceMode(project)}
+                onChange={(event) =>
+                  void run(() =>
+                    updateProject(project.id, {
+                      cloudAgentWorkspaceMode: event.target.value as CloudAgentWorkspaceMode
+                    })
+                  )
+                }
+                className="h-10 w-full rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-3 text-sm text-[var(--pear-text)] outline-none focus:border-[var(--pear-accent-dim)]"
+              >
+                <option value="git-overlay">Git + live sync</option>
+                <option value="git">Git - pull after run</option>
+                <option value="relayfile">Relayfile - live sync</option>
+              </select>
+            </label>
+          </div>
         </Section>
 
         <Section

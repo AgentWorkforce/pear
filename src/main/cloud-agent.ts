@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { stat } from 'node:fs/promises'
+import { realpath, stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { BrowserWindow } from 'electron'
@@ -61,15 +61,19 @@ type CloudAgentBoxResponse = Partial<CloudAgentSandbox> & {
 
 type CloudAgentWorkspaceSource =
   | { kind: 'relayfile' }
-  | {
-    kind: 'git'
-    remoteUrl: string
-    ref?: string
-    commit?: string
-    shallow?: boolean
-    targetDir?: string
-    largeReason?: string
-  }
+  | CloudAgentGitWorkspaceSource
+
+type CloudAgentGitWorkspaceSource = {
+  kind: 'git' | 'git-overlay'
+  remoteUrl: string
+  ref?: string
+  commit?: string
+  shallow?: boolean
+  targetDir?: string
+  largeReason?: string
+}
+
+type CloudAgentWorkspaceMode = 'git-overlay' | 'git' | 'relayfile'
 
 type CloudAgentListResponse = ProactiveAgentRecord[] | {
   agents?: ProactiveAgentRecord[]
@@ -368,10 +372,23 @@ function normalizeHttpsGitRemote(rawUrl: string): string | null {
   }
 }
 
+function isGitWorkspaceSource(source: CloudAgentWorkspaceSource | undefined): source is CloudAgentGitWorkspaceSource {
+  return source?.kind === 'git' || source?.kind === 'git-overlay'
+}
+
+function isLiveSyncWorkspaceSource(source: CloudAgentWorkspaceSource | undefined): boolean {
+  return source?.kind === 'relayfile' || source?.kind === 'git-overlay'
+}
+
 function normalizeWorkspaceSource(source: CloudAgentWorkspaceSource | undefined): CloudAgentWorkspaceSource | undefined {
-  if (source?.kind !== 'git') return source
+  if (!isGitWorkspaceSource(source)) return source
   const remoteUrl = normalizeHttpsGitRemote(source.remoteUrl)
   return remoteUrl ? { ...source, remoteUrl } : { kind: 'relayfile' }
+}
+
+function cloudAgentWorkspaceMode(project: Project): CloudAgentWorkspaceMode {
+  const mode = (project as { cloudAgentWorkspaceMode?: unknown }).cloudAgentWorkspaceMode
+  return mode === 'git' || mode === 'relayfile' ? mode : 'git-overlay'
 }
 
 export class CloudAgentManager {
@@ -533,7 +550,7 @@ export class CloudAgentManager {
           ...(workspaceSource?.kind === 'git' ? [] : [SANDBOX_WORKSPACE_PATH]),
           ...paths
         ]),
-        ...(workspaceSource?.kind === 'git'
+        ...(isGitWorkspaceSource(workspaceSource)
           ? { workspaceSource }
           : {})
       })
@@ -687,7 +704,7 @@ export class CloudAgentManager {
     const sandbox = await this.warmBox(projectId, cloudAgentId, workspaceSource)
 
     try {
-      if (workspaceSource.kind === 'relayfile') {
+      if (isLiveSyncWorkspaceSource(workspaceSource)) {
         await this.startMount(projectId, project, sandbox)
       } else {
         await this.stopMount(projectId)
@@ -719,11 +736,20 @@ export class CloudAgentManager {
   }
 
   private async resolveWorkspaceSource(project: Project): Promise<CloudAgentWorkspaceSource> {
+    const mode = cloudAgentWorkspaceMode(project)
+    if (mode === 'relayfile') {
+      return { kind: 'relayfile' }
+    }
+
     try {
       const repoRoot = (await execFileAsync('git', ['rev-parse', '--show-toplevel'], {
         cwd: project.rootPath
       })).stdout.trim()
-      if (!repoRoot || resolve(repoRoot) !== resolve(project.rootPath)) {
+      const [repoRootPath, projectRootPath] = await Promise.all([
+        realpath(repoRoot),
+        realpath(project.rootPath)
+      ])
+      if (!repoRoot || resolve(repoRootPath) !== resolve(projectRootPath)) {
         return { kind: 'relayfile' }
       }
 
@@ -789,18 +815,17 @@ export class CloudAgentManager {
         fileCount > DIRECT_GIT_FILE_THRESHOLD ? `${fileCount} tracked files` : '',
         trackedBytes > DIRECT_GIT_BYTES_THRESHOLD ? `${Math.round(trackedBytes / 1024 / 1024)} MiB tracked files` : ''
       ].filter(Boolean)
-      if (reasons.length === 0) {
+      if (reasons.length > 0) {
         return { kind: 'relayfile' }
       }
 
       return {
-        kind: 'git',
+        kind: mode,
         remoteUrl,
         ref: upstreamBranch,
         commit,
         shallow: true,
-        targetDir: SANDBOX_WORKSPACE_PATH,
-        largeReason: reasons.join(', ')
+        targetDir: SANDBOX_WORKSPACE_PATH
       }
     } catch (error) {
       if (!isExecFailure(error)) {
@@ -1136,6 +1161,10 @@ export class CloudAgentManager {
     this.pullTimers.delete(projectId)
     const project = this.findProject(projectId)
     if (!project?.cloudAgent || project.cloudAgent.autoPullAfterRun === false) return
+    const workspaceSource = normalizeWorkspaceSource(
+      this.workspaceSources.get(projectId) || project.cloudAgent.workspaceSource
+    )
+    if (workspaceSource?.kind !== 'git') return
 
     try {
       const status = await execFileAsync('git', ['status', '--porcelain'], { cwd: project.rootPath })
