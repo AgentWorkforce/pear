@@ -6,12 +6,15 @@ import {
   FolderPlus,
   Monitor,
   MoonStar,
+  PauseCircle,
+  Radio,
   Search,
   Server,
   Settings
 } from 'lucide-react'
 import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
+import { useActiveAgentDeliveryMode } from '@/hooks/use-active-agent-delivery-mode'
 
 interface CommandAction {
   id: string
@@ -48,9 +51,24 @@ export function CommandMenu(): React.ReactNode {
   const toggleTheme = useUIStore((s) => s.toggleTheme)
   const toggleTerminalLayout = useUIStore((s) => s.toggleTerminalLayout)
   const activeProject = useProjectStore((s) => s.getActiveProject())
+  const {
+    activeAgent,
+    currentMode: deliveryMode,
+    canToggle: canToggleDelivery,
+    toggle: toggleDeliveryMode
+  } = useActiveAgentDeliveryMode()
   const [query, setQuery] = useState('')
   const [selectedIndex, setSelectedIndex] = useState(0)
   const inputRef = useRef<HTMLInputElement>(null)
+
+  const deliveryActionLabel = deliveryMode === 'drive'
+    ? 'Switch active agent to Live'
+    : 'Switch active agent to Hold'
+  const deliveryActionDescription = !canToggleDelivery
+    ? 'No active agent — focus an agent terminal first'
+    : deliveryMode === 'drive'
+      ? `${activeAgent?.name ?? 'Active agent'}: incoming messages will auto-inject as they arrive`
+      : `${activeAgent?.name ?? 'Active agent'}: hold incoming messages until you inject them manually`
 
   const actions = useMemo<CommandAction[]>(() => [
     {
@@ -131,8 +149,32 @@ export function CommandMenu(): React.ReactNode {
         toggleTheme()
         closeDialog()
       }
+    },
+    {
+      id: 'toggle-delivery-mode',
+      label: deliveryActionLabel,
+      description: deliveryActionDescription,
+      keywords: ['hold', 'live', 'pause', 'resume', 'drive', 'auto', 'inject', 'delivery'],
+      Icon: deliveryMode === 'drive' ? Radio : PauseCircle,
+      run: () => {
+        if (!canToggleDelivery) return
+        void toggleDeliveryMode()
+        closeDialog()
+      }
     }
-  ], [activeProject, closeDialog, openDialog, openTab, toggleTerminalLayout, toggleTheme])
+  ], [
+    activeProject,
+    canToggleDelivery,
+    closeDialog,
+    deliveryActionDescription,
+    deliveryActionLabel,
+    deliveryMode,
+    openDialog,
+    openTab,
+    toggleDeliveryMode,
+    toggleTerminalLayout,
+    toggleTheme
+  ])
 
   const filteredActions = useMemo(
     () => actions.filter((action) => matchesAction(action, query)),
@@ -156,6 +198,21 @@ export function CommandMenu(): React.ReactNode {
     window.addEventListener('keydown', handleKeyDown, true)
     return () => window.removeEventListener('keydown', handleKeyDown, true)
   }, [activeDialog, closeDialog, openDialog])
+
+  // Cmd+Shift+H: toggle Hold ↔ Live for the focused agent without opening
+  // the palette. Mirrors the palette action so the two stay in sync.
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      if (!event.metaKey || !event.shiftKey || event.altKey || event.ctrlKey) return
+      if (event.key.toLowerCase() !== 'h') return
+      if (!canToggleDelivery) return
+      event.preventDefault()
+      void toggleDeliveryMode()
+    }
+
+    window.addEventListener('keydown', handleKeyDown, true)
+    return () => window.removeEventListener('keydown', handleKeyDown, true)
+  }, [canToggleDelivery, toggleDeliveryMode])
 
   useEffect(() => {
     if (activeDialog !== 'command-menu') return

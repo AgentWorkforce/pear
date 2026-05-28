@@ -869,7 +869,21 @@ export class IntegrationsManager {
         method: 'GET',
         path: `api/v1/workspaces/${handle.workspaceId}/integrations`
       })
-      return this.normalizeWorkspaceIntegrationList(payload)
+      const normalized = await this.normalizeWorkspaceIntegrationList(payload)
+      const rawCount = Array.isArray(payload)
+        ? payload.length
+        : isRecord(payload) && Array.isArray(payload.integrations)
+          ? payload.integrations.length
+          : isRecord(payload) && Array.isArray(payload.data)
+            ? payload.data.length
+            : 0
+      // Quick sanity log so it's obvious from the main-process terminal which
+      // workspace is being queried and which providers survived the
+      // statusPayloadReady filter (see normalizeWorkspaceIntegrationList).
+      console.log(
+        `[integrations] cloud workspace=${handle.workspaceId} raw=${rawCount} kept=${normalized.length} providers=${normalized.map((entry) => entry.provider).join(',') || '(none)'}`
+      )
+      return normalized
     })
   }
 

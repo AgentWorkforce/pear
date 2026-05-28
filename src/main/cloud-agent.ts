@@ -33,7 +33,12 @@ import type {
 
 const execFileAsync = promisify(execFile)
 const WARM_POLL_MS = 2_000
-const WARM_TIMEOUT_MS = 5 * 60_000
+// Must exceed the cloud box-manager's worst-case patience for daytona.start —
+// MAX_CREATE_TIMEOUT_SECONDS (120) × up to 3 retries via
+// retryOnDaytonaUpstreamTimeout + 2s/5s backoff = ~367s. Anything below that
+// makes Pear give up while the server is still working. Bumped to 8 min to
+// leave headroom for the in-between bookkeeping (advisory lock, mount setup).
+const WARM_TIMEOUT_MS = 8 * 60_000
 const RUN_END_PULL_DELAY_MS = 30_000
 const LOCAL_PRIORITY_IDLE_MS = 5_000
 const DIRECT_GIT_FILE_THRESHOLD = 5_000
@@ -834,17 +839,34 @@ export class CloudAgentManager {
       : [SANDBOX_WORKSPACE_PATH, ...integrationMountPaths]
     const url = `${auth.apiUrl}/api/v1/workspaces/${encodeURIComponent(workspaceId)}/cloud-agents/${encodeURIComponent(cloudAgentId)}/box`
     let sandbox = await this.fetchBox(url, auth.accessToken, 'POST', mountPaths, workspaceSource)
+    console.log(`[cloud-agent] warming sandbox ${sandbox.sandboxId} for project ${projectId}: initial status=${sandbox.status}`)
     this.emit({ type: 'sandbox-status', projectId, status: sandbox.status })
 
     const startedAt = Date.now()
+    let lastLoggedStatus: string = sandbox.status
+    let fetchAccessToken = auth.accessToken
     while (sandbox.status === 'warming') {
       if (Date.now() - startedAt > WARM_TIMEOUT_MS) {
-        throw new Error(`Cloud agent sandbox ${sandbox.sandboxId} did not become ready within ${WARM_TIMEOUT_MS / 1000}s`)
+        const elapsedSec = Math.round((Date.now() - startedAt) / 1000)
+        throw new Error(
+          `Cloud agent sandbox ${sandbox.sandboxId} did not become ready within ${WARM_TIMEOUT_MS / 1000}s ` +
+          `(elapsed=${elapsedSec}s, last status=${sandbox.status}${sandbox.error ? `, error=${sandbox.error}` : ''})`
+        )
       }
 
       await delay(WARM_POLL_MS)
-      sandbox = await this.fetchBox(url, auth.accessToken, 'GET')
+      // Refresh auth each poll — token TTL is 1 day, longer than WARM_TIMEOUT_MS,
+      // but the cost is one in-memory read and it future-proofs against TTL cuts.
+      // Falls back to the original token on transient refresh failure.
+      const fresh = await resolveCloudAuth()
+      fetchAccessToken = fresh?.accessToken ?? fetchAccessToken
+      sandbox = await this.fetchBox(url, fetchAccessToken, 'GET')
       this.emit({ type: 'sandbox-status', projectId, status: sandbox.status })
+      if (sandbox.status !== lastLoggedStatus) {
+        const elapsedSec = Math.round((Date.now() - startedAt) / 1000)
+        console.log(`[cloud-agent] sandbox ${sandbox.sandboxId} status changed: ${lastLoggedStatus} -> ${sandbox.status} (elapsed=${elapsedSec}s)`)
+        lastLoggedStatus = sandbox.status
+      }
     }
 
     if (sandbox.status === 'failed') {

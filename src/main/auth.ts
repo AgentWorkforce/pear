@@ -403,15 +403,26 @@ export async function getAuthStatus(): Promise<AuthStatus> {
 
   const tokens = loadTokens()
   if (tokens) {
-    const cachedUser = normalizeUserInfo(tokens.user)
+    // If the access token is past its 1-day TTL, try to refresh now so the
+    // avatar/UI doesn't claim signed-in while every cloud call 401s. On
+    // permanent refresh failure (e.g. refresh token revoked or > 7d old),
+    // refreshStoredTokens clears storage on 403; we then fall through to
+    // loggedOut. On transient failure, keep showing signed-in with the
+    // stale token — the next call will retry.
+    const usable = isTokenExpired(tokens)
+      ? (await refreshStoredTokens(tokens)) ?? (loadTokens() ?? null)
+      : tokens
+    if (!usable) return { loggedIn: false }
+
+    const cachedUser = normalizeUserInfo(usable.user)
     const freshUser = hasAvatarIdentity(cachedUser)
       ? undefined
-      : await fetchWhoami(tokens.apiUrl, tokens.accessToken)
-    const user = await withCachedAvatar(mergeUserInfo(tokens.user, freshUser), true)
-    if (freshUser || user?.cachedAvatarUrl !== tokens.user?.cachedAvatarUrl) {
-      saveTokens({ ...tokens, user })
+      : await fetchWhoami(usable.apiUrl, usable.accessToken)
+    const user = await withCachedAvatar(mergeUserInfo(usable.user, freshUser), true)
+    if (freshUser || user?.cachedAvatarUrl !== usable.user?.cachedAvatarUrl) {
+      saveTokens({ ...usable, user })
     }
-    return { loggedIn: true, apiUrl: tokens.apiUrl, user }
+    return { loggedIn: true, apiUrl: usable.apiUrl, user }
   }
 
   const meta = loadAuthMeta()
@@ -588,12 +599,25 @@ function isCloudSdkAuthExpired(auth: { accessTokenExpiresAt?: string } | null): 
  */
 export async function resolveCloudAuth(): Promise<CloudAuth | null> {
   const pearAuth = loadTokens()
-  if (pearAuth && !isTokenExpired(pearAuth)) {
-    const apiUrl = normalizeCloudApiUrl(pearAuth.apiUrl)
-    return {
-      accessToken: pearAuth.accessToken,
-      apiUrl,
-      accountKey: deriveCloudAuthAccountKey(apiUrl, pearAuth.accessToken, pearAuth.user)
+  if (pearAuth) {
+    // Token may have aged past its 1-day TTL. Refresh transparently so
+    // integrations / cloud-agent / proactive-agent don't surface
+    // "cloud-auth-required" while the UI still shows the user as signed in
+    // (getAuthStatus doesn't check expiry — see #cloud-auth-skew).
+    // On refresh failure, fall through to the stale token (matching
+    // getAccessToken's behaviour) — the caller's 401 surfaces re-login
+    // through the normal flow instead of looking unauthenticated here.
+    // refreshStoredTokens clears tokens itself on permanent failure (403).
+    const usable = isTokenExpired(pearAuth)
+      ? (await refreshStoredTokens(pearAuth)) ?? (loadTokens() ?? null)
+      : pearAuth
+    if (usable) {
+      const apiUrl = normalizeCloudApiUrl(usable.apiUrl)
+      return {
+        accessToken: usable.accessToken,
+        apiUrl,
+        accountKey: deriveCloudAuthAccountKey(apiUrl, usable.accessToken, usable.user)
+      }
     }
   }
 
