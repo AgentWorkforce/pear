@@ -522,6 +522,11 @@ interface BrokerSession {
   name: string
   channels: string[]
   cloudSandboxId: string | null
+  // For attach-to-remote-broker sessions (cloud sandboxes), the SDK doesn't
+  // auto-renew the owner lease the way .spawn() does. The remote broker
+  // auto-shuts-down after 120s without a lease renewal, so we own the timer
+  // here and clear it on shutdown.
+  leaseTimer?: ReturnType<typeof setInterval>
 }
 
 export interface BrokerAgentDetails {
@@ -851,6 +856,16 @@ export class BrokerManager {
       await client.getSession()
 
       const unsubEvent = this.attachClient(normalizedProjectId, client, win)
+      // The remote broker shuts itself down after 120s without an owner-lease
+      // renewal. AgentRelayClient.spawn handles this automatically, but the
+      // attach-to-existing path (used here for cloud sandboxes) doesn't —
+      // without this timer the broker dies mid-session and every subsequent
+      // call surfaces as a 502/disconnect.
+      const leaseTimer = setInterval(() => {
+        client.renewLease().catch((err) => {
+          console.warn(`[broker] Cloud lease renewal failed for project ${normalizedProjectId}:`, toErrorMessage(err))
+        })
+      }, 60_000)
       this.sessions.set(normalizedProjectId, {
         projectId: normalizedProjectId,
         client,
@@ -859,7 +874,8 @@ export class BrokerManager {
         cwd: '',
         name: `cloud-${normalizedProjectId}`,
         channels: [],
-        cloudSandboxId: sandboxId
+        cloudSandboxId: sandboxId,
+        leaseTimer
       })
       client.connectEvents()
 
@@ -1855,6 +1871,7 @@ export class BrokerManager {
       const session = this.sessions.get(targetProjectId)
       if (!session) continue
       session.unsubEvent()
+      if (session.leaseTimer) clearInterval(session.leaseTimer)
       try {
         await session.client.shutdown()
       } catch {
