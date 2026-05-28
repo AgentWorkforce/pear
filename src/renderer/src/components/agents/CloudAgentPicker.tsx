@@ -7,6 +7,7 @@ import {
   useCloudAgentStore,
   type CloudAgentAttachProgress
 } from '@/stores/cloud-agent-store'
+import { useProjectStore, type CloudAgentWorkspaceMode } from '@/stores/project-store'
 
 function phaseLabel(progress: CloudAgentAttachProgress | undefined, elapsedSec: number): string {
   if (!progress) return elapsedSec > 1 ? `Starting attach… (${elapsedSec}s)` : 'Starting attach…'
@@ -110,6 +111,18 @@ function StatusPill({ status }: { status: CloudAgentRecord['status'] }): React.R
   )
 }
 
+function cloudAgentWorkspaceMode(project: { cloudAgentWorkspaceMode?: unknown } | undefined): CloudAgentWorkspaceMode {
+  return project?.cloudAgentWorkspaceMode === 'git' || project?.cloudAgentWorkspaceMode === 'relayfile'
+    ? project.cloudAgentWorkspaceMode
+    : 'git-overlay'
+}
+
+function modeLabel(mode: CloudAgentWorkspaceMode): string {
+  if (mode === 'git') return 'Git - pull after run'
+  if (mode === 'relayfile') return 'Relayfile - live sync'
+  return 'Git + live sync'
+}
+
 export default function CloudAgentPicker({
   projectId,
   onAttach,
@@ -131,6 +144,10 @@ export default function CloudAgentPicker({
     (state) => projectId ? state.attachProgress[projectId] : undefined
   )
   const setAttachProgress = useCloudAgentStore((s) => s.setAttachProgress)
+  const project = useProjectStore(
+    (state) => state.projects.find((candidate) => candidate.id === projectId)
+  )
+  const workspaceMode = cloudAgentWorkspaceMode(project)
 
   // Tick once a second while attaching so the elapsed timer counts up.
   useEffect(() => {
@@ -492,7 +509,12 @@ export default function CloudAgentPicker({
               </span>
             </>
           ) : selectedAgent ? (
-            <span className="truncate">Selected: {getAgentTitle(selectedAgent)}</span>
+            <>
+              <span className="truncate">Selected: {getAgentTitle(selectedAgent)}</span>
+              <span className="hidden shrink-0 rounded-full border border-[var(--pear-border-subtle)] px-2 py-0.5 text-[10px] uppercase tracking-wide text-[var(--pear-text-faint)] sm:inline">
+                {modeLabel(workspaceMode)}
+              </span>
+            </>
           ) : (
             <span>Select an agent to attach</span>
           )}
