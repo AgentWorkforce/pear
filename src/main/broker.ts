@@ -5,6 +5,7 @@ import { execFileSync } from 'child_process'
 import { BrowserWindow } from 'electron'
 import {
   AgentRelayClient,
+  AgentRelayProtocolError,
   type AgentRelaySpawnOptions,
   type SpawnPtyInput,
   type SendMessageInput,
@@ -203,6 +204,42 @@ const AGENTWORKFORCE_CLI_VERSION = '3.0.22'
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+// SDK already retries 503 internally for ~10s during the broker handshake. If
+// that exhausts, give the upstream a couple more chances before surfacing —
+// short Relaycast blips shouldn't bubble all the way to the user.
+const SPAWN_RETRY_BACKOFF_MS = [2000, 5000]
+
+function isRetryableSpawnError(err: unknown): boolean {
+  if (err instanceof AgentRelayProtocolError) return err.retryable === true
+  if (err && typeof err === 'object' && 'retryable' in err) {
+    return (err as { retryable?: unknown }).retryable === true
+  }
+  return false
+}
+
+async function spawnBrokerWithRetry(
+  opts: AgentRelaySpawnOptions,
+  projectId: string
+): Promise<AgentRelayClient> {
+  let lastErr: unknown
+  for (let attempt = 0; attempt <= SPAWN_RETRY_BACKOFF_MS.length; attempt++) {
+    if (attempt > 0) {
+      const waitMs = SPAWN_RETRY_BACKOFF_MS[attempt - 1]
+      console.warn(
+        `[broker] Spawn retry ${attempt}/${SPAWN_RETRY_BACKOFF_MS.length} for project ${projectId} in ${waitMs}ms (last error: ${toErrorMessage(lastErr)})`
+      )
+      await delay(waitMs)
+    }
+    try {
+      return await AgentRelayClient.spawn(opts)
+    } catch (err) {
+      lastErr = err
+      if (!isRetryableSpawnError(err)) throw err
+    }
+  }
+  throw lastErr
 }
 
 function toErrorMessage(err: unknown): string {
@@ -689,7 +726,7 @@ export class BrokerManager {
       }
 
       console.log('[broker] Starting with opts:', JSON.stringify({ ...opts, projectId: normalizedProjectId }))
-      const client = await AgentRelayClient.spawn(opts)
+      const client = await spawnBrokerWithRetry(opts, normalizedProjectId)
       console.log('[broker] Started successfully for project:', normalizedProjectId)
       const unsubEvent = this.attachClient(normalizedProjectId, client, win)
       this.sessions.set(normalizedProjectId, {

@@ -33,6 +33,14 @@ function IntegrationLogo({ iconUrl, label }: { iconUrl?: string; label: string }
   )
 }
 
+// Relaycast/Nango return connections under auth-template keys
+// ("github-app-oauth", "slack-bot", "linear-oauth"), but the catalog uses the
+// product slug ("github", "slack", "linear"). Strip the auth suffix so the two
+// align.
+function canonicalProviderKey(provider: string): string {
+  return provider.trim().toLowerCase().replace(/-(app-oauth|app|oauth|bot-oauth|bot|api-key|apikey)$/, '')
+}
+
 function capabilityLabel(adapter: IntegrationAdapter): string {
   const capabilities = [
     adapter.capabilities.webhook ? 'Webhook' : null,
@@ -78,8 +86,13 @@ export function AccountSettings(): React.ReactNode {
   // Connected integrations only carry a provider id; look up the catalog adapter
   // to reuse its logo (and display name) in the connected list.
   const adapterByProvider = useMemo(
-    () => new Map(catalog.map((adapter) => [adapter.provider, adapter])),
+    () => new Map(catalog.map((adapter) => [canonicalProviderKey(adapter.provider), adapter])),
     [catalog]
+  )
+
+  const connectedProviders = useMemo(
+    () => new Set(connected.map((integration) => canonicalProviderKey(integration.provider))),
+    [connected]
   )
 
   const loadConnected = useCallback(async () => {
@@ -267,7 +280,7 @@ export function AccountSettings(): React.ReactNode {
               </div>
             ) : (
               connected.map((integration) => {
-                const adapter = adapterByProvider.get(integration.provider)
+                const adapter = adapterByProvider.get(canonicalProviderKey(integration.provider))
                 return (
                 <div
                   key={integration.integrationId}
@@ -306,34 +319,49 @@ export function AccountSettings(): React.ReactNode {
             <span className="text-xs text-[var(--pear-text-faint)]">{loading ? 'Loading' : catalog.length}</span>
           </div>
           <div className="grid gap-3 md:grid-cols-2">
-            {catalog.map((adapter) => (
-              <div
-                key={adapter.provider}
-                className="rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] p-4"
-              >
-                <div className="flex items-start gap-3">
-                  <IntegrationLogo iconUrl={adapter.iconUrl} label={adapter.displayName} />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-sm font-medium text-[var(--pear-text)]">{adapter.displayName}</div>
-                    <div className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--pear-text-dim)]">
-                      {adapter.description}
+            {catalog.map((adapter) => {
+              const isConnected = connectedProviders.has(canonicalProviderKey(adapter.provider))
+              return (
+                <div
+                  key={adapter.provider}
+                  className="rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] p-4"
+                >
+                  <div className="flex items-start gap-3">
+                    <IntegrationLogo iconUrl={adapter.iconUrl} label={adapter.displayName} />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className="truncate text-sm font-medium text-[var(--pear-text)]">{adapter.displayName}</span>
+                        {isConnected && (
+                          <CheckCircle2 size={13} className="shrink-0 text-[var(--pear-accent-bright)]" />
+                        )}
+                      </div>
+                      <div className="mt-1 line-clamp-2 text-xs leading-5 text-[var(--pear-text-dim)]">
+                        {adapter.description}
+                      </div>
                     </div>
                   </div>
+                  <div className="mt-3 flex items-center justify-between gap-3">
+                    <span className="truncate text-xs text-[var(--pear-text-faint)]">{capabilityLabel(adapter)}</span>
+                    {isConnected ? (
+                      <span className="flex h-8 items-center gap-2 rounded-md border border-[var(--pear-accent-dim)]/40 bg-[var(--pear-accent-bright)]/10 px-3 text-xs text-[var(--pear-accent-bright)]">
+                        <CheckCircle2 size={13} />
+                        Connected
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        disabled={!activeProjectId || busyProvider === adapter.provider}
+                        onClick={() => void startConnect(adapter)}
+                        className="flex h-8 items-center gap-2 rounded-md border border-[var(--pear-border)] px-3 text-xs text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:opacity-40"
+                      >
+                        <ExternalLink size={13} />
+                        Connect
+                      </button>
+                    )}
+                  </div>
                 </div>
-                <div className="mt-3 flex items-center justify-between gap-3">
-                  <span className="truncate text-xs text-[var(--pear-text-faint)]">{capabilityLabel(adapter)}</span>
-                  <button
-                    type="button"
-                    disabled={!activeProjectId || busyProvider === adapter.provider}
-                    onClick={() => void startConnect(adapter)}
-                    className="flex h-8 items-center gap-2 rounded-md border border-[var(--pear-border)] px-3 text-xs text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:opacity-40"
-                  >
-                    <ExternalLink size={13} />
-                    Connect
-                  </button>
-                </div>
-              </div>
-            ))}
+              )
+            })}
           </div>
         </section>
       </div>
