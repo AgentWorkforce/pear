@@ -120,11 +120,18 @@ type WorkspaceIntegrationPayload = {
   connectionId?: unknown
   currentConnectionId?: unknown
   providerConfigKey?: unknown
+  ready?: unknown
   status?: unknown
   state?: unknown
   connectedAt?: unknown
   createdAt?: unknown
   updatedAt?: unknown
+  connection?: {
+    ready?: unknown
+    status?: unknown
+    state?: unknown
+    connectedAt?: unknown
+  }
   webhookHealth?: {
     healthy?: unknown
     lastError?: unknown
@@ -881,7 +888,7 @@ export class IntegrationsManager {
       const payload = await handle.requestJson({
         operation: 'listIntegrations',
         method: 'GET',
-        path: `api/v1/workspaces/${workspaceId}/integrations`
+        path: `api/v1/workspaces/${encodeURIComponent(workspaceId)}/integrations`
       })
       const normalized = await this.normalizeWorkspaceIntegrationList(payload)
       const rawCount = Array.isArray(payload)
@@ -925,7 +932,7 @@ export class IntegrationsManager {
         readString(payloadEntry.currentConnectionId)
 
       if (!provider || !integrationId) continue
-      if (!this.statusPayloadReady(payloadEntry)) continue
+      if (!this.workspaceIntegrationPayloadReady(payloadEntry)) continue
 
       const adapter = adapterByProvider.get(toRelayfileProvider(provider))
       const providerConfigKey = readString(payloadEntry.providerConfigKey)
@@ -1012,6 +1019,21 @@ export class IntegrationsManager {
       this.isReadyStatus(payload.connection?.status) ||
       this.isReadyStatus(payload.connection?.state) ||
       Boolean(payload.connectedAt || payload.connection?.connectedAt)
+  }
+
+  private workspaceIntegrationPayloadReady(payload: WorkspaceIntegrationPayload): boolean {
+    return this.statusPayloadReady({
+      ready: payload.ready === true,
+      status: readString(payload.status),
+      state: readString(payload.state),
+      connectedAt: readString(payload.connectedAt),
+      connection: {
+        ready: payload.connection?.ready === true,
+        status: readString(payload.connection?.status),
+        state: readString(payload.connection?.state),
+        connectedAt: readString(payload.connection?.connectedAt)
+      }
+    })
   }
 
   private isReadyStatus(value: unknown): boolean {
