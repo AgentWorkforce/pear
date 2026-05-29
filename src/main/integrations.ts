@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { BrowserWindow, shell } from 'electron'
 import type { WorkspaceHandle } from '@relayfile/sdk'
-import { getApiUrl, resolveCloudAuth } from './auth'
+import { getAccountWorkspaceId, getApiUrl, resolveCloudAuth } from './auth'
 import { brokerManager } from './broker'
 import { cloudAgentManager } from './cloud-agent'
 import { integrationEventBridge, integrationSubscriptionSummaries } from './integration-event-bridge'
@@ -877,10 +877,11 @@ export class IntegrationsManager {
 
   private async listCloudWorkspaceIntegrations(): Promise<ConnectedIntegration[]> {
     return this.withWorkspaceHandle(async (handle) => {
+      const workspaceId = await getAccountWorkspaceId()
       const payload = await handle.requestJson({
         operation: 'listIntegrations',
         method: 'GET',
-        path: `api/v1/workspaces/${handle.workspaceId}/integrations`
+        path: `api/v1/workspaces/${workspaceId}/integrations`
       })
       const normalized = await this.normalizeWorkspaceIntegrationList(payload)
       const rawCount = Array.isArray(payload)
@@ -894,7 +895,7 @@ export class IntegrationsManager {
       // workspace is being queried and which providers survived the
       // statusPayloadReady filter (see normalizeWorkspaceIntegrationList).
       console.log(
-        `[integrations] cloud workspace=${handle.workspaceId} raw=${rawCount} kept=${normalized.length} providers=${normalized.map((entry) => entry.provider).join(',') || '(none)'}`
+        `[integrations] cloud workspace=${workspaceId} raw=${rawCount} kept=${normalized.length} providers=${normalized.map((entry) => entry.provider).join(',') || '(none)'}`
       )
       return normalized
     })
