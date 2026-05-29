@@ -21,7 +21,11 @@ function nextAgentName(cli: SpawnAgentCli, projectId: string, liveNames: string[
   return `${cli}-${index}`
 }
 
-export async function spawnProjectAgent(project: Project, cli: SpawnAgentCli): Promise<string> {
+export async function spawnProjectAgent(
+  project: Project,
+  cli: SpawnAgentCli,
+  customName?: string
+): Promise<string> {
   const projectStore = useProjectStore.getState()
   if (projectStore.activeProjectId !== project.id) {
     await projectStore.setActiveProject(project.id)
@@ -53,7 +57,11 @@ export async function spawnProjectAgent(project: Project, cli: SpawnAgentCli): P
     )
   }
 
-  const requestedName = nextAgentName(cli, project.id, liveAgents.map((agent) => agent.name))
+  const trimmedCustom = customName?.trim() || undefined
+  // When the user provides a custom name use it verbatim; the broker's
+  // getAvailableAgentName will append -2/-3/... on conflict. When empty we
+  // fall back to the per-cli auto-numbered default.
+  const requestedName = trimmedCustom ?? nextAgentName(cli, project.id, liveAgents.map((agent) => agent.name))
   const spawned = await pear.broker.spawnAgent(project.id, {
     name: requestedName,
     cli,
