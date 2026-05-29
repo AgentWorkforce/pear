@@ -1,0 +1,15 @@
+name: pr-reviewer substance failing check
+
+on:
+  pull_request:
+    branches:
+      - main
+
+jobs:
+  forced-failure:
+    runs-on: ubuntu-latest
+    steps:
+      - name: fail for pr-reviewer substance test
+        run: |
+          echo "substance-test-2 forced CI failure"
+          exit 1
