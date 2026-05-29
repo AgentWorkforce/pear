@@ -10,6 +10,7 @@ AUTH_FILE="${CLOUD_AUTH_FILE:-$HOME/.agent-relay/cloud-auth.json}"
 REPORT_FILE="/tmp/cloud-agent-probe-$(date -u +%Y%m%dT%H%M%SZ).jsonl"
 POLL_INTERVAL_SEC=2
 POLL_TIMEOUT_SEC=300
+STOP_TIMEOUT_SEC=120
 SANDBOX_WORKSPACE_PATH="/workspace"
 
 usage() {
@@ -185,6 +186,18 @@ read_error_message() {
   ' "$file" 2>/dev/null || printf '%s\n' "$fallback"
 }
 
+is_not_found_response() {
+  local status="$1"
+  local file="$2"
+  local message
+  if [[ "$status" == "404" ]]; then
+    return 0
+  fi
+
+  message="$(read_error_message "$file" "")"
+  [[ "$message" =~ [Nn]ot[[:space:]_-]?[Ff]ound ]] || [[ "$message" =~ no[[:space:]_-]?sandbox ]]
+}
+
 discover_cloud_agent_id() {
   if [[ -n "${CLOUD_AGENT_ID:-}" ]]; then
     printf '%s\n' "$CLOUD_AGENT_ID"
@@ -295,6 +308,7 @@ write_result() {
   local status="$5"
   local error_message="$6"
   local sandbox_id="$7"
+  local pre_warm_status="$8"
 
   jq -cn \
     --argjson attempt "$attempt" \
@@ -304,9 +318,11 @@ write_result() {
     --arg status "$status" \
     --arg errorMessage "$error_message" \
     --arg sandboxId "$sandbox_id" \
+    --arg preWarmStatus "$pre_warm_status" \
     '{
       attempt: $attempt,
       mode: $mode,
+      preWarmStatus: $preWarmStatus,
       success: $success,
       elapsedSec: $elapsedSec,
       status: $status,
@@ -330,16 +346,81 @@ box_error() {
   jq -r '.errorMessage // .error // .message // empty' "$file"
 }
 
+wait_for_cold_box() {
+  local get_url="$1"
+  local delete_status delete_response_file status response_file sandbox_status started_at elapsed last_observed
+
+  call_curl_json DELETE "$get_url"
+  delete_status="$CURL_STATUS"
+  delete_response_file="$CURL_RESPONSE_FILE"
+  if [[ "$delete_status" == 2* ]]; then
+    sandbox_status="$(box_status "$delete_response_file")"
+    last_observed="${sandbox_status:-http-${delete_status}}"
+    rm -f "$delete_response_file"
+  elif is_not_found_response "$delete_status" "$delete_response_file"; then
+    rm -f "$delete_response_file"
+    printf 'absent\n'
+    return 0
+  else
+    local message
+    message="$(read_error_message "$delete_response_file" "DELETE /box failed")"
+    rm -f "$delete_response_file"
+    printf 'delete-failed:%s:%s\n' "$delete_status" "$message"
+    return 1
+  fi
+
+  started_at="$(date -u +%s)"
+  while true; do
+    call_curl_json GET "$get_url"
+    status="$CURL_STATUS"
+    response_file="$CURL_RESPONSE_FILE"
+
+    if is_not_found_response "$status" "$response_file"; then
+      rm -f "$response_file"
+      printf 'absent\n'
+      return 0
+    fi
+
+    if [[ "$status" == 2* ]]; then
+      sandbox_status="$(box_status "$response_file")"
+      last_observed="${sandbox_status:-http-${status}}"
+    else
+      sandbox_status=""
+      last_observed="http-${status}:$(read_error_message "$response_file" "GET /box failed")"
+    fi
+    rm -f "$response_file"
+
+    if [[ "$status" == 2* && "$sandbox_status" == "stopped" ]]; then
+      printf 'stopped\n'
+      return 0
+    fi
+
+    elapsed="$(( $(date -u +%s) - started_at ))"
+    if (( elapsed >= STOP_TIMEOUT_SEC )); then
+      printf '%s\n' "${last_observed:-unknown}"
+      return 1
+    fi
+
+    sleep "$POLL_INTERVAL_SEC"
+  done
+}
+
 run_attempt() {
   local attempt="$1"
   local cloud_agent_id="$2"
-  local mode start now elapsed body post_url get_url status response_file sandbox_status sandbox_id error_message
+  local mode start now elapsed body post_url get_url status response_file sandbox_status sandbox_id error_message pre_warm_status
 
   mode="$(mode_for_attempt "$attempt")"
   start="$(date -u +%s)"
   body="$(request_body_for_mode "$mode")"
   get_url="$CLOUD_BASE/api/v1/workspaces/$(printf '%s' "$WORKSPACE_ID" | jq -sRr @uri)/cloud-agents/$(printf '%s' "$cloud_agent_id" | jq -sRr @uri)/box"
   post_url="${get_url}?async=true"
+
+  if ! pre_warm_status="$(wait_for_cold_box "$get_url")"; then
+    elapsed="$(( $(date -u +%s) - start ))"
+    write_result "$attempt" "$mode" false "$elapsed" "$pre_warm_status" "box did not stop before warm" "" "$pre_warm_status"
+    return 1
+  fi
 
   call_curl_json POST "$post_url" "$body"
   status="$CURL_STATUS"
@@ -350,7 +431,7 @@ run_attempt() {
     error_message="$(read_error_message "$response_file" "POST /box failed")"
     rm -f "$response_file"
     elapsed="$(( $(date -u +%s) - start ))"
-    write_result "$attempt" "$mode" false "$elapsed" "$sandbox_status" "POST ${status}: ${error_message}" "$sandbox_id"
+    write_result "$attempt" "$mode" false "$elapsed" "$sandbox_status" "POST ${status}: ${error_message}" "$sandbox_id" "$pre_warm_status"
     return 1
   fi
   error_message="$(box_error "$response_file")"
@@ -361,17 +442,17 @@ run_attempt() {
     elapsed="$(( now - start ))"
     case "$sandbox_status" in
       ready)
-        write_result "$attempt" "$mode" true "$elapsed" "$sandbox_status" "" "$sandbox_id"
+        write_result "$attempt" "$mode" true "$elapsed" "$sandbox_status" "" "$sandbox_id" "$pre_warm_status"
         return 0
         ;;
       failed|stopping|stopped)
-        write_result "$attempt" "$mode" false "$elapsed" "$sandbox_status" "${error_message:-box_warm_failed}" "$sandbox_id"
+        write_result "$attempt" "$mode" false "$elapsed" "$sandbox_status" "${error_message:-box_warm_failed}" "$sandbox_id" "$pre_warm_status"
         return 1
         ;;
     esac
 
     if (( elapsed >= POLL_TIMEOUT_SEC )); then
-      write_result "$attempt" "$mode" false "$elapsed" "${sandbox_status:-unknown}" "Cloud agent box warm timed out" "$sandbox_id"
+      write_result "$attempt" "$mode" false "$elapsed" "${sandbox_status:-unknown}" "Cloud agent box warm timed out" "$sandbox_id" "$pre_warm_status"
       return 1
     fi
 
@@ -386,7 +467,7 @@ run_attempt() {
       error_message="$(read_error_message "$response_file" "GET /box failed")"
       rm -f "$response_file"
       elapsed="$(( $(date -u +%s) - start ))"
-      write_result "$attempt" "$mode" false "$elapsed" "$sandbox_status" "GET ${status}: ${error_message}" "$sandbox_id"
+      write_result "$attempt" "$mode" false "$elapsed" "$sandbox_status" "GET ${status}: ${error_message}" "$sandbox_id" "$pre_warm_status"
       return 1
     fi
     rm -f "$response_file"
@@ -408,6 +489,11 @@ print_report() {
     | ($rows | length) as $total
     | ($rows | map(select(.success)) | length) as $successes
     | ($rows | map(.elapsedSec)) as $elapsed
+    | ([
+        range(1; $rows | length) as $idx
+        | select(($rows[$idx - 1].sandboxId != "") and ($rows[$idx].sandboxId != "") and ($rows[$idx - 1].sandboxId == $rows[$idx].sandboxId))
+        | "  attempts \($rows[$idx - 1].attempt) and \($rows[$idx].attempt) share sandboxId \($rows[$idx].sandboxId)"
+      ]) as $reuseWarnings
     | "Report file: \($file)",
       "Success rate: \($successes)/\($total) (\(pct($successes; $total))%)",
       "Elapsed seconds: p50=\(percentile($elapsed; 50) // "n/a") p95=\(percentile($elapsed; 95) // "n/a")",
@@ -422,11 +508,14 @@ print_report() {
         | .[]
       ),
       "",
+      "Sandbox reuse warnings:",
+      (if ($reuseWarnings | length) == 0 then "  none" else $reuseWarnings[] end),
+      "",
       "Results:",
-      "attempt\tmode\tsuccess\telapsedSec\tstatus\tsandboxId\terrorMessage",
+      "attempt\tmode\tpreWarmStatus\tsuccess\telapsedSec\tstatus\tsandboxId\terrorMessage",
       (
         $rows[]
-        | "\(.attempt)\t\(.mode)\t\(.success)\t\(.elapsedSec)\t\(.status)\t\(.sandboxId)\t\(.errorMessage)"
+        | "\(.attempt)\t\(.mode)\t\(.preWarmStatus)\t\(.success)\t\(.elapsedSec)\t\(.status)\t\(.sandboxId)\t\(.errorMessage)"
       )
   ' "$REPORT_FILE"
 }
