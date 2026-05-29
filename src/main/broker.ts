@@ -1,7 +1,8 @@
-import { existsSync, readFileSync } from 'fs'
+import { accessSync, constants, existsSync, readFileSync } from 'fs'
 import { rm } from 'fs/promises'
 import { randomUUID } from 'node:crypto'
-import { basename, join } from 'path'
+import { delimiter, basename, dirname, join } from 'path'
+import { execFileSync } from 'child_process'
 import { BrowserWindow } from 'electron'
 import {
   AgentRelayClient,
@@ -13,7 +14,9 @@ import {
   type ListAgent,
   type InboundDeliveryMode,
   type PendingRelayMessage,
-  type PtyInputStream
+  type PtyInputStream,
+  findPersona,
+  listPersonas
 } from '@agent-relay/sdk'
 import { getAccessToken, getApiUrl } from './auth'
 import { assertDirectory } from './path-utils'
@@ -25,6 +28,7 @@ import {
   type GeneratedCommitDraft
 } from './schemas'
 import { compactBrokerEvent, normalizeEventTimestamp } from '../shared/lib/broker-events'
+import type { WorkforcePersona } from '../shared/types/ipc'
 
 function isShellLikeCommand(cli: string): boolean {
   const normalized = basename(cli).toLowerCase()
@@ -42,6 +46,85 @@ function resolveShellCommand(): string {
   }
 
   return '/bin/zsh'
+}
+
+function canExecute(filePath: string): boolean {
+  try {
+    accessSync(filePath, constants.X_OK)
+    return true
+  } catch {
+    return false
+  }
+}
+
+function resolveCommandOnPath(command: string): string | undefined {
+  const pathValue = process.env.PATH || ''
+  const extensions = process.platform === 'win32'
+    ? ['', '.cmd', '.exe', '.bat']
+    : ['']
+
+  for (const dir of pathValue.split(delimiter)) {
+    if (!dir) continue
+    for (const extension of extensions) {
+      const candidate = join(dir, `${command}${extension}`)
+      if (canExecute(candidate)) return candidate
+    }
+  }
+
+  try {
+    const resolved = execFileSync(process.platform === 'win32' ? 'where' : 'which', [command], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).split(/\r?\n/)[0]?.trim()
+    return resolved || undefined
+  } catch {
+    return undefined
+  }
+}
+
+function resolvePackageBin(packageName: string, binName: string): string | undefined {
+  try {
+    const packageJsonPath = require.resolve(`${packageName}/package.json`)
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as {
+      bin?: string | Record<string, string>
+    }
+    const binPath = typeof packageJson.bin === 'string'
+      ? packageJson.bin
+      : packageJson.bin?.[binName]
+    if (!binPath) return undefined
+
+    const candidate = join(dirname(packageJsonPath), binPath)
+    return canExecute(candidate) ? candidate : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function resolveAgentWorkforceCommand(cwd: string): { cli: string; args: string[] } {
+  const binaryName = process.platform === 'win32' ? 'agentworkforce.cmd' : 'agentworkforce'
+  const localCandidates = [
+    join(cwd, 'node_modules', '.bin', binaryName),
+    join(process.cwd(), 'node_modules', '.bin', binaryName)
+  ]
+
+  for (const candidate of localCandidates) {
+    if (canExecute(candidate)) return { cli: candidate, args: [] }
+  }
+
+  const packageCommand = resolvePackageBin('agentworkforce', 'agentworkforce')
+  if (packageCommand) {
+    if (process.platform !== 'win32') return { cli: packageCommand, args: [] }
+    const nodeCommand = resolveCommandOnPath('node')
+    if (nodeCommand) return { cli: nodeCommand, args: [packageCommand] }
+  }
+
+  const pathCommand = resolveCommandOnPath('agentworkforce')
+  if (pathCommand) return { cli: pathCommand, args: [] }
+
+  const npxCommand = resolveCommandOnPath('npx')
+  if (npxCommand) return { cli: npxCommand, args: ['-y', `agentworkforce@${AGENTWORKFORCE_CLI_VERSION}`] }
+
+  throw new Error('AgentWorkforce CLI not found — install it to launch personas')
 }
 
 // Resolve the broker binary bundled inside @agent-relay/sdk.
@@ -112,6 +195,12 @@ const COMMIT_DRAFT_MAX_DIFF_CHARS = 80_000
 const COMMIT_DRAFT_TIMEOUT_MS = 180_000
 const MAX_BROKER_EVENT_HISTORY = 3_000
 const BROKER_EVENT_HISTORY_TTL_MS = 12 * 60 * 60 * 1_000
+// After this many consecutive failures to open a PTY input stream, give up on
+// the WS fast path for that agent and send over HTTP until it re-attaches.
+const MAX_INPUT_STREAM_OPEN_FAILURES = 3
+const PERSONA_REGISTRATION_TIMEOUT_MS = 5_000
+const PERSONA_REGISTRATION_STABILITY_MS = 1_000
+const AGENTWORKFORCE_CLI_VERSION = '3.0.22'
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -150,6 +239,17 @@ function getPearBurnSpawnEnrichment(
     ...(lineage?.parentAgentKey ? { pear_parent_agent_key: lineage.parentAgentKey } : {})
   }
 }
+
+// NOTE: an earlier version of this file wrapped AgentRelayClient.spawn in an
+// outer retry for retryable errors. That was unsafe: every spawn() call forks
+// a fresh broker child process (see client.js spawn → child_process.spawn),
+// and the SDK does NOT kill the child on partial failure. Retrying after the
+// SDK's built-in 10s 503-poll exhausted left the first broker alive while a
+// second one started — two brokers fought over connection.json, workspace
+// identity, and ports, which surfaced as mass agent release and a dead
+// broker. The SDK's internal 10s polling is the only retry that's safe at
+// this layer; if it fails, surface the error and let the user retry through
+// the UI (which goes through connectExistingBroker first).
 
 function toErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
@@ -432,6 +532,11 @@ interface BrokerSession {
   channels: string[]
   cloudSandboxId: string | null
   pearLineage: Map<string, PearLineageEntry>
+  // For attach-to-remote-broker sessions (cloud sandboxes), the SDK doesn't
+  // auto-renew the owner lease the way .spawn() does. The remote broker
+  // auto-shuts-down after 120s without a lease renewal, so we own the timer
+  // here and clear it on shutdown.
+  leaseTimer?: ReturnType<typeof setInterval>
 }
 
 export interface BrokerAgentDetails {
@@ -521,6 +626,13 @@ export class BrokerManager {
   private agentProjects = new Map<string, Set<string>>()
   private inputStreams = new Map<string, PtyInputStream>()
   private inputStreamFallbacks = new Set<string>()
+  // Keys whose WS input stream has completed the broker's pty_input_ready
+  // handshake — only these are safe to send on without blocking. Everything
+  // else routes over HTTP until the stream is confirmed open.
+  private inputStreamReady = new Set<string>()
+  // Consecutive background open failures per key; after MAX we stop retrying the
+  // WS for this agent (HTTP-only) until the terminal is re-attached.
+  private inputStreamOpenFailures = new Map<string, number>()
   private eventObservers = new Set<BrokerEventObserver>()
   private eventHistory: BrokerEventRecord[] = []
   private eventSerial = 0
@@ -756,6 +868,16 @@ export class BrokerManager {
       await client.getSession()
 
       const unsubEvent = this.attachClient(normalizedProjectId, client, win)
+      // The remote broker shuts itself down after 120s without an owner-lease
+      // renewal. AgentRelayClient.spawn handles this automatically, but the
+      // attach-to-existing path (used here for cloud sandboxes) doesn't —
+      // without this timer the broker dies mid-session and every subsequent
+      // call surfaces as a 502/disconnect.
+      const leaseTimer = setInterval(() => {
+        client.renewLease().catch((err) => {
+          console.warn(`[broker] Cloud lease renewal failed for project ${normalizedProjectId}:`, toErrorMessage(err))
+        })
+      }, 60_000)
       this.sessions.set(normalizedProjectId, {
         projectId: normalizedProjectId,
         client,
@@ -765,7 +887,8 @@ export class BrokerManager {
         name: `cloud-${normalizedProjectId}`,
         channels: [],
         cloudSandboxId: sandboxId,
-        pearLineage: new Map()
+        pearLineage: new Map(),
+        leaseTimer
       })
       client.connectEvents()
 
@@ -1101,42 +1224,90 @@ export class BrokerManager {
     return `${projectId}:${name}`
   }
 
-  private getOrOpenInputStream(session: BrokerSession, name: string): PtyInputStream {
+  // Returns the input stream for an agent plus whether it is *ready* to send on
+  // (the broker has acked pty_input_ready). The WS handshake runs in the
+  // background and is never awaited here, so a keystroke is never blocked on the
+  // up-to-10s open timeout — callers send over HTTP until `ready` flips true.
+  private ensureInputStream(
+    session: BrokerSession,
+    name: string
+  ): { stream: PtyInputStream; ready: boolean } {
     const key = this.getInputStreamKey(session.projectId, name)
     const existing = this.inputStreams.get(key)
     if (existing && !existing.closed) {
-      return existing
+      return { stream: existing, ready: this.inputStreamReady.has(key) }
     }
 
     const stream = session.client.openInputStream(name)
     this.inputStreams.set(key, stream)
-    stream.waitUntilOpen().catch(() => {
-      if (this.inputStreams.get(key) === stream) {
+    this.inputStreamReady.delete(key)
+    stream.waitUntilOpen().then(
+      () => {
+        if (this.inputStreams.get(key) === stream) {
+          this.inputStreamReady.add(key)
+          this.inputStreamOpenFailures.delete(key)
+        }
+      },
+      () => {
+        if (this.inputStreams.get(key) !== stream) return
         this.inputStreams.delete(key)
+        this.inputStreamReady.delete(key)
+        const failures = (this.inputStreamOpenFailures.get(key) ?? 0) + 1
+        this.inputStreamOpenFailures.set(key, failures)
+        // A stream that never opens (e.g. broker never sends pty_input_ready)
+        // would otherwise be re-opened on every keystroke. Stop trying the WS
+        // after a few failures and ride HTTP until the terminal re-attaches.
+        // This is the one case worth surfacing: transient not-ready is normal,
+        // but a *persistently* unopenable stream means the low-latency fast path
+        // is off for this agent — log it once rather than hiding it.
+        if (failures >= MAX_INPUT_STREAM_OPEN_FAILURES && !this.inputStreamFallbacks.has(key)) {
+          console.warn(
+            `[broker] PTY input stream for ${name} failed to open ${failures}x; ` +
+            `routing input over HTTP for this agent until the terminal re-attaches`
+          )
+        }
+        if (failures >= MAX_INPUT_STREAM_OPEN_FAILURES) {
+          this.inputStreamFallbacks.add(key)
+        }
       }
-    })
-    return stream
+    )
+    return { stream, ready: false }
   }
 
   private closeInputStream(key: string, code = 1000, reason = 'closed'): void {
     const stream = this.inputStreams.get(key)
     this.inputStreams.delete(key)
+    this.inputStreamReady.delete(key)
     this.inputStreamFallbacks.delete(key)
+    this.inputStreamOpenFailures.delete(key)
     if (stream) {
       stream.close(code, reason)
     }
   }
 
+  // Drop any cached HTTP-only fallback + failure count for an agent so a fresh
+  // terminal attach gets another chance at the low-latency WS stream. Does not
+  // disturb a healthy open stream.
+  private resetInputStreamFallback(key: string): void {
+    this.inputStreamFallbacks.delete(key)
+    this.inputStreamOpenFailures.delete(key)
+  }
+
   private closeInputStreamsForProject(projectId: string): void {
+    const prefix = `${projectId}:`
     for (const key of Array.from(this.inputStreams.keys())) {
-      if (key.startsWith(`${projectId}:`)) {
+      if (key.startsWith(prefix)) {
         this.closeInputStream(key, 1000, 'project closed')
       }
     }
-    for (const key of Array.from(this.inputStreamFallbacks.keys())) {
-      if (key.startsWith(`${projectId}:`)) {
-        this.inputStreamFallbacks.delete(key)
-      }
+    for (const key of Array.from(this.inputStreamFallbacks)) {
+      if (key.startsWith(prefix)) this.inputStreamFallbacks.delete(key)
+    }
+    for (const key of Array.from(this.inputStreamOpenFailures.keys())) {
+      if (key.startsWith(prefix)) this.inputStreamOpenFailures.delete(key)
+    }
+    for (const key of Array.from(this.inputStreamReady)) {
+      if (key.startsWith(prefix)) this.inputStreamReady.delete(key)
     }
   }
 
@@ -1209,6 +1380,190 @@ export class BrokerManager {
     }
 
     throw new Error(`Unable to allocate an agent name for ${relayAwareInput.name}`)
+  }
+
+  async listPersonas(projectId: string): Promise<WorkforcePersona[]> {
+    const session = this.getSessionForProject(projectId)
+
+    try {
+      return listPersonas({ cwd: session.cwd }).map((persona) => ({
+        id: persona.id,
+        description: persona.spec.description,
+        harness: persona.spec.harness,
+        tags: persona.spec.tags,
+        source: persona.path
+      }))
+    } catch (err) {
+      console.warn(`[broker] Failed to list workforce personas for project ${projectId}:`, err)
+      return []
+    }
+  }
+
+  async spawnPersona(projectId: string, personaId: string): Promise<{ name: string; runtime: string; cli?: string }> {
+    const session = this.getSessionForProject(projectId)
+    const trimmedPersonaId = personaId.trim()
+    if (!trimmedPersonaId) {
+      throw new Error('Persona id is required')
+    }
+
+    const persona = findPersona(trimmedPersonaId, { cwd: session.cwd })
+    if (!persona) {
+      throw new Error(`Workforce persona not found: ${trimmedPersonaId}`)
+    }
+
+    // Resolve the harness straight from the discovered spec rather than
+    // loadPersona(): loadPersona throws when a persona has no `systemPrompt`,
+    // but personas that drive the prompt via `agentsMdContent` (e.g.
+    // nango-integrations) legitimately leave systemPrompt empty. The actual
+    // spawn is delegated to the workforce CLI (`agent --install-in-repo`),
+    // which reads the full persona itself, so the broker only needs the harness
+    // for the informational `cli` field it returns.
+    const resolvedHarness = persona.spec.harness ?? 'claude'
+    const command = resolveAgentWorkforceCommand(session.cwd)
+    const spawned = await this.spawnPersonaWithMode(session, {
+      personaId: trimmedPersonaId,
+      baseName: persona.id,
+      command,
+      resolvedHarness
+    })
+    const registeredAgent = await this.verifyPersonaBrokerRegistration(session, spawned.name)
+    if (registeredAgent) {
+      console.info('[broker] Workforce persona broker registration verified', {
+        projectId: session.projectId,
+        personaId: trimmedPersonaId,
+        name: spawned.name,
+        mode: 'cli-install-in-repo',
+        runtime: registeredAgent.runtime,
+        cli: registeredAgent.cli,
+        currentState: registeredAgent.current_state
+      })
+      return spawned
+    }
+
+    await session.client.release(spawned.name, 'persona broker registration verification failed').catch((err) => {
+      if (!isMissingAgentError(err)) {
+        console.warn(`[broker] Failed to release unverified persona agent ${spawned.name}:`, err)
+      }
+    })
+    throw new Error(
+      `Workforce persona ${trimmedPersonaId} launched but did not stay registered with the broker`
+    )
+  }
+
+  private async spawnPersonaWithMode(
+    session: BrokerSession,
+    input: {
+      personaId: string
+      baseName: string
+      command: { cli: string; args: string[] }
+      resolvedHarness: string
+    }
+  ): Promise<{ name: string; runtime: string; cli?: string }> {
+    const existingNames = new Set(
+      (await session.client.listAgents()).map((agent) => agent.name)
+    )
+    const personaArgs = ['agent', '--install-in-repo', input.personaId]
+    let nextInput: SpawnPtyInput = {
+      name: getAvailableAgentName(input.baseName, existingNames),
+      cli: input.command.cli,
+      args: [...input.command.args, ...personaArgs],
+      cwd: session.cwd,
+      channels: session.channels,
+      skipRelayPrompt: true
+    }
+
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      try {
+        const spawned = await session.client.spawnPty(nextInput)
+        this.rememberAgentProject(spawned.name || nextInput.name, session.projectId)
+        return { ...spawned, cli: input.resolvedHarness }
+      } catch (err) {
+        if (!isAgentNameConflict(err)) {
+          throw err
+        }
+        existingNames.add(nextInput.name)
+        nextInput = {
+          ...nextInput,
+          name: getAvailableAgentName(nextInput.name, existingNames)
+        }
+      }
+    }
+
+    throw new Error(`Unable to allocate an agent name for ${input.baseName}`)
+  }
+
+  // Poll listAgents until `name` appears or the deadline passes. Used at the
+  // top of attachTerminal so a freshly-spawned agent doesn't 404 on the
+  // first setInboundDeliveryMode/getInboundDeliveryMode call. No-op if the
+  // agent is already registered (the first listAgents() call returns it).
+  // Returns true when the agent appeared, false on timeout — the caller
+  // logs the timeout for debugging and falls through to the downstream
+  // calls (with their own retry wrapper) so a registration that completes
+  // just after the deadline still works.
+  private async waitForAgentRegistration(session: BrokerSession, name: string): Promise<boolean> {
+    // Bumped from PERSONA_REGISTRATION_TIMEOUT_MS (5s) — `claude --resume`
+    // reads session history before connecting to the broker; a long
+    // conversation can push first-registration past 5s.
+    const deadlineMs = 15_000
+    const deadline = Date.now() + deadlineMs
+    while (Date.now() < deadline) {
+      try {
+        const agents = await session.client.listAgents()
+        if (agents.some((agent) => agent.name === name)) return true
+      } catch {
+        // Transient broker errors during the wait are fine — keep polling
+        // until the deadline; if the broker is genuinely down the downstream
+        // calls will surface the real error.
+      }
+      await delay(250)
+    }
+    return false
+  }
+
+  // Retry a broker call that targets a specific agent name on
+  // agent_not_found. Closes the residual race between
+  // waitForAgentRegistration returning true and the next call hitting a
+  // broker node that hasn't seen the registration yet, and also handles
+  // the case where waitForAgentRegistration timed out but the agent
+  // registers right after (e.g. claude --resume took 16s to boot).
+  private async withAgentMissingRetry<T>(label: string, name: string, fn: () => Promise<T>): Promise<T> {
+    const attempts = [0, 500, 1000, 2000, 4000]
+    let lastErr: unknown
+    for (let i = 0; i < attempts.length; i += 1) {
+      if (attempts[i] > 0) await delay(attempts[i])
+      try {
+        return await fn()
+      } catch (err) {
+        lastErr = err
+        if (!isMissingAgentError(err)) throw err
+        console.warn(`[broker] ${label} for ${name} got agent_not_found (attempt ${i + 1}/${attempts.length}); retrying`)
+      }
+    }
+    throw lastErr
+  }
+
+  private async verifyPersonaBrokerRegistration(session: BrokerSession, name: string): Promise<ListAgent | null> {
+    const deadline = Date.now() + PERSONA_REGISTRATION_TIMEOUT_MS
+    let agent: ListAgent | undefined
+
+    while (Date.now() < deadline) {
+      agent = (await session.client.listAgents()).find((candidate) => candidate.name === name)
+      if (agent) break
+      await delay(250)
+    }
+
+    if (!agent) {
+      return null
+    }
+
+    await delay(PERSONA_REGISTRATION_STABILITY_MS)
+    const stableAgent = (await session.client.listAgents()).find((candidate) => candidate.name === name)
+    if (!stableAgent) {
+      return null
+    }
+
+    this.rememberAgentProject(stableAgent.name, session.projectId)
+    return stableAgent
   }
 
   async generateCommitDraft(projectId: string, diff: string): Promise<GeneratedCommitDraft> {
@@ -1303,23 +1658,37 @@ export class BrokerManager {
 
     const session = this.getSessionForAgent(name, projectId)
     const client = session.client
+    // A re-attach (window reload, restart, tab re-open) is a fresh start for
+    // this terminal — clear any stale HTTP-only fallback so the WS fast path
+    // gets retried instead of being stuck on HTTP for the agent's lifetime.
+    this.resetInputStreamFallback(this.getInputStreamKey(session.projectId, name))
+    // Wait for the broker to register the worker. spawnAgent (used by the
+    // Conversations panel's Resume flow and Add Agent dialog) returns as
+    // soon as the CLI process is forked, before the worker has connected
+    // to the broker, so the renderer races: spawn → mount terminal →
+    // attach → broker 404. claude --resume in particular reads session
+    // history first and can take 10+ seconds to register.
+    const registered = await this.waitForAgentRegistration(session, name)
+    if (!registered) {
+      console.warn(`[broker] attachTerminal: ${name} did not appear in listAgents within wait window; falling through to per-call retry`)
+    }
     const mode = toInboundDeliveryMode(input.mode)
     let previousMode: InboundDeliveryMode | undefined
 
     try {
-      previousMode = await client.getInboundDeliveryMode(name)
+      previousMode = await this.withAgentMissingRetry('getInboundDeliveryMode', name, () => client.getInboundDeliveryMode(name))
     } catch (err) {
       console.warn(`[broker] Failed to read delivery mode for ${name}:`, err)
     }
 
     // Keep the broker's inbound delivery policy aligned with the renderer's
     // queue mode while human terminal input continues to go through sendInput.
-    await client.setInboundDeliveryMode(name, mode)
+    await this.withAgentMissingRetry('setInboundDeliveryMode', name, () => client.setInboundDeliveryMode(name, mode))
 
     let resizedBeforeSnapshot = false
     if (isPositiveInteger(input.rows) && isPositiveInteger(input.cols)) {
       try {
-        await client.resizePty(name, input.rows, input.cols)
+        await this.withAgentMissingRetry('resizePty', name, () => client.resizePty(name, input.rows!, input.cols!))
         resizedBeforeSnapshot = true
       } catch (err) {
         console.warn(`[broker] Failed to sync PTY size for ${name}:`, err)
@@ -1327,14 +1696,14 @@ export class BrokerManager {
     }
 
     const pending = mode === 'manual_flush'
-      ? await client.getPending(name).then((messages) => messages.length).catch(() => 0)
+      ? await this.withAgentMissingRetry('getPending', name, () => client.getPending(name)).then((messages) => messages.length).catch(() => 0)
       : 0
 
     try {
       if (resizedBeforeSnapshot) {
         await delay(80)
       }
-      const snapshot = await client.snapshot(name, 'ansi')
+      const snapshot = await this.withAgentMissingRetry('snapshot', name, () => client.snapshot(name, 'ansi'))
       return {
         name,
         mode,
@@ -1374,17 +1743,23 @@ export class BrokerManager {
     const session = this.getSessionForAgent(trimmedName, projectId)
     const key = this.getInputStreamKey(session.projectId, trimmedName)
     if (!this.inputStreamFallbacks.has(key)) {
-      const stream = this.getOrOpenInputStream(session, trimmedName)
-      try {
-        return await stream.send(data)
-      } catch (err) {
-        if (this.inputStreams.get(key) === stream) {
-          this.closeInputStream(key, 1011, 'stream send failed')
+      // Kick off (or reuse) the WS stream, but only *send* on it once the broker
+      // has acked the handshake. Before that, fall through to HTTP so a keystroke
+      // never stalls on the open timeout — the symptom that made typing look dead
+      // after a re-attach. Subsequent keystrokes take the fast path once ready.
+      const { stream, ready } = this.ensureInputStream(session, trimmedName)
+      if (ready && !stream.closed) {
+        try {
+          return await stream.send(data)
+        } catch (err) {
+          if (this.inputStreams.get(key) === stream) {
+            this.closeInputStream(key, 1011, 'stream send failed')
+          }
+          if (isUnsupportedInputStreamError(err)) {
+            this.inputStreamFallbacks.add(key)
+          }
+          console.warn(`[broker] PTY input stream failed for ${trimmedName}; falling back to HTTP input:`, err)
         }
-        if (isUnsupportedInputStreamError(err)) {
-          this.inputStreamFallbacks.add(key)
-        }
-        console.warn(`[broker] PTY input stream failed for ${trimmedName}; falling back to HTTP input:`, err)
       }
     }
     return session.client.sendInput(trimmedName, data)
@@ -1401,6 +1776,12 @@ export class BrokerManager {
       return
     }
     this.sendInput(projectId, trimmedName, data).catch((err) => {
+      // Keystroke races with agent shutdown: ignore the "no such agent" 404
+      // and the broker's transient "internal channel closed" while it's
+      // tearing down. Both surface as noise that's not actionable.
+      if (isMissingAgentError(err)) return
+      const message = toErrorMessage(err)
+      if (/internal channel closed|internal reply dropped/i.test(message)) return
       console.warn(`[broker] sendInputFireAndForget failed for ${trimmedName}:`, err)
     })
   }
@@ -1436,7 +1817,16 @@ export class BrokerManager {
     }
 
     const session = this.getSessionForAgent(trimmedName, projectId)
-    return session.client.getPending(trimmedName)
+    try {
+      return await session.client.getPending(trimmedName)
+    } catch (err) {
+      // The renderer polls getPending on a 2.5s interval; there's a small
+      // window after the broker releases a worker but before the
+      // agent_released event reaches the renderer where we get a 404. Swallow
+      // it so the IPC log doesn't flood with errors during normal teardown.
+      if (isMissingAgentError(err)) return []
+      throw err
+    }
   }
 
   async flushPending(projectId: string | undefined, name: string): Promise<{ flushed: number }> {
@@ -1677,6 +2067,7 @@ export class BrokerManager {
       const session = this.sessions.get(targetProjectId)
       if (!session) continue
       session.unsubEvent()
+      if (session.leaseTimer) clearInterval(session.leaseTimer)
       try {
         await session.client.shutdown()
       } catch {

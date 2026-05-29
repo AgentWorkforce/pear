@@ -26,6 +26,7 @@ const RendererProjectSchema = makeProjectSchema(RendererProjectRootSchema).trans
 export type ProjectRoot = z.infer<typeof RendererProjectRootSchema>
 export type ProjectIntegration = z.infer<typeof ProjectIntegrationSchema>
 export type Project = z.infer<typeof RendererProjectSchema>
+export type CloudAgentWorkspaceMode = 'git-overlay' | 'git' | 'relayfile'
 
 export { normalizeChannelName }
 
@@ -74,7 +75,7 @@ interface ProjectState {
   ensureBroker: () => Promise<void>
   syncBrokerChannels: () => Promise<void>
   addProject: (name: string, rootPath?: string) => Promise<Project | null>
-  updateProject: (id: string, update: Partial<Pick<Project, 'name'>>) => Promise<void>
+  updateProject: (id: string, update: Partial<Pick<Project, 'name'>> & { cloudAgentWorkspaceMode?: CloudAgentWorkspaceMode }) => Promise<void>
   removeProject: (id: string) => Promise<void>
   setActiveProject: (id: string | null) => Promise<void>
   setActiveRoot: (id: string | null) => void
@@ -170,9 +171,20 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   },
 
   updateProject: async (id, update) => {
-    const name = typeof update.name === 'string' ? update.name.trim() : ''
-    if (!name) return
-    await pear.project.update(id, { name })
+    const next: Record<string, unknown> = {}
+    if (typeof update.name === 'string') {
+      const name = update.name.trim()
+      if (name) next.name = name
+    }
+    if (
+      update.cloudAgentWorkspaceMode === 'git-overlay' ||
+      update.cloudAgentWorkspaceMode === 'git' ||
+      update.cloudAgentWorkspaceMode === 'relayfile'
+    ) {
+      next.cloudAgentWorkspaceMode = update.cloudAgentWorkspaceMode
+    }
+    if (Object.keys(next).length === 0) return
+    await pear.project.update(id, next)
     await get().load()
   },
 

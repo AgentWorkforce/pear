@@ -31,6 +31,17 @@ export type ProjectCloudAgent = {
   relayfileMountPath: string
   attachedAt: string
   autoPullAfterRun: boolean
+  workspaceSource?: {
+    kind: 'relayfile'
+  } | {
+    kind: 'git' | 'git-overlay'
+    remoteUrl: string
+    ref?: string
+    commit?: string
+    shallow?: boolean
+    targetDir?: string
+    largeReason?: string
+  }
 }
 
 export interface RelayWorkspace {
@@ -253,7 +264,11 @@ export function updateProject(id: string, update: Partial<Project>): void {
   if (typeof update.name === 'string' && update.name.trim()) {
     next.name = update.name.trim()
   }
+  const workspaceMode = (update as { cloudAgentWorkspaceMode?: unknown }).cloudAgentWorkspaceMode
+  if (workspaceMode === 'git-overlay' || workspaceMode === 'git' || workspaceMode === 'relayfile') {
+    const nextWithWorkspaceMode = next as { cloudAgentWorkspaceMode?: typeof workspaceMode }
+    nextWithWorkspaceMode.cloudAgentWorkspaceMode = workspaceMode
+  }
   data.projects[idx] = next
   saveStore(data)
 }
-

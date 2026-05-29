@@ -210,6 +210,14 @@ export function registerIpcHandlers(): void {
     return brokerManager.spawnAgent(projectId, input)
   })
 
+  ipcMain.handle('broker:list-personas', async (_, projectId: string) => {
+    return brokerManager.listPersonas(projectId)
+  })
+
+  ipcMain.handle('broker:spawn-persona', async (_, projectId: string, personaId: string) => {
+    return brokerManager.spawnPersona(projectId, personaId)
+  })
+
   ipcMain.handle('broker:attach-terminal', async (_, input: {
     projectId?: string
     name: string
@@ -524,8 +532,8 @@ export function registerIpcHandlers(): void {
     return integrationsManager.listCatalog()
   })
 
-  ipcMain.handle('integrations:list', (_, projectId: string) => {
-    return integrationsManager.listConnected(projectId)
+  ipcMain.handle('integrations:list', async (_, projectId: string) => {
+    return integrationsManager.listConnectedForSettings(projectId)
   })
 
   ipcMain.handle('integrations:start-connect', async (_, projectId: string, provider: string) => {
@@ -554,6 +562,13 @@ export function registerIpcHandlers(): void {
     'integrations:update-scope',
     async (_, projectId: string, integrationId: string, scope: Record<string, unknown>, mountPaths: string[]) => {
       return integrationsManager.updateScope(projectId, integrationId, scope, mountPaths)
+    }
+  )
+
+  ipcMain.handle(
+    'integrations:update-subscription',
+    async (_, projectId: string, integrationId: string, subscribeAgent: boolean) => {
+      return integrationsManager.updateSubscription(projectId, integrationId, subscribeAgent)
     }
   )
 

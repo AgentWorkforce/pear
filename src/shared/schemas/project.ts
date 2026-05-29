@@ -85,6 +85,7 @@ export const ProjectIntegrationSchema = z
   .passthrough()
   .refine((value) => value.name.length > 0, { message: 'integration name is required' })
   .transform((value) => ({
+    ...value,
     id: value.id?.trim() || crypto.randomUUID(),
     name: value.name,
     type: value.type?.trim() || 'custom'
@@ -130,6 +131,7 @@ export function makeProjectSchema<R extends { id: string; name: string; path: st
       })
       const channelPeople = buildChannelPeople(channelPeopleSchema.parse(value.channelPeople), channels)
       return {
+        ...value,
         id: value.id,
         name: value.name,
         relayWorkspaceId: value.relayWorkspaceId?.trim() || value.id,
@@ -150,6 +152,7 @@ export const StoreDataSchema = <P>(projectSchema: z.ZodType<P, z.ZodTypeDef, unk
     })
     .passthrough()
     .transform((value) => ({
+      ...value,
       projects: (value.projects ?? []).flatMap((entry) => {
         const parsed = projectSchema.safeParse(entry)
         return parsed.success ? [parsed.data] : []

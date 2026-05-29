@@ -293,6 +293,15 @@ export interface BrokerSpawnAgentInput {
 export interface BrokerSpawnAgentResult {
   name: string
   runtime: string
+  cli?: string
+}
+
+export interface WorkforcePersona {
+  id: string
+  description?: string
+  harness?: string
+  tags?: string[]
+  source?: string
 }
 
 export interface BrokerAttachTerminalInput {
@@ -597,6 +606,9 @@ export type ConnectedIntegration = {
   mountPaths: string[]
   connectedAt: string
   notifyAgent: boolean
+  subscribeAgent?: boolean
+  visibleInProject?: boolean
+  localMountPaths?: string[]
   lastSyncAt?: string
   lastError?: string
 }
@@ -706,6 +718,8 @@ export interface PearAPI {
     ) => Promise<{ removed: string[] }>
     connectCloud: () => Promise<string>
     spawnAgent: (projectId: string, input: BrokerSpawnAgentInput) => Promise<BrokerSpawnAgentResult>
+    listPersonas: (projectId: string) => Promise<WorkforcePersona[]>
+    spawnPersona: (projectId: string, personaId: string) => Promise<BrokerSpawnAgentResult>
     attachTerminal: (input: BrokerAttachTerminalInput) => Promise<BrokerAttachTerminalResult>
     sendInputFast: (projectId: string | undefined, name: string, data: string) => void
     setTerminalMode: (
@@ -819,6 +833,11 @@ export interface PearAPI {
       integrationId: string,
       scope: Record<string, unknown>,
       mountPaths: string[]
+    ) => Promise<ConnectedIntegration>
+    updateSubscription: (
+      projectId: string,
+      integrationId: string,
+      subscribeAgent: boolean
     ) => Promise<ConnectedIntegration>
     disconnect: (projectId: string, integrationId: string) => Promise<void>
     onEvent: (callback: (event: IntegrationsEvent) => void) => () => void

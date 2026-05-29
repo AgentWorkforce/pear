@@ -53,17 +53,34 @@ function areDuplicateHumanMessages(left: ChatMessageType, right: ChatMessageType
 
 function dedupeHumanMessages(messages: ChatMessageType[]): ChatMessageType[] {
   const deduped: ChatMessageType[] = []
+  // Collapsing near-simultaneous human echoes used to be O(n²): a findIndex over
+  // the whole deduped list per message, so the cost grew with chat length and
+  // ran on every new message (via the messages useMemo). Track the most recently
+  // kept human message per `${to}\0${body}` key instead, making each message O(1).
+  // Only human messages dedupe against each other, and duplicates fall inside a
+  // 10s window, so the latest kept entry for a key is the only one a new message
+  // can collide with — the result is identical to the previous scan.
+  const lastHumanIndexByKey = new Map<string, number>()
 
   for (const message of messages) {
-    const duplicateIndex = deduped.findIndex((candidate) => areDuplicateHumanMessages(candidate, message))
-    if (duplicateIndex === -1) {
+    if (!isHumanMessage(message)) {
       deduped.push(message)
       continue
     }
 
-    if (message.isHuman && !deduped[duplicateIndex].isHuman) {
-      deduped[duplicateIndex] = message
+    const key = `${normalizeMessageChannel(message.to)}\0${message.body}`
+    const priorIndex = lastHumanIndexByKey.get(key)
+    const prior = priorIndex !== undefined ? deduped[priorIndex] : undefined
+
+    if (prior && areDuplicateHumanMessages(prior, message)) {
+      if (message.isHuman && !prior.isHuman) {
+        deduped[priorIndex!] = message
+      }
+      continue
     }
+
+    deduped.push(message)
+    lastHumanIndexByKey.set(key, deduped.length - 1)
   }
 
   return deduped

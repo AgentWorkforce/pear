@@ -1,4 +1,11 @@
+import { execFile } from 'node:child_process'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { promisify } from 'node:util'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+
+const execFileAsync = promisify(execFile)
 
 type MockCloudAuth = {
   apiUrl: string
@@ -163,6 +170,8 @@ vi.mock('./integrations', () => ({
 import { CloudAgentManager } from './cloud-agent'
 
 describe('CloudAgentManager', () => {
+  const tempDirs: string[] = []
+
   beforeEach(() => {
     mock.currentAuth = {
       apiUrl: 'https://cloud.example',
@@ -189,7 +198,27 @@ describe('CloudAgentManager', () => {
     vi.useRealTimers()
     vi.unstubAllGlobals()
     mock.currentAuth = null
+    mock.project.rootPath = '/tmp/project-1'
+    delete (mock.project as { cloudAgentWorkspaceMode?: string }).cloudAgentWorkspaceMode
+    return Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))).then(() => undefined)
   })
+
+  async function createCleanGitProject(): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), 'pear-cloud-agent-'))
+    tempDirs.push(dir)
+    await execFileAsync('git', ['init'], { cwd: dir })
+    await execFileAsync('git', ['config', 'user.email', 'pear@example.test'], { cwd: dir })
+    await execFileAsync('git', ['config', 'user.name', 'Pear Test'], { cwd: dir })
+    await writeFile(join(dir, 'README.md'), 'hello\n')
+    await execFileAsync('git', ['add', 'README.md'], { cwd: dir })
+    await execFileAsync('git', ['commit', '-m', 'init'], { cwd: dir })
+    await execFileAsync('git', ['branch', '-M', 'main'], { cwd: dir })
+    await execFileAsync('git', ['remote', 'add', 'origin', 'https://github.com/acme/fast-repo.git'], { cwd: dir })
+    const head = (await execFileAsync('git', ['rev-parse', 'HEAD'], { cwd: dir })).stdout.trim()
+    await execFileAsync('git', ['update-ref', 'refs/remotes/origin/main', head], { cwd: dir })
+    await execFileAsync('git', ['branch', '--set-upstream-to', 'origin/main', 'main'], { cwd: dir })
+    return dir
+  }
 
   it('warms a box using the token account workspace, not the relay workspace', async () => {
     const manager = new CloudAgentManager()
@@ -200,9 +229,86 @@ describe('CloudAgentManager', () => {
     expect(boxPost?.url).toBe(
       'https://cloud.example/api/v1/workspaces/account-workspace-id/cloud-agents/cloud-agent-1/box?async=true'
     )
+    expect(JSON.parse(String(boxPost?.init?.body))).toEqual({
+      relayfileMountPaths: ['/integrations/github', '/workspace']
+    })
     expect(boxPost?.url).not.toContain('relay-workspace-id')
     expect(mock.fetchCalls.filter((call) => call.url.endsWith('/api/v1/auth/whoami'))).toHaveLength(1)
     expect(mock.mountInputs[0]?.workspaceId).toBe('relay-workspace-id')
+  })
+
+  it('prefers git-overlay for clean upstream git projects and starts the local relayfile mount', async () => {
+    mock.project.rootPath = await createCleanGitProject()
+    const manager = new CloudAgentManager()
+
+    await manager.attach('project-1', 'cloud-agent-1')
+
+    const boxPost = mock.fetchCalls.find((call) => call.init?.method === 'POST')
+    expect(JSON.parse(String(boxPost?.init?.body))).toEqual({
+      relayfileMountPaths: ['/integrations/github', '/workspace'],
+      workspaceSource: expect.objectContaining({
+        kind: 'git-overlay',
+        remoteUrl: 'https://github.com/acme/fast-repo.git',
+        ref: 'main',
+        shallow: true,
+        targetDir: '/workspace'
+      })
+    })
+    expect(mock.mountInputs[0]).toMatchObject({
+      workspaceId: 'relay-workspace-id',
+      localDir: mock.project.rootPath,
+      remotePath: '/remote/project-1'
+    })
+  })
+
+  it('can opt a clean upstream git project back into pure git clone mode', async () => {
+    mock.project.rootPath = await createCleanGitProject()
+    const project = mock.project as { cloudAgentWorkspaceMode?: string }
+    project.cloudAgentWorkspaceMode = 'git'
+    const manager = new CloudAgentManager()
+
+    await manager.attach('project-1', 'cloud-agent-1')
+
+    const boxPost = mock.fetchCalls.find((call) => call.init?.method === 'POST')
+    expect(JSON.parse(String(boxPost?.init?.body))).toEqual({
+      relayfileMountPaths: ['/integrations/github'],
+      workspaceSource: expect.objectContaining({
+        kind: 'git',
+        remoteUrl: 'https://github.com/acme/fast-repo.git',
+        ref: 'main',
+        shallow: true,
+        targetDir: '/workspace'
+      })
+    })
+    expect(mock.mountInputs).toHaveLength(0)
+  })
+
+  it('does not run pull-after-run for git-overlay live sync projects', async () => {
+    vi.useFakeTimers()
+    const project = mock.project as typeof mock.project & { cloudAgent: Record<string, unknown> }
+    project.cloudAgent = {
+      id: 'cloud-agent-1',
+      sandboxId: 'sandbox-1',
+      relayfileMountPath: '/workspace',
+      attachedAt: new Date().toISOString(),
+      autoPullAfterRun: true,
+      workspaceSource: {
+        kind: 'git-overlay',
+        remoteUrl: 'https://github.com/acme/fast-repo.git',
+        targetDir: '/workspace'
+      }
+    }
+    const manager = new CloudAgentManager()
+    const events: Array<{ type: string; message?: string }> = []
+    manager.onEvent((event) => events.push(event))
+
+    manager.noteToolCallStart('project-1')
+    manager.noteToolCallEnd('project-1')
+    await vi.runOnlyPendingTimersAsync()
+
+    expect(events.some((event) =>
+      event.type === 'error' && event.message?.includes('git pull failed after cloud agent run')
+    )).toBe(false)
   })
 
   it('polls async box warm until the sandbox is ready', async () => {
