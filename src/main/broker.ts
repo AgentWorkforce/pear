@@ -1349,15 +1349,20 @@ export class BrokerManager {
   // top of attachTerminal so a freshly-spawned agent doesn't 404 on the
   // first setInboundDeliveryMode/getInboundDeliveryMode call. No-op if the
   // agent is already registered (the first listAgents() call returns it).
-  // Silently returns on timeout — the existing downstream calls will surface
-  // the real error (and on a still-genuinely-missing agent that's the right
-  // signal to show).
-  private async waitForAgentRegistration(session: BrokerSession, name: string): Promise<void> {
-    const deadline = Date.now() + PERSONA_REGISTRATION_TIMEOUT_MS
+  // Returns true when the agent appeared, false on timeout — the caller
+  // logs the timeout for debugging and falls through to the downstream
+  // calls (with their own retry wrapper) so a registration that completes
+  // just after the deadline still works.
+  private async waitForAgentRegistration(session: BrokerSession, name: string): Promise<boolean> {
+    // Bumped from PERSONA_REGISTRATION_TIMEOUT_MS (5s) — `claude --resume`
+    // reads session history before connecting to the broker; a long
+    // conversation can push first-registration past 5s.
+    const deadlineMs = 15_000
+    const deadline = Date.now() + deadlineMs
     while (Date.now() < deadline) {
       try {
         const agents = await session.client.listAgents()
-        if (agents.some((agent) => agent.name === name)) return
+        if (agents.some((agent) => agent.name === name)) return true
       } catch {
         // Transient broker errors during the wait are fine — keep polling
         // until the deadline; if the broker is genuinely down the downstream
@@ -1365,6 +1370,29 @@ export class BrokerManager {
       }
       await delay(250)
     }
+    return false
+  }
+
+  // Retry a broker call that targets a specific agent name on
+  // agent_not_found. Closes the residual race between
+  // waitForAgentRegistration returning true and the next call hitting a
+  // broker node that hasn't seen the registration yet, and also handles
+  // the case where waitForAgentRegistration timed out but the agent
+  // registers right after (e.g. claude --resume took 16s to boot).
+  private async withAgentMissingRetry<T>(label: string, name: string, fn: () => Promise<T>): Promise<T> {
+    const attempts = [0, 500, 1000, 2000, 4000]
+    let lastErr: unknown
+    for (let i = 0; i < attempts.length; i += 1) {
+      if (attempts[i] > 0) await delay(attempts[i])
+      try {
+        return await fn()
+      } catch (err) {
+        lastErr = err
+        if (!isMissingAgentError(err)) throw err
+        console.warn(`[broker] ${label} for ${name} got agent_not_found (attempt ${i + 1}/${attempts.length}); retrying`)
+      }
+    }
+    throw lastErr
   }
 
   private async verifyPersonaBrokerRegistration(session: BrokerSession, name: string): Promise<ListAgent | null> {
@@ -1487,30 +1515,33 @@ export class BrokerManager {
     // this terminal — clear any stale HTTP-only fallback so the WS fast path
     // gets retried instead of being stuck on HTTP for the agent's lifetime.
     this.resetInputStreamFallback(this.getInputStreamKey(session.projectId, name))
-    // Wait briefly for the broker to register the worker. spawnAgent (used
-    // by the Conversations panel's Resume flow) returns as soon as the CLI
-    // process is forked, before the worker has connected to the broker, so
-    // the renderer races: spawn → mount terminal → attach → broker 404.
-    // Mirrors verifyPersonaBrokerRegistration's polling shape (lighter — we
-    // don't need the stability delay, just existence).
-    await this.waitForAgentRegistration(session, name)
+    // Wait for the broker to register the worker. spawnAgent (used by the
+    // Conversations panel's Resume flow and Add Agent dialog) returns as
+    // soon as the CLI process is forked, before the worker has connected
+    // to the broker, so the renderer races: spawn → mount terminal →
+    // attach → broker 404. claude --resume in particular reads session
+    // history first and can take 10+ seconds to register.
+    const registered = await this.waitForAgentRegistration(session, name)
+    if (!registered) {
+      console.warn(`[broker] attachTerminal: ${name} did not appear in listAgents within wait window; falling through to per-call retry`)
+    }
     const mode = toInboundDeliveryMode(input.mode)
     let previousMode: InboundDeliveryMode | undefined
 
     try {
-      previousMode = await client.getInboundDeliveryMode(name)
+      previousMode = await this.withAgentMissingRetry('getInboundDeliveryMode', name, () => client.getInboundDeliveryMode(name))
     } catch (err) {
       console.warn(`[broker] Failed to read delivery mode for ${name}:`, err)
     }
 
     // Keep the broker's inbound delivery policy aligned with the renderer's
     // queue mode while human terminal input continues to go through sendInput.
-    await client.setInboundDeliveryMode(name, mode)
+    await this.withAgentMissingRetry('setInboundDeliveryMode', name, () => client.setInboundDeliveryMode(name, mode))
 
     let resizedBeforeSnapshot = false
     if (isPositiveInteger(input.rows) && isPositiveInteger(input.cols)) {
       try {
-        await client.resizePty(name, input.rows, input.cols)
+        await this.withAgentMissingRetry('resizePty', name, () => client.resizePty(name, input.rows!, input.cols!))
         resizedBeforeSnapshot = true
       } catch (err) {
         console.warn(`[broker] Failed to sync PTY size for ${name}:`, err)
@@ -1518,14 +1549,14 @@ export class BrokerManager {
     }
 
     const pending = mode === 'manual_flush'
-      ? await client.getPending(name).then((messages) => messages.length).catch(() => 0)
+      ? await this.withAgentMissingRetry('getPending', name, () => client.getPending(name)).then((messages) => messages.length).catch(() => 0)
       : 0
 
     try {
       if (resizedBeforeSnapshot) {
         await delay(80)
       }
-      const snapshot = await client.snapshot(name, 'ansi')
+      const snapshot = await this.withAgentMissingRetry('snapshot', name, () => client.snapshot(name, 'ansi'))
       return {
         name,
         mode,
