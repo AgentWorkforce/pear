@@ -1,7 +1,8 @@
 export type FeedbackProbeProfile = {
-  displayName?: string | null;
-};
+  displayName?: string | null
+}
 
 export function formatFeedbackProbeGreeting(profile: FeedbackProbeProfile | null): string {
-  return `Hello, ${profile!.displayName!.trim()}`;
+  const displayName = profile?.displayName?.trim()
+  return `Hello, ${displayName || 'there'}`
 }
