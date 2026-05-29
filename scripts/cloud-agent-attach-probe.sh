@@ -10,7 +10,7 @@ AUTH_FILE="${CLOUD_AUTH_FILE:-$HOME/.agent-relay/cloud-auth.json}"
 REPORT_FILE="/tmp/cloud-agent-probe-$(date -u +%Y%m%dT%H%M%SZ).jsonl"
 POLL_INTERVAL_SEC=2
 POLL_TIMEOUT_SEC=300
-STOP_TIMEOUT_SEC=45
+STOP_TIMEOUT_SEC=120
 STOP_SETTLE_SEC=10
 SANDBOX_WORKSPACE_PATH="/workspace"
 
@@ -406,14 +406,18 @@ wait_for_cold_box() {
     fi
     rm -f "$response_file"
 
-    if [[ "$status" == 2* && ( "$sandbox_status" == "stopped" || "$sandbox_status" == "stopping" ) ]]; then
+    if [[ "$status" == 2* && ( "$sandbox_status" == "stopped" || "$sandbox_status" == "stopping" || "$sandbox_status" == "failed" ) ]]; then
       printf 'get-status-%s\n' "$sandbox_status"
       return 0
     fi
 
     elapsed="$(( $(date -u +%s) - started_at ))"
     if (( elapsed >= STOP_TIMEOUT_SEC )); then
-      printf '%s\n' "${last_observed:-unknown}"
+      if [[ "$last_observed" == "warming" ]]; then
+        printf 'stuck-warming\n'
+        return 0
+      fi
+      printf 'timeout:%s\n' "${last_observed:-unknown}"
       return 1
     fi
 
@@ -506,10 +510,20 @@ print_report() {
     | ($rows | map(select(.success)) | length) as $successes
     | ($rows | map(.warmElapsedSec)) as $elapsed
     | ([
-        range(1; $rows | length) as $idx
-        | select(($rows[$idx - 1].sandboxId != "") and ($rows[$idx].sandboxId != "") and ($rows[$idx - 1].sandboxId == $rows[$idx].sandboxId))
-        | "  attempts \($rows[$idx - 1].attempt) and \($rows[$idx].attempt) share sandboxId \($rows[$idx].sandboxId)"
-      ]) as $reuseWarnings
+        $rows[]
+        | .preWarmSignal as $signal
+        | select(
+            (
+              ($signal | startswith("delete-absent")) or
+              ($signal | startswith("get-404-absent")) or
+              ($signal | startswith("get-503-box_request_failed")) or
+              ($signal | startswith("get-status-stopped")) or
+              ($signal | startswith("get-status-stopping")) or
+              ($signal | startswith("get-status-failed"))
+            ) | not
+          )
+        | "  attempt \(.attempt) preWarmSignal=\(.preWarmSignal)"
+      ]) as $coldWarnings
     | "Report file: \($file)",
       "Success rate: \($successes)/\($total) (\(pct($successes; $total))%)",
       "Warm elapsed seconds: p50=\(percentile($elapsed; 50) // "n/a") p95=\(percentile($elapsed; 95) // "n/a")",
@@ -524,8 +538,8 @@ print_report() {
         | .[]
       ),
       "",
-      "Sandbox reuse warnings:",
-      (if ($reuseWarnings | length) == 0 then "  none" else $reuseWarnings[] end),
+      "Coldness warnings:",
+      (if ($coldWarnings | length) == 0 then "  none" else $coldWarnings[] end),
       "",
       "Results:",
       "attempt\tmode\tpreWarmSignal\twarmElapsedSec\tsuccess\tstatus\tsandboxId\terrorMessage",
