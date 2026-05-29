@@ -5,7 +5,15 @@ import { setTimeout as delay } from 'node:timers/promises'
 const projectId = process.env.PEAR_AUTOPILOT_PROJECT_ID || process.env.PROJECT_ID || ''
 const cloudAgentId = process.env.PEAR_AUTOPILOT_CLOUD_AGENT_ID || process.env.CLOUD_AGENT_ID || ''
 const readyPattern = /\[ipc\] ready/i
-const readyTimeoutMs = Number(process.env.PEAR_AUTOPILOT_READY_TIMEOUT_MS || 120_000)
+const defaultReadyTimeoutMs = 120_000
+const readyTimeoutMs = parsePositiveNumber(process.env.PEAR_AUTOPILOT_READY_TIMEOUT_MS, defaultReadyTimeoutMs)
+const outputBufferLimit = 10_000
+
+function parsePositiveNumber(value, fallback) {
+  if (value === undefined || value === '') return fallback
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
 
 function usage() {
   console.log(`Usage: PEAR_AUTOPILOT_PROJECT_ID=<project> PEAR_AUTOPILOT_CLOUD_AGENT_ID=<agent> scripts/pear-attach-probe.mjs
@@ -38,7 +46,7 @@ function waitForReady(child) {
 
     const onData = (chunk) => {
       const text = chunk.toString()
-      output += text
+      output = (output + text).slice(-outputBufferLimit)
       process.stdout.write(text)
       if (!settled && readyPattern.test(output)) {
         settled = true
@@ -49,6 +57,12 @@ function waitForReady(child) {
 
     child.stdout?.on('data', onData)
     child.stderr?.on('data', (chunk) => process.stderr.write(chunk))
+    child.once('error', (error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      reject(new Error(`Failed to start Pear dev process: ${error.message}`))
+    })
     child.once('exit', (code, signal) => {
       if (settled) return
       settled = true
@@ -75,7 +89,8 @@ async function main() {
     return
   }
 
-  const child = spawn('npm', ['run', 'dev'], {
+  const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm'
+  const child = spawn(npmCmd, ['run', 'dev'], {
     stdio: ['ignore', 'pipe', 'pipe'],
     env: {
       ...process.env,

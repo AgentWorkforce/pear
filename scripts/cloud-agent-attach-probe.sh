@@ -59,7 +59,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ "$COUNT" =~ ^[0-9]+$ ]] && [[ "$COUNT" -gt 0 ]] || die "--count must be a positive integer"
+[[ "$COUNT" =~ ^[0-9]+$ ]] || die "--count must be a positive integer"
+COUNT=$((10#$COUNT))
+(( COUNT > 0 )) || die "--count must be a positive integer"
 case "$WORKSPACE_SOURCE" in
   relayfile|git|git-overlay|all) ;;
   *) die "--workspace-source must be relayfile, git, git-overlay, or all" ;;
@@ -68,8 +70,8 @@ esac
 require_tool curl
 require_tool jq
 
-json_string() {
-  jq -rn --arg value "$1" '$value'
+url_encode() {
+  jq -rn --arg value "$1" '$value | @uri'
 }
 
 expires_epoch() {
@@ -120,7 +122,7 @@ refresh_auth_if_needed() {
   [[ -n "$next_expires" ]] || die "token refresh response missing accessTokenExpiresAt"
 
   tmp_file="$(mktemp "${AUTH_FILE}.tmp.XXXXXX")"
-  jq \
+  if jq \
     --arg accessToken "$access_token" \
     --arg refreshToken "$next_refresh" \
     --arg accessTokenExpiresAt "$next_expires" \
@@ -129,9 +131,15 @@ refresh_auth_if_needed() {
       | .refreshToken = $refreshToken
       | .accessTokenExpiresAt = $accessTokenExpiresAt
       | .apiUrl = $apiUrl' \
-    "$AUTH_FILE" > "$tmp_file"
-  chmod 600 "$tmp_file"
-  mv "$tmp_file" "$AUTH_FILE"
+    "$AUTH_FILE" > "$tmp_file"; then
+    if ! chmod 600 "$tmp_file" || ! mv "$tmp_file" "$AUTH_FILE"; then
+      rm -f "$tmp_file"
+      die "failed to update auth file"
+    fi
+  else
+    rm -f "$tmp_file"
+    die "failed to update auth file"
+  fi
 }
 
 access_token() {
@@ -139,12 +147,14 @@ access_token() {
   jq -r '.accessToken // empty' "$AUTH_FILE"
 }
 
-curl_json() {
+call_curl_json() {
   local method="$1"
   local url="$2"
   local body="${3:-}"
   local token response_file status
-  token="$(access_token)"
+  if ! token="$(access_token)"; then
+    exit 1
+  fi
   [[ -n "$token" ]] || die "auth file is missing accessToken"
 
   response_file="$(mktemp)"
@@ -165,24 +175,27 @@ curl_json() {
     )"
   fi
 
-  printf '%s\n%s\n' "$status" "$response_file"
+  CURL_STATUS="$status"
+  CURL_RESPONSE_FILE="$response_file"
 }
 
 CURL_STATUS=""
 CURL_RESPONSE_FILE=""
-call_curl_json() {
-  local output
-  output="$(curl_json "$@")"
-  CURL_STATUS="${output%%$'\n'*}"
-  CURL_RESPONSE_FILE="${output#*$'\n'}"
-}
 
 read_error_message() {
   local file="$1"
   local fallback="$2"
-  jq -r --arg fallback "$fallback" '
-    .errorMessage // .error // .message // .details // $fallback
-  ' "$file" 2>/dev/null || printf '%s\n' "$fallback"
+  local message
+  message="$(
+    jq -r --arg fallback "$fallback" '
+      .errorMessage // .error // .message // .details // $fallback
+    ' "$file" 2>/dev/null || true
+  )"
+  if [[ -n "$message" && "$message" != "null" ]]; then
+    printf '%s\n' "$message"
+  else
+    printf '%s\n' "$fallback"
+  fi
 }
 
 discover_cloud_agent_id() {
@@ -317,17 +330,17 @@ write_result() {
 
 box_status() {
   local file="$1"
-  jq -r '.status // empty' "$file"
+  jq -r '.status // empty' "$file" 2>/dev/null || true
 }
 
 box_sandbox_id() {
   local file="$1"
-  jq -r '.sandboxId // .id // empty' "$file"
+  jq -r '.sandboxId // .id // empty' "$file" 2>/dev/null || true
 }
 
 box_error() {
   local file="$1"
-  jq -r '.errorMessage // .error // .message // empty' "$file"
+  jq -r '.errorMessage // .error // .message // empty' "$file" 2>/dev/null || true
 }
 
 run_attempt() {
@@ -338,7 +351,7 @@ run_attempt() {
   mode="$(mode_for_attempt "$attempt")"
   start="$(date -u +%s)"
   body="$(request_body_for_mode "$mode")"
-  get_url="$CLOUD_BASE/api/v1/workspaces/$(printf '%s' "$WORKSPACE_ID" | jq -sRr @uri)/cloud-agents/$(printf '%s' "$cloud_agent_id" | jq -sRr @uri)/box"
+  get_url="$CLOUD_BASE/api/v1/workspaces/$(url_encode "$WORKSPACE_ID")/cloud-agents/$(url_encode "$cloud_agent_id")/box"
   post_url="${get_url}?async=true"
 
   call_curl_json POST "$post_url" "$body"
@@ -437,7 +450,7 @@ main() {
   cloud_agent_id="$(discover_cloud_agent_id)"
   echo "Cloud agent probe: workspace=$WORKSPACE_ID cloudAgent=$cloud_agent_id report=$REPORT_FILE" >&2
 
-  for attempt in $(seq 1 "$COUNT"); do
+  for ((attempt=1; attempt<=COUNT; attempt++)); do
     if ! run_attempt "$attempt" "$cloud_agent_id"; then
       failures=$(( failures + 1 ))
     fi
