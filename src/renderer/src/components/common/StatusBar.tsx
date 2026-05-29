@@ -49,8 +49,6 @@ export function StatusBar(): React.ReactNode {
     void loadBurn()
   })
 
-  const hasBurn = !!burn && (burn.totalTokens > 0 || burn.totalCost > 0)
-
   const statusColor =
     brokerStatus === 'connected'
       ? 'bg-[var(--pear-accent)]'
@@ -86,7 +84,7 @@ export function StatusBar(): React.ReactNode {
 
       <div className="flex-1" />
 
-      {project && hasBurn && (
+      {project && burn && (
         <button
           type="button"
           onClick={() => openTab({ kind: 'burn-project', projectId: project.id })}
@@ -95,7 +93,7 @@ export function StatusBar(): React.ReactNode {
           aria-label={`Open project token burn. ${formatTokenCount(burn.totalTokens)} tokens, ${formatUsd(burn.totalCost)} spent.`}
         >
           <Flame size={12} className="text-[var(--pear-orange)]" />
-          <span className="tabular-nums">{formatTokenCount(burn.totalTokens)}</span>
+          <span className="tabular-nums">{formatTokenCount(burn.totalTokens)} tokens</span>
           <span className="text-[var(--pear-text-faint)]">·</span>
           <span className="tabular-nums">{formatUsd(burn.totalCost)}</span>
         </button>
