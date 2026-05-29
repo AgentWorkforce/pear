@@ -131,6 +131,14 @@ function getPearBurnSpawnEnrichment(
   lineage?: { lineageId: string; parentAgentKey?: string }
 ): Record<string, string> {
   return {
+    // Defaults that the spawn listener applies via DEFAULT_ENRICHMENT. The
+    // Codex post-spawn path and observed-child-spawn path write stamps without
+    // going through the listener, and burn queries/rollups filter on
+    // `spawner: 'pear'` (see getPearBurnAgentTags / getPearBurnProjectTags), so
+    // these must be present or the session disappears from every rollup.
+    spawner: 'pear',
+    on_relay: 'true',
+    spawned_by: 'direct',
     pear_project_id: projectId,
     pear_agent_name: input.name,
     pear_agent_key: getPearBurnAgentKey(projectId, input.name),
