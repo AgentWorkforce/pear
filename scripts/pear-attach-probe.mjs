@@ -25,6 +25,14 @@ Environment fallbacks:
 }
 
 function parseArgs(argv) {
+  const readOptionValue = (index, option) => {
+    const value = argv[index + 1]
+    if (!value || value.startsWith('-')) {
+      throw new Error(`${option} requires a value`)
+    }
+    return value
+  }
+
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
     if (arg === '-h' || arg === '--help') {
@@ -36,12 +44,12 @@ function parseArgs(argv) {
       continue
     }
     if (arg === '--project-id') {
-      projectId = argv[index + 1] || ''
+      projectId = readOptionValue(index, arg)
       index += 1
       continue
     }
     if (arg === '--cloud-agent-id') {
-      cloudAgentId = argv[index + 1] || ''
+      cloudAgentId = readOptionValue(index, arg)
       index += 1
       continue
     }
@@ -100,15 +108,25 @@ async function invokeAutopilotAttach(port) {
 }
 
 async function stopProcessTree(child) {
-  const exited = new Promise((resolve) => child.once('exit', resolve))
+  const exited = child.exitCode !== null || child.signalCode !== null
+    ? Promise.resolve()
+    : new Promise((resolve) => child.once('exit', resolve))
   const descendants = child.pid ? descendantPids(child.pid) : []
-  const targets = [...descendants.reverse(), child.pid, ...projectDevProcessPids()]
+  const processGroup = process.platform !== 'win32' && child.pid ? -child.pid : undefined
+  const targets = [processGroup, ...descendants.reverse(), child.pid, ...projectDevProcessPids()]
     .filter((pid) => typeof pid === 'number' && pid !== process.pid)
   const signal = (value) => {
+    for (const pid of new Set(targets)) {
+      try {
+        process.kill(pid, value)
+      } catch {
+        // The process may have already exited or may not exist on this platform.
+      }
+    }
     try {
-      for (const pid of targets) process.kill(pid, value)
-    } catch {
       child.kill(value)
+    } catch {
+      // The root process can exit before cleanup reaches it.
     }
   }
 
@@ -137,7 +155,12 @@ function projectDevProcessPids() {
       const command = match[2]
       if (!Number.isFinite(pid)) continue
       if (!command.includes(cwd)) continue
-      if (command.includes('node_modules/electron/dist/Electron.app') || command.includes('electron-vite')) {
+      if (
+        command.includes('node_modules/electron/dist/electron') ||
+        command.includes('node_modules/electron/dist/Electron.app') ||
+        command.includes('electron.exe') ||
+        command.includes('electron-vite')
+      ) {
         pids.push(pid)
       }
     }
@@ -175,7 +198,14 @@ function descendantPids(rootPid) {
 }
 
 async function main() {
-  parseArgs(process.argv.slice(2))
+  try {
+    parseArgs(process.argv.slice(2))
+  } catch (error) {
+    usage()
+    console.error(error instanceof Error ? error.message : String(error))
+    process.exitCode = 2
+    return
+  }
 
   const startedAt = Date.now()
   if (!dryRun && (!projectId || !cloudAgentId)) {
