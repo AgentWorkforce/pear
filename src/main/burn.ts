@@ -401,7 +401,7 @@ class BurnManager {
   private sessionLookupCache = new Map<string, { lookup: BurnSessionLookup; updatedAt: number }>()
 
   async listAgentSummaries(agents: BurnAgentInput[]): Promise<BurnAgentSummary[]> {
-    await this.ingestRecent()
+    await this.refreshLedger(false)
     if (agents.length <= 1) return Promise.all(agents.map((agent) => this.getAgentSummary(agent)))
 
     const byProject = new Map<string, Array<{ agent: BurnAgentInput; index: number }>>()
@@ -450,7 +450,7 @@ class BurnManager {
     }
     if (uncached.length === 0) return result
 
-    await this.ingestRecent()
+    await this.refreshLedger(false)
     const wanted = new Set(uncached)
     const agentBySession = new Map<string, BurnSessionAgentRef>()
 
@@ -511,7 +511,7 @@ class BurnManager {
   }
 
   async getProjectBreakdown(input: BurnProjectInput): Promise<BurnProjectBreakdown> {
-    await this.ingestRecent(input.force === true)
+    await this.refreshLedger(input.force === true)
     const tags = getPearBurnProjectTags(input.projectId)
     const base = {
       projectId: input.projectId,
@@ -553,7 +553,7 @@ class BurnManager {
   }
 
   async getAgentBreakdown(agent: BurnAgentInput): Promise<BurnAgentBreakdown> {
-    await this.ingestRecent(agent.force === true)
+    await this.refreshLedger(agent.force === true)
     const summary = await this.getAgentSummary(agent, true)
     if (summary.status !== 'ok') return summary
 
@@ -604,7 +604,7 @@ class BurnManager {
   }
 
   async getSessionBreakdown(input: BurnSessionBreakdownInput): Promise<BurnSessionBreakdown> {
-    await this.ingestRecent(input.force === true)
+    await this.refreshLedger(input.force === true)
     const base = {
       sessionId: input.sessionId,
       totalTokens: 0,
@@ -689,7 +689,7 @@ class BurnManager {
   }
 
   async getProjectOverhead(input: { projectId: string }): Promise<BurnProjectOverhead> {
-    await this.ingestRecent()
+    await this.refreshLedger(false)
     const base = {
       projectId: input.projectId,
       grandTotal: 0,
@@ -951,6 +951,30 @@ class BurnManager {
     const burn = await this.loadSdk()
     const stamps = await burn.exportStamps({ ledgerHome: getBurnLedgerHome() }) as BurnExportStamp[]
     return sessionRefsForTags(stamps, tags)
+  }
+
+  /**
+   * Pay the one-time native-binding load + DB-open cost (~1.3s) and prime the
+   * ledger once at startup — off the user's critical path — so the first burn
+   * view queries a warm, recently-ingested ledger instead of stalling on it.
+   */
+  warmUp(): void {
+    void this.ingestRecent()
+  }
+
+  /**
+   * Keep the ledger fresh without blocking reads on it. A manual refresh
+   * (`force`) awaits a fresh ingest; otherwise ingest runs in the background
+   * (throttled + deduped) while the caller queries the current ledger
+   * immediately. `ingest()` costs ~1.5s even incrementally, so awaiting it on
+   * every read is what made burn views feel slow.
+   */
+  private async refreshLedger(force: boolean): Promise<void> {
+    if (force) {
+      await this.ingestRecent(true)
+    } else {
+      void this.ingestRecent()
+    }
   }
 
   private async ingestRecent(force = false): Promise<void> {

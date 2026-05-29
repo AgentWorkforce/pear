@@ -2,6 +2,7 @@ import { app, BrowserWindow, shell, Menu, protocol, nativeImage } from 'electron
 import { existsSync } from 'fs'
 import { join } from 'path'
 import { registerIpcHandlers } from './ipc-handlers'
+import { burnManager } from './burn'
 import { brokerManager } from './broker'
 import { cloudAgentManager } from './cloud-agent'
 import { integrationsManager } from './integrations'
@@ -203,6 +204,9 @@ app.whenReady().then(() => {
 
   registerAvatarCacheProtocol()
   registerIpcHandlers()
+  // Prime the burn ledger off the critical path so the first burn view (and the
+  // status-bar summary) queries a warm binding/DB instead of stalling ~1.5-4s.
+  burnManager.warmUp()
   void integrationsManager.startLocalMountDaemon().catch((error) => {
     console.warn('[integrations] Failed to start local integration mount daemon:', error instanceof Error ? error.message : String(error))
   })
