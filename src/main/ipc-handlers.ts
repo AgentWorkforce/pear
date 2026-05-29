@@ -1,3 +1,5 @@
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { app, ipcMain, dialog, BrowserWindow, shell } from 'electron'
 import { resolve } from 'path'
 import type { SpawnPtyInput, SendMessageInput } from '@agent-relay/sdk'
@@ -48,9 +50,120 @@ function assertPathWithinProjects(targetPath: string): void {
 }
 
 const gitStatusWarnings = new Set<string>()
+const AUTOPILOT_ATTACH_CHANNEL = '__autopilot:cloud-attach'
+
+type AutopilotCloudAttachInput = {
+  projectId?: unknown
+  cloudAgentId?: unknown
+}
+
+type AutopilotCloudAttachResult = {
+  ok: boolean
+  brokerMode: string | null
+  elapsedSec: number
+  error?: string
+}
+
+let autopilotProbeServer: Server | null = null
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function requireString(value: unknown, label: string): string {
+  if (typeof value !== 'string' || !value.trim()) throw new Error(`${label} is required`)
+  return value.trim()
+}
+
+function sessionMode(value: unknown): string | null {
+  return isRecord(value) && typeof value.mode === 'string' ? value.mode : null
+}
+
+async function readJsonRequest(req: IncomingMessage): Promise<unknown> {
+  const chunks: Buffer[] = []
+  for await (const chunk of req) {
+    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk))
+  }
+  if (chunks.length === 0) return null
+  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown
+}
+
+async function runAutopilotCloudAttach(
+  input: AutopilotCloudAttachInput,
+  win?: BrowserWindow | null
+): Promise<AutopilotCloudAttachResult> {
+  const startedAt = Date.now()
+  try {
+    const projectId = requireString(input.projectId, 'projectId')
+    const cloudAgentId = requireString(input.cloudAgentId, 'cloudAgentId')
+    await cloudAgentManager.attach(projectId, cloudAgentId, win ?? BrowserWindow.getAllWindows()[0] ?? null)
+
+    const details = (await brokerManager.listBrokerDetails())
+      .find((entry) => entry.projectId === projectId && entry.kind === 'cloud')
+    if (!details?.url) throw new Error('Cloud broker URL was not available after attach')
+
+    const response = await fetch(new URL('/api/session', details.url), {
+      headers: details.apiKey ? { 'X-API-Key': details.apiKey } : undefined
+    })
+    const payload = await response.json().catch(() => null) as unknown
+    if (!response.ok) {
+      throw new Error(`Broker /api/session failed: ${response.status} ${response.statusText}`)
+    }
+
+    const brokerMode = sessionMode(payload) || details.session?.mode || null
+    return {
+      ok: brokerMode === 'persist',
+      brokerMode,
+      elapsedSec: Math.round((Date.now() - startedAt) / 1000)
+    }
+  } catch (error) {
+    return {
+      ok: false,
+      brokerMode: null,
+      elapsedSec: Math.round((Date.now() - startedAt) / 1000),
+      error: toErrorMessage(error)
+    }
+  }
+}
+
+function sendJson(res: ServerResponse, status: number, payload: unknown): void {
+  res.writeHead(status, { 'Content-Type': 'application/json' })
+  res.end(JSON.stringify(payload))
+}
+
+function startAutopilotProbeBridge(): void {
+  if (process.env.PEAR_AUTOPILOT_PROBE !== '1' || autopilotProbeServer) return
+
+  const port = Number(process.env.PEAR_AUTOPILOT_PROBE_PORT || 0)
+  autopilotProbeServer = createServer(async (req, res) => {
+    try {
+      if (req.method === 'GET' && req.url === '/health') {
+        sendJson(res, 200, { ok: true, ipcChannel: AUTOPILOT_ATTACH_CHANNEL })
+        return
+      }
+      if (req.method === 'POST' && req.url === '/cloud-attach') {
+        const body = await readJsonRequest(req)
+        const result = await runAutopilotCloudAttach(isRecord(body) ? body : {})
+        sendJson(res, 200, result)
+        return
+      }
+      sendJson(res, 404, { ok: false, error: 'not-found' })
+    } catch (error) {
+      sendJson(res, 500, { ok: false, error: toErrorMessage(error) })
+    }
+  })
+  autopilotProbeServer.listen(port, '127.0.0.1', () => {
+    const address = autopilotProbeServer?.address() as AddressInfo | null
+    console.log(`[ipc] ready port=${address?.port ?? port} channel=${AUTOPILOT_ATTACH_CHANNEL}`)
+  })
+  app.once('before-quit', () => {
+    autopilotProbeServer?.close()
+    autopilotProbeServer = null
+  })
 }
 
 function warnGitStatusOnce(path: string, error: unknown): void {
@@ -456,6 +569,13 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('cloud-agent:attach', async (event, projectId: string, cloudAgentId: string) => {
     return cloudAgentManager.attach(projectId, cloudAgentId, BrowserWindow.fromWebContents(event.sender))
   })
+
+  if (process.env.PEAR_AUTOPILOT_PROBE === '1') {
+    ipcMain.handle(AUTOPILOT_ATTACH_CHANNEL, async (event, input: AutopilotCloudAttachInput) => {
+      return runAutopilotCloudAttach(input, BrowserWindow.fromWebContents(event.sender))
+    })
+    startAutopilotProbeBridge()
+  }
 
   ipcMain.handle('cloud-agent:detach', async (_, projectId: string) => {
     return cloudAgentManager.detach(projectId)
