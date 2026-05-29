@@ -159,7 +159,9 @@ function createTab(input: AppTabInput): AppTab {
     dmParticipants: input.kind === 'dm'
       ? sortDirectMessageParticipants(input.dmParticipants || [])
       : undefined,
-    burnAgent: input.kind === 'burn-session' ? input.burnAgent : undefined,
+    burnAgent: input.kind === 'burn-session' || input.kind === 'burn-session-detail'
+      ? input.burnAgent
+      : undefined,
     burnSessionId: input.kind === 'burn-session-detail' ? input.burnSessionId : undefined
   }
 }
