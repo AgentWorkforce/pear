@@ -21,6 +21,15 @@ import type {
   BurnAgentBreakdown,
   BurnAgentInput,
   BurnAgentSummary,
+  BurnFingerprintInput,
+  BurnHotspotInsight,
+  BurnHotspotMcpServer,
+  BurnProjectBreakdown,
+  BurnProjectInput,
+  BurnProjectOverhead,
+  BurnSessionBreakdown,
+  BurnSessionBreakdownInput,
+  BurnSessionLookup,
   CloudAgentBinding,
   CloudAgentEvent,
   CloudAgentRecord,
@@ -80,6 +89,17 @@ export type {
   BurnAgentBreakdown,
   BurnAgentInput,
   BurnAgentSummary,
+  BurnFingerprintInput,
+  BurnHotspotInsight,
+  BurnHotspotMcpServer,
+  BurnProjectAgentRollup,
+  BurnProjectBreakdown,
+  BurnProjectInput,
+  BurnProjectOverhead,
+  BurnSessionAgentRef,
+  BurnSessionBreakdown,
+  BurnSessionBreakdownInput,
+  BurnSessionLookup,
   CloudAgentBinding,
   CloudAgentEvent,
   CloudAgentMountStatus,
@@ -232,7 +252,17 @@ const api = {
     listAgentSummaries: (agents: BurnAgentInput[]) =>
       invoke<BurnAgentSummary[]>('burn:list-agent-summaries', agents),
     getAgentBreakdown: (agent: BurnAgentInput) =>
-      invoke<BurnAgentBreakdown>('burn:get-agent-breakdown', agent)
+      invoke<BurnAgentBreakdown>('burn:get-agent-breakdown', agent),
+    getProjectBreakdown: (input: BurnProjectInput) =>
+      invoke<BurnProjectBreakdown>('burn:get-project-breakdown', input),
+    lookupSessions: (sessionIds: string[]) =>
+      invoke<Record<string, BurnSessionLookup>>('burn:lookup-sessions', sessionIds),
+    getSessionBreakdown: (input: BurnSessionBreakdownInput) =>
+      invoke<BurnSessionBreakdown>('burn:get-session-breakdown', input),
+    fingerprint: (input: BurnFingerprintInput) =>
+      invoke<{ fingerprint: string }>('burn:fingerprint', input),
+    getProjectOverhead: (input: { projectId: string }) =>
+      invoke<BurnProjectOverhead>('burn:get-project-overhead', input)
   },
   git: {
     status: (path: string) => invoke<GitFileStatus[]>('git:status', path),

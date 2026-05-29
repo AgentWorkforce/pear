@@ -10,13 +10,16 @@
  */
 
 import assert from 'node:assert/strict'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { createPearBurnSpawnListener } from '../burn-spawn-hook.ts'
+import { createPearBurnSpawnListener, stampPearBurnSpawnedAgent } from '../burn-spawn-hook.ts'
 import type { BeforeAgentSpawnContext } from '@agent-relay/sdk'
 
 interface BurnCalls {
-  writeStamp: Array<{ sessionId: string; enrichment: Record<string, string>; ledgerHome?: string }>
+  writeStamp: Array<{ sessionId: string; enrichment: Record<string, string>; ts?: string; ledgerHome?: string }>
   writePendingStamp: Array<{
     harness: 'claude' | 'codex' | 'opencode'
     cwd: string
@@ -99,20 +102,15 @@ test('Claude branch: spreads existing args before appending --session-id', async
   assert.match(patch!.args![3], /^[0-9a-f-]{36}$/i)
 })
 
-test('Codex branch: calls writePendingStamp with the right harness, no patch returned', async () => {
+test('Codex branch: defers exact stamping until the post-spawn session id is available', async () => {
   const stub = makeBurnStub()
   const listener = createPearBurnSpawnListener({ loadBurn: stub.loadBurn })
 
   const patch = await listener(makeCtx({ cli: 'codex' }))
 
-  assert.equal(patch, undefined, 'no patch — observe-only for codex')
+  assert.equal(patch, undefined, 'no patch — post-spawn stamping handles codex')
   assert.equal(stub.calls.writeStamp.length, 0)
-  assert.equal(stub.calls.writePendingStamp.length, 1)
-  assert.equal(stub.calls.writePendingStamp[0].harness, 'codex')
-  assert.equal(stub.calls.writePendingStamp[0].cwd, '/tmp/proj')
-  assert.equal(stub.calls.writePendingStamp[0].spawnerPid, 9999)
-  assert.equal(stub.calls.writePendingStamp[0].spawnStartTs, '2026-05-21T12:00:00.000Z')
-  assert.equal(stub.calls.writePendingStamp[0].enrichment.spawner, 'pear')
+  assert.equal(stub.calls.writePendingStamp.length, 0)
 })
 
 test('OpenCode branch: calls writePendingStamp with harness=opencode', async () => {
@@ -181,8 +179,51 @@ test('ledgerHome option threads through to both stamping calls', async () => {
   await listenerClaude(makeCtx({ cli: 'claude' }))
   assert.equal(stub.calls.writeStamp[0].ledgerHome, '/custom/ledger')
 
-  await listenerClaude(makeCtx({ cli: 'codex' }))
+  await listenerClaude(makeCtx({ cli: 'opencode' }))
   assert.equal(stub.calls.writePendingStamp[0].ledgerHome, '/custom/ledger')
+})
+
+test('Post-spawn Codex stamping finds the session_meta file and writes an exact stamp', async () => {
+  const stub = makeBurnStub()
+  const codexHome = mkdtempSync(join(tmpdir(), 'pear-codex-home-'))
+  const sessionDir = join(codexHome, 'sessions', '2026', '05', '24')
+  const sessionId = '019e5775-8948-7540-a594-3ec1190686ed'
+  mkdirSync(sessionDir, { recursive: true })
+  writeFileSync(
+    join(sessionDir, `rollout-2026-05-24T00-49-41-${sessionId}.jsonl`),
+    `${JSON.stringify({
+      timestamp: '2026-05-24T00:49:41.263Z',
+      type: 'session_meta',
+      payload: {
+        id: sessionId,
+        timestamp: '2026-05-24T00:49:41.221Z',
+        cwd: '/tmp/proj'
+      }
+    })}\n`
+  )
+
+  try {
+    await stampPearBurnSpawnedAgent(
+      { name: 'codex-1', cli: 'codex', cwd: '/tmp/proj' },
+      '2026-05-24T00:49:39.442Z',
+      { spawner: 'pear', pear_agent_key: 'project:codex-1' },
+      {
+        codexHome,
+        loadBurn: stub.loadBurn,
+        ledgerHome: '/custom/ledger',
+        retryDelaysMs: [0]
+      }
+    )
+  } finally {
+    rmSync(codexHome, { recursive: true, force: true })
+  }
+
+  assert.equal(stub.calls.writeStamp.length, 1)
+  assert.equal(stub.calls.writeStamp[0].sessionId, sessionId)
+  assert.equal(stub.calls.writeStamp[0].ts, '2026-05-24T00:49:41.221Z')
+  assert.equal(stub.calls.writeStamp[0].ledgerHome, '/custom/ledger')
+  assert.equal(stub.calls.writeStamp[0].enrichment.pear_agent_key, 'project:codex-1')
+  assert.equal(stub.calls.writePendingStamp.length, 0)
 })
 
 test('writeStamp failure does not return a patch — spawn proceeds un-stamped', async () => {

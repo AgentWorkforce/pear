@@ -1,9 +1,10 @@
 import type React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { ClipboardCopy, MessageSquare, RefreshCw, Search } from 'lucide-react'
+import { ClipboardCopy, Flame, MessageSquare, RefreshCw, Search } from 'lucide-react'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
 import { FilterInput, PaneSidebar } from '@/components/common/PaneShell'
-import { pear } from '@/lib/ipc'
+import { formatTokenCount, formatUsd } from '@/lib/format'
+import { pear, type BurnSessionLookup } from '@/lib/ipc'
 import { useProjectStore, type Project } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 import { useAgentStore, getAgentKey } from '@/stores/agent-store'
@@ -53,6 +54,8 @@ const SOURCE_ICON_CLI: Record<Source, string> = {
   cursor: 'cursor',
   relay: 'relay'
 }
+
+const BURN_LOOKUP_BATCH_SIZE = 24
 
 function formatRelative(timestampMs: number): string {
   const diffMs = Date.now() - timestampMs
@@ -203,6 +206,7 @@ function ConversationsPanel(): React.ReactNode {
 
   const [status, setStatus] = useState<Status | null>(null)
   const [sessions, setSessions] = useState<Session[]>([])
+  const [burnBySession, setBurnBySession] = useState<Record<string, BurnSessionLookup>>({})
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [query, setQuery] = useState('')
@@ -259,6 +263,7 @@ function ConversationsPanel(): React.ReactNode {
 
   const refresh = useCallback(async (): Promise<void> => {
     setRefreshing(true)
+    setBurnBySession({})
     try {
       await pear.aiHist.reload()
       await loadSessions(query, sourceFilter)
@@ -344,6 +349,40 @@ function ConversationsPanel(): React.ReactNode {
     () => visibleSessions.map((session) => session.sessionId),
     [visibleSessions]
   )
+
+  // Fetch burn cost/tokens for the sessions we're showing. Skips ids we've
+  // already looked up; merges results so the badges persist across refilters.
+  useEffect(() => {
+    if (visibleSessionIds.length === 0) return
+    const missing = visibleSessionIds
+      .filter((id) => !(id in burnBySession))
+      .slice(0, BURN_LOOKUP_BATCH_SIZE)
+    if (missing.length === 0) return
+    let cancelled = false
+    pear.burn.lookupSessions(missing)
+      .then((lookup) => {
+        if (cancelled) return
+        setBurnBySession((prev) => {
+          const next = { ...prev }
+          for (const id of missing) {
+            next[id] = lookup[id] ?? {
+              sessionId: id,
+              totalTokens: 0,
+              totalCost: 0,
+              turnCount: 0,
+              status: 'unavailable'
+            }
+          }
+          return next
+        })
+      })
+      .catch(() => {
+        // Swallow — burn data is informational, no need to surface in the panel.
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [visibleSessionIds, burnBySession])
 
   const openTab = useUIStore((s) => s.openTab)
   const setActiveAgentKey = useAgentStore((s) => s.setActiveAgentKey)
@@ -563,6 +602,8 @@ function ConversationsPanel(): React.ReactNode {
                         {group.sessions.map((sess) => {
                           const isActive = sess.sessionId === activeSessionId
                           const mutedTextClass = conversationMutedTextClass(isActive)
+                          const burn = burnBySession[sess.sessionId]
+                          const hasBurn = burn?.status === 'ok' && (burn.totalCost > 0 || burn.totalTokens > 0)
                           return (
                             <li key={sess.sessionId}>
                               <button
@@ -591,7 +632,35 @@ function ConversationsPanel(): React.ReactNode {
                                   <span className="truncate" title={sess.project || ''}>
                                     {shortenPath(sess.project)}
                                   </span>
-                                  <span>{sess.promptCount} prompt{sess.promptCount === 1 ? '' : 's'}</span>
+                                  <div className="flex shrink-0 items-center gap-2">
+                                    {hasBurn && (() => {
+                                      const burnAgent = burn.agent
+                                      const baseClass = 'inline-flex items-center gap-1'
+                                      const flameClass = isActive ? 'text-white/90' : 'text-[var(--pear-orange)]'
+                                      const tipBase = `${formatTokenCount(burn.totalTokens)} tokens · ${burn.turnCount} turn${burn.turnCount === 1 ? '' : 's'}`
+                                      return (
+                                        <span
+                                          role="button"
+                                          tabIndex={-1}
+                                          onClick={(e) => {
+                                            e.stopPropagation()
+                                            openTab({
+                                              kind: 'burn-session-detail',
+                                              burnSessionId: sess.sessionId,
+                                              projectId: burnAgent?.projectId,
+                                              ...(burnAgent ? { burnAgent: { name: burnAgent.name, projectId: burnAgent.projectId, cwd: burnAgent.cwd, cli: burnAgent.cli } } : {})
+                                            })
+                                          }}
+                                          className={`${baseClass} cursor-pointer rounded px-1 -mx-1 hover:bg-white/10`}
+                                          title={`Open session burn breakdown · ${tipBase}`}
+                                        >
+                                          <Flame size={9} className={flameClass} />
+                                          {formatUsd(burn.totalCost)}
+                                        </span>
+                                      )
+                                    })()}
+                                    <span>{sess.promptCount} prompt{sess.promptCount === 1 ? '' : 's'}</span>
+                                  </div>
                                 </div>
                               </button>
                             </li>
@@ -633,6 +702,43 @@ function ConversationsPanel(): React.ReactNode {
                     </div>
                   </div>
                   <div className="flex shrink-0 items-center gap-1.5">
+                    {(() => {
+                      const activeBurn = burnBySession[activeSession.sessionId]
+                      if (!activeBurn || activeBurn.status !== 'ok') return null
+                      const hasNumbers = activeBurn.totalCost > 0 || activeBurn.totalTokens > 0
+                      if (!hasNumbers && !activeBurn.agent) return null
+                      const agent = activeBurn.agent
+                      const summary = hasNumbers
+                        ? `${formatUsd(activeBurn.totalCost)} · ${formatTokenCount(activeBurn.totalTokens)} tokens`
+                        : 'View burn'
+                      const className = 'inline-flex items-center gap-1.5 rounded-md bg-[var(--pear-bg-overlay)] px-2.5 py-1.5 text-xs hover:bg-[var(--pear-bg-surface-hover)]'
+                      if (!agent) {
+                        return (
+                          <span className={className} title="Burn data is recorded for this session but no pear agent is linked">
+                            <Flame size={12} className="text-[var(--pear-orange)]" />
+                            {summary}
+                          </span>
+                        )
+                      }
+                      return (
+                        <button
+                          onClick={() => openTab({
+                            kind: 'burn-session',
+                            burnAgent: {
+                              name: agent.name,
+                              projectId: agent.projectId,
+                              cwd: agent.cwd,
+                              cli: agent.cli
+                            }
+                          })}
+                          className={className}
+                          title={`Open burn breakdown for ${agent.name}`}
+                        >
+                          <Flame size={12} className="text-[var(--pear-orange)]" />
+                          {summary}
+                        </button>
+                      )
+                    })()}
                     <button
                       onClick={() => void resumeAndOpen(activeSession)}
                       className="inline-flex items-center gap-1.5 rounded-md bg-[var(--pear-selection-blue)] px-2.5 py-1.5 text-xs text-white hover:brightness-110"

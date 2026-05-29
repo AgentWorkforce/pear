@@ -14,6 +14,8 @@ export type ViewMode =
   | 'source-control'
   | 'ai-hist'
   | 'burn-session'
+  | 'burn-project'
+  | 'burn-session-detail'
 
 export type TerminalAttachMode = 'view' | 'drive' | 'passthrough'
 export type InboundDeliveryMode = 'auto_inject' | 'manual_flush'
@@ -54,6 +56,7 @@ export interface BurnAgentInput {
   name: string
   cwd?: string
   cli?: string
+  force?: boolean
 }
 
 export interface BurnAgentSummary {
@@ -71,19 +74,118 @@ export interface BurnAgentSummary {
   error?: string
 }
 
+export interface BurnHotspotMcpServer {
+  server: string
+  callCount: number
+  initialTokens: number
+  persistenceTokens: number
+  ridingTurns: number
+  totalCost: number
+  topTools: string[]
+}
+
+export interface BurnHotspotsBreakdown {
+  sessionId?: string
+  grandTotal: number
+  attributedTotal: number
+  unattributedTotal: number
+  attributionDegraded: boolean
+  files: Array<{ path: string; initialTokens: number; persistenceTokens: number; ridingTurns: number; totalCost: number }>
+  bashVerbs: Array<{ verb: string; callCount: number; distinctCommands: number; initialTokens: number; persistenceTokens: number; avgPersistenceTurns: number; totalCost: number; topExamples: string[] }>
+  bash: Array<{ command?: string; callCount: number; initialTokens: number; persistenceTokens: number; totalCost: number }>
+  subagents: Array<{ subagentType: string; callCount: number; initialTokens: number; persistenceTokens: number; totalCost: number }>
+  mcpServers: BurnHotspotMcpServer[]
+}
+
+export interface BurnHotspotInsight {
+  kind: 'file' | 'bash' | 'mcp' | 'subagent'
+  label: string
+  totalCost: number
+  ridingTurns?: number
+  detail?: string
+}
+
 export interface BurnAgentBreakdown extends BurnAgentSummary {
   primarySessionId?: string
-  hotspots?: {
-    sessionId?: string
-    grandTotal: number
-    attributedTotal: number
-    unattributedTotal: number
-    attributionDegraded: boolean
-    files: Array<{ path: string; initialTokens: number; persistenceTokens: number; ridingTurns: number; totalCost: number }>
-    bashVerbs: Array<{ verb: string; callCount: number; distinctCommands: number; initialTokens: number; persistenceTokens: number; avgPersistenceTurns: number; totalCost: number; topExamples: string[] }>
-    bash: Array<{ command?: string; callCount: number; initialTokens: number; persistenceTokens: number; totalCost: number }>
-    subagents: Array<{ subagentType: string; callCount: number; initialTokens: number; persistenceTokens: number; totalCost: number }>
-  }
+  hotspots?: BurnHotspotsBreakdown
+}
+
+export interface BurnSessionBreakdownInput { sessionId: string; force?: boolean }
+
+export interface BurnSessionBreakdown {
+  sessionId: string
+  agent?: BurnSessionAgentRef
+  totalTokens: number
+  totalCost: number
+  turnCount: number
+  models: string[]
+  hotspots?: BurnHotspotsBreakdown
+  insights: BurnHotspotInsight[]
+  updatedAt: number
+  status: 'ok' | 'unavailable'
+  error?: string
+}
+
+export interface BurnFingerprintInput { sessionId?: string; projectId?: string }
+
+export interface BurnProjectOverhead {
+  projectId: string
+  project?: string
+  grandTotal: number
+  perSessionTotal: number
+  recommendations: Array<{ file: string; heading: string; perSessionUsd: number; tokens: number }>
+  updatedAt: number
+  status: 'ok' | 'unavailable'
+  error?: string
+}
+
+export interface BurnSessionAgentRef {
+  projectId?: string
+  name: string
+  agentKey: string
+  cli?: string
+  cwd?: string
+}
+
+export interface BurnSessionLookup {
+  sessionId: string
+  totalTokens: number
+  totalCost: number
+  turnCount: number
+  agent?: BurnSessionAgentRef
+  status: 'ok' | 'unavailable'
+  error?: string
+}
+
+export interface BurnProjectInput {
+  projectId: string
+  force?: boolean
+}
+
+export interface BurnProjectAgentRollup {
+  name: string
+  agentKey: string
+  totalTokens: number
+  totalCost: number
+  turnCount: number
+  sessionCount: number
+  cli?: string
+  cwd?: string
+  lastTs?: string
+}
+
+export interface BurnProjectBreakdown {
+  projectId: string
+  totalTokens: number
+  totalCost: number
+  turnCount: number
+  byModel: Array<{ model: string; tokens: number; cost: number }>
+  byTool: Array<{ tool: string; tokens: number; cost: number; count: number }>
+  byAgent: BurnProjectAgentRollup[]
+  sessionIds: Array<{ sessionId: string; ts?: string }>
+  updatedAt: number
+  status: 'ok' | 'unavailable'
+  error?: string
 }
 
 export interface PendingRelayMessage {
@@ -629,6 +731,11 @@ export interface PearAPI {
   burn: {
     listAgentSummaries: (agents: BurnAgentInput[]) => Promise<BurnAgentSummary[]>
     getAgentBreakdown: (agent: BurnAgentInput) => Promise<BurnAgentBreakdown>
+    getProjectBreakdown: (input: BurnProjectInput) => Promise<BurnProjectBreakdown>
+    lookupSessions: (sessionIds: string[]) => Promise<Record<string, BurnSessionLookup>>
+    getSessionBreakdown: (input: BurnSessionBreakdownInput) => Promise<BurnSessionBreakdown>
+    fingerprint: (input: BurnFingerprintInput) => Promise<{ fingerprint: string }>
+    getProjectOverhead: (input: { projectId: string }) => Promise<BurnProjectOverhead>
   }
   git: {
     status: (path: string) => Promise<GitFileStatus[]>
