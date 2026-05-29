@@ -136,9 +136,17 @@ function resumeAgentSpec(
 ): { cli: string; args: string[]; cwd?: string } | null {
   switch (session.source) {
     case 'claude':
+      // claude rejects `--resume <id>` on its own with
+      //   "session-id can only be used with continue or resume if
+      //    fork-session is also supplied"
+      // The CLI now requires --fork-session when targeting a specific id so
+      // two processes can't dual-attach the same session log. The resumed
+      // conversation gets a fresh session id; the original is untouched.
+      // Claude exits immediately on the bad invocation, so the broker never
+      // registers a worker → attachTerminal sees agent_not_found.
       return {
         cli: 'claude',
-        args: ['--resume', session.sessionId],
+        args: ['--resume', session.sessionId, '--fork-session'],
         cwd: session.project ?? undefined
       }
     case 'codex':
