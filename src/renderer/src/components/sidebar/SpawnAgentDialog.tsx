@@ -18,6 +18,7 @@ export function SpawnAgentDialog(): React.ReactNode {
   const [personas, setPersonas] = useState<WorkforcePersona[]>([])
   const [loadingPersonas, setLoadingPersonas] = useState(false)
   const [selectedPersonaId, setSelectedPersonaId] = useState('')
+  const [customName, setCustomName] = useState('')
   const [error, setError] = useState<string | null>(null)
   const project = useProjectStore((s) => s.getActiveProject())
   const root = useProjectStore((s) => s.getActiveRoot())
@@ -100,7 +101,7 @@ export function SpawnAgentDialog(): React.ReactNode {
     setError(null)
     setSpawningCli(cli)
     try {
-      await spawnProjectAgent(project, cli)
+      await spawnProjectAgent(project, cli, customName)
       closeDialog()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -153,6 +154,22 @@ export function SpawnAgentDialog(): React.ReactNode {
           {project ? (
             <div className="space-y-3">
               <div className="truncate text-xs text-[var(--pear-text-faint)]">{root?.path || project.rootPath}</div>
+              <div>
+                <label htmlFor="spawn-agent-name" className="mb-1 block text-xs font-medium text-[var(--pear-text-dim)]">
+                  Name <span className="text-[var(--pear-text-faint)]">(optional)</span>
+                </label>
+                <input
+                  id="spawn-agent-name"
+                  type="text"
+                  value={customName}
+                  onChange={(event) => setCustomName(event.target.value)}
+                  disabled={spawning}
+                  placeholder={`auto: ${AGENT_OPTIONS[0].cli}-N`}
+                  spellCheck={false}
+                  autoComplete="off"
+                  className="h-9 w-full rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 text-sm text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent-dim)] disabled:opacity-50"
+                />
+              </div>
               <div className="grid grid-cols-2 gap-3">
                 {AGENT_OPTIONS.map(({ cli, label, Icon }) => (
                   <button
