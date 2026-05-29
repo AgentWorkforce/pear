@@ -1345,6 +1345,28 @@ export class BrokerManager {
     throw new Error(`Unable to allocate an agent name for ${input.baseName}`)
   }
 
+  // Poll listAgents until `name` appears or the deadline passes. Used at the
+  // top of attachTerminal so a freshly-spawned agent doesn't 404 on the
+  // first setInboundDeliveryMode/getInboundDeliveryMode call. No-op if the
+  // agent is already registered (the first listAgents() call returns it).
+  // Silently returns on timeout — the existing downstream calls will surface
+  // the real error (and on a still-genuinely-missing agent that's the right
+  // signal to show).
+  private async waitForAgentRegistration(session: BrokerSession, name: string): Promise<void> {
+    const deadline = Date.now() + PERSONA_REGISTRATION_TIMEOUT_MS
+    while (Date.now() < deadline) {
+      try {
+        const agents = await session.client.listAgents()
+        if (agents.some((agent) => agent.name === name)) return
+      } catch {
+        // Transient broker errors during the wait are fine — keep polling
+        // until the deadline; if the broker is genuinely down the downstream
+        // calls will surface the real error.
+      }
+      await delay(250)
+    }
+  }
+
   private async verifyPersonaBrokerRegistration(session: BrokerSession, name: string): Promise<ListAgent | null> {
     const deadline = Date.now() + PERSONA_REGISTRATION_TIMEOUT_MS
     let agent: ListAgent | undefined
@@ -1465,6 +1487,13 @@ export class BrokerManager {
     // this terminal — clear any stale HTTP-only fallback so the WS fast path
     // gets retried instead of being stuck on HTTP for the agent's lifetime.
     this.resetInputStreamFallback(this.getInputStreamKey(session.projectId, name))
+    // Wait briefly for the broker to register the worker. spawnAgent (used
+    // by the Conversations panel's Resume flow) returns as soon as the CLI
+    // process is forked, before the worker has connected to the broker, so
+    // the renderer races: spawn → mount terminal → attach → broker 404.
+    // Mirrors verifyPersonaBrokerRegistration's polling shape (lighter — we
+    // don't need the stability delay, just existence).
+    await this.waitForAgentRegistration(session, name)
     const mode = toInboundDeliveryMode(input.mode)
     let previousMode: InboundDeliveryMode | undefined
 
