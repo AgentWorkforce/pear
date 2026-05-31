@@ -57,7 +57,14 @@ export function PendingMessagesMenu({
     [agentMessages]
   )
 
+  const inFlightRef = useRef(false)
+
   const loadPending = useCallback(async (): Promise<void> => {
+    // Skip if a previous poll is still outstanding. A wedged broker makes
+    // getPending hang for its full timeout; without this guard the 2.5s interval
+    // stacks a dozen concurrent calls that all time out and flood the logs.
+    if (inFlightRef.current) return
+    inFlightRef.current = true
     setLoading(true)
     setError(null)
     try {
@@ -65,6 +72,7 @@ export function PendingMessagesMenu({
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load held messages')
     } finally {
+      inFlightRef.current = false
       setLoading(false)
     }
   }, [agentName, projectId])
