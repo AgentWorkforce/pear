@@ -318,9 +318,9 @@ function isBrokerUnreachableError(err: unknown): boolean {
 function isBrokerTimeoutError(err: unknown): boolean {
   return someInCauseChain(err, (node) => {
     if (node.code === 'ETIMEDOUT') return true
-    if (node.name === 'TimeoutError' || node.name === 'AbortError') return true
+    if (node.name === 'TimeoutError') return true
     const message = node.message
-    return typeof message === 'string' && /aborted due to timeout|operation was aborted|ETIMEDOUT/i.test(message)
+    return typeof message === 'string' && /aborted due to timeout|ETIMEDOUT|timed?out/i.test(message)
   })
 }
 
@@ -883,10 +883,12 @@ export class BrokerManager {
 
     const { cwd, name, channels } = session
     const brokerPid = session.client.brokerPid
-    const promise = (async () => {
+    let promise!: Promise<boolean>
+    promise = (async () => {
       console.warn(`[broker] Broker for project ${projectId} is unreachable; restarting on a fresh port`)
       this.dropSession(projectId, { disconnectOnly: true })
       await terminateOwnedBrokerProcess(brokerPid)
+      if (this.revivePromises.get(projectId) !== promise) return false
       await this.start(projectId, cwd, name, win, channels)
       return this.sessions.has(projectId)
     })()
@@ -1067,6 +1069,23 @@ export class BrokerManager {
 
   private getSessionForProject(projectId: string): BrokerSession {
     const normalizedProjectId = projectId.trim()
+    const session = this.sessions.get(normalizedProjectId)
+    if (!session) {
+      throw new Error('Relay workspace not started — select the project first')
+    }
+    return session
+  }
+
+  private async getOrAwaitSession(projectId: string): Promise<BrokerSession> {
+    const normalizedProjectId = projectId.trim()
+    const revivePromise = this.revivePromises.get(normalizedProjectId)
+    if (revivePromise) {
+      await revivePromise.catch(() => undefined)
+    }
+    const startPromise = this.startPromises.get(normalizedProjectId)
+    if (startPromise) {
+      await startPromise.catch(() => undefined)
+    }
     const session = this.sessions.get(normalizedProjectId)
     if (!session) {
       throw new Error('Relay workspace not started — select the project first')
@@ -1923,7 +1942,15 @@ export class BrokerManager {
     projectId: string
     inboundDeliveryMode?: InboundDeliveryMode
   }>> {
-    const sessions = projectId ? [this.getSessionForProject(projectId)] : Array.from(this.sessions.values())
+    const sessions = projectId
+      ? [await this.getOrAwaitSession(projectId)]
+      : (await Promise.all(
+          Array.from(new Set([
+            ...Array.from(this.sessions.keys()),
+            ...Array.from(this.revivePromises.keys()),
+            ...Array.from(this.startPromises.keys())
+          ])).map((id) => this.getOrAwaitSession(id).catch(() => undefined))
+        )).filter((session): session is BrokerSession => !!session)
     const results = await Promise.all(
       sessions.map(async (session) => {
         try {
@@ -1958,7 +1985,16 @@ export class BrokerManager {
             console.warn(`[broker] listAgents: broker for project ${session.projectId} is unreachable; returning no agents`)
             return []
           }
-          return this.collectSessionAgents(next)
+          try {
+            return await this.collectSessionAgents(next)
+          } catch (retryErr) {
+            console.warn(
+              `[broker] listAgents: broker for project ${session.projectId} is still unreachable after restart; ` +
+              `returning no agents:`,
+              retryErr
+            )
+            return []
+          }
         }
       })
     )
@@ -2102,8 +2138,14 @@ export class BrokerManager {
   }
 
   async shutdown(projectId?: string): Promise<void> {
-    const targetProjectIds = projectId ? [projectId] : Array.from(this.sessions.keys())
+    const targetProjectIds = projectId
+      ? [projectId]
+      : Array.from(new Set([
+          ...Array.from(this.sessions.keys()),
+          ...Array.from(this.revivePromises.keys())
+        ]))
     for (const targetProjectId of targetProjectIds) {
+      this.revivePromises.delete(targetProjectId)
       const session = this.sessions.get(targetProjectId)
       try {
         await session?.client.shutdown()
