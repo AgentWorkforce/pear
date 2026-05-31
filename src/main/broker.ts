@@ -202,12 +202,54 @@ const MAX_INPUT_STREAM_OPEN_FAILURES = 3
 // After this many consecutive timeouts for a project we respawn it rather than
 // time out every poll forever. The first request after a respawn resets this.
 const MAX_BROKER_TIMEOUTS_BEFORE_REVIVE = 2
+const BROKER_REVIVE_TERM_GRACE_MS = 1_500
 const PERSONA_REGISTRATION_TIMEOUT_MS = 5_000
 const PERSONA_REGISTRATION_STABILITY_MS = 1_000
 const AGENTWORKFORCE_CLI_VERSION = '3.0.22'
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(pid)) return true
+    await delay(100)
+  }
+  return !isProcessAlive(pid)
+}
+
+async function terminateOwnedBrokerProcess(pid: number | undefined): Promise<void> {
+  if (!pid || pid <= 0 || !Number.isInteger(pid) || !isProcessAlive(pid)) return
+
+  try {
+    process.kill(pid, 'SIGTERM')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
+      console.warn(`[broker] Failed to terminate broker process ${pid}:`, err)
+    }
+    return
+  }
+
+  if (await waitForProcessExit(pid, BROKER_REVIVE_TERM_GRACE_MS)) return
+
+  try {
+    process.kill(pid, 'SIGKILL')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
+      console.warn(`[broker] Failed to kill broker process ${pid}:`, err)
+    }
+  }
 }
 
 // NOTE: an earlier version of this file wrapped AgentRelayClient.spawn in an
@@ -822,12 +864,11 @@ export class BrokerManager {
     }
   }
 
-  // Re-establish a local broker whose process has died (cached client points at
-  // a port nothing is listening on). Tearing down the stale session and calling
-  // start() runs connectExistingBroker first — the dead connection.json fails
-  // getSession() and falls through to spawn(), which binds a fresh OS-assigned
-  // port. Deduped per project so concurrent callers (e.g. polled list-agents)
-  // don't race shutdown/start against each other or fork duplicate brokers.
+  // Re-establish a local broker whose process has died or wedged. When this
+  // manager owns the broker child process, terminate it first; otherwise a
+  // wedged process can keep the runtime lock and make the replacement spawn
+  // fail. Deduped per project so concurrent callers don't race teardown/start
+  // against each other or fork duplicate brokers.
   private async reviveSession(projectId: string): Promise<boolean> {
     const existing = this.revivePromises.get(projectId)
     if (existing) return existing
@@ -841,9 +882,11 @@ export class BrokerManager {
     if (!win || win.isDestroyed()) return false
 
     const { cwd, name, channels } = session
+    const brokerPid = session.client.brokerPid
     const promise = (async () => {
       console.warn(`[broker] Broker for project ${projectId} is unreachable; restarting on a fresh port`)
-      await this.shutdown(projectId)
+      this.dropSession(projectId, { disconnectOnly: true })
+      await terminateOwnedBrokerProcess(brokerPid)
       await this.start(projectId, cwd, name, win, channels)
       return this.sessions.has(projectId)
     })()
@@ -1886,6 +1929,9 @@ export class BrokerManager {
         try {
           return await this.collectSessionAgents(session)
         } catch (err) {
+          if (session.cloudSandboxId) {
+            throw err
+          }
           // A dead broker (connection refused) is a definitive signal — respawn
           // immediately. A wedged broker (request timeout) might just be a slow
           // response, so only respawn after MAX consecutive timeouts; below the
@@ -2058,24 +2104,36 @@ export class BrokerManager {
   async shutdown(projectId?: string): Promise<void> {
     const targetProjectIds = projectId ? [projectId] : Array.from(this.sessions.keys())
     for (const targetProjectId of targetProjectIds) {
-      this.closeInputStreamsForProject(targetProjectId)
-      this.brokerTimeoutCounts.delete(targetProjectId)
-
       const session = this.sessions.get(targetProjectId)
-      if (!session) continue
-      session.unsubEvent()
-      if (session.leaseTimer) clearInterval(session.leaseTimer)
       try {
-        await session.client.shutdown()
+        await session?.client.shutdown()
       } catch {
         // Ignore shutdown errors.
       }
-      this.sessions.delete(targetProjectId)
-      for (const [agentName, mappedProjectIds] of Array.from(this.agentProjects.entries())) {
-        mappedProjectIds.delete(targetProjectId)
-        if (mappedProjectIds.size === 0) {
-          this.agentProjects.delete(agentName)
-        }
+      this.dropSession(targetProjectId, { disconnectOnly: false })
+    }
+  }
+
+  private dropSession(projectId: string, options: { disconnectOnly: boolean }): void {
+    this.closeInputStreamsForProject(projectId)
+    this.brokerTimeoutCounts.delete(projectId)
+
+    const session = this.sessions.get(projectId)
+    if (!session) return
+
+    session.unsubEvent()
+    if (session.leaseTimer) clearInterval(session.leaseTimer)
+    if (options.disconnectOnly) {
+      const disconnect = (session.client as { disconnect?: () => void }).disconnect
+      if (typeof disconnect === 'function') {
+        disconnect.call(session.client)
+      }
+    }
+    this.sessions.delete(projectId)
+    for (const [agentName, mappedProjectIds] of Array.from(this.agentProjects.entries())) {
+      mappedProjectIds.delete(projectId)
+      if (mappedProjectIds.size === 0) {
+        this.agentProjects.delete(agentName)
       }
     }
   }
