@@ -197,10 +197,11 @@ const BROKER_EVENT_HISTORY_TTL_MS = 12 * 60 * 60 * 1_000
 // After this many consecutive failures to open a PTY input stream, give up on
 // the WS fast path for that agent and send over HTTP until it re-attaches.
 const MAX_INPUT_STREAM_OPEN_FAILURES = 3
-// A single listAgents timeout can be a one-off slow response; a run of them
-// means the broker process is wedged (alive, accepting TCP, never answering).
-// After this many consecutive timeouts for a project we respawn it rather than
-// time out every poll forever. The first request after a respawn resets this.
+// A single broker read timeout can be a one-off slow response; a run of them
+// means that endpoint is wedged (alive, accepting TCP, never answering).
+// After this many consecutive timeouts for one project/operation we respawn it
+// rather than time out every poll forever. A successful request for that same
+// operation resets the streak.
 const MAX_BROKER_TIMEOUTS_BEFORE_REVIVE = 2
 const BROKER_REVIVE_TERM_GRACE_MS = 1_500
 const PERSONA_REGISTRATION_TIMEOUT_MS = 5_000
@@ -695,8 +696,8 @@ export class BrokerManager {
   // Consecutive background open failures per key; after MAX we stop retrying the
   // WS for this agent (HTTP-only) until the terminal is re-attached.
   private inputStreamOpenFailures = new Map<string, number>()
-  // Consecutive listAgents timeouts per project; after MAX we respawn the wedged
-  // broker. Reset whenever a listAgents call for the project succeeds.
+  // Consecutive broker read timeouts per project/operation; after MAX we
+  // respawn the wedged broker. Reset whenever that operation succeeds.
   private brokerTimeoutCounts = new Map<string, number>()
   private eventObservers = new Set<BrokerEventObserver>()
   private eventHistory: BrokerEventRecord[] = []
@@ -1969,9 +1970,10 @@ export class BrokerManager {
     run: (session: BrokerSession) => Promise<T>,
     options: { degradeOnTimeout?: boolean } = {}
   ): Promise<T> {
+    const timeoutKey = `${session.projectId}:${label}`
     try {
       const result = await run(session)
-      this.brokerTimeoutCounts.delete(session.projectId)
+      this.brokerTimeoutCounts.delete(timeoutKey)
       return result
     } catch (err) {
       // Cloud sessions live in a remote sandbox we can't respawn locally.
@@ -1979,8 +1981,8 @@ export class BrokerManager {
       const unreachable = isBrokerUnreachableError(err)
       if (!unreachable) {
         if (!isBrokerTimeoutError(err)) throw err
-        const timeouts = (this.brokerTimeoutCounts.get(session.projectId) ?? 0) + 1
-        this.brokerTimeoutCounts.set(session.projectId, timeouts)
+        const timeouts = (this.brokerTimeoutCounts.get(timeoutKey) ?? 0) + 1
+        this.brokerTimeoutCounts.set(timeoutKey, timeouts)
         if (timeouts < MAX_BROKER_TIMEOUTS_BEFORE_REVIVE) {
           if (options.degradeOnTimeout) return fallback
           throw err
@@ -1992,7 +1994,7 @@ export class BrokerManager {
       }
       // Restart on a fresh port and retry once against the new session; if
       // recovery fails, degrade to `fallback` rather than rejecting.
-      this.brokerTimeoutCounts.delete(session.projectId)
+      this.brokerTimeoutCounts.delete(timeoutKey)
       const revived = await this.reviveSession(session.projectId)
       const next = revived ? this.sessions.get(session.projectId) : undefined
       if (!next) {
@@ -2001,7 +2003,7 @@ export class BrokerManager {
       }
       try {
         const result = await run(next)
-        this.brokerTimeoutCounts.delete(next.projectId)
+        this.brokerTimeoutCounts.delete(`${next.projectId}:${label}`)
         return result
       } catch (retryErr) {
         console.warn(
@@ -2050,7 +2052,7 @@ export class BrokerManager {
     const agents = await session.client.listAgents()
     // A successful poll means the broker is answering again — clear any wedge
     // streak so a future timeout starts counting from zero.
-    this.brokerTimeoutCounts.delete(session.projectId)
+    this.brokerTimeoutCounts.delete(`${session.projectId}:listAgents`)
     for (const agent of agents) {
       this.rememberAgentProject(agent.name, session.projectId)
     }
@@ -2198,9 +2200,17 @@ export class BrokerManager {
     }
   }
 
+  private clearBrokerTimeoutCountsForProject(projectId: string): void {
+    for (const key of Array.from(this.brokerTimeoutCounts.keys())) {
+      if (key.startsWith(`${projectId}:`)) {
+        this.brokerTimeoutCounts.delete(key)
+      }
+    }
+  }
+
   private dropSession(projectId: string, options: { disconnectOnly: boolean }): void {
     this.closeInputStreamsForProject(projectId)
-    this.brokerTimeoutCounts.delete(projectId)
+    this.clearBrokerTimeoutCountsForProject(projectId)
 
     const session = this.sessions.get(projectId)
     if (!session) return
