@@ -147,7 +147,7 @@ export class IntegrationMountManager {
       mode: 'poll',
       background: true,
       agentName: 'pear-integrations',
-      scopes: ['relayfile:fs:readwrite:/integrations/**'],
+      scopes: ['relayfile:fs:read:/integrations/**', 'relayfile:fs:write:/integrations/**'],
       readyTimeoutMs: MOUNT_READY_TIMEOUT_MS
     })
     this.workspaceId = workspaceId
