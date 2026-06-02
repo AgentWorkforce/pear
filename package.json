@@ -4,6 +4,9 @@
   "productName": "Pear by Agent Relay",
   "description": "Pair programming workspace for humans and AI agents",
   "main": "./out/main/index.js",
+  "bin": {
+    "pear": "bin/pear.mjs"
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",

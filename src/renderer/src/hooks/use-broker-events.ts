@@ -108,6 +108,17 @@ export function useBrokerEvents(): void {
       if (agent) pear.broker.releaseAgent(agent.projectId, agent.name)
     })
 
+    // `pear open <dir>` from the CLI: the main process has already created or
+    // selected the project on disk; reload to pick up any new project, then
+    // switch the UI to it.
+    const unsubOpenProject = pear.onMenu('cli:open-project', (projectId) => {
+      if (typeof projectId !== 'string') return
+      void (async () => {
+        await useProjectStore.getState().load()
+        await useProjectStore.getState().setActiveProject(projectId)
+      })()
+    })
+
     return () => {
       unsubEvent()
       unsubPtyChunk()
@@ -116,6 +127,7 @@ export function useBrokerEvents(): void {
       unsubSpawn()
       unsubCloseTab()
       unsubRelease()
+      unsubOpenProject()
     }
   }, [
     handleBrokerEvent,
