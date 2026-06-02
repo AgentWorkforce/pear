@@ -891,7 +891,7 @@ export class IntegrationsManager {
   private async listCloudWorkspaceIntegrations(): Promise<ConnectedIntegration[]> {
     const workspaceId = await getAccountWorkspaceId()
     // The list is addressed by the account (app) workspace UUID, so it must be
-    // authorized with the account access token — NOT the Relayfile workspace
+    // authorized with the account access token, not the Relayfile workspace
     // handle. The handle's JWT is scoped to Pear's locally-created `rw_*`
     // workspace, which the cloud has no binding for, so the cloud's
     // hasWorkspaceAccess check rejects it as 403 Forbidden. (connect-session and
