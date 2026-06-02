@@ -132,6 +132,19 @@ type WorkspaceIntegrationPayload = {
   }
 }
 
+type IntegrationReadyPayload = {
+  ready?: unknown
+  status?: unknown
+  state?: unknown
+  connectedAt?: unknown
+  connection?: {
+    ready?: unknown
+    status?: unknown
+    state?: unknown
+    connectedAt?: unknown
+  }
+}
+
 type CloudAgentIntegrationsBridge = {
   updateMountPaths: (projectId: string, paths: string[]) => Promise<void> | void
 }
@@ -1010,7 +1023,7 @@ export class IntegrationsManager {
     }, existing)
   }
 
-  private statusPayloadReady(payload: IntegrationStatusPayload): boolean {
+  private statusPayloadReady(payload: IntegrationReadyPayload): boolean {
     return payload.ready === true ||
       payload.connection?.ready === true ||
       this.isReadyStatus(payload.status) ||
