@@ -473,6 +473,14 @@ export function registerIpcHandlers(): void {
     return cloudAgentManager.delete(id)
   })
 
+  ipcMain.handle('cloud-agent:prewarm', async (_, projectId: string, cloudAgentId: string) => {
+    return cloudAgentManager.prewarm(projectId, cloudAgentId)
+  })
+
+  ipcMain.handle('cloud-agent:cancel-prewarm', async (_, projectId: string, cloudAgentId?: string) => {
+    return cloudAgentManager.cancelPrewarm(projectId, cloudAgentId)
+  })
+
   ipcMain.handle('cloud-agent:attach', async (event, projectId: string, cloudAgentId: string) => {
     return cloudAgentManager.attach(projectId, cloudAgentId, BrowserWindow.fromWebContents(event.sender))
   })

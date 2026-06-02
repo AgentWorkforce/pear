@@ -167,9 +167,12 @@ function providerMountRoot(provider: string): string {
   return `/integrations/${provider}`
 }
 
-function cloudAgentWorkspaceMode(project: { cloudAgentWorkspaceMode?: unknown }): CloudAgentWorkspaceMode {
-  return project.cloudAgentWorkspaceMode === 'git' || project.cloudAgentWorkspaceMode === 'relayfile'
-    ? project.cloudAgentWorkspaceMode
+function cloudAgentWorkspaceMode(project: unknown): CloudAgentWorkspaceMode {
+  const mode = project && typeof project === 'object'
+    ? (project as { cloudAgentWorkspaceMode?: unknown }).cloudAgentWorkspaceMode
+    : undefined
+  return mode === 'git' || mode === 'relayfile'
+    ? mode
     : 'git-overlay'
 }
 

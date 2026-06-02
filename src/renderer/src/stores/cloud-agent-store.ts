@@ -2,6 +2,7 @@ import { create } from 'zustand'
 import type {
   CloudAgentRecord,
   CloudAgentBinding,
+  CloudAgentSandboxPhase,
   CloudAgentStatus,
   CloudAgentEvent
 } from '@/lib/ipc'
@@ -11,8 +12,19 @@ export type CloudAgentCatalogStatus = 'idle' | 'loading' | 'ready' | 'error'
 
 export interface CloudAgentAttachProgress {
   phase: 'idle' | 'warming-sandbox' | 'mounting' | 'connecting-broker' | 'done' | 'error'
+  sandboxPhase?: CloudAgentSandboxPhase
+  etaMs?: number
+  cloudAgentId?: string
+  cloudAgentName?: string
   message?: string
   startedAt: number
+  updatedAt?: number
+}
+
+export interface QueuedCloudAgentPrompt {
+  text: string
+  targetName?: string
+  queuedAt: number
 }
 
 interface CloudAgentState {
@@ -25,6 +37,7 @@ interface CloudAgentState {
   bindings: Record<string, CloudAgentBinding>
   statuses: Record<string, CloudAgentStatus>
   attachProgress: Record<string, CloudAgentAttachProgress>
+  queuedFirstPrompts: Record<string, QueuedCloudAgentPrompt>
 
   setCatalog(records: CloudAgentRecord[]): void
   setCatalogLoading(loading: boolean): void
@@ -38,6 +51,7 @@ interface CloudAgentState {
   setBinding(projectId: string, binding: CloudAgentBinding | null): void
   setStatus(projectId: string, status: CloudAgentStatus | null): void
   setAttachProgress(projectId: string, progress: CloudAgentAttachProgress | null): void
+  queueFirstPrompt(projectId: string, prompt: QueuedCloudAgentPrompt | null): void
 
   applyEvent(event: CloudAgentEvent): void
 
@@ -58,6 +72,7 @@ export const useCloudAgentStore = create<CloudAgentState>((set, get) => ({
   bindings: {},
   statuses: {},
   attachProgress: {},
+  queuedFirstPrompts: {},
 
   setCatalog: (records) => set({
     catalog: records,
@@ -104,7 +119,8 @@ export const useCloudAgentStore = create<CloudAgentState>((set, get) => ({
       const { [projectId]: _binding, ...bindings } = state.bindings
       const { [projectId]: _status, ...statuses } = state.statuses
       const { [projectId]: _progress, ...attachProgress } = state.attachProgress
-      return { bindings, statuses, attachProgress }
+      const { [projectId]: _prompt, ...queuedFirstPrompts } = state.queuedFirstPrompts
+      return { bindings, statuses, attachProgress, queuedFirstPrompts }
     }
     return { bindings: { ...state.bindings, [projectId]: binding } }
   }),
@@ -128,6 +144,14 @@ export const useCloudAgentStore = create<CloudAgentState>((set, get) => ({
     return { attachProgress: { ...state.attachProgress, [projectId]: progress } }
   }),
 
+  queueFirstPrompt: (projectId, prompt) => set((state) => {
+    if (prompt === null) {
+      const { [projectId]: _prompt, ...queuedFirstPrompts } = state.queuedFirstPrompts
+      return { queuedFirstPrompts }
+    }
+    return { queuedFirstPrompts: { ...state.queuedFirstPrompts, [projectId]: prompt } }
+  }),
+
   applyEvent: (event) => set((state) => {
     const current = state.statuses[event.projectId]
 
@@ -140,15 +164,23 @@ export const useCloudAgentStore = create<CloudAgentState>((set, get) => ({
         // spinner. Then merge into the persisted status row if we have one.
         const existingProgress = state.attachProgress[event.projectId]
         const startedAt = existingProgress?.startedAt ?? Date.now()
+        const sandboxPhase = event.phase
         const phase: CloudAgentAttachProgress['phase'] =
-          event.status === 'ready' ? 'connecting-broker'
+          sandboxPhase === 'ready' ? 'done'
+          : sandboxPhase === 'mounting' ? 'mounting'
+          : event.status === 'ready' ? 'connecting-broker'
           : event.status === 'failed' ? 'error'
           : event.status === 'stopping' || event.status === 'stopped' ? 'idle'
           : 'warming-sandbox'
         const nextProgress: CloudAgentAttachProgress = {
           phase,
-          message: `Sandbox ${event.status}`,
-          startedAt
+          sandboxPhase,
+          etaMs: event.etaMs,
+          cloudAgentId: existingProgress?.cloudAgentId,
+          cloudAgentName: existingProgress?.cloudAgentName,
+          message: sandboxPhase ? undefined : `Sandbox ${event.status}`,
+          startedAt,
+          updatedAt: Date.now()
         }
         return {
           attachProgress: { ...state.attachProgress, [event.projectId]: nextProgress },
@@ -157,7 +189,12 @@ export const useCloudAgentStore = create<CloudAgentState>((set, get) => ({
               ...state.statuses,
               [event.projectId]: {
                 ...current,
-                sandbox: { ...current.sandbox, status: event.status }
+                sandbox: {
+                  ...current.sandbox,
+                  status: event.status,
+                  ...(event.phase ? { phase: event.phase } : {}),
+                  ...(event.etaMs !== undefined ? { etaMs: event.etaMs } : {})
+                }
               }
             }
           } : {})
@@ -184,17 +221,24 @@ export const useCloudAgentStore = create<CloudAgentState>((set, get) => ({
         }
       }
 
-      case 'error':
+      case 'error': {
+        const existingProgress = state.attachProgress[event.projectId]
+        const { [event.projectId]: _prompt, ...queuedFirstPrompts } = state.queuedFirstPrompts
         return {
           attachProgress: {
             ...state.attachProgress,
             [event.projectId]: {
               phase: 'error',
+              cloudAgentId: existingProgress?.cloudAgentId,
+              cloudAgentName: existingProgress?.cloudAgentName,
               message: event.message,
-              startedAt: Date.now()
+              startedAt: existingProgress?.startedAt ?? Date.now(),
+              updatedAt: Date.now()
             }
-          }
+          },
+          queuedFirstPrompts
         }
+      }
     }
 
     return {}
@@ -213,6 +257,7 @@ export const useCloudAgentStore = create<CloudAgentState>((set, get) => ({
     authStatus: 'unknown',
     bindings: {},
     statuses: {},
-    attachProgress: {}
+    attachProgress: {},
+    queuedFirstPrompts: {}
   })
 }))
