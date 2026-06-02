@@ -198,6 +198,12 @@ const BROKER_EVENT_HISTORY_TTL_MS = 12 * 60 * 60 * 1_000
 // After this many consecutive failures to open a PTY input stream, give up on
 // the WS fast path for that agent and send over HTTP until it re-attaches.
 const MAX_INPUT_STREAM_OPEN_FAILURES = 3
+// A single listAgents timeout can be a one-off slow response; a run of them
+// means the broker process is wedged (alive, accepting TCP, never answering).
+// After this many consecutive timeouts for a project we respawn it rather than
+// time out every poll forever. The first request after a respawn resets this.
+const MAX_BROKER_TIMEOUTS_BEFORE_REVIVE = 2
+const BROKER_REVIVE_TERM_GRACE_MS = 1_500
 const PERSONA_REGISTRATION_TIMEOUT_MS = 5_000
 const PERSONA_REGISTRATION_STABILITY_MS = 1_000
 const AGENTWORKFORCE_CLI_VERSION = '3.0.22'
@@ -240,6 +246,47 @@ function getPearBurnSpawnEnrichment(
   }
 }
 
+function isProcessAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'EPERM'
+  }
+}
+
+async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(pid)) return true
+    await delay(100)
+  }
+  return !isProcessAlive(pid)
+}
+
+async function terminateOwnedBrokerProcess(pid: number | undefined): Promise<void> {
+  if (!pid || pid <= 0 || !Number.isInteger(pid) || !isProcessAlive(pid)) return
+
+  try {
+    process.kill(pid, 'SIGTERM')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
+      console.warn(`[broker] Failed to terminate broker process ${pid}:`, err)
+    }
+    return
+  }
+
+  if (await waitForProcessExit(pid, BROKER_REVIVE_TERM_GRACE_MS)) return
+
+  try {
+    process.kill(pid, 'SIGKILL')
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ESRCH') {
+      console.warn(`[broker] Failed to kill broker process ${pid}:`, err)
+    }
+  }
+}
+
 // NOTE: an earlier version of this file wrapped AgentRelayClient.spawn in an
 // outer retry for retryable errors. That was unsafe: every spawn() call forks
 // a fresh broker child process (see client.js spawn → child_process.spawn),
@@ -268,6 +315,56 @@ function isUnsupportedInputStreamError(err: unknown): boolean {
 
 function isMissingAgentError(err: unknown): boolean {
   return getErrorStatus(err) === 404 || /agent_not_found|no worker named|not found/i.test(toErrorMessage(err))
+}
+
+// Walk an error's `cause` chain looking for any node that satisfies `predicate`.
+// Node's `fetch` wraps the real socket error: a dead broker surfaces as
+// `TypeError: fetch failed` whose `cause` carries the `ECONNREFUSED` code, and
+// `toErrorMessage` only reads the top-level `.message`, so the cause chain is
+// where the actionable signal lives.
+function someInCauseChain(err: unknown, predicate: (node: Record<string, unknown>) => boolean): boolean {
+  const seen = new Set<unknown>()
+  let current: unknown = err
+  while (current && typeof current === 'object' && !seen.has(current)) {
+    seen.add(current)
+    if (predicate(current as Record<string, unknown>)) return true
+    current = (current as { cause?: unknown }).cause
+  }
+  return false
+}
+
+// A dead local broker (process exited, nothing listening on the cached port)
+// fails the connection outright with `ECONNREFUSED`/`ECONNRESET`. This is a
+// definitive "broker is gone" signal — safe to respawn on the spot.
+function isBrokerUnreachableError(err: unknown): boolean {
+  return someInCauseChain(err, (node) => {
+    const code = node.code
+    if (code === 'ECONNREFUSED' || code === 'ECONNRESET') return true
+    const message = node.message
+    return typeof message === 'string' && /ECONNREFUSED|ECONNRESET/.test(message)
+  })
+}
+
+// A wedged broker (alive, accepting the TCP connection, but never answering the
+// HTTP request) surfaces as the transport's `AbortSignal.timeout` firing — a
+// `TimeoutError` DOMException — or as a socket-level `ETIMEDOUT`. Unlike an
+// unreachable broker this can also be a one-off slow response, so callers gate
+// respawning behind a consecutive-timeout count rather than acting immediately.
+function isBrokerTimeoutError(err: unknown): boolean {
+  return someInCauseChain(err, (node) => {
+    if (node.code === 'ETIMEDOUT') return true
+    if (node.name === 'TimeoutError') return true
+    const message = node.message
+    return typeof message === 'string' && /aborted due to timeout|ETIMEDOUT|timed?out/i.test(message)
+  })
+}
+
+// The PTY input WS rejects in-flight sends with `input_stream_closed` when the
+// stream is deliberately torn down (project/agent shutdown, terminal re-attach)
+// while a keystroke was mid-flight. That's an expected close, not a transport
+// failure — callers fall through to HTTP without logging it as an error.
+function isInputStreamClosedError(err: unknown): boolean {
+  return (err as { code?: unknown } | null | undefined)?.code === 'input_stream_closed'
 }
 
 function getBrokerEventName(event: BrokerEvent): string | undefined {
@@ -623,6 +720,7 @@ interface BrokerClientInternals {
 export class BrokerManager {
   private sessions = new Map<string, BrokerSession>()
   private startPromises = new Map<string, Promise<void>>()
+  private revivePromises = new Map<string, Promise<boolean>>()
   private agentProjects = new Map<string, Set<string>>()
   private inputStreams = new Map<string, PtyInputStream>()
   private inputStreamFallbacks = new Set<string>()
@@ -633,6 +731,9 @@ export class BrokerManager {
   // Consecutive background open failures per key; after MAX we stop retrying the
   // WS for this agent (HTTP-only) until the terminal is re-attached.
   private inputStreamOpenFailures = new Map<string, number>()
+  // Consecutive listAgents timeouts per project; after MAX we respawn the wedged
+  // broker. Reset whenever a listAgents call for the project succeeds.
+  private brokerTimeoutCounts = new Map<string, number>()
   private eventObservers = new Set<BrokerEventObserver>()
   private eventHistory: BrokerEventRecord[] = []
   private eventSerial = 0
@@ -801,6 +902,47 @@ export class BrokerManager {
     }
   }
 
+  // Re-establish a local broker whose process has died or wedged. When this
+  // manager owns the broker child process, terminate it first; otherwise a
+  // wedged process can keep the runtime lock and make the replacement spawn
+  // fail. Deduped per project so concurrent callers don't race teardown/start
+  // against each other or fork duplicate brokers.
+  private async reviveSession(projectId: string): Promise<boolean> {
+    const existing = this.revivePromises.get(projectId)
+    if (existing) return existing
+
+    const session = this.sessions.get(projectId)
+    if (!session) return false
+    // Cloud sessions can't be re-spawned locally — they live in a remote
+    // sandbox and are owned by CloudAgentManager.
+    if (session.cloudSandboxId) return false
+    const win = session.window
+    if (!win || win.isDestroyed()) return false
+
+    const { cwd, name, channels } = session
+    const brokerPid = session.client.brokerPid
+    let promise!: Promise<boolean>
+    promise = (async () => {
+      console.warn(`[broker] Broker for project ${projectId} is unreachable; restarting on a fresh port`)
+      this.dropSession(projectId, { disconnectOnly: true })
+      await terminateOwnedBrokerProcess(brokerPid)
+      if (this.revivePromises.get(projectId) !== promise) return false
+      await this.start(projectId, cwd, name, win, channels)
+      return this.sessions.has(projectId)
+    })()
+    this.revivePromises.set(projectId, promise)
+    try {
+      return await promise
+    } catch (err) {
+      console.error(`[broker] Failed to revive broker for project ${projectId}:`, toErrorMessage(err))
+      return false
+    } finally {
+      if (this.revivePromises.get(projectId) === promise) {
+        this.revivePromises.delete(projectId)
+      }
+    }
+  }
+
   async autoFixRuntime(
     projectId: string,
     cwd: string,
@@ -966,6 +1108,23 @@ export class BrokerManager {
 
   private getSessionForProject(projectId: string): BrokerSession {
     const normalizedProjectId = projectId.trim()
+    const session = this.sessions.get(normalizedProjectId)
+    if (!session) {
+      throw new Error('Relay workspace not started — select the project first')
+    }
+    return session
+  }
+
+  private async getOrAwaitSession(projectId: string): Promise<BrokerSession> {
+    const normalizedProjectId = projectId.trim()
+    const revivePromise = this.revivePromises.get(normalizedProjectId)
+    if (revivePromise) {
+      await revivePromise.catch(() => undefined)
+    }
+    const startPromise = this.startPromises.get(normalizedProjectId)
+    if (startPromise) {
+      await startPromise.catch(() => undefined)
+    }
     const session = this.sessions.get(normalizedProjectId)
     if (!session) {
       throw new Error('Relay workspace not started — select the project first')
@@ -1758,7 +1917,13 @@ export class BrokerManager {
           if (isUnsupportedInputStreamError(err)) {
             this.inputStreamFallbacks.add(key)
           }
-          console.warn(`[broker] PTY input stream failed for ${trimmedName}; falling back to HTTP input:`, err)
+          // A deliberate close (project/agent shutdown, terminal re-attach) that
+          // races an in-flight send rejects with `input_stream_closed`. That's
+          // not a transport failure — fall through to HTTP silently instead of
+          // logging a misleading "stream failed" warning (notably on app quit).
+          if (!isInputStreamClosedError(err)) {
+            console.warn(`[broker] PTY input stream failed for ${trimmedName}; falling back to HTTP input:`, err)
+          }
         }
       }
     }
@@ -1924,22 +2089,82 @@ export class BrokerManager {
     projectId: string
     inboundDeliveryMode?: InboundDeliveryMode
   }>> {
-    const sessions = projectId ? [this.getSessionForProject(projectId)] : Array.from(this.sessions.values())
+    const sessions = projectId
+      ? [await this.getOrAwaitSession(projectId)]
+      : (await Promise.all(
+          Array.from(new Set([
+            ...Array.from(this.sessions.keys()),
+            ...Array.from(this.revivePromises.keys()),
+            ...Array.from(this.startPromises.keys())
+          ])).map((id) => this.getOrAwaitSession(id).catch(() => undefined))
+        )).filter((session): session is BrokerSession => !!session)
     const results = await Promise.all(
       sessions.map(async (session) => {
-        const agents = await session.client.listAgents()
-        for (const agent of agents) {
-          this.rememberAgentProject(agent.name, session.projectId)
+        try {
+          return await this.collectSessionAgents(session)
+        } catch (err) {
+          if (session.cloudSandboxId) {
+            throw err
+          }
+          // A dead broker (connection refused) is a definitive signal — respawn
+          // immediately. A wedged broker (request timeout) might just be a slow
+          // response, so only respawn after MAX consecutive timeouts; below the
+          // threshold we rethrow so the renderer keeps its stale agent list
+          // rather than flickering to empty on a transient blip.
+          const unreachable = isBrokerUnreachableError(err)
+          if (!unreachable) {
+            if (!isBrokerTimeoutError(err)) throw err
+            const timeouts = (this.brokerTimeoutCounts.get(session.projectId) ?? 0) + 1
+            this.brokerTimeoutCounts.set(session.projectId, timeouts)
+            if (timeouts < MAX_BROKER_TIMEOUTS_BEFORE_REVIVE) throw err
+            console.warn(
+              `[broker] listAgents: broker for project ${session.projectId} timed out ${timeouts}x; ` +
+              `restarting it on a fresh port`
+            )
+          }
+          // Restart on a fresh port and retry once against the new session; if
+          // recovery fails, degrade to an empty list for this project rather
+          // than failing the whole call (other projects may still be healthy).
+          this.brokerTimeoutCounts.delete(session.projectId)
+          const revived = await this.reviveSession(session.projectId)
+          const next = revived ? this.sessions.get(session.projectId) : undefined
+          if (!next) {
+            console.warn(`[broker] listAgents: broker for project ${session.projectId} is unreachable; returning no agents`)
+            return []
+          }
+          try {
+            return await this.collectSessionAgents(next)
+          } catch (retryErr) {
+            console.warn(
+              `[broker] listAgents: broker for project ${session.projectId} is still unreachable after restart; ` +
+              `returning no agents:`,
+              retryErr
+            )
+            return []
+          }
         }
-        return Promise.all(
-          agents.map(async (agent) => {
-            const inboundDeliveryMode = await session.client.getInboundDeliveryMode(agent.name).catch(() => undefined)
-            return { ...agent, projectId: session.projectId, inboundDeliveryMode }
-          })
-        )
       })
     )
     return results.flat()
+  }
+
+  private async collectSessionAgents(session: BrokerSession): Promise<Array<ListAgent & {
+    projectId: string
+    inboundDeliveryMode?: InboundDeliveryMode
+  }>> {
+    const agents = await session.client.listAgents()
+    // A successful poll means the broker is answering again — clear any wedge
+    // streak so a future timeout starts counting from zero.
+    this.brokerTimeoutCounts.delete(session.projectId)
+    for (const agent of agents) {
+      this.rememberAgentProject(agent.name, session.projectId)
+    }
+    return Promise.all(
+      agents.map(async (agent) => {
+        const inboundDeliveryMode = await session.client.getInboundDeliveryMode(agent.name).catch(() => undefined)
+        return { ...agent, projectId: session.projectId, inboundDeliveryMode }
+      })
+    )
   }
 
   async listBrokerDetails(): Promise<BrokerDetails[]> {
@@ -2060,25 +2285,44 @@ export class BrokerManager {
   }
 
   async shutdown(projectId?: string): Promise<void> {
-    const targetProjectIds = projectId ? [projectId] : Array.from(this.sessions.keys())
+    const targetProjectIds = projectId
+      ? [projectId]
+      : Array.from(new Set([
+          ...Array.from(this.sessions.keys()),
+          ...Array.from(this.revivePromises.keys())
+        ]))
     for (const targetProjectId of targetProjectIds) {
-      this.closeInputStreamsForProject(targetProjectId)
-
+      this.revivePromises.delete(targetProjectId)
       const session = this.sessions.get(targetProjectId)
-      if (!session) continue
-      session.unsubEvent()
-      if (session.leaseTimer) clearInterval(session.leaseTimer)
       try {
-        await session.client.shutdown()
+        await session?.client.shutdown()
       } catch {
         // Ignore shutdown errors.
       }
-      this.sessions.delete(targetProjectId)
-      for (const [agentName, mappedProjectIds] of Array.from(this.agentProjects.entries())) {
-        mappedProjectIds.delete(targetProjectId)
-        if (mappedProjectIds.size === 0) {
-          this.agentProjects.delete(agentName)
-        }
+      this.dropSession(targetProjectId, { disconnectOnly: false })
+    }
+  }
+
+  private dropSession(projectId: string, options: { disconnectOnly: boolean }): void {
+    this.closeInputStreamsForProject(projectId)
+    this.brokerTimeoutCounts.delete(projectId)
+
+    const session = this.sessions.get(projectId)
+    if (!session) return
+
+    session.unsubEvent()
+    if (session.leaseTimer) clearInterval(session.leaseTimer)
+    if (options.disconnectOnly) {
+      const disconnect = (session.client as { disconnect?: () => void }).disconnect
+      if (typeof disconnect === 'function') {
+        disconnect.call(session.client)
+      }
+    }
+    this.sessions.delete(projectId)
+    for (const [agentName, mappedProjectIds] of Array.from(this.agentProjects.entries())) {
+      mappedProjectIds.delete(projectId)
+      if (mappedProjectIds.size === 0) {
+        this.agentProjects.delete(agentName)
       }
     }
   }
