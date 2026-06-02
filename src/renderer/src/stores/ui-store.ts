@@ -7,14 +7,14 @@ import {
 } from '@/lib/direct-messages'
 import type { BurnAgentInput } from '@/lib/ipc'
 
-export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'ai-hist' | 'burn-session'
+export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'ai-hist' | 'burn-session' | 'burn-project' | 'burn-session-detail'
 export type DialogType = 'add-project' | 'spawn-agent' | 'spawn-local-agent' | 'cloud-agent' | 'add-channel' | 'command-menu' | null
 const ThemeSchema = z.enum(['dark', 'light'])
 const TerminalLayoutSchema = z.enum(['tabs', 'horizontal-split', 'graph'])
 const BooleanPreferenceSchema = z.enum(['true', 'false']).transform((value) => value === 'true')
 export type Theme = z.infer<typeof ThemeSchema>
 export type TerminalLayout = z.infer<typeof TerminalLayoutSchema>
-export type AppTabKind = 'agents' | 'channel' | 'dm' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'ai-hist' | 'burn-session'
+export type AppTabKind = 'agents' | 'channel' | 'dm' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'ai-hist' | 'burn-session' | 'burn-project' | 'burn-session-detail'
 
 export interface AppTab {
   id: string
@@ -24,6 +24,7 @@ export interface AppTab {
   channelName?: string
   dmParticipants?: string[]
   burnAgent?: BurnAgentInput
+  burnSessionId?: string
 }
 
 export type AppTabInput = Omit<AppTab, 'id' | 'title'> & {
@@ -112,6 +113,10 @@ function getTabId(tab: AppTabInput): string {
       return `ai-hist:${tab.projectId || 'global'}`
     case 'burn-session':
       return `burn-session:${tab.burnAgent?.projectId || tab.projectId || 'unknown'}:${tab.burnAgent?.name || 'agent'}`
+    case 'burn-project':
+      return `burn-project:${tab.projectId || 'unknown'}`
+    case 'burn-session-detail':
+      return `burn-session-detail:${tab.burnSessionId || 'unknown'}`
   }
 }
 
@@ -137,6 +142,10 @@ function getTabTitle(tab: AppTabInput): string {
       return 'Conversations'
     case 'burn-session':
       return tab.burnAgent?.name ? `${tab.burnAgent.name} burn` : 'Burn'
+    case 'burn-project':
+      return 'Project burn'
+    case 'burn-session-detail':
+      return 'Session burn'
   }
 }
 
@@ -150,7 +159,10 @@ function createTab(input: AppTabInput): AppTab {
     dmParticipants: input.kind === 'dm'
       ? sortDirectMessageParticipants(input.dmParticipants || [])
       : undefined,
-    burnAgent: input.kind === 'burn-session' ? input.burnAgent : undefined
+    burnAgent: input.kind === 'burn-session' || input.kind === 'burn-session-detail'
+      ? input.burnAgent
+      : undefined,
+    burnSessionId: input.kind === 'burn-session-detail' ? input.burnSessionId : undefined
   }
 }
 
@@ -173,6 +185,10 @@ function viewModeForTab(tab: AppTab): ViewMode {
       return 'ai-hist'
     case 'burn-session':
       return 'burn-session'
+    case 'burn-project':
+      return 'burn-project'
+    case 'burn-session-detail':
+      return 'burn-session-detail'
   }
 }
 
@@ -191,6 +207,10 @@ function tabInputForViewMode(mode: ViewMode): AppTabInput {
     case 'ai-hist':
       return { kind: 'ai-hist' }
     case 'burn-session':
+      return { kind: 'agents' }
+    case 'burn-project':
+      return { kind: 'agents' }
+    case 'burn-session-detail':
       return { kind: 'agents' }
     case 'graph':
     case 'terminal':

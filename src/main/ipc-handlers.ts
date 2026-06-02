@@ -23,7 +23,7 @@ import { cloudAgentManager } from './cloud-agent'
 import { proactiveAgentManager } from './proactive-agent'
 import { integrationsManager } from './integrations'
 import { aiHistManager } from './ai-hist'
-import { burnManager, type BurnAgentInput } from './burn'
+import { burnManager, type BurnAgentInput, type BurnProjectInput, type BurnSessionBreakdownInput, type BurnFingerprintInput } from './burn'
 import { resetRelayWorkspaceManager } from './relay-workspace'
 import { assertDirectory, isDirectory } from './path-utils'
 import type { ProactiveAgentDraft } from './proactive-agent.types'
@@ -293,6 +293,26 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('burn:get-agent-breakdown', async (_, agent: BurnAgentInput) => {
     return burnManager.getAgentBreakdown(agent)
+  })
+
+  ipcMain.handle('burn:get-project-breakdown', async (_, input: BurnProjectInput) => {
+    return burnManager.getProjectBreakdown(input)
+  })
+
+  ipcMain.handle('burn:lookup-sessions', async (_, sessionIds: string[]) => {
+    return burnManager.lookupSessions(Array.isArray(sessionIds) ? sessionIds : [])
+  })
+
+  ipcMain.handle('burn:get-session-breakdown', async (_, input: BurnSessionBreakdownInput) => {
+    return burnManager.getSessionBreakdown(input)
+  })
+
+  ipcMain.handle('burn:fingerprint', async (_, input: BurnFingerprintInput) => {
+    return burnManager.getFingerprint(input ?? {})
+  })
+
+  ipcMain.handle('burn:get-project-overhead', async (_, input: { projectId: string }) => {
+    return burnManager.getProjectOverhead(input)
   })
 
   // --- Git ---

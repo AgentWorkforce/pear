@@ -36,6 +36,10 @@ function TabIcon({ tab, className = '' }: { tab: AppTab; className?: string }): 
       return <Clock3 size={14} className={iconClassName} />
     case 'burn-session':
       return <Flame size={14} className={iconClassName} />
+    case 'burn-project':
+      return <Flame size={14} className={iconClassName} />
+    case 'burn-session-detail':
+      return <Flame size={14} className={iconClassName} />
     case 'agents':
       return <LayoutGrid size={14} className={iconClassName} />
   }
@@ -59,6 +63,10 @@ function tabSubtitle(tab: AppTab, projectNameById: Map<string, string>): string 
       return projectName ? `${projectName} history` : 'Conversation history'
     case 'burn-session':
       return projectName ? `${projectName} burn` : 'Burn breakdown'
+    case 'burn-project':
+      return projectName ? `${projectName} burn rollup` : 'Project burn rollup'
+    case 'burn-session-detail':
+      return projectName ? `${projectName} session` : 'Session burn'
     case 'agents':
       return projectName ? `${projectName} agents` : 'Agent quadrants'
   }

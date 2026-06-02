@@ -7,6 +7,8 @@ import { TerminalPane } from '@/components/terminal/TerminalPane'
 import { ChatView } from '@/components/chat/ChatView'
 import { BrokerDetailsPage } from '@/components/broker/BrokerDetailsPage'
 import { BurnSessionPage } from '@/components/burn/BurnSessionPage'
+import { BurnProjectPage } from '@/components/burn/BurnProjectPage'
+import { BurnSessionDetailPage } from '@/components/burn/BurnSessionDetailPage'
 import { DiffPane } from '@/components/diff/DiffPane'
 import ConversationsPanel from '@/components/ai-hist/ConversationsPanel'
 import { AppTopBar } from '@/components/common/AppTopBar'
@@ -99,6 +101,10 @@ export default function App(): React.ReactNode {
       ? <ConversationsPanel />
     : activeTab?.kind === 'burn-session'
       ? <BurnSessionPage />
+    : activeTab?.kind === 'burn-project'
+      ? <BurnProjectPage />
+    : activeTab?.kind === 'burn-session-detail'
+      ? <BurnSessionDetailPage />
     : activeTab?.kind === 'channel' || activeTab?.kind === 'dm'
       ? <ChatView />
       : <TerminalPane />
