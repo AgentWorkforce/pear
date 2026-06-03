@@ -8,7 +8,8 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "test": "node --experimental-strip-types --no-warnings --test 'src/main/__tests__/*.test.ts'"
+    "test": "node --experimental-strip-types --no-warnings --test 'src/main/__tests__/*.test.ts'",
+    "personas:refresh": "npx --yes agentworkforce install @agentworkforce/persona-autonomous-actor --overwrite"
   },
   "dependencies": {
     "@agent-relay/events": "^6.3.6",

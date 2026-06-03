@@ -11,15 +11,18 @@ persona pack**
 — it is not hand-maintained. It is materialized here so the persona is available
 to pear's local workforce tooling.
 
-Refresh it with the workforce CLI (copies the spec into `workforce/personas/`):
+Refresh it from the latest published pack (copies the spec into
+`workforce/personas/`) with:
 
 ```bash
-agentworkforce install @agentworkforce/persona-autonomous-actor --overwrite
+npm run personas:refresh
 ```
 
-(Requires the pack at `>=0.1.2`, which ships the `agentworkforce.personas`
-layout.) To change the persona, edit it in the package, republish, then re-run
-the install — do not hand-edit `autonomous-actor.json`.
+which runs `agentworkforce install @agentworkforce/persona-autonomous-actor
+--overwrite`. (Requires the pack at `>=0.1.2`, which ships the
+`agentworkforce.personas` layout.) To change the persona, edit it in the
+package, republish, then re-run the refresh — do not hand-edit
+`autonomous-actor.json`. Commit the resulting diff.
 
 Other personas in `workforce/personas/` (e.g. `settings-panel-hero.json`) are
 repo-local and unaffected.
