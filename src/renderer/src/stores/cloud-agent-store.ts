@@ -182,8 +182,13 @@ export const useCloudAgentStore = create<CloudAgentState>((set, get) => ({
           startedAt,
           updatedAt: Date.now()
         }
+        const attachProgress = phase === 'done' && current && !state.queuedFirstPrompts[event.projectId]
+          ? Object.fromEntries(
+              Object.entries(state.attachProgress).filter(([projectId]) => projectId !== event.projectId)
+            )
+          : { ...state.attachProgress, [event.projectId]: nextProgress }
         return {
-          attachProgress: { ...state.attachProgress, [event.projectId]: nextProgress },
+          attachProgress,
           ...(current ? {
             statuses: {
               ...state.statuses,
