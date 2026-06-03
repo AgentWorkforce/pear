@@ -3,6 +3,12 @@
   "version": "1.0.0",
   "productName": "Pear by Agent Relay",
   "description": "Pair programming workspace for humans and AI agents",
+  "author": "Agent Relay",
+  "homepage": "https://github.com/AgentWorkforce/pear",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/AgentWorkforce/pear.git"
+  },
   "main": "./out/main/index.js",
   "bin": {
     "pear": "bin/pear.mjs"
@@ -11,7 +17,10 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
-    "test": "node --experimental-strip-types --no-warnings --test 'src/main/__tests__/*.test.ts'"
+    "test": "node --experimental-strip-types --no-warnings --test 'src/main/__tests__/*.test.ts'",
+    "pack": "npm run build && electron-builder --mac --dir",
+    "dist": "npm run build && electron-builder --mac",
+    "release": "npm run build && electron-builder --mac --publish always"
   },
   "dependencies": {
     "@agent-relay/events": "^6.3.6",
@@ -26,6 +35,7 @@
     "agentworkforce": "3.0.35",
     "ai-hist": "^0.2.3",
     "allotment": "^1.0.9",
+    "electron-updater": "^6.3.9",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-diff-view": "^3.2.1",
@@ -36,11 +46,13 @@
     "zustand": "^5.0.0"
   },
   "devDependencies": {
+    "@electron/notarize": "^2.5.0",
     "@tailwindcss/vite": "^4.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",
     "electron": "^42.1.0",
+    "electron-builder": "^25.1.8",
     "electron-vite": "^5.0.0",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.7.0",

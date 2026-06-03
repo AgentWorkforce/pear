@@ -10,6 +10,8 @@ import { registerAvatarCacheProtocol } from './avatar-cache'
 import { openProjectForPath, parseOpenCommand, type OpenPathDeps } from './cli'
 import { addProject, loadStore, setActiveProject } from './store'
 import { isDirectory } from './path-utils'
+import { initAutoUpdater, registerUpdaterIpc, checkForUpdatesInteractive } from './updater'
+import { registerCliInstallIpc, promptInstallPearCli } from './cli-install'
 
 const APP_NAME = 'Pear by Agent Relay'
 
@@ -159,6 +161,19 @@ function createMenu(): void {
       label: app.name,
       submenu: [
         { role: 'about' },
+        {
+          label: 'Check for Updates…',
+          click: (): void => {
+            void checkForUpdatesInteractive()
+          }
+        },
+        { type: 'separator' },
+        {
+          label: "Install 'pear' command in PATH…",
+          click: (): void => {
+            void promptInstallPearCli()
+          }
+        },
         { type: 'separator' },
         { role: 'services' },
         { type: 'separator' },
@@ -280,6 +295,9 @@ if (!gotSingleInstanceLock) {
 
     registerAvatarCacheProtocol()
     registerIpcHandlers()
+    registerUpdaterIpc()
+    registerCliInstallIpc()
+    initAutoUpdater()
     // Prime the burn ledger off the critical path so the first burn view (and the
     // status-bar summary) queries a warm binding/DB instead of stalling ~1.5-4s.
     burnManager.warmUp()

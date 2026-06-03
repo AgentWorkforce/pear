@@ -1,6 +1,7 @@
 node_modules/
 out/
 dist/
+release/
 .npm-cache/
 *.env
 .DS_Store

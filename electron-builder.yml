@@ -1,0 +1,55 @@
+appId: com.agentrelay.pear
+productName: Pear by Agent Relay
+copyright: Copyright © 2026 Agent Relay
+
+# electron-vite emits the compiled app into out/. We ship that plus the
+# production node_modules (native deps like ssh2/cpu-features are required at
+# runtime because they're externalized from the main bundle).
+directories:
+  output: release/${version}
+  buildResources: build
+
+files:
+  - out/**/*
+  - package.json
+  - "!**/*.{ts,tsx,map,md}"
+  - "!**/{tsconfig.json,tsconfig.*.json,.eslintrc.*,.prettierrc.*}"
+
+# Native .node addons can't live inside the asar — unpack them so dlopen works.
+asarUnpack:
+  - "**/*.node"
+  - "**/node_modules/ssh2/**"
+  - "**/node_modules/cpu-features/**"
+
+mac:
+  category: public.app-category.developer-tools
+  icon: resources/app-icon.png
+  target:
+    # dmg for distribution, zip so electron-updater can self-update.
+    - target: dmg
+      arch:
+        - arm64
+        - x64
+    - target: zip
+      arch:
+        - arm64
+        - x64
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+  extendInfo:
+    # Surface a friendlier "open with" / about identity.
+    NSHumanReadableCopyright: Copyright © 2026 Agent Relay
+
+dmg:
+  artifactName: ${productName}-${version}-${arch}.${ext}
+
+# afterSign runs notarization (build/notarize.cjs) once the app is signed.
+afterSign: build/notarize.cjs
+
+publish:
+  provider: github
+  owner: AgentWorkforce
+  repo: pear
+  releaseType: release
