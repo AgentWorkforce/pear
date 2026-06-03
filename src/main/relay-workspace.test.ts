@@ -31,6 +31,11 @@ const mock = vi.hoisted(() => {
     requestJson: ReturnType<typeof vi.fn>
   }
 
+  type HoistedWorkspaceOptions = {
+    agentName?: string
+    scopes?: string[]
+  }
+
   type HoistedDeferred<T> = {
     promise: Promise<T>
     resolve(value: T): void
@@ -49,8 +54,8 @@ const mock = vi.hoisted(() => {
 
   const createResults = new Map<string, HoistedDeferred<HoistedWorkspaceHandle>>()
   const joinResults = new Map<string, HoistedDeferred<HoistedWorkspaceHandle>>()
-  const createCalls: Array<{ apiUrl: string }> = []
-  const joinCalls: Array<{ apiUrl: string; workspaceId: string }> = []
+  const createCalls: Array<{ apiUrl: string; options?: HoistedWorkspaceOptions }> = []
+  const joinCalls: Array<{ apiUrl: string; workspaceId: string; options?: HoistedWorkspaceOptions }> = []
   const store: { relayWorkspace?: unknown } = {}
   const savedStores: unknown[] = []
   let currentAuth: HoistedCloudAuth | null = null
@@ -62,18 +67,26 @@ const mock = vi.hoisted(() => {
       this.cloudApiUrl = options.cloudApiUrl
     }
 
-    createWorkspace(): Promise<HoistedWorkspaceHandle> {
-      createCalls.push({ apiUrl: this.cloudApiUrl })
+    createWorkspace(options?: HoistedWorkspaceOptions): Promise<HoistedWorkspaceHandle> {
+      createCalls.push({ apiUrl: this.cloudApiUrl, options: cloneOptions(options) })
       const result = createResults.get(this.cloudApiUrl)
       if (!result) throw new Error(`unexpected createWorkspace for ${this.cloudApiUrl}`)
       return result.promise
     }
 
-    joinWorkspace(workspaceId: string): Promise<HoistedWorkspaceHandle> {
-      joinCalls.push({ apiUrl: this.cloudApiUrl, workspaceId })
+    joinWorkspace(workspaceId: string, options?: HoistedWorkspaceOptions): Promise<HoistedWorkspaceHandle> {
+      joinCalls.push({ apiUrl: this.cloudApiUrl, workspaceId, options: cloneOptions(options) })
       const result = joinResults.get(`${this.cloudApiUrl}:${workspaceId}`)
       if (!result) throw new Error(`unexpected joinWorkspace for ${this.cloudApiUrl}:${workspaceId}`)
       return result.promise
+    }
+  }
+
+  function cloneOptions(options?: HoistedWorkspaceOptions): HoistedWorkspaceOptions | undefined {
+    if (!options) return undefined
+    return {
+      ...options,
+      scopes: options.scopes ? [...options.scopes] : undefined
     }
   }
 
@@ -129,6 +142,11 @@ const authB: MockCloudAuth = {
   accountKey: 'account-b'
 }
 
+const accountOptions = {
+  agentName: 'pear-account',
+  scopes: ['relayfile:fs:read:/**', 'relayfile:fs:write:/**']
+}
+
 function createDeferred<T>(): Deferred<T> {
   return mock.createDeferred<T>()
 }
@@ -172,12 +190,15 @@ describe('RelayWorkspaceManager', () => {
     mock.currentAuth = authA
     const firstHandle = manager.getWorkspaceHandle()
     await flushMicrotasks()
-    expect(mock.createCalls).toEqual([{ apiUrl: authA.apiUrl }])
+    expect(mock.createCalls).toEqual([{ apiUrl: authA.apiUrl, options: accountOptions }])
 
     mock.currentAuth = authB
     const secondHandle = manager.getWorkspaceHandle()
     await flushMicrotasks()
-    expect(mock.createCalls).toEqual([{ apiUrl: authA.apiUrl }, { apiUrl: authB.apiUrl }])
+    expect(mock.createCalls).toEqual([
+      { apiUrl: authA.apiUrl, options: accountOptions },
+      { apiUrl: authB.apiUrl, options: accountOptions }
+    ])
 
     createB.resolve(handleB)
     await expect(secondHandle).resolves.toBe(handleB)
@@ -202,12 +223,15 @@ describe('RelayWorkspaceManager', () => {
     mock.currentAuth = authA
     const firstHandle = manager.getWorkspaceHandle()
     await flushMicrotasks()
-    expect(mock.createCalls).toEqual([{ apiUrl: authA.apiUrl }])
+    expect(mock.createCalls).toEqual([{ apiUrl: authA.apiUrl, options: accountOptions }])
 
     mock.currentAuth = authB
     const secondHandle = manager.getWorkspaceHandle()
     await flushMicrotasks()
-    expect(mock.createCalls).toEqual([{ apiUrl: authA.apiUrl }, { apiUrl: authB.apiUrl }])
+    expect(mock.createCalls).toEqual([
+      { apiUrl: authA.apiUrl, options: accountOptions },
+      { apiUrl: authB.apiUrl, options: accountOptions }
+    ])
 
     createA.resolve(handleA)
     await flushMicrotasks()
@@ -217,5 +241,30 @@ describe('RelayWorkspaceManager', () => {
     await expect(secondHandle).resolves.toBe(handleB)
     expect(manager.getPersisted()?.id).toBe('ws-b')
     expect(mock.saveStore).toHaveBeenCalledTimes(1)
+  })
+
+  it('joins a persisted account workspace with separate relayfile read and write scopes', async () => {
+    const manager = new RelayWorkspaceManager()
+    const join = createDeferred<MockWorkspaceHandle>()
+    const handle = createHandle('ws-existing')
+    mock.joinResults.set(`${authA.apiUrl}:ws-existing`, join)
+    mock.store.relayWorkspace = {
+      id: 'ws-existing',
+      createdAt: '2026-06-02T00:00:00.000Z',
+      apiUrl: authA.apiUrl,
+      authKey: authA.accountKey
+    }
+
+    mock.currentAuth = authA
+    const joinedHandle = manager.getWorkspaceHandle()
+    await flushMicrotasks()
+
+    expect(mock.joinCalls).toEqual([
+      { apiUrl: authA.apiUrl, workspaceId: 'ws-existing', options: accountOptions }
+    ])
+    expect(mock.createCalls).toEqual([])
+
+    join.resolve(handle)
+    await expect(joinedHandle).resolves.toBe(handle)
   })
 })

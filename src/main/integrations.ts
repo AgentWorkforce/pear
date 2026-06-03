@@ -132,6 +132,19 @@ type WorkspaceIntegrationPayload = {
   }
 }
 
+type IntegrationReadyPayload = {
+  ready?: unknown
+  status?: unknown
+  state?: unknown
+  connectedAt?: unknown
+  connection?: {
+    ready?: unknown
+    status?: unknown
+    state?: unknown
+    connectedAt?: unknown
+  }
+}
+
 type CloudAgentIntegrationsBridge = {
   updateMountPaths: (projectId: string, paths: string[]) => Promise<void> | void
 }
@@ -876,29 +889,35 @@ export class IntegrationsManager {
   }
 
   private async listCloudWorkspaceIntegrations(): Promise<ConnectedIntegration[]> {
-    return this.withWorkspaceHandle(async (handle) => {
-      const workspaceId = await getAccountWorkspaceId()
-      const payload = await handle.requestJson({
-        operation: 'listIntegrations',
-        method: 'GET',
-        path: `api/v1/workspaces/${workspaceId}/integrations`
-      })
-      const normalized = await this.normalizeWorkspaceIntegrationList(payload)
-      const rawCount = Array.isArray(payload)
-        ? payload.length
-        : isRecord(payload) && Array.isArray(payload.integrations)
-          ? payload.integrations.length
-          : isRecord(payload) && Array.isArray(payload.data)
-            ? payload.data.length
-            : 0
-      // Quick sanity log so it's obvious from the main-process terminal which
-      // workspace is being queried and which providers survived the
-      // statusPayloadReady filter (see normalizeWorkspaceIntegrationList).
-      console.log(
-        `[integrations] cloud workspace=${workspaceId} raw=${rawCount} kept=${normalized.length} providers=${normalized.map((entry) => entry.provider).join(',') || '(none)'}`
-      )
-      return normalized
-    })
+    const workspaceId = await getAccountWorkspaceId()
+    // The list is addressed by the account (app) workspace UUID, so it must be
+    // authorized with the account access token, not the Relayfile workspace
+    // handle. The handle's JWT is scoped to Pear's locally-created `rw_*`
+    // workspace, which the cloud has no binding for, so the cloud's
+    // hasWorkspaceAccess check rejects it as 403 Forbidden. (connect-session and
+    // status calls still use the handle because they address `handle.workspaceId`
+    // directly.) See cloud workspace-integration-identity.ts. The account token
+    // resolves to currentWorkspace=workspaceId on cloud (same path as whoami),
+    // so this is the authorized way to read account-level integrations.
+    const payload = await this.fetchJson<unknown>(
+      'GET',
+      `api/v1/workspaces/${workspaceId}/integrations`
+    )
+    const normalized = await this.normalizeWorkspaceIntegrationList(payload)
+    const rawCount = Array.isArray(payload)
+      ? payload.length
+      : isRecord(payload) && Array.isArray(payload.integrations)
+        ? payload.integrations.length
+        : isRecord(payload) && Array.isArray(payload.data)
+          ? payload.data.length
+          : 0
+    // Quick sanity log so it's obvious from the main-process terminal which
+    // workspace is being queried and which providers survived the
+    // statusPayloadReady filter (see normalizeWorkspaceIntegrationList).
+    console.log(
+      `[integrations] cloud workspace=${workspaceId} raw=${rawCount} kept=${normalized.length} providers=${normalized.map((entry) => entry.provider).join(',') || '(none)'}`
+    )
+    return normalized
   }
 
   private async normalizeWorkspaceIntegrationList(payload: unknown): Promise<ConnectedIntegration[]> {
@@ -1004,7 +1023,7 @@ export class IntegrationsManager {
     }, existing)
   }
 
-  private statusPayloadReady(payload: IntegrationStatusPayload): boolean {
+  private statusPayloadReady(payload: IntegrationReadyPayload): boolean {
     return payload.ready === true ||
       payload.connection?.ready === true ||
       this.isReadyStatus(payload.status) ||

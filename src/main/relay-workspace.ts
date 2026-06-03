@@ -5,7 +5,10 @@ import { loadStore, saveStore } from './store'
 import type { RelayWorkspaceManagerLike, RelayWorkspaceRecord } from './relay-workspace.types'
 
 const ACCOUNT_AGENT_NAME = 'pear-account'
-const ACCOUNT_SCOPES = ['relayfile:fs:readwrite:/**']
+// Scope grammar is `plane:resource:action:path`; the cloud API only accepts the
+// `read` and `write` actions (matching the SDK's DEFAULT_SCOPES of fs:read/fs:write).
+// A combined `readwrite` action is rejected with `invalid_scopes`, so grant both.
+const ACCOUNT_SCOPES = ['relayfile:fs:read:/**', 'relayfile:fs:write:/**']
 
 type RelayWorkspaceAuthContext = {
   apiUrl: string

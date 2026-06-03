@@ -46,6 +46,7 @@ import type {
   GitFileStatus,
   GitGenerateCommitMessageInput,
   GitHistoryCommit,
+  GitPullRequest,
   GitSummary,
   IntegrationAdapter,
   IntegrationConnectSession,
@@ -123,6 +124,7 @@ export type {
   GitHistoryCoAuthor,
   GitHistoryCommit,
   GitHistoryFile,
+  GitPullRequest,
   GitSummary,
   InboundDeliveryMode,
   IntegrationAdapter,
@@ -289,6 +291,8 @@ const api = {
       invoke<GitBranchSyncStatus>('git:pull-current-branch', root),
     pushCurrentBranch: (root: string) =>
       invoke<GitBranchSyncStatus>('git:push-current-branch', root),
+    activePullRequests: (roots: string[]) =>
+      invoke<GitPullRequest[]>('git:active-pull-requests', roots),
     history: (path: string, limit?: number) =>
       invoke<GitHistoryCommit[]>('git:history', path, limit),
     show: (path: string, hash: string, file?: string) =>
@@ -317,6 +321,10 @@ const api = {
     create: (input: CreateCloudAgentInput) =>
       invoke<CloudAgentRecord>('cloud-agent:create', input),
     delete: (id: string) => invoke<void>('cloud-agent:delete', id),
+    prewarm: (projectId: string, cloudAgentId: string) =>
+      invoke<void>('cloud-agent:prewarm', projectId, cloudAgentId),
+    cancelPrewarm: (projectId: string, cloudAgentId?: string) =>
+      invoke<void>('cloud-agent:cancel-prewarm', projectId, cloudAgentId),
     attach: (projectId: string, cloudAgentId: string) =>
       invoke<CloudAgentBinding>('cloud-agent:attach', projectId, cloudAgentId),
     detach: (projectId: string) => invoke<void>('cloud-agent:detach', projectId),

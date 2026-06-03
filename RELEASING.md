@@ -6,17 +6,21 @@ in-app auto-update via [`electron-updater`].
 ## Overview
 
 - **Packaging:** [`electron-builder`] (config in [`electron-builder.yml`](./electron-builder.yml))
-- **Targets:** `dmg` (distribution) + `zip` (required for auto-update), each for `arm64` and `x64`
+- **Targets:** `dmg` (the download users install) + `zip` (consumed by auto-update), **arm64 only**
 - **Signing:** Developer ID Application certificate (hardened runtime + [entitlements](./build/entitlements.mac.plist))
-- **Notarization:** App Store Connect API key, run from the [`afterSign` hook](./build/notarize.cjs)
-- **Publish:** GitHub Releases (`AgentWorkforce/pear`)
-- **CI:** [`.github/workflows/release.yml`](./.github/workflows/release.yml), triggered by `v*` tags
+- **Notarization:** built-in `notarize: true` (notarytool) using an App Store Connect API key
+- **Publish:** GitHub Releases (`AgentWorkforce/pear`) as a **draft** you publish manually
+- **CI:** [`.github/workflows/release.yml`](./.github/workflows/release.yml), **manually triggered** from the Actions tab
+
+> **arm64 only:** `@agent-relay/sdk` ships per-arch prebuilt broker binaries, so a
+> single CI runner can't produce a working universal/Intel build. The arm64 build
+> matches the Apple-Silicon runner and the broker binary npm installs there.
 
 ## One-time setup
 
 ### 1. Apple credentials
 
-You need an **Apple Developer Program** membership ($99/yr).
+You need an **Apple Developer Program** membership.
 
 1. **Developer ID Application certificate** — create one in
    [Certificates, IDs & Profiles](https://developer.apple.com/account/resources/certificates/list),
@@ -48,31 +52,26 @@ Add these under **Settings → Secrets and variables → Actions**:
 
 ## Cutting a release
 
-1. Bump the version in `package.json` (the git tag must match):
-   ```sh
-   npm version patch   # or minor / major — creates a v<x.y.z> tag
-   ```
-2. Push the tag:
-   ```sh
-   git push origin main --follow-tags
-   ```
-3. The **Release** workflow builds, signs, notarizes, and uploads the DMGs/ZIPs
-   plus the `latest-mac.yml` update feed to a GitHub Release.
-4. Publish the (draft) GitHub Release. Installed apps pick up the update on next launch.
+1. Bump the version in `package.json`.
+2. Go to the repo's **Actions** tab → **Release (macOS)** → **Run workflow**.
+3. The workflow builds, signs, notarizes, and uploads the DMG/ZIP plus the
+   `latest-mac.yml` update feed to a **draft** GitHub Release.
+4. Review the draft on the [Releases page](https://github.com/AgentWorkforce/pear/releases),
+   then click **Publish**. Installed apps pick up the update on next launch.
 
 ## Local builds
 
-- `npm run pack` — unpacked `.app` in `release/<version>/` (fast smoke test, no installer).
-- `npm run dist` — full DMG/ZIP. Signs if a Developer ID cert is in your keychain (or
-  `CSC_LINK`/`CSC_KEY_PASSWORD` are set); notarizes if the `APPLE_*` env vars are present,
-  otherwise it skips notarization with a warning.
+- `npm run dist:mac` — full DMG/ZIP in `dist/` without publishing. Signs if a Developer ID
+  cert is in your keychain (or `CSC_LINK`/`CSC_KEY_PASSWORD` are set); notarizes if the
+  `APPLE_*` env vars are present.
 
 ## Auto-update behavior
 
 On a packaged build the app checks GitHub Releases on launch and every 6 hours
 ([`src/main/updater.ts`](./src/main/updater.ts)). Updates download in the background; the
 user is prompted to restart when one is ready. **Check for Updates…** in the app menu
-triggers a manual check. Auto-update only works on signed builds.
+triggers a manual check. Auto-update only sees a release once it's **published** (not while
+it's a draft), and only works on signed builds.
 
 ## The `pear` CLI
 

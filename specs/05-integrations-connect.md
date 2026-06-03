@@ -85,8 +85,9 @@ gated by the whitelist.
   credential is needed; `joinWorkspace`/`createWorkspace` authenticate with this
   token and return the workspace token internally.
 - **Workspace join params (fixed).** Join/create with
-  `agentName: 'pear-account'`, `scopes: ['relayfile:fs:readwrite:/**']` — the same
-  scope `cloud-agent.ts:718` already uses, widened to account scope.
+  `agentName: 'pear-account'`, `scopes: ['relayfile:fs:read:/**', 'relayfile:fs:write:/**']` —
+  the same read/write scope pair `cloud-agent.ts:718` already uses, widened to
+  account scope.
 - **Per-project visibility = mount-path scoping.** A connected integration's VFS
   lives at `/integrations/{provider}/…` in the account workspace. Per-project
   visibility (default on) is enforced by whether that subtree is included in the
@@ -112,9 +113,9 @@ workspace:
 
 1. On first need (sign-in, or first integrations/cloud-agent action), check the
    account store for a persisted `relayWorkspace.id`.
-2. If absent: `setup.createWorkspace({ agentName: 'pear-account', scopes: ['relayfile:fs:readwrite:/**'] })`
+2. If absent: `setup.createWorkspace({ agentName: 'pear-account', scopes: ['relayfile:fs:read:/**', 'relayfile:fs:write:/**'] })`
    → persist `{ id, createdAt }`. If present:
-   `setup.joinWorkspace(id, { agentName: 'pear-account', scopes: ['relayfile:fs:readwrite:/**'] })`.
+   `setup.joinWorkspace(id, { agentName: 'pear-account', scopes: ['relayfile:fs:read:/**', 'relayfile:fs:write:/**'] })`.
 3. Cache the live `WorkspaceHandle` for the process lifetime; refresh its token
    via `handle.refreshToken()` on `401`. Expose
    `getWorkspaceHandle(): Promise<WorkspaceHandle>` and `getWorkspaceId(): string`.

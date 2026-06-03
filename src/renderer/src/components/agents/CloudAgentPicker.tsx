@@ -1,8 +1,8 @@
 import type React from 'react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, Cloud, Loader2, Plus, Trash2 } from 'lucide-react'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
-import { pear, type CloudAgentBinding, type CloudAgentRecord } from '@/lib/ipc'
+import { pear, type CloudAgentRecord } from '@/lib/ipc'
 import {
   useCloudAgentStore,
   type CloudAgentAttachProgress
@@ -12,6 +12,22 @@ import { useProjectStore, type CloudAgentWorkspaceMode } from '@/stores/project-
 function phaseLabel(progress: CloudAgentAttachProgress | undefined, elapsedSec: number): string {
   if (!progress) return elapsedSec > 1 ? `Starting attach… (${elapsedSec}s)` : 'Starting attach…'
   const elapsed = `(${elapsedSec}s)`
+  if (progress.sandboxPhase) {
+    switch (progress.sandboxPhase) {
+      case 'queued':
+        return `Queued for sandbox ${elapsed}`
+      case 'pulling-image':
+        return `Preparing sandbox image ${elapsed}`
+      case 'starting':
+        return `Starting sandbox ${elapsed}`
+      case 'cloning':
+        return `Cloning workspace ${elapsed}`
+      case 'mounting':
+        return `Mounting workspace ${elapsed}`
+      case 'ready':
+        return 'Ready'
+    }
+  }
   switch (progress.phase) {
     case 'warming-sandbox':
       return `Warming sandbox ${elapsed}`
@@ -31,7 +47,7 @@ function phaseLabel(progress: CloudAgentAttachProgress | undefined, elapsedSec: 
 
 export type CloudAgentPickerProps = {
   projectId?: string
-  onAttach: (cloudAgentId: string, binding?: CloudAgentBinding) => void | Promise<void>
+  onAttach: (cloudAgentId: string) => void | Promise<void>
   onCancel: () => void
   onAuthRequired?: () => void
 }
@@ -111,9 +127,12 @@ function StatusPill({ status }: { status: CloudAgentRecord['status'] }): React.R
   )
 }
 
-function cloudAgentWorkspaceMode(project: { cloudAgentWorkspaceMode?: unknown } | undefined): CloudAgentWorkspaceMode {
-  return project?.cloudAgentWorkspaceMode === 'git' || project?.cloudAgentWorkspaceMode === 'relayfile'
-    ? project.cloudAgentWorkspaceMode
+function cloudAgentWorkspaceMode(project: unknown): CloudAgentWorkspaceMode {
+  const mode = project && typeof project === 'object'
+    ? (project as { cloudAgentWorkspaceMode?: unknown }).cloudAgentWorkspaceMode
+    : undefined
+  return mode === 'git' || mode === 'relayfile'
+    ? mode
     : 'git-overlay'
 }
 
@@ -139,6 +158,10 @@ export default function CloudAgentPicker({
   const [createModel, setCreateModel] = useState('claude-opus-4-7')
   const [busy, setBusy] = useState(false)
   const [nowMs, setNowMs] = useState(() => Date.now())
+  const prewarmTargetRef = useRef<string | null>(null)
+  const attachStartedRef = useRef(false)
+  const mountedRef = useRef(true)
+  const projectIdRef = useRef(projectId)
 
   const attachProgress = useCloudAgentStore(
     (state) => projectId ? state.attachProgress[projectId] : undefined
@@ -149,6 +172,10 @@ export default function CloudAgentPicker({
   )
   const workspaceMode = cloudAgentWorkspaceMode(project)
 
+  useEffect(() => {
+    projectIdRef.current = projectId
+  }, [projectId])
+
   // Tick once a second while attaching so the elapsed timer counts up.
   useEffect(() => {
     if (!busy) return
@@ -156,9 +183,15 @@ export default function CloudAgentPicker({
     return () => window.clearInterval(interval)
   }, [busy])
 
-  const attachElapsedSec = busy && attachProgress
+  const attachElapsedSec = attachProgress
     ? Math.max(1, Math.round((nowMs - attachProgress.startedAt) / 1000))
     : 0
+  const showingAttachProgress = Boolean(
+    attachProgress &&
+    attachProgress.phase !== 'idle' &&
+    attachProgress.phase !== 'done' &&
+    (attachProgress.cloudAgentId === undefined || attachProgress.cloudAgentId === selectedId)
+  )
 
   const selectedAgent = useMemo(
     () => agents.find((agent) => agent.id === selectedId) || null,
@@ -199,6 +232,73 @@ export default function CloudAgentPicker({
       cancelled = true
     }
   }, [onAuthRequired])
+
+  function seedWarmProgress(agentId: string): void {
+    if (!projectId) return
+    const agent = agents.find((candidate) => candidate.id === agentId)
+    setAttachProgress(projectId, {
+      phase: 'warming-sandbox',
+      cloudAgentId: agentId,
+      cloudAgentName: agent ? getAgentTitle(agent) : agentId,
+      message: 'Requesting cloud sandbox',
+      startedAt: Date.now(),
+      updatedAt: Date.now()
+    })
+  }
+
+  function beginPrewarm(agentId: string): void {
+    if (!projectId || !agentId || attachStartedRef.current) return
+
+    const previous = prewarmTargetRef.current
+    if (previous === agentId) return
+    if (previous) {
+      void pear.cloudAgent.cancelPrewarm(projectId, previous).catch(() => undefined)
+    }
+    prewarmTargetRef.current = agentId
+    seedWarmProgress(agentId)
+    void pear.cloudAgent.prewarm(projectId, agentId).catch((err) => {
+      if (prewarmTargetRef.current !== agentId || attachStartedRef.current) return
+      if (isAuthRequiredError(err)) {
+        if (mountedRef.current) onAuthRequired?.()
+        return
+      }
+      if (mountedRef.current) setError(getErrorMessage(err))
+      if (mountedRef.current && projectId) {
+        const agent = agents.find((candidate) => candidate.id === agentId)
+        setAttachProgress(projectId, {
+          phase: 'error',
+          cloudAgentId: agentId,
+          cloudAgentName: agent ? getAgentTitle(agent) : agentId,
+          message: getErrorMessage(err),
+          startedAt: attachProgress?.startedAt ?? Date.now(),
+          updatedAt: Date.now()
+        })
+      }
+    })
+  }
+
+  function cancelCurrentPrewarm(): void {
+    const currentProjectId = projectIdRef.current
+    if (!currentProjectId || !prewarmTargetRef.current) return
+    const target = prewarmTargetRef.current
+    prewarmTargetRef.current = null
+    void pear.cloudAgent.cancelPrewarm(currentProjectId, target).catch(() => undefined)
+    setAttachProgress(currentProjectId, null)
+  }
+
+  useEffect(() => {
+    if (!projectId || !selectedId || loading || creating || attachStartedRef.current) return
+    beginPrewarm(selectedId)
+  }, [projectId, selectedId, loading, creating])
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false
+      if (!attachStartedRef.current) {
+        cancelCurrentPrewarm()
+      }
+    }
+  }, [])
 
   async function handleCreate(): Promise<void> {
     const name = createName.trim()
@@ -256,8 +356,12 @@ export default function CloudAgentPicker({
   }
 
   async function handleAttachClick(): Promise<void> {
-    if (!selectedId) return
+    if (!selectedId || !projectId) return
 
+    const attachingAgentId = selectedId
+    const attachingAgent = selectedAgent
+    attachStartedRef.current = true
+    prewarmTargetRef.current = null
     setBusy(true)
     setError(null)
     // Seed an immediate progress row so the UI doesn't show a blank "busy"
@@ -266,30 +370,44 @@ export default function CloudAgentPicker({
     if (projectId) {
       setAttachProgress(projectId, {
         phase: 'warming-sandbox',
+        cloudAgentId: attachingAgentId,
+        cloudAgentName: attachingAgent ? getAgentTitle(attachingAgent) : attachingAgentId,
         message: 'Requesting cloud sandbox',
-        startedAt: Date.now()
+        startedAt: attachProgress?.startedAt ?? Date.now(),
+        updatedAt: Date.now()
       })
     }
-    try {
-      const binding = projectId ? await pear.cloudAgent.attach(projectId, selectedId) : undefined
-      if (projectId) setAttachProgress(projectId, null)
-      await onAttach(selectedId, binding)
-    } catch (err) {
-      if (isAuthRequiredError(err)) {
-        onAuthRequired?.()
+    Promise.resolve(onAttach(attachingAgentId)).catch((err) => {
+      if (mountedRef.current) setError(getErrorMessage(err))
+    })
+    pear.cloudAgent.attach(projectId, attachingAgentId).then(() => {
+      if (projectId) {
+        setAttachProgress(projectId, null)
+      }
+    }).catch((err) => {
+      if (/cloud agent attach canceled/i.test(getErrorMessage(err))) {
+        if (projectId) setAttachProgress(projectId, null)
         return
       }
-      setError(getErrorMessage(err))
+      if (isAuthRequiredError(err)) {
+        if (mountedRef.current) onAuthRequired?.()
+        return
+      }
+      if (mountedRef.current) setError(getErrorMessage(err))
       if (projectId) {
         setAttachProgress(projectId, {
           phase: 'error',
+          cloudAgentId: attachingAgentId,
+          cloudAgentName: attachingAgent ? getAgentTitle(attachingAgent) : attachingAgentId,
           message: getErrorMessage(err),
-          startedAt: attachProgress?.startedAt ?? Date.now()
+          startedAt: attachProgress?.startedAt ?? Date.now(),
+          updatedAt: Date.now()
         })
       }
-    } finally {
-      setBusy(false)
-    }
+    }).finally(() => {
+      attachStartedRef.current = false
+      if (mountedRef.current) setBusy(false)
+    })
   }
 
   function handleHarnessChange(value: string): void {
@@ -338,12 +456,17 @@ export default function CloudAgentPicker({
                   role="radio"
                   aria-checked={selected}
                   tabIndex={busy ? -1 : 0}
-                  onClick={() => !busy && setSelectedId(agent.id)}
+                  onClick={() => {
+                    if (busy) return
+                    setSelectedId(agent.id)
+                    beginPrewarm(agent.id)
+                  }}
                   onKeyDown={(event) => {
                     if (busy) return
                     if (event.key === 'Enter' || event.key === ' ') {
                       event.preventDefault()
                       setSelectedId(agent.id)
+                      beginPrewarm(agent.id)
                     }
                   }}
                   className={`group cursor-pointer rounded-md border px-3 py-3 outline-none transition-colors ${
@@ -501,7 +624,7 @@ export default function CloudAgentPicker({
 
       <footer className="flex items-center justify-between gap-3 border-t border-[var(--pear-border-subtle)] px-5 py-4">
         <div className="min-w-0 flex items-center gap-2 text-xs text-[var(--pear-text-faint)]">
-          {busy ? (
+          {showingAttachProgress ? (
             <>
               <Loader2 size={13} className="shrink-0 animate-spin text-[var(--pear-accent)]" />
               <span className="truncate text-[var(--pear-text-dim)]">
@@ -522,8 +645,11 @@ export default function CloudAgentPicker({
         <div className="flex shrink-0 items-center gap-2">
           <button
             type="button"
-            onClick={onCancel}
-            disabled={busy}
+            onClick={() => {
+              if (!attachStartedRef.current) cancelCurrentPrewarm()
+              onCancel()
+            }}
+            disabled={creating}
             className="h-9 rounded-md px-3 text-sm text-[var(--pear-text-dim)] hover:text-[var(--pear-text)] disabled:opacity-40"
           >
             Cancel

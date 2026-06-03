@@ -3,12 +3,7 @@
   "version": "1.0.0",
   "productName": "Pear by Agent Relay",
   "description": "Pair programming workspace for humans and AI agents",
-  "author": "Agent Relay",
-  "homepage": "https://github.com/AgentWorkforce/pear",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/AgentWorkforce/pear.git"
-  },
+  "author": "Agent Workforce Incorporated",
   "main": "./out/main/index.js",
   "bin": {
     "pear": "bin/pear.mjs"
@@ -17,10 +12,10 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
+    "dist:mac": "electron-vite build && electron-builder --mac --publish never",
+    "release:mac": "electron-vite build && electron-builder --mac --publish always",
     "test": "node --experimental-strip-types --no-warnings --test 'src/main/__tests__/*.test.ts'",
-    "pack": "npm run build && electron-builder --mac --dir",
-    "dist": "npm run build && electron-builder --mac",
-    "release": "npm run build && electron-builder --mac --publish always"
+    "personas:refresh": "npx --yes agentworkforce install @agentworkforce/persona-autonomous-actor --overwrite"
   },
   "dependencies": {
     "@agent-relay/events": "^6.3.6",
@@ -46,13 +41,12 @@
     "zustand": "^5.0.0"
   },
   "devDependencies": {
-    "@electron/notarize": "^2.5.0",
     "@tailwindcss/vite": "^4.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",
     "electron": "^42.1.0",
-    "electron-builder": "^25.1.8",
+    "electron-builder": "^26.8.1",
     "electron-vite": "^5.0.0",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.7.0",
