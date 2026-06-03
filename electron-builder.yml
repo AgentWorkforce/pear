@@ -6,17 +6,21 @@ directories:
   buildResources: build
   output: dist
 
-# Include the bundled output + production deps; exclude source & config.
+# Include only the bundled app, production deps, and runtime resources.
 files:
-  - '!**/.vscode/*'
-  - '!src/*'
-  - '!electron.vite.config.{js,ts,mjs,cjs}'
-  - '!vitest.config.mjs'
-  - '!{tsconfig.json,tsconfig.node.json,tsconfig.web.json,tsconfig.web.tsbuildinfo}'
-  - '!{.env,.env.*,.npmrc}'
+  - out/**
+  - resources/**
+  - package.json
+  - node_modules/**
+  - '!node_modules/.cache/**'
+
+extraResources:
+  - from: resources/app-icon.png
+    to: app-icon.png
 
 asarUnpack:
   - resources/**
+  - node_modules/@agent-relay/sdk/bin/**
 
 mac:
   category: public.app-category.developer-tools
