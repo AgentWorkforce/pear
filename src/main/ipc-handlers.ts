@@ -26,17 +26,13 @@ import { aiHistManager } from './ai-hist'
 import { burnManager, type BurnAgentInput, type BurnProjectInput, type BurnSessionBreakdownInput, type BurnFingerprintInput } from './burn'
 import { resetRelayWorkspaceManager } from './relay-workspace'
 import { assertDirectory, isDirectory } from './path-utils'
+import { findProjectForPath } from './cli'
 import type { ProactiveAgentDraft } from './proactive-agent.types'
 
 function getProjectIdForPath(targetPath: string): string | null {
   const resolved = resolve(targetPath)
   const { projects } = loadStore()
-  const project = projects.find((candidate) =>
-    candidate.roots.some((root) => {
-      const rootPath = resolve(root.path)
-      return resolved.startsWith(rootPath + '/') || resolved === rootPath
-    })
-  )
+  const project = findProjectForPath(projects, resolved)
   return project?.id || null
 }
 

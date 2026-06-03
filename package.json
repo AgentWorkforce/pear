@@ -5,6 +5,9 @@
   "description": "Pair programming workspace for humans and AI agents",
   "author": "Agent Workforce Incorporated",
   "main": "./out/main/index.js",
+  "bin": {
+    "pear": "bin/pear.mjs"
+  },
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
@@ -27,6 +30,7 @@
     "agentworkforce": "^3.0.42",
     "ai-hist": "^0.2.3",
     "allotment": "^1.0.9",
+    "electron-updater": "^6.3.9",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
     "react-diff-view": "^3.2.1",

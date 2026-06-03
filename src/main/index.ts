@@ -1,12 +1,17 @@
-import { app, BrowserWindow, shell, Menu, protocol, nativeImage } from 'electron'
+import { app, BrowserWindow, shell, Menu, protocol, nativeImage, ipcMain } from 'electron'
 import { existsSync } from 'fs'
-import { join } from 'path'
+import { join, resolve } from 'path'
 import { registerIpcHandlers } from './ipc-handlers'
 import { burnManager } from './burn'
 import { brokerManager } from './broker'
 import { cloudAgentManager } from './cloud-agent'
 import { integrationsManager } from './integrations'
 import { registerAvatarCacheProtocol } from './avatar-cache'
+import { openProjectForPath, parseOpenCommand, type OpenPathDeps } from './cli'
+import { addProject, loadStore, setActiveProject } from './store'
+import { isDirectory } from './path-utils'
+import { initAutoUpdater, registerUpdaterIpc, checkForUpdatesInteractive } from './updater'
+import { registerCliInstallIpc, promptInstallPearCli } from './cli-install'
 
 const APP_NAME = 'Pear by Agent Relay'
 
@@ -26,6 +31,46 @@ protocol.registerSchemesAsPrivileged([
 let mainWindow: BrowserWindow | null = null
 let shutdownPromise: Promise<void> | null = null
 let quitAfterShutdown = false
+// Path requested via `pear open <dir>` before the renderer has registered its
+// listener; applied once the renderer sends `cli:renderer-ready`.
+let pendingOpenPath: string | null = null
+let rendererReadyForCliOpen = false
+
+const openPathDeps: OpenPathDeps = { loadStore, addProject, setActiveProject, isDirectory }
+
+/**
+ * Handle a `pear open <dir>` invocation: resolve the directory to a project
+ * (reusing or creating one) and tell the renderer to switch to it. When the
+ * window isn't ready yet the request is queued for `flushPendingOpen()`.
+ */
+function handleOpenCommand(argv: readonly string[], workingDirectory: string): void {
+  const rawPath = parseOpenCommand(argv)
+  if (!rawPath) return
+
+  const targetPath = resolve(workingDirectory, rawPath)
+  try {
+    const result = openProjectForPath(targetPath, openPathDeps)
+    if (mainWindow && !mainWindow.isDestroyed() && rendererReadyForCliOpen) {
+      mainWindow.webContents.send('cli:open-project', result.projectId)
+    } else {
+      pendingOpenPath = targetPath
+    }
+  } catch (error) {
+    console.warn('[cli] Failed to open path:', error instanceof Error ? error.message : String(error))
+  }
+}
+
+function flushPendingOpen(): void {
+  if (!pendingOpenPath || !mainWindow || !rendererReadyForCliOpen) return
+  const targetPath = pendingOpenPath
+  pendingOpenPath = null
+  try {
+    const result = openProjectForPath(targetPath, openPathDeps)
+    mainWindow.webContents.send('cli:open-project', result.projectId)
+  } catch (error) {
+    console.warn('[cli] Failed to open path:', error instanceof Error ? error.message : String(error))
+  }
+}
 
 function getAppIconPath(): string {
   const iconPaths = app.isPackaged
@@ -56,6 +101,7 @@ function shutdownBrokerOnce(): Promise<void> {
 }
 
 function createWindow(): void {
+  rendererReadyForCliOpen = false
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -77,6 +123,15 @@ function createWindow(): void {
 
   mainWindow.on('ready-to-show', () => {
     mainWindow!.show()
+  })
+
+  mainWindow.on('closed', () => {
+    mainWindow = null
+    rendererReadyForCliOpen = false
+  })
+
+  mainWindow.webContents.on('did-start-loading', () => {
+    rendererReadyForCliOpen = false
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
@@ -106,6 +161,19 @@ function createMenu(): void {
       label: app.name,
       submenu: [
         { role: 'about' },
+        {
+          label: 'Check for Updates…',
+          click: (): void => {
+            void checkForUpdatesInteractive()
+          }
+        },
+        { type: 'separator' },
+        {
+          label: "Install 'pear' command in PATH…",
+          click: (): void => {
+            void promptInstallPearCli()
+          }
+        },
         { type: 'separator' },
         { role: 'services' },
         { type: 'separator' },
@@ -190,33 +258,63 @@ function createMenu(): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
-app.whenReady().then(() => {
-  const appIcon = getAppIcon()
-  app.setAboutPanelOptions({
-    applicationName: APP_NAME,
-    applicationVersion: app.getVersion(),
-    iconPath: getAppIconPath()
+// Ensure a single running instance so `pear open <dir>` from a second launch is
+// routed to the existing window instead of starting a duplicate app.
+const gotSingleInstanceLock = app.requestSingleInstanceLock()
+if (!gotSingleInstanceLock) {
+  app.quit()
+} else {
+  // A second `pear ...` invocation forwards its argv + cwd here.
+  app.on('second-instance', (_event, argv, workingDirectory) => {
+    handleOpenCommand(argv, workingDirectory)
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore()
+      mainWindow.focus()
+    } else if (app.isReady()) {
+      createWindow()
+    }
   })
 
-  if (process.platform === 'darwin' && appIcon) {
-    app.dock.setIcon(appIcon)
-  }
-
-  registerAvatarCacheProtocol()
-  registerIpcHandlers()
-  // Prime the burn ledger off the critical path so the first burn view (and the
-  // status-bar summary) queries a warm binding/DB instead of stalling ~1.5-4s.
-  burnManager.warmUp()
-  void integrationsManager.startLocalMountDaemon().catch((error) => {
-    console.warn('[integrations] Failed to start local integration mount daemon:', error instanceof Error ? error.message : String(error))
+  ipcMain.on('cli:renderer-ready', (event) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return
+    rendererReadyForCliOpen = true
+    flushPendingOpen()
   })
-  createMenu()
-  createWindow()
 
-  app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+  app.whenReady().then(() => {
+    const appIcon = getAppIcon()
+    app.setAboutPanelOptions({
+      applicationName: APP_NAME,
+      applicationVersion: app.getVersion(),
+      iconPath: getAppIconPath()
+    })
+
+    if (process.platform === 'darwin' && appIcon) {
+      app.dock.setIcon(appIcon)
+    }
+
+    registerAvatarCacheProtocol()
+    registerIpcHandlers()
+    registerUpdaterIpc()
+    registerCliInstallIpc()
+    initAutoUpdater()
+    // Prime the burn ledger off the critical path so the first burn view (and the
+    // status-bar summary) queries a warm binding/DB instead of stalling ~1.5-4s.
+    burnManager.warmUp()
+    void integrationsManager.startLocalMountDaemon().catch((error) => {
+      console.warn('[integrations] Failed to start local integration mount daemon:', error instanceof Error ? error.message : String(error))
+    })
+    createMenu()
+    // Resolve any `pear open <dir>` from the initial launch; queued until the
+    // renderer registers its listener and sends `cli:renderer-ready`.
+    handleOpenCommand(process.argv, process.cwd())
+    createWindow()
+
+    app.on('activate', () => {
+      if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    })
   })
-})
+}
 
 app.on('window-all-closed', async () => {
   await shutdownBrokerOnce()

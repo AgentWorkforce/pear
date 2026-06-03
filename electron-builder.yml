@@ -37,8 +37,13 @@ mac:
   # binaries (broker-darwin-arm64 / -x64), so a universal build can't merge
   # them on a single-arch CI runner. arm64 matches the runner and the broker
   # binary that npm installs.
+  #
+  # dmg = the user-facing download; zip = the artifact electron-updater needs
+  # for in-app auto-update (its presence also generates latest-mac.yml).
   target:
     - target: dmg
+      arch: arm64
+    - target: zip
       arch: arm64
 
 dmg:
