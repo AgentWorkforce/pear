@@ -69,15 +69,31 @@ type GitHubRepo = {
   repo: string
 }
 
+type GitHubPullRequestLookup = {
+  baseRepo: GitHubRepo
+  head: {
+    owner: string
+    branch: string
+  }
+}
+
 type GitHubCommitAvatar = {
   authorAvatarUrl?: string
 }
 
+type GitHubPullRequestCacheEntry = {
+  expiresAt: number
+  pullRequests: GitPullRequest[]
+}
+
 const gitHubCommitAvatarCache = new Map<string, GitHubCommitAvatar>()
+const gitHubPullRequestCache = new Map<string, GitHubPullRequestCacheEntry>()
 // Git suppresses merge file details unless a merge diff strategy is requested.
 const mergeDiffArgs = ['--diff-merges=first-parent']
 const MAX_UNTRACKED_SUMMARY_FILES = 500
 const MAX_UNTRACKED_SUMMARY_FILE_BYTES = 1024 * 1024
+const GITHUB_PULL_REQUEST_CACHE_MS = 90_000
+const GITHUB_CLI_CANDIDATES = ['gh', '/opt/homebrew/bin/gh', '/usr/local/bin/gh']
 
 export interface GitCommitSelectionInput {
   title: string
@@ -105,6 +121,18 @@ export interface GitBranchSyncStatus {
 
 export interface GitCheckoutBranchOptions {
   stashChanges?: boolean
+}
+
+export interface GitPullRequest {
+  rootPath: string
+  branch: string
+  owner: string
+  repo: string
+  number: number
+  url: string
+  mergeState: 'mergeable' | 'blocked' | 'unknown'
+  ciState: 'passing' | 'failing' | 'pending' | 'unknown'
+  title?: string
 }
 
 function runGit(
@@ -166,6 +194,85 @@ function runGit(
       child.stdin?.end(options.input)
     }
   })
+}
+
+function runCommand(
+  command: string,
+  args: string[],
+  cwd: string,
+  timeoutMs: number
+): Promise<string> {
+  assertDirectory(cwd, 'Command working directory')
+
+  return new Promise((resolve, reject) => {
+    let child: ReturnType<typeof spawn>
+    try {
+      child = spawn(command, args, {
+        cwd,
+        stdio: ['ignore', 'pipe', 'pipe']
+      })
+    } catch (error) {
+      reject(error)
+      return
+    }
+
+    let stdout = ''
+    let stderr = ''
+    let settled = false
+    const timeout = setTimeout(() => {
+      if (settled) return
+      settled = true
+      child.kill()
+      reject(new Error(`${command} ${args.join(' ')} timed out`))
+    }, timeoutMs)
+
+    const rejectOnce = (error: unknown): void => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      reject(error)
+    }
+
+    child.stdout?.on('data', (chunk) => {
+      stdout += String(chunk)
+      if (stdout.length > 1024 * 1024) {
+        child.kill()
+        rejectOnce(new Error(`${command} ${args.join(' ')} exceeded output buffer`))
+      }
+    })
+    child.stderr?.on('data', (chunk) => {
+      stderr += String(chunk)
+    })
+    child.on('error', rejectOnce)
+    child.on('close', (code) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      if (code === 0) {
+        resolve(stdout)
+        return
+      }
+      reject(new Error(stderr || `${command} ${args.join(' ')} exited with code ${code}`))
+    })
+  })
+}
+
+async function runFirstAvailableCommand(
+  commands: string[],
+  args: string[],
+  cwd: string,
+  timeoutMs: number
+): Promise<string> {
+  let lastError: unknown
+  for (const command of commands) {
+    try {
+      return await runCommand(command, args, cwd, timeoutMs)
+    } catch (error) {
+      lastError = error
+    }
+  }
+
+  throw lastError instanceof Error ? lastError : new Error('Command unavailable')
 }
 
 async function git(args: string[], cwd: string): Promise<string> {
@@ -849,6 +956,425 @@ async function getGitHubRepo(path: string): Promise<GitHubRepo | null> {
   } catch {
     return null
   }
+}
+
+async function getGitHubRepoForRemote(path: string, remote: string): Promise<GitHubRepo | null> {
+  try {
+    return parseGitHubRemoteUrl(await git(['remote', 'get-url', remote], path))
+  } catch {
+    return null
+  }
+}
+
+function getRemoteFromUpstream(upstream: string, remotes: string[]): string | null {
+  return remotes
+    .filter((remote) => upstream.startsWith(`${remote}/`))
+    .sort((left, right) => right.length - left.length)[0] || null
+}
+
+async function getGitHubPullRequestLookup(
+  path: string,
+  localBranch: string
+): Promise<GitHubPullRequestLookup | null> {
+  const remotes = await getRemotes(path)
+  const preferredRemote = remotes.includes('origin') ? 'origin' : remotes[0] || null
+  if (!preferredRemote) return null
+
+  const headRepo = await getGitHubRepoForRemote(path, preferredRemote)
+  if (!headRepo) return null
+
+  let baseRepo = headRepo
+  const upstreamRemote = remotes.includes('upstream')
+    ? 'upstream'
+    : getRemoteFromUpstream(await getUpstreamBranch(path) || '', remotes)
+
+  if (upstreamRemote) {
+    const upstreamRepo = await getGitHubRepoForRemote(path, upstreamRemote)
+    if (upstreamRepo) baseRepo = upstreamRepo
+  }
+
+  return {
+    baseRepo,
+    head: {
+      owner: headRepo.owner,
+      branch: localBranch
+    }
+  }
+}
+
+function isGitHubPullRequestUrl(value: unknown): value is string {
+  if (typeof value !== 'string') return false
+  try {
+    const url = new URL(value)
+    return url.protocol === 'https:' && url.hostname === 'github.com' && /\/pull\/\d+\/?$/.test(url.pathname)
+  } catch {
+    return false
+  }
+}
+
+function normalizePullRequestMergeState(
+  value: unknown,
+  draft: unknown
+): GitPullRequest['mergeState'] {
+  if (draft === true) return 'blocked'
+  if (typeof value === 'boolean') return value ? 'mergeable' : 'blocked'
+  if (typeof value !== 'string') return 'unknown'
+
+  const normalized = value.trim().toUpperCase().replace(/-/g, '_')
+  if (!normalized || normalized === 'UNKNOWN') return 'unknown'
+  if (normalized === 'CLEAN' || normalized === 'HAS_HOOKS' || normalized === 'MERGEABLE') {
+    return 'mergeable'
+  }
+  if (
+    normalized === 'BLOCKED' ||
+    normalized === 'BEHIND' ||
+    normalized === 'DIRTY' ||
+    normalized === 'DRAFT' ||
+    normalized === 'UNSTABLE' ||
+    normalized === 'CONFLICTING'
+  ) {
+    return 'blocked'
+  }
+
+  return 'unknown'
+}
+
+function collectPullRequestCiSignals(value: unknown, signals: string[] = []): string[] {
+  if (value === null || value === undefined) return signals
+
+  if (typeof value === 'string') {
+    signals.push(value)
+    return signals
+  }
+
+  if (Array.isArray(value)) {
+    value.forEach((entry) => collectPullRequestCiSignals(entry, signals))
+    return signals
+  }
+
+  if (typeof value !== 'object') return signals
+
+  const record = value as Record<string, unknown>
+  for (const key of ['conclusion', 'state', 'status']) {
+    const signal = record[key]
+    if (typeof signal === 'string') signals.push(signal)
+  }
+
+  for (const key of ['nodes', 'checkRuns', 'check_runs', 'checkSuites', 'check_suites', 'contexts', 'statuses']) {
+    collectPullRequestCiSignals(record[key], signals)
+  }
+
+  return signals
+}
+
+function normalizePullRequestCiState(value: unknown): GitPullRequest['ciState'] {
+  const signals = collectPullRequestCiSignals(value)
+    .map((signal) => signal.trim().toUpperCase().replace(/-/g, '_'))
+    .filter(Boolean)
+
+  if (signals.length === 0) return 'unknown'
+
+  if (signals.some((signal) =>
+    signal === 'FAILURE' ||
+    signal === 'FAILED' ||
+    signal === 'ERROR' ||
+    signal === 'TIMED_OUT' ||
+    signal === 'CANCELLED' ||
+    signal === 'CANCELED' ||
+    signal === 'ACTION_REQUIRED' ||
+    signal === 'STARTUP_FAILURE'
+  )) {
+    return 'failing'
+  }
+
+  if (signals.some((signal) =>
+    signal === 'PENDING' ||
+    signal === 'QUEUED' ||
+    signal === 'IN_PROGRESS' ||
+    signal === 'REQUESTED' ||
+    signal === 'WAITING' ||
+    signal === 'EXPECTED'
+  )) {
+    return 'pending'
+  }
+
+  if (signals.some((signal) =>
+    signal === 'SUCCESS' ||
+    signal === 'SUCCESSFUL' ||
+    signal === 'PASSED' ||
+    signal === 'COMPLETED' ||
+    signal === 'SKIPPED' ||
+    signal === 'NEUTRAL'
+  )) {
+    return 'passing'
+  }
+
+  return 'unknown'
+}
+
+function pruneExpiredGitHubPullRequestCache(now = Date.now()): void {
+  for (const [key, entry] of gitHubPullRequestCache) {
+    if (entry.expiresAt <= now) gitHubPullRequestCache.delete(key)
+  }
+}
+
+function normalizePullRequestPayload(
+  path: string,
+  branch: string,
+  repo: GitHubRepo,
+  value: unknown
+): GitPullRequest | null {
+  if (!value || typeof value !== 'object') return null
+
+  const record = value as {
+    number?: unknown
+    html_url?: unknown
+    url?: unknown
+    title?: unknown
+    state?: unknown
+    draft?: unknown
+    isDraft?: unknown
+    mergeable?: unknown
+    mergeable_state?: unknown
+    mergeStateStatus?: unknown
+    statusCheckRollup?: unknown
+    head?: unknown
+  }
+  const state = typeof record.state === 'string' ? record.state.trim().toLowerCase() : ''
+  if (state && state !== 'open') return null
+
+  const number = typeof record.number === 'number' ? record.number : Number(record.number)
+  if (!Number.isInteger(number) || number <= 0) return null
+
+  const fallbackUrl = `https://github.com/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.repo)}/pull/${number}`
+  const apiUrl = record.html_url || record.url
+  const url = isGitHubPullRequestUrl(apiUrl) ? apiUrl : fallbackUrl
+  const title = typeof record.title === 'string' && record.title.trim() ? record.title.trim() : undefined
+  const draft = record.isDraft ?? record.draft
+  const mergeState = normalizePullRequestMergeState(
+    record.mergeStateStatus ?? record.mergeable_state ?? record.mergeable,
+    draft
+  )
+  const ciState = normalizePullRequestCiState(record.statusCheckRollup)
+
+  return {
+    rootPath: path,
+    branch,
+    owner: repo.owner,
+    repo: repo.repo,
+    number,
+    url,
+    mergeState,
+    ciState,
+    ...(title ? { title } : {})
+  }
+}
+
+async function fetchOpenPullRequestsWithGitHubCli(
+  path: string,
+  branch: string,
+  repo: GitHubRepo,
+  head: { branch: string }
+): Promise<GitPullRequest[] | null> {
+  try {
+    const output = await runFirstAvailableCommand(GITHUB_CLI_CANDIDATES, [
+      'pr',
+      'list',
+      '--state',
+      'open',
+      '--head',
+      head.branch,
+      '--repo',
+      `${repo.owner}/${repo.repo}`,
+      '--json',
+      'number,url,title,isDraft,mergeStateStatus,statusCheckRollup',
+      '--limit',
+      '10'
+    ], path, 2500)
+    const payload = JSON.parse(output)
+    if (!Array.isArray(payload)) return null
+
+    return payload
+      .map((entry) => normalizePullRequestPayload(path, branch, repo, entry))
+      .filter((entry): entry is GitPullRequest => entry !== null)
+  } catch {
+    return null
+  }
+}
+
+function githubApiHeaders(): Record<string, string> {
+  return {
+    Accept: 'application/vnd.github+json',
+    'User-Agent': 'pear-git-pull-requests'
+  }
+}
+
+async function fetchGitHubJson(url: URL, timeoutMs: number): Promise<unknown | null> {
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), timeoutMs)
+
+  try {
+    const response = await fetch(url, {
+      signal: controller.signal,
+      headers: githubApiHeaders()
+    })
+    if (!response.ok) return null
+    return await response.json()
+  } catch {
+    return null
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
+async function fetchPullRequestDetailsFromGitHubApi(
+  repo: GitHubRepo,
+  number: number
+): Promise<unknown | null> {
+  const url = new URL(
+    `https://api.github.com/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.repo)}/pulls/${number}`
+  )
+  return fetchGitHubJson(url, 2500)
+}
+
+function getPullRequestHeadSha(value: unknown): string | null {
+  if (!value || typeof value !== 'object') return null
+  const head = (value as { head?: unknown }).head
+  if (!head || typeof head !== 'object') return null
+  const sha = (head as { sha?: unknown }).sha
+  return typeof sha === 'string' && sha.trim() ? sha.trim() : null
+}
+
+async function fetchPullRequestCheckStateFromGitHubApi(
+  repo: GitHubRepo,
+  sha: string
+): Promise<unknown[]> {
+  const statusUrl = new URL(
+    `https://api.github.com/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.repo)}/commits/${encodeURIComponent(sha)}/status`
+  )
+  const checksUrl = new URL(
+    `https://api.github.com/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.repo)}/commits/${encodeURIComponent(sha)}/check-runs`
+  )
+  checksUrl.searchParams.set('per_page', '100')
+
+  const [status, checks] = await Promise.all([
+    fetchGitHubJson(statusUrl, 2000),
+    fetchGitHubJson(checksUrl, 2000)
+  ])
+
+  return [status, checks].filter((entry) => entry !== null)
+}
+
+async function hydratePullRequestsFromGitHubApi(
+  path: string,
+  branch: string,
+  repo: GitHubRepo,
+  entries: unknown[]
+): Promise<GitPullRequest[]> {
+  const basePullRequests = entries
+    .map((entry) => normalizePullRequestPayload(path, branch, repo, entry))
+    .filter((entry): entry is GitPullRequest => entry !== null)
+
+  const hydrated = await Promise.all(basePullRequests.map(async (pullRequest) => {
+    if (pullRequest.mergeState !== 'unknown' && pullRequest.ciState !== 'unknown') return pullRequest
+
+    const details = await fetchPullRequestDetailsFromGitHubApi(repo, pullRequest.number)
+    if (!details) return pullRequest
+    const headSha = getPullRequestHeadSha(details)
+    const statusCheckRollup = pullRequest.ciState === 'unknown' && headSha
+      ? await fetchPullRequestCheckStateFromGitHubApi(repo, headSha)
+      : undefined
+
+    const merged = normalizePullRequestPayload(path, branch, repo, {
+      ...(details as Record<string, unknown>),
+      number: pullRequest.number,
+      html_url: pullRequest.url,
+      title: pullRequest.title,
+      ...(statusCheckRollup ? { statusCheckRollup } : {})
+    })
+
+    return merged || pullRequest
+  }))
+
+  return hydrated
+}
+
+async function fetchOpenPullRequestsForBranch(
+  path: string,
+  branch: string,
+  repo: GitHubRepo,
+  head: { owner: string; branch: string }
+): Promise<GitPullRequest[]> {
+  pruneExpiredGitHubPullRequestCache()
+  const cacheKey = `${repo.owner}/${repo.repo}:${head.owner}:${head.branch}`.toLowerCase()
+  const cached = gitHubPullRequestCache.get(cacheKey)
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.pullRequests.map((pullRequest) => ({
+      ...pullRequest,
+      rootPath: path,
+      branch
+    }))
+  }
+
+  const ghPullRequests = await fetchOpenPullRequestsWithGitHubCli(path, branch, repo, head)
+  if (ghPullRequests !== null) {
+    gitHubPullRequestCache.set(cacheKey, {
+      expiresAt: Date.now() + GITHUB_PULL_REQUEST_CACHE_MS,
+      pullRequests: ghPullRequests
+    })
+    return ghPullRequests
+  }
+
+  const url = new URL(`https://api.github.com/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.repo)}/pulls`)
+  url.searchParams.set('state', 'open')
+  url.searchParams.set('head', `${head.owner}:${head.branch}`)
+  url.searchParams.set('per_page', '10')
+
+  const payload = await fetchGitHubJson(url, 2500)
+  const pullRequests = Array.isArray(payload)
+    ? await hydratePullRequestsFromGitHubApi(path, branch, repo, payload)
+    : []
+
+  gitHubPullRequestCache.set(cacheKey, {
+    expiresAt: Date.now() + GITHUB_PULL_REQUEST_CACHE_MS,
+    pullRequests
+  })
+  return pullRequests
+}
+
+async function getActivePullRequestsForRoot(path: string): Promise<GitPullRequest[]> {
+  const branch = await getCurrentBranch(path)
+  if (!branch) return []
+
+  const lookup = await getGitHubPullRequestLookup(path, branch)
+  if (!lookup) return []
+
+  return fetchOpenPullRequestsForBranch(path, branch, lookup.baseRepo, lookup.head)
+}
+
+export async function getActivePullRequests(paths: string[]): Promise<GitPullRequest[]> {
+  const uniquePaths = Array.from(new Set(paths.filter((path) => path.trim()))).slice(0, 20)
+  if (uniquePaths.length === 0) return []
+
+  const pullRequestGroups = await Promise.all(
+    uniquePaths.map(async (path) => {
+      try {
+        return await getActivePullRequestsForRoot(path)
+      } catch {
+        return []
+      }
+    })
+  )
+
+  const seen = new Set<string>()
+  const pullRequests: GitPullRequest[] = []
+  for (const pullRequest of pullRequestGroups.flat()) {
+    const key = pullRequest.url.toLowerCase()
+    if (seen.has(key)) continue
+    seen.add(key)
+    pullRequests.push(pullRequest)
+  }
+  return pullRequests
 }
 
 function isGitHubAvatarUrl(value: unknown): value is string {

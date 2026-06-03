@@ -387,6 +387,18 @@ export function registerIpcHandlers(): void {
     return git.pushCurrentBranch(root)
   })
 
+  ipcMain.handle('git:active-pull-requests', async (_, roots: string[]) => {
+    const validRoots = Array.isArray(roots)
+      ? roots.filter((root): root is string => typeof root === 'string')
+      : []
+
+    for (const root of validRoots) {
+      assertPathWithinProjects(root)
+    }
+
+    return git.getActivePullRequests(validRoots.filter((root) => isDirectory(root)))
+  })
+
   ipcMain.handle('git:history', async (_, path: string, limit?: number) => {
     assertPathWithinProjects(path)
     if (!isDirectory(path)) return []
