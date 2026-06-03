@@ -111,8 +111,8 @@ export function StatusBar(): React.ReactNode {
       : brokerStatus === 'error'
         ? 'bg-[var(--pear-red)]'
         : 'bg-[var(--pear-text-faint)]'
-  const pullRequestMergeIconColor = pullRequests.some((pullRequest) => pullRequest.mergeState === 'blocked')
-    ? 'text-[var(--pear-orange)]'
+  const pullRequestMergeIconColor = pullRequests.some(pullRequestHasBlockingStatus)
+    ? 'text-[var(--pear-red)]'
     : 'text-[var(--pear-green)]'
 
   return (

@@ -1328,7 +1328,7 @@ async function getActivePullRequestsForRoot(path: string): Promise<GitPullReques
 }
 
 export async function getActivePullRequests(paths: string[]): Promise<GitPullRequest[]> {
-  const uniquePaths = Array.from(new Set(paths.map((path) => path.trim()).filter(Boolean))).slice(0, 20)
+  const uniquePaths = Array.from(new Set(paths.filter((path) => path.trim()))).slice(0, 20)
   if (uniquePaths.length === 0) return []
 
   const pullRequestGroups = await Promise.all(
