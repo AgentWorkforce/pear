@@ -458,6 +458,7 @@ export type CreateCloudAgentInput = {
 }
 
 export type CloudAgentSandboxStatus = 'warming' | 'ready' | 'failed' | 'stopping' | 'stopped'
+export type CloudAgentSandboxPhase = 'queued' | 'pulling-image' | 'starting' | 'cloning' | 'mounting' | 'ready'
 
 export type CloudAgentBinding = {
   projectId: string
@@ -478,13 +479,13 @@ export type CloudAgentSyncMode = 'sandbox-priority' | 'local-priority'
 
 export type CloudAgentStatus = {
   binding: CloudAgentBinding
-  sandbox: { id: string; status: CloudAgentSandboxStatus }
+  sandbox: { id: string; status: CloudAgentSandboxStatus; phase?: CloudAgentSandboxPhase; etaMs?: number }
   mount: CloudAgentMountStatus
   syncMode: CloudAgentSyncMode
 }
 
 export type CloudAgentEvent =
-  | { type: 'sandbox-status'; projectId: string; status: CloudAgentSandboxStatus }
+  | { type: 'sandbox-status'; projectId: string; status: CloudAgentSandboxStatus; phase?: CloudAgentSandboxPhase; etaMs?: number }
   | { type: 'mount-status'; projectId: string; mount: CloudAgentMountStatus }
   | { type: 'sync-mode-changed'; projectId: string; syncMode: CloudAgentSyncMode }
   | { type: 'error'; projectId: string; message: string }
@@ -791,6 +792,8 @@ export interface PearAPI {
     list: () => Promise<CloudAgentRecord[]>
     create: (input: CreateCloudAgentInput) => Promise<CloudAgentRecord>
     delete: (id: string) => Promise<void>
+    prewarm: (projectId: string, cloudAgentId: string) => Promise<void>
+    cancelPrewarm: (projectId: string, cloudAgentId?: string) => Promise<void>
     attach: (projectId: string, cloudAgentId: string) => Promise<CloudAgentBinding>
     detach: (projectId: string) => Promise<void>
     status: (projectId: string) => Promise<CloudAgentStatus | null>

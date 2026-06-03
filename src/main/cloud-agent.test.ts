@@ -221,6 +221,11 @@ describe('CloudAgentManager', () => {
     return dir
   }
 
+  async function flushMicrotasks(): Promise<void> {
+    await Promise.resolve()
+    await Promise.resolve()
+  }
+
   it('warms a box using the token account workspace, not the relay workspace', async () => {
     const manager = new CloudAgentManager()
 
@@ -236,6 +241,63 @@ describe('CloudAgentManager', () => {
     expect(boxPost?.url).not.toContain('relay-workspace-id')
     expect(mock.fetchCalls.filter((call) => call.url.endsWith('/api/v1/auth/whoami'))).toHaveLength(1)
     expect(mock.mountInputs[0]?.workspaceId).toBe('relay-workspace-id')
+  })
+
+  it('reuses a warm-on-intent box when attach is clicked', async () => {
+    const manager = new CloudAgentManager()
+
+    await manager.prewarm('project-1', 'cloud-agent-1')
+    await manager.attach('project-1', 'cloud-agent-1')
+
+    const boxCalls = mock.fetchCalls.filter((call) => call.url.includes('/cloud-agents/cloud-agent-1/box'))
+    expect(boxCalls.map((call) => call.init?.method)).toEqual(['POST'])
+  })
+
+  it('cancels and reaps a speculative warm when the picker closes', async () => {
+    const manager = new CloudAgentManager()
+
+    await manager.prewarm('project-1', 'cloud-agent-1')
+    await flushMicrotasks()
+    await manager.cancelPrewarm('project-1', 'cloud-agent-1')
+
+    const boxCalls = mock.fetchCalls.filter((call) => call.url.includes('/cloud-agents/cloud-agent-1/box'))
+    expect(boxCalls.map((call) => call.init?.method)).toEqual(['POST', 'DELETE'])
+  })
+
+  it('cancels speculative warms during shutdown', async () => {
+    const manager = new CloudAgentManager()
+
+    await manager.prewarm('project-1', 'cloud-agent-1')
+    await flushMicrotasks()
+    await manager.shutdownAll()
+
+    const boxCalls = mock.fetchCalls.filter((call) => call.url.includes('/cloud-agents/cloud-agent-1/box'))
+    expect(boxCalls.map((call) => call.init?.method)).toEqual(['POST', 'DELETE'])
+  })
+
+  it('forwards granular phase and eta from box warm responses', async () => {
+    mock.boxResponses.push({
+      sandboxId: 'sandbox-1',
+      execUrl: 'https://sandbox.example',
+      relayfileToken: 'relayfile-token',
+      relayfileMountPath: '/remote/project-1',
+      status: 'ready',
+      phase: 'ready',
+      etaMs: 0
+    })
+    const manager = new CloudAgentManager()
+    const events: Array<{ type: string; phase?: string; etaMs?: number }> = []
+    manager.onEvent((event) => events.push(event))
+
+    await manager.attach('project-1', 'cloud-agent-1')
+
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: 'sandbox-status',
+        phase: 'ready',
+        etaMs: 0
+      })
+    ]))
   })
 
   it('prefers git-overlay for clean upstream git projects and starts the local relayfile mount', async () => {

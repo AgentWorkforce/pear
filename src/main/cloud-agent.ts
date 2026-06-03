@@ -25,6 +25,7 @@ import type {
   CloudAgentMountStatus,
   CloudAgentRecord,
   CloudAgentSandbox,
+  CloudAgentSandboxPhase,
   CloudAgentSandboxStatus,
   CloudAgentStatus,
   CloudAgentSyncMode,
@@ -57,6 +58,8 @@ type CloudAgentBoxResponse = Partial<CloudAgentSandbox> & {
   url?: string
   mountPath?: string
   expectedReadyBy?: string
+  phase?: unknown
+  etaMs?: unknown
 }
 
 type CloudAgentWorkspaceSource =
@@ -110,6 +113,21 @@ type CompatibleDeployInput = {
 
 type ConflictPolicy = 'remote-wins' | 'local-wins'
 
+type PrewarmEntry = {
+  projectId: string
+  cloudAgentId: string
+  workspaceSourceKey: string
+  promise: Promise<CloudAgentSandbox>
+  sandbox?: CloudAgentSandbox
+  cancelled: boolean
+  consumed: boolean
+}
+
+type WarmBoxOptions = {
+  onSandbox?: (sandbox: CloudAgentSandbox) => void
+  isCancelled?: () => boolean
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
@@ -142,11 +160,29 @@ function normalizeAgentRecord(record: ProactiveAgentRecord | Record<string, unkn
   }
 }
 
+function normalizeSandboxPhase(value: unknown): CloudAgentSandboxPhase | undefined {
+  return value === 'queued' ||
+    value === 'pulling-image' ||
+    value === 'starting' ||
+    value === 'cloning' ||
+    value === 'mounting' ||
+    value === 'ready'
+    ? value
+    : undefined
+}
+
+function normalizeEtaMs(value: unknown): number | undefined {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) return undefined
+  return Math.round(value)
+}
+
 function normalizeSandbox(payload: CloudAgentBoxResponse): CloudAgentSandbox {
   const sandboxId = payload.sandboxId || payload.id
   const execUrl = payload.execUrl || payload.httpUrl || payload.baseUrl || payload.url
   const relayfileMountPath = payload.relayfileMountPath || payload.mountPath
   const status = payload.status || 'warming'
+  const phase = normalizeSandboxPhase(payload.phase)
+  const etaMs = normalizeEtaMs(payload.etaMs)
 
   if (!['warming', 'ready', 'failed', 'stopping', 'stopped'].includes(status)) {
     throw new Error(`Unsupported cloud agent sandbox status: ${status}`)
@@ -167,6 +203,8 @@ function normalizeSandbox(payload: CloudAgentBoxResponse): CloudAgentSandbox {
     relayfileToken: payload.relayfileToken,
     relayfileMountPath,
     status: status as CloudAgentSandboxStatus,
+    ...(phase ? { phase } : {}),
+    ...(etaMs !== undefined ? { etaMs } : {}),
     apiKey: payload.apiKey,
     error: payload.error
   }
@@ -391,6 +429,14 @@ function cloudAgentWorkspaceMode(project: Project): CloudAgentWorkspaceMode {
   return mode === 'git' || mode === 'relayfile' ? mode : 'git-overlay'
 }
 
+function prewarmKey(projectId: string, cloudAgentId: string): string {
+  return `${projectId}\0${cloudAgentId}`
+}
+
+function workspaceSourceKey(source: CloudAgentWorkspaceSource): string {
+  return JSON.stringify(source)
+}
+
 export class CloudAgentManager {
   private bindings = new Map<string, CloudAgentBinding>()
   private sandboxes = new Map<string, CloudAgentSandbox>()
@@ -403,6 +449,8 @@ export class CloudAgentManager {
   private appliedConflictPolicies = new Map<string, ConflictPolicy>()
   private mountRestartPromises = new Map<string, Promise<void>>()
   private workspaceSources = new Map<string, CloudAgentWorkspaceSource>()
+  private prewarms = new Map<string, PrewarmEntry>()
+  private canceledAttaches = new Set<string>()
   private eventHandlers = new Set<(event: CloudAgentEvent) => void>()
 
   constructor() {
@@ -448,10 +496,90 @@ export class CloudAgentManager {
     const cloudAgentId = id.trim()
     if (!cloudAgentId) throw new Error('Cloud agent id is required')
 
+    for (const entry of Array.from(this.prewarms.values())) {
+      if (entry.cloudAgentId === cloudAgentId) {
+        await this.cancelPrewarm(entry.projectId, entry.cloudAgentId)
+      }
+    }
+
     const data = loadStore()
     const attachedProjects = data.projects.filter((project) => project.cloudAgent?.id === cloudAgentId)
     await Promise.all(attachedProjects.map((project) => this.detach(project.id)))
     await cloudDeleteCloudAgent(auth, cloudAgentId)
+  }
+
+  async prewarm(projectId: string, cloudAgentId: string): Promise<void> {
+    const normalizedProjectId = projectId.trim()
+    const normalizedCloudAgentId = cloudAgentId.trim()
+    if (!normalizedProjectId) throw new Error('Project id is required')
+    if (!normalizedCloudAgentId) throw new Error('Cloud agent id is required')
+    if (this.bindings.has(normalizedProjectId) || this.findPersistedBinding(normalizedProjectId)) return
+    if (this.attachPromises.has(normalizedProjectId)) return
+
+    const project = this.requireProject(normalizedProjectId)
+    const workspaceSource = await this.resolveWorkspaceSource(project)
+    const sourceKey = workspaceSourceKey(workspaceSource)
+    const key = prewarmKey(normalizedProjectId, normalizedCloudAgentId)
+    const existing = this.prewarms.get(key)
+    if (existing && !existing.cancelled && existing.workspaceSourceKey === sourceKey) return
+
+    if (existing) {
+      await this.cancelPrewarm(normalizedProjectId, normalizedCloudAgentId)
+    }
+
+    const entry: PrewarmEntry = {
+      projectId: normalizedProjectId,
+      cloudAgentId: normalizedCloudAgentId,
+      workspaceSourceKey: sourceKey,
+      promise: Promise.resolve(null as unknown as CloudAgentSandbox),
+      cancelled: false,
+      consumed: false
+    }
+
+    let failed = false
+    entry.promise = this.warmBox(normalizedProjectId, normalizedCloudAgentId, workspaceSource, {
+      onSandbox: (sandbox) => {
+        entry.sandbox = sandbox
+      },
+      isCancelled: () => entry.cancelled
+    }).catch(async (error) => {
+      failed = true
+      if (!entry.consumed && !entry.cancelled) {
+        this.emit({ type: 'error', projectId: normalizedProjectId, message: toErrorMessage(error) })
+      }
+      throw error
+    }).finally(() => {
+      if (!entry.consumed && (entry.cancelled || failed)) {
+        this.prewarms.delete(key)
+      }
+    })
+
+    this.prewarms.set(key, entry)
+    entry.promise.catch(() => undefined)
+  }
+
+  async cancelPrewarm(projectId: string, cloudAgentId?: string): Promise<void> {
+    const normalizedProjectId = projectId.trim()
+    if (!normalizedProjectId) return
+
+    const entries = Array.from(this.prewarms.entries())
+      .filter(([, entry]) =>
+        entry.projectId === normalizedProjectId &&
+        (!cloudAgentId || entry.cloudAgentId === cloudAgentId.trim())
+      )
+
+    await Promise.all(entries.map(async ([key, entry]) => {
+      if (entry.consumed) return
+      entry.cancelled = true
+      this.prewarms.delete(key)
+      if (entry.sandbox) {
+        await this.deleteBox(toBinding(entry.projectId, entry.cloudAgentId, entry.sandbox)).catch((error) => {
+          this.emit({ type: 'error', projectId: entry.projectId, message: toErrorMessage(error) })
+        })
+      } else {
+        await entry.promise.catch(() => undefined)
+      }
+    }))
   }
 
   async attach(projectId: string, cloudAgentId: string, win?: BrowserWindow | null): Promise<CloudAgentBinding> {
@@ -461,9 +589,11 @@ export class CloudAgentManager {
     const existingAttach = this.attachPromises.get(normalizedProjectId)
     if (existingAttach) return existingAttach
 
+    this.canceledAttaches.delete(normalizedProjectId)
     const attachPromise = this.attachInternal(normalizedProjectId, cloudAgentId.trim(), win ?? undefined)
       .finally(() => {
         this.attachPromises.delete(normalizedProjectId)
+        this.canceledAttaches.delete(normalizedProjectId)
       })
     this.attachPromises.set(normalizedProjectId, attachPromise)
     return attachPromise
@@ -476,6 +606,10 @@ export class CloudAgentManager {
     this.clearPullTimer(normalizedProjectId)
     this.clearSyncModeTimer(normalizedProjectId)
     this.mountRestartPromises.delete(normalizedProjectId)
+    if (this.attachPromises.has(normalizedProjectId)) {
+      this.canceledAttaches.add(normalizedProjectId)
+    }
+    await this.cancelPrewarm(normalizedProjectId)
     const binding = this.bindings.get(normalizedProjectId) || this.findPersistedBinding(normalizedProjectId)
 
     const mount = this.mounts.get(normalizedProjectId)
@@ -518,7 +652,9 @@ export class CloudAgentManager {
       binding,
       sandbox: {
         id: sandbox?.sandboxId || binding.sandboxId,
-        status: sandbox?.status || 'stopped'
+        status: sandbox?.status || 'stopped',
+        ...(sandbox?.phase ? { phase: sandbox.phase } : {}),
+        ...(sandbox?.etaMs !== undefined ? { etaMs: sandbox.etaMs } : {})
       },
       mount: toMountStatus(mountStatus),
       syncMode: this.syncModeFor(normalizedProjectId)
@@ -570,7 +706,7 @@ export class CloudAgentManager {
           ...(payload as CloudAgentBoxResponse)
         })
         this.sandboxes.set(normalizedProjectId, sandbox)
-        this.emit({ type: 'sandbox-status', projectId: normalizedProjectId, status: sandbox.status })
+        this.emitSandboxStatus(normalizedProjectId, sandbox)
       } catch {
         // PATCH responses may be acknowledgements rather than full sandbox payloads.
       }
@@ -624,12 +760,14 @@ export class CloudAgentManager {
   async shutdownAll(): Promise<void> {
     const projectIds = Array.from(new Set([
       ...Array.from(this.mounts.keys()),
-      ...Array.from(this.bindings.keys())
+      ...Array.from(this.bindings.keys()),
+      ...Array.from(this.prewarms.values()).map((entry) => entry.projectId)
     ]))
 
     await Promise.all(projectIds.map(async (projectId) => {
       this.clearPullTimer(projectId)
       this.clearSyncModeTimer(projectId)
+      await this.cancelPrewarm(projectId)
       const mount = this.mounts.get(projectId)
       this.mounts.delete(projectId)
       if (mount) {
@@ -701,25 +839,31 @@ export class CloudAgentManager {
     await this.requireCloudAuth()
     const project = this.requireProject(projectId)
     const workspaceSource = await this.resolveWorkspaceSource(project)
-    const sandbox = await this.warmBox(projectId, cloudAgentId, workspaceSource)
+    const sandbox = await this.consumePrewarm(projectId, cloudAgentId, workspaceSource) ??
+      await this.warmBox(projectId, cloudAgentId, workspaceSource)
+    await this.throwIfAttachCanceled(projectId, cloudAgentId, sandbox)
 
     try {
+      this.emitSandboxStatus(projectId, { ...sandbox, phase: 'mounting' })
       if (isLiveSyncWorkspaceSource(workspaceSource)) {
         await this.startMount(projectId, project, sandbox)
       } else {
         await this.stopMount(projectId)
         this.emit({ type: 'mount-status', projectId, mount: toMountStatus(null) })
       }
+      await this.throwIfAttachCanceled(projectId, cloudAgentId, sandbox)
       await this.connectBroker(projectId, sandbox, win)
+      await this.throwIfAttachCanceled(projectId, cloudAgentId, sandbox)
     } catch (error) {
       await this.stopMount(projectId)
       await this.deleteBox(toBinding(projectId, cloudAgentId, sandbox)).catch(() => undefined)
       throw error
     }
 
-    const binding = toBinding(projectId, cloudAgentId, sandbox)
+    const finalSandbox: CloudAgentSandbox = { ...sandbox, phase: 'ready', etaMs: 0 }
+    const binding = toBinding(projectId, cloudAgentId, finalSandbox)
     this.bindings.set(projectId, binding)
-    this.sandboxes.set(projectId, sandbox)
+    this.sandboxes.set(projectId, finalSandbox)
     this.workspaceSources.set(projectId, workspaceSource)
     this.persistCloudAgent(projectId, {
       id: cloudAgentId,
@@ -729,10 +873,41 @@ export class CloudAgentManager {
       autoPullAfterRun: project.cloudAgent?.autoPullAfterRun ?? true,
       workspaceSource
     })
-    this.emit({ type: 'sandbox-status', projectId, status: sandbox.status })
+    this.emitSandboxStatus(projectId, finalSandbox)
     const currentStatus = await this.status(projectId)
     if (currentStatus) this.emit({ type: 'mount-status', projectId, mount: currentStatus.mount })
+    this.canceledAttaches.delete(projectId)
     return binding
+  }
+
+  private async throwIfAttachCanceled(
+    projectId: string,
+    cloudAgentId: string,
+    sandbox: CloudAgentSandbox
+  ): Promise<void> {
+    if (!this.canceledAttaches.has(projectId)) return
+    this.canceledAttaches.delete(projectId)
+    await this.deleteBox(toBinding(projectId, cloudAgentId, sandbox)).catch(() => undefined)
+    throw new Error('Cloud agent attach canceled')
+  }
+
+  private async consumePrewarm(
+    projectId: string,
+    cloudAgentId: string,
+    workspaceSource: CloudAgentWorkspaceSource
+  ): Promise<CloudAgentSandbox | null> {
+    const key = prewarmKey(projectId, cloudAgentId)
+    const entry = this.prewarms.get(key)
+    if (!entry) return null
+
+    if (entry.cancelled || entry.workspaceSourceKey !== workspaceSourceKey(workspaceSource)) {
+      await this.cancelPrewarm(projectId, cloudAgentId)
+      return null
+    }
+
+    entry.consumed = true
+    this.prewarms.delete(key)
+    return entry.promise
   }
 
   private async resolveWorkspaceSource(project: Project): Promise<CloudAgentWorkspaceSource> {
@@ -854,7 +1029,8 @@ export class CloudAgentManager {
   private async warmBox(
     projectId: string,
     cloudAgentId: string,
-    workspaceSource: CloudAgentWorkspaceSource
+    workspaceSource: CloudAgentWorkspaceSource,
+    options: WarmBoxOptions = {}
   ): Promise<CloudAgentSandbox> {
     const auth = await this.requireCloudAuth()
     const workspaceId = await this.requireAccountTokenWorkspaceId()
@@ -864,8 +1040,13 @@ export class CloudAgentManager {
       : [SANDBOX_WORKSPACE_PATH, ...integrationMountPaths]
     const url = `${auth.apiUrl}/api/v1/workspaces/${encodeURIComponent(workspaceId)}/cloud-agents/${encodeURIComponent(cloudAgentId)}/box`
     let sandbox = await this.fetchBox(url, auth.accessToken, 'POST', mountPaths, workspaceSource)
+    options.onSandbox?.(sandbox)
+    if (options.isCancelled?.()) {
+      await this.deleteBox(toBinding(projectId, cloudAgentId, sandbox)).catch(() => undefined)
+      throw new Error('Cloud agent sandbox warm canceled')
+    }
     console.log(`[cloud-agent] warming sandbox ${sandbox.sandboxId} for project ${projectId}: initial status=${sandbox.status}`)
-    this.emit({ type: 'sandbox-status', projectId, status: sandbox.status })
+    this.emitSandboxStatus(projectId, sandbox)
 
     const startedAt = Date.now()
     let lastLoggedStatus: string = sandbox.status
@@ -886,7 +1067,12 @@ export class CloudAgentManager {
       const fresh = await resolveCloudAuth()
       fetchAccessToken = fresh?.accessToken ?? fetchAccessToken
       sandbox = await this.fetchBox(url, fetchAccessToken, 'GET')
-      this.emit({ type: 'sandbox-status', projectId, status: sandbox.status })
+      options.onSandbox?.(sandbox)
+      if (options.isCancelled?.()) {
+        await this.deleteBox(toBinding(projectId, cloudAgentId, sandbox)).catch(() => undefined)
+        throw new Error('Cloud agent sandbox warm canceled')
+      }
+      this.emitSandboxStatus(projectId, sandbox)
       if (sandbox.status !== lastLoggedStatus) {
         const elapsedSec = Math.round((Date.now() - startedAt) / 1000)
         console.log(`[cloud-agent] sandbox ${sandbox.sandboxId} status changed: ${lastLoggedStatus} -> ${sandbox.status} (elapsed=${elapsedSec}s)`)
@@ -1193,6 +1379,16 @@ export class CloudAgentManager {
     const mount = this.mounts.get(projectId)
     const status = mount ? await mount.status().catch(() => null) : null
     this.emit({ type: 'mount-status', projectId, mount: toMountStatus(status) })
+  }
+
+  private emitSandboxStatus(projectId: string, sandbox: Pick<CloudAgentSandbox, 'status' | 'phase' | 'etaMs'>): void {
+    this.emit({
+      type: 'sandbox-status',
+      projectId,
+      status: sandbox.status,
+      ...(sandbox.phase ? { phase: sandbox.phase } : {}),
+      ...(sandbox.etaMs !== undefined ? { etaMs: sandbox.etaMs } : {})
+    })
   }
 
   private requireProject(projectId: string): Project {

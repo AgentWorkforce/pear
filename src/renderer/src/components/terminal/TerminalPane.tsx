@@ -1,12 +1,14 @@
 import type React from 'react'
-import { useEffect, useMemo, useState } from 'react'
-import { ChevronLeft, ChevronRight, Columns2, Network, PanelTop, X } from 'lucide-react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { AlertTriangle, ChevronLeft, ChevronRight, Columns2, Loader2, Network, PanelTop, X } from 'lucide-react'
 import { AgentHarnessIcon, ClaudeIcon, CodexIcon } from '@/components/common/AgentIcons'
 import { GraphView } from '@/components/graph/GraphView'
+import { ChatComposerInput } from '@/components/chat/ChatComposerInput'
 import { spawnProjectAgent, type SpawnAgentCli } from '@/lib/spawn-agent'
 import { formatTokenCount } from '@/lib/format'
 import { pear, type BurnAgentInput, type BurnAgentSummary, type TerminalAttachMode } from '@/lib/ipc'
 import { getAgentKeyForAgent, type Agent, useAgentStore } from '@/stores/agent-store'
+import { useCloudAgentStore, type CloudAgentAttachProgress } from '@/stores/cloud-agent-store'
 import { useIsAgentTyping } from '@/stores/typing-store'
 import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
@@ -14,6 +16,68 @@ import { PendingMessagesMenu, type QueueDeliveryMode } from './PendingMessagesPa
 import { TerminalInstance } from './TerminalInstance'
 
 const SPLIT_PAGE_SIZE = 4
+
+function isPreparingCloudAgent(progress: CloudAgentAttachProgress | undefined): boolean {
+  return Boolean(progress && progress.phase !== 'idle' && progress.phase !== 'done' && progress.phase !== 'error')
+}
+
+function cloudAgentErrorMessage(progress: CloudAgentAttachProgress | undefined): string | null {
+  return progress?.phase === 'error'
+    ? progress.message || 'Cloud agent attach failed'
+    : null
+}
+
+function formatDuration(ms: number): string {
+  const seconds = Math.max(0, Math.round(ms / 1000))
+  if (seconds < 60) return `${seconds}s`
+  const minutes = Math.floor(seconds / 60)
+  const remainder = seconds % 60
+  return remainder > 0 ? `${minutes}m ${remainder}s` : `${minutes}m`
+}
+
+function preparingLabel(progress: CloudAgentAttachProgress | undefined): string {
+  if (!progress) return 'Preparing cloud agent'
+  if (progress.message && !progress.sandboxPhase) return progress.message
+  switch (progress.sandboxPhase) {
+    case 'queued':
+      return 'Queued for sandbox capacity'
+    case 'pulling-image':
+      return 'Preparing sandbox image'
+    case 'starting':
+      return 'Starting sandbox'
+    case 'cloning':
+      return 'Cloning workspace'
+    case 'mounting':
+      return 'Mounting workspace'
+    case 'ready':
+      return 'Finalizing connection'
+  }
+  switch (progress.phase) {
+    case 'mounting':
+      return 'Mounting workspace'
+    case 'connecting-broker':
+      return 'Connecting broker'
+    default:
+      return 'Warming sandbox'
+  }
+}
+
+function progressPercent(progress: CloudAgentAttachProgress | undefined, elapsedMs: number): number | null {
+  if (!progress?.sandboxPhase && progress?.etaMs === undefined) return null
+  const baseByPhase: Partial<Record<NonNullable<CloudAgentAttachProgress['sandboxPhase']>, number>> = {
+    queued: 8,
+    'pulling-image': 24,
+    starting: 42,
+    cloning: 60,
+    mounting: 78,
+    ready: 100
+  }
+  const base = progress.sandboxPhase ? baseByPhase[progress.sandboxPhase] ?? 12 : 12
+  if (progress.sandboxPhase === 'ready' || progress.phase === 'done') return 100
+  if (typeof progress.etaMs !== 'number' || progress.etaMs <= 0) return base
+  const fraction = elapsedMs / Math.max(1, elapsedMs + progress.etaMs)
+  return Math.max(base, Math.min(96, Math.round(base + fraction * (96 - base))))
+}
 
 function getTerminalMode(agent: Agent): TerminalAttachMode {
   return agent.terminalMode === 'passthrough' || agent.terminalMode === 'view'
@@ -327,6 +391,12 @@ export function TerminalPane(): React.ReactNode {
   const activeAgentKey = useAgentStore((s) => s.activeAgentKey)
   const setActiveAgentKey = useAgentStore((s) => s.setActiveAgentKey)
   const setAgentTerminalMode = useAgentStore((s) => s.setAgentTerminalMode)
+  const brokerStatus = useAgentStore((s) => s.brokerStatus)
+  const addHumanMessage = useAgentStore((s) => s.addHumanMessage)
+  const cloudAttachProgress = useCloudAgentStore((s) => activeProjectId ? s.attachProgress[activeProjectId] : undefined)
+  const queuedFirstPrompt = useCloudAgentStore((s) => activeProjectId ? s.queuedFirstPrompts[activeProjectId] : undefined)
+  const setCloudAttachProgress = useCloudAgentStore((s) => s.setAttachProgress)
+  const queueFirstPrompt = useCloudAgentStore((s) => s.queueFirstPrompt)
   const openDialog = useUIStore((s) => s.openDialog)
   const openTab = useUIStore((s) => s.openTab)
   const terminalLayout = useUIStore((s) => s.terminalLayout)
@@ -335,6 +405,10 @@ export function TerminalPane(): React.ReactNode {
   const [spawnError, setSpawnError] = useState<string | null>(null)
   const [burnSummariesByAgentKey, setBurnSummariesByAgentKey] = useState<Record<string, BurnAgentSummary>>({})
   const [splitPage, setSplitPage] = useState(0)
+  const [firstPromptText, setFirstPromptText] = useState('')
+  const [queuedPromptError, setQueuedPromptError] = useState<string | null>(null)
+  const [nowMs, setNowMs] = useState(() => Date.now())
+  const flushingPromptRef = useRef<string | null>(null)
   const graphEnabled = terminalLayout === 'graph'
   const splitEnabled = terminalLayout === 'horizontal-split' && agents.length > 1
   const splitPages = splitEnabled ? chunkAgents(agents) : []
@@ -351,6 +425,10 @@ export function TerminalPane(): React.ReactNode {
     () => burnInputs.map((agent) => `${agent.projectId || 'unknown'}:${agent.name}:${agent.cwd || ''}:${agent.cli || ''}`).join('|'),
     [burnInputs]
   )
+  const preparingCloudAgent = isPreparingCloudAgent(cloudAttachProgress)
+  const cloudAttachError = cloudAgentErrorMessage(cloudAttachProgress)
+  const preparingElapsedMs = cloudAttachProgress ? Math.max(0, nowMs - cloudAttachProgress.startedAt) : 0
+  const preparingProgressPercent = progressPercent(cloudAttachProgress, preparingElapsedMs)
 
   const handleSpawn = async (cli: SpawnAgentCli): Promise<void> => {
     if (!activeProject) {
@@ -366,6 +444,31 @@ export function TerminalPane(): React.ReactNode {
       setSpawnError(err instanceof Error ? err.message : String(err))
     } finally {
       setSpawningCli(null)
+    }
+  }
+
+  const queuePreparingPrompt = (): void => {
+    if (!activeProjectId || !firstPromptText.trim()) return
+    const text = firstPromptText.trim()
+    queueFirstPrompt(activeProjectId, {
+      text,
+      targetName: cloudAttachProgress?.cloudAgentName,
+      queuedAt: Date.now()
+    })
+    setFirstPromptText('')
+    setQueuedPromptError(null)
+  }
+
+  const cancelPreparingCloudAgent = async (): Promise<void> => {
+    if (!activeProjectId) return
+    setQueuedPromptError(null)
+    queueFirstPrompt(activeProjectId, null)
+    setCloudAttachProgress(activeProjectId, null)
+    try {
+      await pear.cloudAgent.cancelPrewarm(activeProjectId, cloudAttachProgress?.cloudAgentId)
+      await pear.cloudAgent.detach(activeProjectId)
+    } catch (err) {
+      setQueuedPromptError(err instanceof Error ? err.message : String(err))
     }
   }
 
@@ -438,6 +541,51 @@ export function TerminalPane(): React.ReactNode {
   }, [burnInputsKey])
 
   useEffect(() => {
+    if (!preparingCloudAgent) return
+    const interval = window.setInterval(() => setNowMs(Date.now()), 1000)
+    return () => window.clearInterval(interval)
+  }, [preparingCloudAgent])
+
+  useEffect(() => {
+    if (!activeProjectId || !queuedFirstPrompt || queuedPromptError || brokerStatus !== 'connected') return
+    const target = agents.find((agent) => agent.name === queuedFirstPrompt.targetName) || agents[0]
+    if (!target) return
+
+    const flushKey = `${activeProjectId}\0${queuedFirstPrompt.queuedAt}\0${target.name}`
+    if (flushingPromptRef.current === flushKey) return
+    flushingPromptRef.current = flushKey
+
+    pear.broker.sendMessage(activeProjectId, {
+      to: target.name,
+      text: queuedFirstPrompt.text,
+      from: 'human'
+    }).then(() => {
+      addHumanMessage(target.name, queuedFirstPrompt.text, activeProjectId)
+      queueFirstPrompt(activeProjectId, null)
+      if (cloudAttachProgress?.phase === 'done') {
+        setCloudAttachProgress(activeProjectId, null)
+      }
+      setQueuedPromptError(null)
+    }).catch((err) => {
+      setQueuedPromptError(err instanceof Error ? err.message : String(err))
+    }).finally(() => {
+      if (flushingPromptRef.current === flushKey) {
+        flushingPromptRef.current = null
+      }
+    })
+  }, [
+    activeProjectId,
+    addHumanMessage,
+    agents,
+    brokerStatus,
+    cloudAttachProgress?.phase,
+    queuedFirstPrompt,
+    queuedPromptError,
+    queueFirstPrompt,
+    setCloudAttachProgress
+  ])
+
+  useEffect(() => {
     if (agents.length === 0) {
       if (activeAgentKey) {
         setActiveAgentKey(null)
@@ -471,6 +619,104 @@ export function TerminalPane(): React.ReactNode {
   }, [activeAgentKey, agents, splitEnabled])
 
   if (agents.length === 0) {
+    if (activeProject && cloudAttachError) {
+      return (
+        <div className="flex h-full flex-col bg-[var(--pear-bg)]">
+          <div className="mx-auto flex h-full w-full max-w-[620px] flex-col justify-center px-6 py-8">
+            <div className="rounded-lg border border-[var(--pear-red)]/25 bg-[var(--pear-red)]/10 p-5">
+              <div className="flex items-start gap-3">
+                <AlertTriangle size={18} className="mt-0.5 shrink-0 text-[var(--pear-red)]" />
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium text-[var(--pear-text)]">Cloud agent attach failed</div>
+                  <div className="mt-1 text-xs leading-5 text-[var(--pear-red)]">{cloudAttachError}</div>
+                </div>
+              </div>
+              <div className="mt-4 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => activeProjectId && setCloudAttachProgress(activeProjectId, null)}
+                  className="rounded-md border border-[var(--pear-border-subtle)] px-3 py-1.5 text-xs text-[var(--pear-text-dim)] transition-colors hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
+                >
+                  Dismiss
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )
+    }
+
+    if (activeProject && preparingCloudAgent) {
+      return (
+        <div className="flex h-full flex-col bg-[var(--pear-bg)]">
+          <div className="mx-auto flex h-full w-full max-w-[760px] flex-col justify-center px-6 py-8">
+            <div className="rounded-lg border border-[var(--pear-border)] bg-[var(--pear-bg-raised)] p-5">
+              <div className="flex items-start justify-between gap-4">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 text-sm font-medium text-[var(--pear-text)]">
+                    <Loader2 size={15} className="animate-spin text-[var(--pear-accent)]" />
+                    <span className="truncate">{cloudAttachProgress?.cloudAgentName || 'Cloud agent'}</span>
+                  </div>
+                  <div className="mt-1 text-xs text-[var(--pear-text-faint)]">
+                    {preparingLabel(cloudAttachProgress)} · elapsed {formatDuration(preparingElapsedMs)}
+                    {cloudAttachProgress?.etaMs !== undefined && (
+                      <span> · ETA {formatDuration(cloudAttachProgress.etaMs)}</span>
+                    )}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void cancelPreparingCloudAgent()}
+                  className="shrink-0 rounded-md border border-[var(--pear-border-subtle)] px-3 py-1.5 text-xs text-[var(--pear-text-dim)] transition-colors hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
+                >
+                  Cancel
+                </button>
+              </div>
+
+              {preparingProgressPercent === null ? (
+                <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-[var(--pear-bg-overlay)]">
+                  <div className="h-full w-1/3 animate-pulse rounded-full bg-[var(--pear-accent)]/70" />
+                </div>
+              ) : (
+                <div className="mt-4 h-1.5 overflow-hidden rounded-full bg-[var(--pear-bg-overlay)]">
+                  <div
+                    className="h-full rounded-full bg-[var(--pear-accent)] transition-[width] duration-500"
+                    style={{ width: `${preparingProgressPercent}%` }}
+                  />
+                </div>
+              )}
+
+              <div className="mt-5">
+                <ChatComposerInput
+                  value={firstPromptText}
+                  placeholder={queuedFirstPrompt ? 'First prompt queued' : 'Queue the first prompt'}
+                  sendLabel="Queue first prompt"
+                  runningAgents={[]}
+                  activeProjectId={activeProjectId}
+                  disabled={Boolean(queuedFirstPrompt)}
+                  canSend={Boolean(firstPromptText.trim()) && !queuedFirstPrompt}
+                  onChange={setFirstPromptText}
+                  onSubmit={queuePreparingPrompt}
+                />
+              </div>
+
+              {queuedFirstPrompt && (
+                <div className="mt-3 rounded-md border border-[var(--pear-accent-dim)]/25 bg-[var(--pear-accent)]/10 px-3 py-2 text-xs text-[var(--pear-text-dim)]">
+                  Queued: {queuedFirstPrompt.text}
+                </div>
+              )}
+
+              {queuedPromptError && (
+                <div className="mt-3 rounded-md border border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 px-3 py-2 text-xs text-[var(--pear-red)]">
+                  {queuedPromptError}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      )
+    }
+
     return (
       <div className="flex h-full flex-col items-center justify-center bg-[var(--pear-bg)] px-8 text-[var(--pear-text-faint)]">
         <p className="text-sm text-[var(--pear-text-dim)]">
@@ -614,6 +860,81 @@ export function TerminalPane(): React.ReactNode {
       {spawnError && (
         <div className="shrink-0 border-b border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 px-3 py-2 text-xs text-[var(--pear-red)]">
           {spawnError}
+        </div>
+      )}
+      {cloudAttachError && (
+        <div className="flex shrink-0 items-start gap-2 border-b border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 px-3 py-2 text-xs text-[var(--pear-red)]">
+          <AlertTriangle size={13} className="mt-0.5 shrink-0" />
+          <span className="min-w-0 flex-1">{cloudAttachError}</span>
+          <button
+            type="button"
+            onClick={() => activeProjectId && setCloudAttachProgress(activeProjectId, null)}
+            className="shrink-0 text-[var(--pear-text-dim)] hover:text-[var(--pear-text)]"
+          >
+            Dismiss
+          </button>
+        </div>
+      )}
+      {preparingCloudAgent && (
+        <div className="shrink-0 border-b border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-3 py-3">
+          <div className="flex flex-col gap-3 lg:flex-row lg:items-center">
+            <div className="min-w-[220px] flex-1">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 text-xs font-medium text-[var(--pear-text)]">
+                    <Loader2 size={13} className="animate-spin text-[var(--pear-accent)]" />
+                    <span className="truncate">{cloudAttachProgress?.cloudAgentName || 'Cloud agent'}</span>
+                  </div>
+                  <div className="mt-1 text-[11px] text-[var(--pear-text-faint)]">
+                    {preparingLabel(cloudAttachProgress)} · elapsed {formatDuration(preparingElapsedMs)}
+                    {cloudAttachProgress?.etaMs !== undefined && (
+                      <span> · ETA {formatDuration(cloudAttachProgress.etaMs)}</span>
+                    )}
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void cancelPreparingCloudAgent()}
+                  className="shrink-0 rounded-md border border-[var(--pear-border-subtle)] px-2.5 py-1 text-[11px] text-[var(--pear-text-dim)] transition-colors hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
+                >
+                  Cancel
+                </button>
+              </div>
+              <div className="mt-2 h-1 overflow-hidden rounded-full bg-[var(--pear-bg-overlay)]">
+                {preparingProgressPercent === null ? (
+                  <div className="h-full w-1/3 animate-pulse rounded-full bg-[var(--pear-accent)]/70" />
+                ) : (
+                  <div
+                    className="h-full rounded-full bg-[var(--pear-accent)] transition-[width] duration-500"
+                    style={{ width: `${preparingProgressPercent}%` }}
+                  />
+                )}
+              </div>
+            </div>
+            <div className="min-w-0 flex-[1.4]">
+              <ChatComposerInput
+                value={firstPromptText}
+                placeholder={queuedFirstPrompt ? 'First prompt queued' : 'Queue the first prompt'}
+                sendLabel="Queue first prompt"
+                runningAgents={agents}
+                activeProjectId={activeProjectId}
+                disabled={Boolean(queuedFirstPrompt)}
+                canSend={Boolean(firstPromptText.trim()) && !queuedFirstPrompt}
+                onChange={setFirstPromptText}
+                onSubmit={queuePreparingPrompt}
+              />
+              {queuedFirstPrompt && (
+                <div className="mt-2 truncate text-[11px] text-[var(--pear-text-faint)]">
+                  Queued: {queuedFirstPrompt.text}
+                </div>
+              )}
+              {queuedPromptError && (
+                <div className="mt-2 text-[11px] text-[var(--pear-red)]">
+                  {queuedPromptError}
+                </div>
+              )}
+            </div>
+          </div>
         </div>
       )}
 

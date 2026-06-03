@@ -314,6 +314,10 @@ const api = {
     create: (input: CreateCloudAgentInput) =>
       invoke<CloudAgentRecord>('cloud-agent:create', input),
     delete: (id: string) => invoke<void>('cloud-agent:delete', id),
+    prewarm: (projectId: string, cloudAgentId: string) =>
+      invoke<void>('cloud-agent:prewarm', projectId, cloudAgentId),
+    cancelPrewarm: (projectId: string, cloudAgentId?: string) =>
+      invoke<void>('cloud-agent:cancel-prewarm', projectId, cloudAgentId),
     attach: (projectId: string, cloudAgentId: string) =>
       invoke<CloudAgentBinding>('cloud-agent:attach', projectId, cloudAgentId),
     detach: (projectId: string) => invoke<void>('cloud-agent:detach', projectId),
