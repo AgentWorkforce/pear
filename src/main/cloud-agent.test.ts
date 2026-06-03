@@ -17,6 +17,7 @@ const mock = vi.hoisted(() => {
     workspaceId: string
     localDir: string
     remotePath: string
+    scopes?: string[]
   }
 
   const fetchCalls: Array<{ url: string; init?: RequestInit }> = []
@@ -257,7 +258,8 @@ describe('CloudAgentManager', () => {
     expect(mock.mountInputs[0]).toMatchObject({
       workspaceId: 'relay-workspace-id',
       localDir: mock.project.rootPath,
-      remotePath: '/remote/project-1'
+      remotePath: '/remote/project-1',
+      scopes: ['relayfile:fs:read:/**', 'relayfile:fs:write:/**']
     })
   })
 

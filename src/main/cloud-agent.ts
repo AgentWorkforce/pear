@@ -990,7 +990,7 @@ export class CloudAgentManager {
       mode: 'poll' as const,
       background: true,
       agentName: `pear-${project.id}`,
-      scopes: ['relayfile:fs:readwrite:/**'],
+      scopes: ['relayfile:fs:read:/**', 'relayfile:fs:write:/**'],
       launcher,
       readyTimeoutMs: WARM_TIMEOUT_MS
     }
