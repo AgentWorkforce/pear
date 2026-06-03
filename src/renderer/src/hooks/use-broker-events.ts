@@ -115,6 +115,7 @@ export function useBrokerEvents(): void {
       if (typeof projectId !== 'string') return
       void (async () => {
         await useProjectStore.getState().load()
+        useUIStore.getState().openTab({ kind: 'agents', projectId })
         await useProjectStore.getState().setActiveProject(projectId)
       })()
     })

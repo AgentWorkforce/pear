@@ -1,4 +1,4 @@
-import { basename, resolve } from 'path'
+import { basename, isAbsolute, relative, resolve } from 'path'
 import type { Project } from './store'
 
 /**
@@ -30,7 +30,8 @@ export function findProjectForPath(projects: readonly Project[], targetPath: str
     projects.find((project) =>
       project.roots.some((root) => {
         const rootPath = resolve(root.path)
-        return resolved === rootPath || resolved.startsWith(rootPath + '/')
+        const pathFromRoot = relative(rootPath, resolved)
+        return pathFromRoot === '' || (!pathFromRoot.startsWith('..') && !isAbsolute(pathFromRoot))
       })
     ) ?? null
   )

@@ -31,6 +31,7 @@ let quitAfterShutdown = false
 // Path requested via `pear open <dir>` before the window exists; applied once
 // the renderer is ready to receive the active-project switch.
 let pendingOpenPath: string | null = null
+let rendererReadyForCliOpen = false
 
 const openPathDeps: OpenPathDeps = { loadStore, addProject, setActiveProject, isDirectory }
 
@@ -46,7 +47,7 @@ function handleOpenCommand(argv: readonly string[], workingDirectory: string): v
   const targetPath = resolve(workingDirectory, rawPath)
   try {
     const result = openProjectForPath(targetPath, openPathDeps)
-    if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow && !mainWindow.isDestroyed() && rendererReadyForCliOpen) {
       mainWindow.webContents.send('cli:open-project', result.projectId)
     } else {
       pendingOpenPath = targetPath
@@ -57,7 +58,7 @@ function handleOpenCommand(argv: readonly string[], workingDirectory: string): v
 }
 
 function flushPendingOpen(): void {
-  if (!pendingOpenPath || !mainWindow) return
+  if (!pendingOpenPath || !mainWindow || !rendererReadyForCliOpen) return
   const targetPath = pendingOpenPath
   pendingOpenPath = null
   try {
@@ -97,6 +98,7 @@ function shutdownBrokerOnce(): Promise<void> {
 }
 
 function createWindow(): void {
+  rendererReadyForCliOpen = false
   mainWindow = new BrowserWindow({
     width: 1400,
     height: 900,
@@ -120,9 +122,19 @@ function createWindow(): void {
     mainWindow!.show()
   })
 
+  mainWindow.on('closed', () => {
+    mainWindow = null
+    rendererReadyForCliOpen = false
+  })
+
+  mainWindow.webContents.on('did-start-loading', () => {
+    rendererReadyForCliOpen = false
+  })
+
   // Apply a queued `pear open <dir>` request once the renderer has loaded and
   // registered its `cli:open-project` listener.
   mainWindow.webContents.on('did-finish-load', () => {
+    rendererReadyForCliOpen = true
     flushPendingOpen()
   })
 
@@ -249,6 +261,8 @@ if (!gotSingleInstanceLock) {
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore()
       mainWindow.focus()
+    } else if (app.isReady()) {
+      createWindow()
     }
   })
 
