@@ -10,6 +10,7 @@ permissions:
 jobs:
   release:
     runs-on: macos-latest
+    timeout-minutes: 120 # backstop for the notarization retry loop below
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,4 +42,17 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           # Publishing the GitHub Release
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: npm run release:mac
+        # electron-builder notarizes internally and has no per-attempt retry,
+        # so Apple's transient notary drops (-1009) can fail an otherwise-good
+        # build. Retry the whole build a few times; notarization runs before
+        # publishing, so a failed attempt leaves nothing half-published.
+        run: |
+          for attempt in 1 2 3; do
+            if npm run release:mac; then
+              exit 0
+            fi
+            echo "release attempt ${attempt} failed; retrying in 60s..."
+            sleep 60
+          done
+          echo "release failed after 3 attempts"
+          exit 1
