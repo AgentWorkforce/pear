@@ -264,6 +264,17 @@ describe('CloudAgentManager', () => {
     expect(boxCalls.map((call) => call.init?.method)).toEqual(['POST', 'DELETE'])
   })
 
+  it('cancels speculative warms during shutdown', async () => {
+    const manager = new CloudAgentManager()
+
+    await manager.prewarm('project-1', 'cloud-agent-1')
+    await flushMicrotasks()
+    await manager.shutdownAll()
+
+    const boxCalls = mock.fetchCalls.filter((call) => call.url.includes('/cloud-agents/cloud-agent-1/box'))
+    expect(boxCalls.map((call) => call.init?.method)).toEqual(['POST', 'DELETE'])
+  })
+
   it('forwards granular phase and eta from box warm responses', async () => {
     mock.boxResponses.push({
       sandboxId: 'sandbox-1',

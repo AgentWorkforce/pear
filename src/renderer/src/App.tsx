@@ -22,6 +22,7 @@ import { CloudAgentDialog } from '@/components/agents/CloudAgentDialog'
 import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 import { useBrokerEvents } from '@/hooks/use-broker-events'
+import { useCloudAgentEvents } from '@/hooks/use-cloud-agent'
 import { useGitStatus } from '@/hooks/use-git-status'
 import { useAgentStore } from '@/stores/agent-store'
 import { initTypingTrace } from '@/lib/typing-trace'
@@ -42,6 +43,7 @@ export default function App(): React.ReactNode {
   const setActiveAgentKey = useAgentStore((s) => s.setActiveAgentKey)
 
   useBrokerEvents()
+  useCloudAgentEvents()
   useGitStatus()
 
   useEffect(() => {

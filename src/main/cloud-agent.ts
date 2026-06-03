@@ -760,12 +760,14 @@ export class CloudAgentManager {
   async shutdownAll(): Promise<void> {
     const projectIds = Array.from(new Set([
       ...Array.from(this.mounts.keys()),
-      ...Array.from(this.bindings.keys())
+      ...Array.from(this.bindings.keys()),
+      ...Array.from(this.prewarms.values()).map((entry) => entry.projectId)
     ]))
 
     await Promise.all(projectIds.map(async (projectId) => {
       this.clearPullTimer(projectId)
       this.clearSyncModeTimer(projectId)
+      await this.cancelPrewarm(projectId)
       const mount = this.mounts.get(projectId)
       this.mounts.delete(projectId)
       if (mount) {

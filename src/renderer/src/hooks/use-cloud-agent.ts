@@ -133,6 +133,12 @@ export function useCloudAgent(projectId: string | null): {
   }
 }
 
+export function useCloudAgentEvents(): void {
+  useEffect(() => {
+    return subscribeCloudAgentEvents()
+  }, [])
+}
+
 export function useCloudAgentCatalog(): {
   catalog: CloudAgentRecord[]
   status: 'idle' | 'loading' | 'ready' | 'error'
