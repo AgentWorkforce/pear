@@ -8,6 +8,8 @@
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "preview": "electron-vite preview",
+    "dist:mac": "electron-vite build && electron-builder --mac --publish never",
+    "release:mac": "electron-vite build && electron-builder --mac --publish always",
     "test": "node --experimental-strip-types --no-warnings --test 'src/main/__tests__/*.test.ts'",
     "personas:refresh": "npx --yes agentworkforce install @agentworkforce/persona-autonomous-actor --overwrite"
   },
@@ -39,6 +41,7 @@
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",
     "electron": "^42.1.0",
+    "electron-builder": "^26.8.1",
     "electron-vite": "^5.0.0",
     "tailwindcss": "^4.0.0",
     "typescript": "^5.7.0",
