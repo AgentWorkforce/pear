@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "productName": "Pear by Agent Relay",
   "description": "Pair programming workspace for humans and AI agents",
+  "author": "Agent Workforce Incorporated",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
