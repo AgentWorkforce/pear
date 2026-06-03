@@ -1,55 +1,47 @@
 import type React from 'react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Flame, RefreshCcw, TerminalSquare } from 'lucide-react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Flame, RefreshCcw } from 'lucide-react'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
-import { formatRelativeShort, formatTokenCount, formatUsd } from '@/lib/format'
-import { pear, type BurnAgentBreakdown, type BurnAgentInput } from '@/lib/ipc'
+import { formatTokenCount, formatUsd } from '@/lib/format'
+import { pear, type BurnSessionBreakdown } from '@/lib/ipc'
 import { useUIStore } from '@/stores/ui-store'
 import { Metric, Section, sessionShortId } from '@/components/burn/BurnPrimitives'
 import { useBurnFingerprintRefresh } from '@/components/burn/useBurnFingerprintRefresh'
 
-const BURN_BREAKDOWN_REFRESH_MS = 12_000
-const burnBreakdownCache = new Map<string, BurnAgentBreakdown>()
+const burnSessionDetailCache = new Map<string, BurnSessionBreakdown>()
 
 interface BreakdownState {
-  agentKey: string | null
-  breakdown: BurnAgentBreakdown | null
+  sessionId: string | null
+  breakdown: BurnSessionBreakdown | null
   loading: boolean
   error: string | null
 }
 
-function getBurnAgent(tabBurnAgent: BurnAgentInput | undefined): BurnAgentInput | null {
-  if (!tabBurnAgent?.name.trim()) return null
+function createBreakdownState(sessionId: string | null): BreakdownState {
+  const cached = sessionId ? burnSessionDetailCache.get(sessionId) ?? null : null
   return {
-    name: tabBurnAgent.name,
-    projectId: tabBurnAgent.projectId,
-    cwd: tabBurnAgent.cwd,
-    cli: tabBurnAgent.cli
-  }
-}
-
-function getBurnAgentKey(agent: BurnAgentInput): string {
-  return `${agent.projectId || 'unknown'}:${agent.name.trim()}`
-}
-
-function createBreakdownState(agentKey: string | null): BreakdownState {
-  const cached = agentKey ? burnBreakdownCache.get(agentKey) ?? null : null
-  return {
-    agentKey,
+    sessionId,
     breakdown: cached,
-    loading: Boolean(agentKey && !cached),
+    loading: Boolean(sessionId && !cached),
     error: null
   }
 }
 
-export function BurnSessionPage(): React.ReactNode {
-  const activeTab = useUIStore((s) => s.tabs.find((tab) => tab.id === s.activeTabId))
+const KIND_CHIP_CLASSES: Record<string, string> = {
+  file: 'bg-[var(--pear-blue)]/15 text-[var(--pear-blue)]',
+  bash: 'bg-[var(--pear-orange)]/15 text-[var(--pear-orange)]',
+  mcp: 'bg-[var(--pear-green)]/15 text-[var(--pear-green)]',
+  subagent: 'bg-[var(--pear-purple)]/15 text-[var(--pear-purple)]'
+}
+
+export function BurnSessionDetailPage(): React.ReactNode {
+  const activeTab = useUIStore((s) => s.tabs.find((t) => t.id === s.activeTabId))
   const openTab = useUIStore((s) => s.openTab)
-  const burnAgent = useMemo(() => getBurnAgent(activeTab?.burnAgent), [activeTab?.burnAgent])
-  const burnAgentKey = useMemo(() => burnAgent ? getBurnAgentKey(burnAgent) : null, [burnAgent])
+  const sessionId = activeTab?.burnSessionId ?? null
+
   const mountedRef = useRef(true)
-  const loadingAgentKeyRef = useRef<string | null>(null)
-  const [breakdownState, setBreakdownState] = useState<BreakdownState>(() => createBreakdownState(burnAgentKey))
+  const loadingKeyRef = useRef<string | null>(null)
+  const [breakdownState, setBreakdownState] = useState<BreakdownState>(() => createBreakdownState(sessionId))
 
   useEffect(() => {
     return () => {
@@ -58,31 +50,31 @@ export function BurnSessionPage(): React.ReactNode {
   }, [])
 
   const loadBreakdown = useCallback(async (force = false) => {
-    if (!burnAgent || !burnAgentKey) {
+    if (!sessionId) {
       setBreakdownState(createBreakdownState(null))
       return
     }
 
-    if (loadingAgentKeyRef.current === burnAgentKey) return
+    if (!force && loadingKeyRef.current === sessionId) return
 
-    const cached = burnBreakdownCache.get(burnAgentKey) ?? null
-    loadingAgentKeyRef.current = burnAgentKey
+    const cached = burnSessionDetailCache.get(sessionId) ?? null
+    loadingKeyRef.current = sessionId
     setBreakdownState({
-      agentKey: burnAgentKey,
+      sessionId,
       breakdown: cached,
       loading: true,
       error: null
     })
 
     try {
-      const next = await pear.burn.getAgentBreakdown(force ? { ...burnAgent, force: true } : burnAgent)
+      const next = await pear.burn.getSessionBreakdown(force ? { sessionId, force: true } : { sessionId })
       const nextError = next.status === 'unavailable' && next.error ? next.error : null
-      if (next.status === 'ok') burnBreakdownCache.set(burnAgentKey, next)
+      if (next.status === 'ok') burnSessionDetailCache.set(sessionId, next)
       if (!mountedRef.current) return
       setBreakdownState((current) => {
-        if (current.agentKey !== burnAgentKey) return current
+        if (current.sessionId !== sessionId) return current
         return {
-          agentKey: burnAgentKey,
+          sessionId,
           breakdown: next.status === 'ok' ? next : current.breakdown ?? cached ?? next,
           loading: false,
           error: nextError
@@ -92,25 +84,32 @@ export function BurnSessionPage(): React.ReactNode {
       const nextError = err instanceof Error ? err.message : String(err)
       if (!mountedRef.current) return
       setBreakdownState((current) => {
-        if (current.agentKey !== burnAgentKey) return current
+        if (current.sessionId !== sessionId) return current
         return {
-          agentKey: burnAgentKey,
+          sessionId,
           breakdown: current.breakdown ?? cached,
           loading: false,
           error: nextError
         }
       })
     } finally {
-      if (loadingAgentKeyRef.current === burnAgentKey) {
-        loadingAgentKeyRef.current = null
+      if (loadingKeyRef.current === sessionId) {
+        loadingKeyRef.current = null
       }
     }
-  }, [burnAgent, burnAgentKey])
+  }, [sessionId])
 
-  useEffect(() => { void loadBreakdown() }, [loadBreakdown])
-  useBurnFingerprintRefresh({}, BURN_BREAKDOWN_REFRESH_MS, () => { void loadBreakdown() })
+  useEffect(() => {
+    void loadBreakdown()
+  }, [loadBreakdown])
 
-  if (!burnAgent) {
+  useBurnFingerprintRefresh(
+    { sessionId: sessionId ?? undefined },
+    12_000,
+    loadBreakdown
+  )
+
+  if (!sessionId) {
     return (
       <div className="flex h-full items-center justify-center bg-[var(--pear-bg)] text-sm text-[var(--pear-text-faint)]">
         No burn session selected
@@ -118,13 +117,20 @@ export function BurnSessionPage(): React.ReactNode {
     )
   }
 
-  const cachedBreakdown = burnAgentKey ? burnBreakdownCache.get(burnAgentKey) ?? null : null
-  const stateMatchesAgent = breakdownState.agentKey === burnAgentKey
-  const display = stateMatchesAgent ? breakdownState.breakdown : cachedBreakdown
-  const loading = stateMatchesAgent ? breakdownState.loading : Boolean(burnAgentKey && !cachedBreakdown)
-  const error = stateMatchesAgent ? breakdownState.error : null
+  const cachedBreakdown = burnSessionDetailCache.get(sessionId) ?? null
+  const stateMatchesSession = breakdownState.sessionId === sessionId
+  const display = stateMatchesSession ? breakdownState.breakdown : cachedBreakdown
+  const loading = stateMatchesSession ? breakdownState.loading : Boolean(sessionId && !cachedBreakdown)
+  const error = stateMatchesSession ? breakdownState.error : null
   const initialLoading = loading && !display
   const hotspots = display?.hotspots
+  const insights = display?.insights ?? []
+
+  const agent = display?.agent ?? activeTab?.burnAgent
+  const agentName = agent && 'name' in agent ? agent.name : undefined
+  const agentCli = agent && 'cli' in agent ? agent.cli : undefined
+  const agentCwd = agent && 'cwd' in agent ? agent.cwd : undefined
+  const agentProjectId = display?.agent?.projectId
 
   return (
     <div className="h-full overflow-y-auto bg-[var(--pear-bg)]">
@@ -133,29 +139,31 @@ export function BurnSessionPage(): React.ReactNode {
           <div className="min-w-0">
             <div className="mb-2 flex items-center gap-2 text-xs text-[var(--pear-text-faint)]">
               <Flame size={14} className="text-[var(--pear-orange)]" />
-              <span>Burn breakdown</span>
+              <span>Session burn</span>
             </div>
             <div className="flex min-w-0 items-center gap-3">
               <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-surface)]">
-                <AgentHarnessIcon cli={burnAgent.cli} className="h-5 w-5 text-[var(--pear-text-secondary)]" />
+                <AgentHarnessIcon cli={agentCli} className="h-5 w-5 text-[var(--pear-text-secondary)]" />
               </span>
               <div className="min-w-0">
-                <h1 className="truncate text-2xl font-semibold text-[var(--pear-text)]">{burnAgent.name}</h1>
+                <h1 className="truncate text-2xl font-semibold text-[var(--pear-text)]">
+                  {sessionShortId(sessionId)}
+                </h1>
                 <p className="mt-1 truncate text-sm text-[var(--pear-text-faint)]">
-                  {display?.primarySessionId
-                    ? sessionShortId(display.primarySessionId)
+                  {agentName
+                    ? agentName
                     : loading
                       ? 'Updating burn data...'
-                      : burnAgent.cwd || burnAgent.projectId || 'Pear agent'}
+                      : agentCwd ?? agentProjectId ?? 'Pear session'}
                 </p>
               </div>
             </div>
           </div>
           <div className="flex items-center gap-2">
-            {burnAgent.projectId && (
+            {agentProjectId && (
               <button
                 type="button"
-                onClick={() => openTab({ kind: 'burn-project', projectId: burnAgent.projectId })}
+                onClick={() => openTab({ kind: 'burn-project', projectId: agentProjectId })}
                 className="flex h-9 items-center gap-2 rounded-lg px-3 text-sm text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
                 title="Project burn rollup"
               >
@@ -163,15 +171,6 @@ export function BurnSessionPage(): React.ReactNode {
                 <span>Project rollup</span>
               </button>
             )}
-            <button
-              type="button"
-              onClick={() => openTab({ kind: 'agents', projectId: burnAgent.projectId })}
-              className="flex h-9 items-center gap-2 rounded-lg px-3 text-sm text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
-              title="Open terminals"
-            >
-              <TerminalSquare size={15} />
-              <span>Terminals</span>
-            </button>
             <button
               type="button"
               onClick={() => void loadBreakdown(true)}
@@ -195,35 +194,41 @@ export function BurnSessionPage(): React.ReactNode {
           <Metric label="Tokens" value={formatTokenCount(display?.totalTokens ?? 0)} loading={initialLoading} />
           <Metric label="Cost" value={formatUsd(display?.totalCost ?? 0)} loading={initialLoading} />
           <Metric label="Turns" value={String(display?.turnCount ?? 0)} loading={initialLoading} />
-          <Metric label="Sessions" value={String(display?.sessionIds.length ?? 0)} loading={initialLoading} />
+          <Metric label="Models" value={String(display?.models.length ?? 0)} loading={initialLoading} />
         </div>
 
-        <div className="grid gap-5 lg:grid-cols-[1fr_1fr]">
-          <Section title="Models" empty={!display?.byModel.length} loading={initialLoading}>
-            <div className="space-y-2">
-              {display?.byModel.map((model) => (
-                <div key={model.model} className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 text-sm">
-                  <span className="truncate text-[var(--pear-text)]">{model.model}</span>
-                  <span className="text-[var(--pear-text-faint)]">{formatTokenCount(model.tokens)}</span>
-                  <span className="text-[var(--pear-text-faint)]">{formatUsd(model.cost)}</span>
+        <Section title="Cost Insights" empty={!insights.length} loading={initialLoading} loadingRows={4}>
+          <div className="space-y-2">
+            {insights.map((insight, index) => (
+              <div
+                key={`${insight.kind}:${insight.label}:${index}`}
+                className="grid grid-cols-[auto_minmax(0,1fr)_auto_auto_auto] items-center gap-3 text-sm"
+              >
+                <span
+                  className={`rounded px-1.5 py-0.5 text-[10px] font-medium uppercase ${KIND_CHIP_CLASSES[insight.kind] ?? 'bg-[var(--pear-bg-overlay)] text-[var(--pear-text-faint)]'}`}
+                >
+                  {insight.kind}
+                </span>
+                <div className="min-w-0">
+                  <span
+                    className={`block truncate ${insight.kind === 'file' || insight.kind === 'bash' ? 'font-mono text-xs text-[var(--pear-text)]' : 'text-[var(--pear-text)]'}`}
+                  >
+                    {insight.label}
+                  </span>
+                  {insight.detail && (
+                    <span className="block truncate text-xs text-[var(--pear-text-faint)]">{insight.detail}</span>
+                  )}
                 </div>
-              ))}
-            </div>
-          </Section>
-
-          <Section title="Tools" empty={!display?.byTool.length} loading={initialLoading}>
-            <div className="space-y-2">
-              {display?.byTool.map((tool) => (
-                <div key={tool.tool} className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] items-center gap-3 text-sm">
-                  <span className="truncate text-[var(--pear-text)]">{tool.tool}</span>
-                  <span className="text-[var(--pear-text-faint)]">{tool.count} calls</span>
-                  <span className="text-[var(--pear-text-faint)]">{formatTokenCount(tool.tokens)}</span>
-                  <span className="text-[var(--pear-text-faint)]">{formatUsd(tool.cost)}</span>
-                </div>
-              ))}
-            </div>
-          </Section>
-        </div>
+                {insight.ridingTurns != null && (
+                  <span className="shrink-0 rounded bg-[var(--pear-bg-overlay)] px-1.5 py-0.5 text-xs text-[var(--pear-text-faint)]">
+                    {insight.ridingTurns} turns
+                  </span>
+                )}
+                <span className="shrink-0 text-[var(--pear-text-faint)]">{formatUsd(insight.totalCost)}</span>
+              </div>
+            ))}
+          </div>
+        </Section>
 
         <Section title="File Hotspots" empty={!hotspots?.files.length} loading={initialLoading} loadingRows={4}>
           <div className="space-y-2">
@@ -238,14 +243,22 @@ export function BurnSessionPage(): React.ReactNode {
           </div>
         </Section>
 
-        <Section title="MCP servers" empty={!hotspots?.mcpServers?.length} loading={initialLoading}>
+        <Section title="MCP Servers" empty={!hotspots?.mcpServers.length} loading={initialLoading}>
           <div className="space-y-2">
-            {hotspots?.mcpServers?.map((m) => (
-              <div key={m.server} className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] items-center gap-3 text-sm">
-                <span className="truncate text-[var(--pear-text)]">{m.server}</span>
-                <span className="text-[var(--pear-text-faint)]">{m.callCount} calls</span>
-                <span className="truncate text-[var(--pear-text-faint)]" title={m.topTools.join(', ')}>{m.topTools.join(', ')}</span>
-                <span className="text-[var(--pear-text-faint)]">{formatUsd(m.totalCost)}</span>
+            {hotspots?.mcpServers.map((srv) => (
+              <div
+                key={srv.server}
+                className="grid grid-cols-[minmax(0,1fr)_auto_auto_auto_auto] items-center gap-3 text-sm"
+              >
+                <span className="truncate text-[var(--pear-text)]">{srv.server}</span>
+                <span className="text-[var(--pear-text-faint)]">{srv.callCount} calls</span>
+                {srv.topTools.length > 0 && (
+                  <span className="max-w-[160px] truncate text-xs text-[var(--pear-text-faint)]">
+                    {srv.topTools.join(', ')}
+                  </span>
+                )}
+                <span className="text-[var(--pear-text-faint)]">{srv.ridingTurns} turns</span>
+                <span className="text-[var(--pear-text-faint)]">{formatUsd(srv.totalCost)}</span>
               </div>
             ))}
           </div>
@@ -269,20 +282,14 @@ export function BurnSessionPage(): React.ReactNode {
             </div>
           </Section>
 
-          <Section title="Sessions" empty={!display?.sessionIds.length} loading={initialLoading}>
+          <Section title="Subagents" empty={!hotspots?.subagents.length} loading={initialLoading}>
             <div className="space-y-2">
-              {display?.sessionIds.map((session) => (
-                <button
-                  key={session.sessionId}
-                  type="button"
-                  onClick={() => openTab({ kind: 'burn-session-detail', burnSessionId: session.sessionId, projectId: burnAgent.projectId, burnAgent: { name: burnAgent.name, projectId: burnAgent.projectId, cwd: burnAgent.cwd, cli: burnAgent.cli } })}
-                  className="grid w-full grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md px-1 py-0.5 text-sm hover:bg-[var(--pear-bg-surface-hover)] text-left"
-                >
-                  <span className="truncate font-mono text-xs text-[var(--pear-text)]">{sessionShortId(session.sessionId)}</span>
-                  <span className="text-[var(--pear-text-faint)]">
-                    {session.ts ? formatRelativeShort(Date.parse(session.ts)) : ''}
-                  </span>
-                </button>
+              {hotspots?.subagents.map((sub) => (
+                <div key={sub.subagentType} className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 text-sm">
+                  <span className="truncate text-[var(--pear-text)]">{sub.subagentType}</span>
+                  <span className="text-[var(--pear-text-faint)]">{sub.callCount} calls</span>
+                  <span className="text-[var(--pear-text-faint)]">{formatUsd(sub.totalCost)}</span>
+                </div>
               ))}
             </div>
           </Section>
@@ -291,7 +298,10 @@ export function BurnSessionPage(): React.ReactNode {
         <Section title="Commands" empty={!hotspots?.bash.length} loading={initialLoading} loadingRows={4}>
           <div className="space-y-2">
             {hotspots?.bash.map((command) => (
-              <div key={`${command.command || 'command'}:${command.totalCost}`} className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 text-sm">
+              <div
+                key={`${command.command || 'command'}:${command.totalCost}`}
+                className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-3 text-sm"
+              >
                 <span className="truncate font-mono text-xs text-[var(--pear-text)]">{command.command || '(unknown)'}</span>
                 <span className="text-[var(--pear-text-faint)]">{command.callCount} calls</span>
                 <span className="text-[var(--pear-text-faint)]">{formatUsd(command.totalCost)}</span>

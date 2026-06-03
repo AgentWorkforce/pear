@@ -39,6 +39,11 @@ test('parseOpenCommand skips flags between open and the path', () => {
   assert.equal(parseOpenCommand(['pear', 'open', '--verbose', '/tmp/foo']), '/tmp/foo')
 })
 
+test('parseOpenCommand treats -- as end-of-options for dash-named directories', () => {
+  assert.equal(parseOpenCommand(['pear', 'open', '--', '-repo']), '-repo')
+  assert.equal(parseOpenCommand(['pear', 'open', '--']), null)
+})
+
 test('parseOpenCommand returns null without an open verb or path', () => {
   assert.equal(parseOpenCommand(['electron', '.']), null)
   assert.equal(parseOpenCommand(['pear', 'open']), null)

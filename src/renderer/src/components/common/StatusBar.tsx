@@ -1,10 +1,13 @@
 import type React from 'react'
-import { FileDiff, Moon, Sun } from 'lucide-react'
-import { formatGitDiffLineCount } from '@/lib/format'
+import { useCallback, useEffect, useState } from 'react'
+import { FileDiff, Flame } from 'lucide-react'
+import { formatGitDiffLineCount, formatTokenCount, formatUsd } from '@/lib/format'
+import { useBurnFingerprintRefresh } from '@/components/burn/useBurnFingerprintRefresh'
 import { useAgentStore } from '@/stores/agent-store'
 import { useGitStore } from '@/stores/git-store'
 import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
+import { pear, type BurnProjectBreakdown } from '@/lib/ipc'
 
 export function StatusBar(): React.ReactNode {
   const brokerStatus = useAgentStore((s) => s.brokerStatus)
@@ -12,14 +15,39 @@ export function StatusBar(): React.ReactNode {
   const project = useProjectStore((s) => s.getActiveProject())
   const projectChangedFiles = useGitStore((s) => s.projectFiles)
   const projectSummary = useGitStore((s) => s.projectSummary)
-  const theme = useUIStore((s) => s.theme)
-  const toggleTheme = useUIStore((s) => s.toggleTheme)
   const openTab = useUIStore((s) => s.openTab)
+  const projectId = project?.id
   const projectRootPathKey = project?.roots
     .filter((root) => root.pathExists)
     .map((root) => root.path)
     .join('\0') || ''
   const projectSummaryMatchesRoots = !!projectSummary && projectSummary.rootPathKey === projectRootPathKey
+
+  const [burn, setBurn] = useState<BurnProjectBreakdown | null>(null)
+
+  const loadBurn = useCallback(async () => {
+    if (!projectId) {
+      setBurn(null)
+      return
+    }
+    try {
+      const next = await pear.burn.getProjectBreakdown({ projectId })
+      setBurn(next.status === 'ok' ? next : null)
+    } catch {
+      // Burn data is informational — leave the prior value on failure.
+    }
+  }, [projectId])
+
+  useEffect(() => {
+    setBurn(null)
+    void loadBurn()
+  }, [loadBurn])
+
+  // Cheap fingerprint poll — only refetches the project burn totals when the
+  // ledger actually changed (global scope, since the bar shows the whole project).
+  useBurnFingerprintRefresh({}, 15_000, () => {
+    void loadBurn()
+  })
 
   const statusColor =
     brokerStatus === 'connected'
@@ -54,6 +82,23 @@ export function StatusBar(): React.ReactNode {
         )}
       </button>
 
+      <div className="flex-1" />
+
+      {project && burn && (
+        <button
+          type="button"
+          onClick={() => openTab({ kind: 'burn-project', projectId: project.id })}
+          className="flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[var(--pear-text-dim)] transition-colors hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text)]"
+          title="Open project token burn breakdown"
+          aria-label={`Open project token burn. ${formatTokenCount(burn.totalTokens)} tokens, ${formatUsd(burn.totalCost)} spent.`}
+        >
+          <Flame size={12} className="text-[var(--pear-orange)]" />
+          <span className="tabular-nums">{formatTokenCount(burn.totalTokens)} tokens</span>
+          <span className="text-[var(--pear-text-faint)]">·</span>
+          <span className="tabular-nums">{formatUsd(burn.totalCost)}</span>
+        </button>
+      )}
+
       {project && projectSummaryMatchesRoots && (
         <button
           type="button"
@@ -73,17 +118,6 @@ export function StatusBar(): React.ReactNode {
           )}
         </button>
       )}
-
-      <div className="flex-1" />
-
-      <button
-        onClick={toggleTheme}
-        className="ml-1 rounded-lg p-1.5 text-[var(--pear-text-faint)] hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text-dim)]"
-        title={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
-        aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} mode`}
-      >
-        {theme === 'dark' ? <Sun size={12} /> : <Moon size={12} />}
-      </button>
     </div>
   )
 }

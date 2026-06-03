@@ -7,12 +7,16 @@ import type { Project } from './store'
  * Electron argv shape varies by launch mode (packaged: `[exe, ...args]`; dev:
  * `[electron, '.', ...args]`), so rather than relying on fixed positions we scan
  * for the `open` verb and return the next non-flag argument as the target path.
+ *
+ * A `--` token ends option parsing, so the argument after it is always treated
+ * as the path — letting `pear open -- -repo` target a directory named `-repo`.
  */
 export function parseOpenCommand(argv: readonly string[]): string | null {
   const openIndex = argv.findIndex((arg) => arg === 'open')
   if (openIndex === -1) return null
   for (let i = openIndex + 1; i < argv.length; i++) {
     const arg = argv[i]
+    if (arg === '--') return argv[i + 1] ?? null
     if (arg.startsWith('-')) continue
     return arg
   }

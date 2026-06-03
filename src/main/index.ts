@@ -2,6 +2,7 @@ import { app, BrowserWindow, shell, Menu, protocol, nativeImage, ipcMain } from 
 import { existsSync } from 'fs'
 import { join, resolve } from 'path'
 import { registerIpcHandlers } from './ipc-handlers'
+import { burnManager } from './burn'
 import { brokerManager } from './broker'
 import { cloudAgentManager } from './cloud-agent'
 import { integrationsManager } from './integrations'
@@ -251,7 +252,7 @@ if (!gotSingleInstanceLock) {
   // A second `pear ...` invocation forwards its argv + cwd here.
   app.on('second-instance', (_event, argv, workingDirectory) => {
     handleOpenCommand(argv, workingDirectory)
-    if (mainWindow) {
+    if (mainWindow && !mainWindow.isDestroyed()) {
       if (mainWindow.isMinimized()) mainWindow.restore()
       mainWindow.focus()
     } else if (app.isReady()) {
@@ -279,6 +280,9 @@ if (!gotSingleInstanceLock) {
 
     registerAvatarCacheProtocol()
     registerIpcHandlers()
+    // Prime the burn ledger off the critical path so the first burn view (and the
+    // status-bar summary) queries a warm binding/DB instead of stalling ~1.5-4s.
+    burnManager.warmUp()
     void integrationsManager.startLocalMountDaemon().catch((error) => {
       console.warn('[integrations] Failed to start local integration mount daemon:', error instanceof Error ? error.message : String(error))
     })

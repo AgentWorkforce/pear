@@ -1,5 +1,6 @@
 import { accessSync, constants, existsSync, readFileSync } from 'fs'
 import { rm } from 'fs/promises'
+import { randomUUID } from 'node:crypto'
 import { delimiter, basename, dirname, join } from 'path'
 import { execFileSync } from 'child_process'
 import { BrowserWindow } from 'electron'
@@ -19,7 +20,7 @@ import {
 } from '@agent-relay/sdk'
 import { getAccessToken, getApiUrl } from './auth'
 import { assertDirectory } from './path-utils'
-import { createPearBurnSpawnListener } from './burn-spawn-hook'
+import { createPearBurnSpawnListener, stampPearBurnSpawnedAgent } from './burn-spawn-hook'
 import { getBurnLedgerHome, getPearBurnAgentKey } from './burn'
 import {
   BrokerConnectionFileSchema,
@@ -209,6 +210,40 @@ const AGENTWORKFORCE_CLI_VERSION = '3.0.22'
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+interface PearLineageEntry {
+  lineageId: string
+  agentKey: string
+  parentAgentKey?: string
+  cwd?: string
+  cli?: string
+}
+
+function getPearBurnSpawnEnrichment(
+  projectId: string,
+  input: { name: string; cwd?: string; cli?: string; team?: string; model?: string },
+  lineage?: { lineageId: string; parentAgentKey?: string }
+): Record<string, string> {
+  return {
+    // Defaults that the spawn listener applies via DEFAULT_ENRICHMENT. The
+    // Codex post-spawn path and observed-child-spawn path write stamps without
+    // going through the listener, and burn queries/rollups filter on
+    // `spawner: 'pear'` (see getPearBurnAgentTags / getPearBurnProjectTags), so
+    // these must be present or the session disappears from every rollup.
+    spawner: 'pear',
+    on_relay: 'true',
+    spawned_by: 'direct',
+    pear_project_id: projectId,
+    pear_agent_name: input.name,
+    pear_agent_key: getPearBurnAgentKey(projectId, input.name),
+    ...(input.cwd ? { pear_cwd: input.cwd } : {}),
+    ...(input.cli ? { pear_cli: input.cli } : {}),
+    ...(input.team ? { relay_team: input.team } : {}),
+    ...(input.model ? { model_requested: input.model } : {}),
+    ...(lineage?.lineageId ? { pear_lineage_id: lineage.lineageId } : {}),
+    ...(lineage?.parentAgentKey ? { pear_parent_agent_key: lineage.parentAgentKey } : {})
+  }
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -593,6 +628,7 @@ interface BrokerSession {
   name: string
   channels: string[]
   cloudSandboxId: string | null
+  pearLineage: Map<string, PearLineageEntry>
   // For attach-to-remote-broker sessions (cloud sandboxes), the SDK doesn't
   // auto-renew the owner lease the way .spawn() does. The remote broker
   // auto-shuts-down after 120s without a lease renewal, so we own the timer
@@ -777,7 +813,8 @@ export class BrokerManager {
           cwd,
           name,
           channels: [],
-          cloudSandboxId: null
+          cloudSandboxId: null,
+          pearLineage: new Map()
         })
         existingClient.connectEvents()
 
@@ -817,7 +854,8 @@ export class BrokerManager {
         cwd,
         name,
         channels: nextChannels,
-        cloudSandboxId: null
+        cloudSandboxId: null,
+        pearLineage: new Map()
       })
 
       this.publishBrokerEvent(normalizedProjectId, win, {
@@ -991,6 +1029,7 @@ export class BrokerManager {
         name: `cloud-${normalizedProjectId}`,
         channels: [],
         cloudSandboxId: sandboxId,
+        pearLineage: new Map(),
         leaseTimer
       })
       client.connectEvents()
@@ -1114,6 +1153,85 @@ export class BrokerManager {
     throw new Error(`No relay workspace found for agent: ${name}`)
   }
 
+  private resolveLineageEntry(
+    session: BrokerSession,
+    input: { name: string; cwd?: string; cli?: string }
+  ): { lineageId: string; parentAgentKey?: string } {
+    const existing = session.pearLineage.get(input.name)
+    if (existing) return { lineageId: existing.lineageId, parentAgentKey: existing.parentAgentKey }
+
+    const entry: PearLineageEntry = {
+      lineageId: randomUUID(),
+      agentKey: getPearBurnAgentKey(session.projectId, input.name),
+      cwd: input.cwd,
+      cli: input.cli
+    }
+    session.pearLineage.set(input.name, entry)
+    return { lineageId: entry.lineageId }
+  }
+
+  /**
+   * Pre-record a lineage entry so the next spawn of `name` inherits a
+   * parent's lineage_id. Used by `spawnAgent` when a caller declares a
+   * parent, and by `handleSpawnedChildLineage` when the broker observes a
+   * non-pear-driven child spawn.
+   */
+  private recordLineageChild(
+    session: BrokerSession,
+    name: string,
+    parentName: string,
+    cwd?: string,
+    cli?: string
+  ): PearLineageEntry | undefined {
+    const parent = session.pearLineage.get(parentName)
+    if (!parent) return undefined
+    if (session.pearLineage.has(name)) return session.pearLineage.get(name)
+
+    const entry: PearLineageEntry = {
+      lineageId: parent.lineageId,
+      agentKey: getPearBurnAgentKey(session.projectId, name),
+      parentAgentKey: parent.agentKey,
+      cwd: cwd ?? parent.cwd,
+      cli
+    }
+    session.pearLineage.set(name, entry)
+    return entry
+  }
+
+  private async handleSpawnedChildLineage(
+    projectId: string,
+    event: Extract<BrokerEvent, { kind: 'agent_spawned' }>
+  ): Promise<void> {
+    const session = this.sessions.get(projectId)
+    if (!session || !event.parent) return
+    const entry = this.recordLineageChild(session, event.name, event.parent, undefined, event.cli)
+    if (!entry) return
+
+    const enrichment = getPearBurnSpawnEnrichment(
+      projectId,
+      {
+        name: event.name,
+        ...(entry.cwd ? { cwd: entry.cwd } : {}),
+        ...(entry.cli ? { cli: entry.cli } : {})
+      },
+      { lineageId: entry.lineageId, parentAgentKey: entry.parentAgentKey }
+    )
+
+    try {
+      const burn = await import('@relayburn/sdk')
+      await burn.writePendingStamp({
+        harness: event.cli === 'codex' ? 'codex' : event.cli === 'opencode' ? 'opencode' : 'claude',
+        cwd: entry.cwd ?? session.cwd,
+        enrichment,
+        ...(event.pid ? { spawnerPid: event.pid } : {}),
+        spawnStartTs: new Date().toISOString(),
+        ledgerHome: getBurnLedgerHome()
+      })
+    } catch (err) {
+      console.warn('[broker] Failed to stamp spawned child lineage:', err)
+    }
+  }
+
   private attachClient(projectId: string, client: AgentRelayClient, win?: BrowserWindow): () => void {
     // Stamp every spawn this session does so burn can attribute Pear sessions
     // via `burn summary --tags spawner=pear`. The listener returns a SpawnPatch
@@ -1127,14 +1245,11 @@ export class BrokerManager {
     // follow-up minor will add the overload), so cast at the call site here.
     const burnHandler = createPearBurnSpawnListener({
       ledgerHome: getBurnLedgerHome(),
-      enrich: (ctx) => ({
-        pear_project_id: projectId,
-        pear_agent_name: ctx.input.name,
-        pear_agent_key: getPearBurnAgentKey(projectId, ctx.input.name),
-        ...(('cwd' in ctx.input && ctx.input.cwd) ? { pear_cwd: ctx.input.cwd } : {}),
-        ...(ctx.input.team ? { relay_team: ctx.input.team } : {}),
-        ...(ctx.input.model ? { model_requested: ctx.input.model } : {})
-      })
+      enrich: (ctx) => {
+        const session = this.sessions.get(projectId)
+        const lineage = session ? this.resolveLineageEntry(session, ctx.input) : undefined
+        return getPearBurnSpawnEnrichment(projectId, ctx.input, lineage)
+      }
     }) as Parameters<typeof client.addListener<'beforeAgentSpawn'>>[1]
     const unsubBurn = client.addListener('beforeAgentSpawn', burnHandler)
 
@@ -1165,6 +1280,9 @@ export class BrokerManager {
 
       if (event.kind === 'agent_spawned' && event.name) {
         this.rememberAgentProject(event.name, projectId)
+        if (event.parent) {
+          void this.handleSpawnedChildLineage(projectId, event)
+        }
       } else if (event.kind === 'agent_exit' && event.name) {
         this.closeInputStream(this.getInputStreamKey(projectId, event.name), 1000, 'agent closed')
         this.forgetAgentProject(event.name, projectId)
@@ -1352,7 +1470,11 @@ export class BrokerManager {
     }
   }
 
-  async spawnAgent(projectId: string, input: SpawnPtyInput): Promise<{ name: string; runtime: string }> {
+  async spawnAgent(
+    projectId: string,
+    input: SpawnPtyInput,
+    options: { parentAgentName?: string } = {}
+  ): Promise<{ name: string; runtime: string }> {
     const session = this.getSessionForProject(projectId)
     const shellSession = isShellLikeCommand(input.cli)
     const relayAwareInput: SpawnPtyInput = shellSession
@@ -1376,8 +1498,33 @@ export class BrokerManager {
 
     for (let attempt = 0; attempt < 20; attempt += 1) {
       try {
+        const spawnStartTs = new Date().toISOString()
+        if (options.parentAgentName) {
+          this.recordLineageChild(
+            session,
+            nextInput.name,
+            options.parentAgentName,
+            nextInput.cwd,
+            nextInput.cli
+          )
+        }
         const spawned = await session.client.spawnPty(nextInput)
-        this.rememberAgentProject(spawned.name || nextInput.name, session.projectId)
+        const spawnedName = spawned.name || nextInput.name
+        this.rememberAgentProject(spawnedName, session.projectId)
+        const burnInput = { ...nextInput, name: spawnedName }
+        const lineage = session.pearLineage.get(spawnedName)
+        void stampPearBurnSpawnedAgent(
+          burnInput,
+          spawnStartTs,
+          getPearBurnSpawnEnrichment(
+            session.projectId,
+            burnInput,
+            lineage ? { lineageId: lineage.lineageId, parentAgentKey: lineage.parentAgentKey } : undefined
+          ),
+          { ledgerHome: getBurnLedgerHome() }
+        ).catch((err) => {
+          console.warn('[burn-spawn-hook] post-spawn burn stamp failed:', err)
+        })
         return spawned
       } catch (err) {
         if (!isAgentNameConflict(err)) {

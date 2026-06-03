@@ -23,6 +23,10 @@ function getEventChannels(event: BrokerEventLike): string[] {
   return channels.filter((channel): channel is string => typeof channel === 'string' && channel.trim().length > 0)
 }
 
+// Monotonic token so overlapping `pear open` events resolve "latest wins":
+// a slower earlier load/switch won't clobber a newer one that already applied.
+let cliOpenSeq = 0
+
 function collectAgentChannelsByProject(agents: BrokerListAgent[]): Map<string, string[]> {
   const channelsByProject = new Map<string, string[]>()
 
@@ -113,8 +117,11 @@ export function useBrokerEvents(): void {
     // switch the UI to it.
     const unsubOpenProject = pear.onMenu('cli:open-project', (projectId) => {
       if (typeof projectId !== 'string') return
+      const seq = ++cliOpenSeq
       void (async () => {
         await useProjectStore.getState().load()
+        // A newer open arrived while we were loading — let it win.
+        if (seq !== cliOpenSeq) return
         useUIStore.getState().openTab({ kind: 'agents', projectId })
         await useProjectStore.getState().setActiveProject(projectId)
       })()
