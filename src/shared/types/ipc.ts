@@ -427,6 +427,18 @@ export interface GitCheckoutBranchOptions {
   stashChanges?: boolean
 }
 
+export interface GitPullRequest {
+  rootPath: string
+  branch: string
+  owner: string
+  repo: string
+  number: number
+  url: string
+  mergeState: 'mergeable' | 'blocked' | 'unknown'
+  ciState: 'passing' | 'failing' | 'pending' | 'unknown'
+  title?: string
+}
+
 export interface FsDirEntry {
   name: string
   path: string
@@ -768,6 +780,7 @@ export interface PearAPI {
     fetchRemote: (root: string) => Promise<GitBranchSyncStatus>
     pullCurrentBranch: (root: string) => Promise<GitBranchSyncStatus>
     pushCurrentBranch: (root: string) => Promise<GitBranchSyncStatus>
+    activePullRequests: (roots: string[]) => Promise<GitPullRequest[]>
     history: (path: string, limit?: number) => Promise<GitHistoryCommit[]>
     show: (path: string, hash: string, file?: string) => Promise<string>
     discardFiles: (path: string, files: string[]) => Promise<void>

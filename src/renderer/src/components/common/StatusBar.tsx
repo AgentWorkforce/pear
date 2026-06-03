@@ -1,13 +1,38 @@
 import type React from 'react'
 import { useCallback, useEffect, useState } from 'react'
-import { FileDiff, Flame } from 'lucide-react'
+import { CircleX, FileDiff, Flame, GitMerge } from 'lucide-react'
 import { formatGitDiffLineCount, formatTokenCount, formatUsd } from '@/lib/format'
 import { useBurnFingerprintRefresh } from '@/components/burn/useBurnFingerprintRefresh'
 import { useAgentStore } from '@/stores/agent-store'
 import { useGitStore } from '@/stores/git-store'
 import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
-import { pear, type BurnProjectBreakdown } from '@/lib/ipc'
+import { pear, type BurnProjectBreakdown, type GitPullRequest } from '@/lib/ipc'
+
+const PULL_REQUEST_REFRESH_MS = 60_000
+
+function pullRequestHasBlockingStatus(pullRequest: GitPullRequest): boolean {
+  return pullRequest.mergeState === 'blocked' || pullRequest.ciState === 'failing'
+}
+
+function pullRequestStatusTitle(pullRequest: GitPullRequest): string {
+  const state = [
+    pullRequest.mergeState === 'mergeable'
+      ? 'mergeable'
+      : pullRequest.mergeState === 'blocked'
+        ? 'not mergeable'
+        : 'mergeability unknown',
+    pullRequest.ciState === 'passing'
+      ? 'CI passing'
+      : pullRequest.ciState === 'failing'
+        ? 'CI failing'
+        : pullRequest.ciState === 'pending'
+          ? 'CI pending'
+          : 'CI unknown'
+  ].join(', ')
+
+  return `${pullRequest.owner}/${pullRequest.repo} ${pullRequest.branch} (${state})${pullRequest.title ? `: ${pullRequest.title}` : ''}`
+}
 
 export function StatusBar(): React.ReactNode {
   const brokerStatus = useAgentStore((s) => s.brokerStatus)
@@ -24,6 +49,7 @@ export function StatusBar(): React.ReactNode {
   const projectSummaryMatchesRoots = !!projectSummary && projectSummary.rootPathKey === projectRootPathKey
 
   const [burn, setBurn] = useState<BurnProjectBreakdown | null>(null)
+  const [pullRequests, setPullRequests] = useState<GitPullRequest[]>([])
 
   const loadBurn = useCallback(async () => {
     if (!projectId) {
@@ -49,12 +75,45 @@ export function StatusBar(): React.ReactNode {
     void loadBurn()
   })
 
+  useEffect(() => {
+    let cancelled = false
+    const rootPaths = projectRootPathKey ? projectRootPathKey.split('\0').filter(Boolean) : []
+
+    async function loadPullRequests(): Promise<void> {
+      if (rootPaths.length === 0) {
+        setPullRequests([])
+        return
+      }
+
+      try {
+        const nextPullRequests = await pear.git.activePullRequests(rootPaths)
+        if (!cancelled) setPullRequests(nextPullRequests)
+      } catch {
+        if (!cancelled) setPullRequests([])
+      }
+    }
+
+    setPullRequests([])
+    void loadPullRequests()
+    const interval = window.setInterval(() => {
+      void loadPullRequests()
+    }, PULL_REQUEST_REFRESH_MS)
+
+    return () => {
+      cancelled = true
+      window.clearInterval(interval)
+    }
+  }, [projectRootPathKey, projectSummary?.branch])
+
   const statusColor =
     brokerStatus === 'connected'
       ? 'bg-[var(--pear-accent)]'
       : brokerStatus === 'error'
         ? 'bg-[var(--pear-red)]'
         : 'bg-[var(--pear-text-faint)]'
+  const pullRequestMergeIconColor = pullRequests.some((pullRequest) => pullRequest.mergeState === 'blocked')
+    ? 'text-[var(--pear-orange)]'
+    : 'text-[var(--pear-green)]'
 
   return (
     <div className="relative flex h-[38px] shrink-0 items-center gap-6 border-t border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-6 text-xs text-[var(--pear-text-dim)]">
@@ -97,6 +156,33 @@ export function StatusBar(): React.ReactNode {
           <span className="text-[var(--pear-text-faint)]">·</span>
           <span className="tabular-nums">{formatUsd(burn.totalCost)}</span>
         </button>
+      )}
+
+      {pullRequests.length > 0 && (
+        <div
+          className="flex min-w-0 max-w-[42vw] items-center gap-1.5 overflow-hidden px-1 py-1 text-[var(--pear-text-dim)]"
+          aria-label="Active pull requests"
+        >
+          <GitMerge size={12} className={`shrink-0 ${pullRequestMergeIconColor}`} />
+          <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
+            {pullRequests.map((pullRequest) => {
+              const blocked = pullRequestHasBlockingStatus(pullRequest)
+              return (
+                <a
+                  key={pullRequest.url}
+                  href={pullRequest.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 tabular-nums text-[var(--pear-text-dim)] transition-colors hover:bg-[var(--pear-bg-overlay)] hover:text-[var(--pear-text)]"
+                  title={pullRequestStatusTitle(pullRequest)}
+                >
+                  <span>PR #{pullRequest.number}</span>
+                  {blocked && <CircleX size={11} className="text-[var(--pear-red)]" aria-hidden="true" />}
+                </a>
+              )
+            })}
+          </div>
+        </div>
       )}
 
       {project && projectSummaryMatchesRoots && (

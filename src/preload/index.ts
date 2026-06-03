@@ -46,6 +46,7 @@ import type {
   GitFileStatus,
   GitGenerateCommitMessageInput,
   GitHistoryCommit,
+  GitPullRequest,
   GitSummary,
   IntegrationAdapter,
   IntegrationConnectSession,
@@ -123,6 +124,7 @@ export type {
   GitHistoryCoAuthor,
   GitHistoryCommit,
   GitHistoryFile,
+  GitPullRequest,
   GitSummary,
   InboundDeliveryMode,
   IntegrationAdapter,
@@ -286,6 +288,8 @@ const api = {
       invoke<GitBranchSyncStatus>('git:pull-current-branch', root),
     pushCurrentBranch: (root: string) =>
       invoke<GitBranchSyncStatus>('git:push-current-branch', root),
+    activePullRequests: (roots: string[]) =>
+      invoke<GitPullRequest[]>('git:active-pull-requests', roots),
     history: (path: string, limit?: number) =>
       invoke<GitHistoryCommit[]>('git:history', path, limit),
     show: (path: string, hash: string, file?: string) =>
