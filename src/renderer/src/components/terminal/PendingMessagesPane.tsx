@@ -57,23 +57,50 @@ export function PendingMessagesMenu({
     [agentMessages]
   )
 
-  const loadPending = useCallback(async (): Promise<void> => {
+  const pendingRequestRef = useRef<{ key: string; token: number } | null>(null)
+  const requestTokenRef = useRef(0)
+
+  const loadPending = useCallback(async (force = false): Promise<void> => {
+    const requestKey = `${projectId ?? ''}\u0000${agentName}\u0000${refreshToken ?? ''}`
+    // Skip if a previous poll is still outstanding. A wedged broker makes
+    // getPending hang for its full timeout; without this guard the 2.5s interval
+    // stacks a dozen concurrent calls that all time out and flood the logs. If
+    // the terminal switches agent/project, let the new key load immediately and
+    // ignore the stale response from the old key.
+    if (!force && pendingRequestRef.current?.key === requestKey) return
+    const token = requestTokenRef.current + 1
+    requestTokenRef.current = token
+    pendingRequestRef.current = { key: requestKey, token }
     setLoading(true)
     setError(null)
     try {
-      setHeldMessages(await pear.broker.getPending(projectId, agentName))
+      const messages = await pear.broker.getPending(projectId, agentName)
+      if (requestTokenRef.current === token) {
+        setHeldMessages(messages)
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Failed to load held messages')
+      if (requestTokenRef.current === token) {
+        setError(err instanceof Error ? err.message : 'Failed to load held messages')
+      }
     } finally {
-      setLoading(false)
+      if (pendingRequestRef.current?.token === token) {
+        pendingRequestRef.current = null
+      }
+      if (requestTokenRef.current === token) {
+        setLoading(false)
+      }
     }
-  }, [agentName, projectId])
+  }, [agentName, projectId, refreshToken])
 
   useEffect(() => {
     void loadPending()
     const timer = window.setInterval(() => void loadPending(), 2500)
-    return () => window.clearInterval(timer)
-  }, [loadPending, refreshToken])
+    return () => {
+      window.clearInterval(timer)
+      requestTokenRef.current += 1
+      pendingRequestRef.current = null
+    }
+  }, [loadPending])
 
   useEffect(() => {
     if (!open) return
@@ -93,7 +120,7 @@ export function PendingMessagesMenu({
     setError(null)
     try {
       await pear.broker.flushPending(projectId, agentName)
-      await loadPending()
+      await loadPending(true)
       setOpen(false)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to inject held messages')

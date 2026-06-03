@@ -198,10 +198,11 @@ const BROKER_EVENT_HISTORY_TTL_MS = 12 * 60 * 60 * 1_000
 // After this many consecutive failures to open a PTY input stream, give up on
 // the WS fast path for that agent and send over HTTP until it re-attaches.
 const MAX_INPUT_STREAM_OPEN_FAILURES = 3
-// A single listAgents timeout can be a one-off slow response; a run of them
-// means the broker process is wedged (alive, accepting TCP, never answering).
-// After this many consecutive timeouts for a project we respawn it rather than
-// time out every poll forever. The first request after a respawn resets this.
+// A single broker read timeout can be a one-off slow response; a run of them
+// means that endpoint is wedged (alive, accepting TCP, never answering).
+// After this many consecutive timeouts for one project/operation we respawn it
+// rather than time out every poll forever. A successful request for that same
+// operation resets the streak.
 const MAX_BROKER_TIMEOUTS_BEFORE_REVIVE = 2
 const BROKER_REVIVE_TERM_GRACE_MS = 1_500
 const PERSONA_REGISTRATION_TIMEOUT_MS = 5_000
@@ -731,8 +732,8 @@ export class BrokerManager {
   // Consecutive background open failures per key; after MAX we stop retrying the
   // WS for this agent (HTTP-only) until the terminal is re-attached.
   private inputStreamOpenFailures = new Map<string, number>()
-  // Consecutive listAgents timeouts per project; after MAX we respawn the wedged
-  // broker. Reset whenever a listAgents call for the project succeeds.
+  // Consecutive broker read timeouts per project/operation; after MAX we
+  // respawn the wedged broker. Reset whenever that operation succeeds.
   private brokerTimeoutCounts = new Map<string, number>()
   private eventObservers = new Set<BrokerEventObserver>()
   private eventHistory: BrokerEventRecord[] = []
@@ -1981,17 +1982,26 @@ export class BrokerManager {
       throw new Error('Agent name is required')
     }
 
-    const session = this.getSessionForAgent(trimmedName, projectId)
-    try {
-      return await session.client.getPending(trimmedName)
-    } catch (err) {
-      // The renderer polls getPending on a 2.5s interval; there's a small
-      // window after the broker releases a worker but before the
-      // agent_released event reaches the renderer where we get a 404. Swallow
-      // it so the IPC log doesn't flood with errors during normal teardown.
-      if (isMissingAgentError(err)) return []
-      throw err
-    }
+    // When the project is known (the renderer always passes it for the 2.5s
+    // poll), await any in-flight revive so a poll racing a respawn picks up the
+    // fresh session instead of throwing "workspace not started".
+    const session = projectId?.trim()
+      ? await this.getOrAwaitSession(projectId)
+      : this.getSessionForAgent(trimmedName, projectId)
+    // A wedged `/api/pending` endpoint otherwise times out on every poll and
+    // floods the IPC log; recover the broker and degrade to [] meanwhile. An
+    // empty held-message list is harmless, so degradeOnTimeout is on.
+    return this.withWedgeRecovery(session, 'getPending', [] as PendingRelayMessage[], async (current) => {
+      try {
+        return await current.client.getPending(trimmedName)
+      } catch (err) {
+        // Small window after the broker releases a worker but before the
+        // agent_released event reaches the renderer where we get a 404. Swallow
+        // it so the IPC log doesn't flood during normal teardown.
+        if (isMissingAgentError(err)) return []
+        throw err
+      }
+    }, { degradeOnTimeout: true })
   }
 
   async flushPending(projectId: string | undefined, name: string): Promise<{ flushed: number }> {
@@ -2085,6 +2095,73 @@ export class BrokerManager {
     this.closeInputStream(this.getInputStreamKey(session.projectId, trimmedName), 1000, 'agent released')
   }
 
+  // Run a per-session broker operation with the same self-healing listAgents
+  // uses, so any polled read survives a dead/wedged broker instead of timing out
+  // (and flooding the IPC error log) on every call. The broker can wedge a
+  // single HTTP endpoint while others stay live — e.g. `/api/pending` hangs but
+  // `/api/spawned` answers — so each polled call needs its own recovery rather
+  // than relying on listAgents to notice and respawn.
+  //
+  // - Connection refused → broker is gone → respawn immediately.
+  // - Repeated timeouts → broker is wedged → respawn after MAX consecutive.
+  // - Still unrecoverable → return `fallback` instead of rejecting.
+  //
+  // `degradeOnTimeout`: when a timeout is still below the respawn threshold,
+  // return `fallback` instead of rethrowing. listAgents opts OUT (false) so the
+  // renderer keeps its stale agent list rather than flickering to empty; pollers
+  // whose empty result is harmless (pending messages) opt IN to kill log spam.
+  private async withWedgeRecovery<T>(
+    session: BrokerSession,
+    label: string,
+    fallback: T,
+    run: (session: BrokerSession) => Promise<T>,
+    options: { degradeOnTimeout?: boolean } = {}
+  ): Promise<T> {
+    const timeoutKey = `${session.projectId}:${label}`
+    try {
+      const result = await run(session)
+      this.brokerTimeoutCounts.delete(timeoutKey)
+      return result
+    } catch (err) {
+      // Cloud sessions live in a remote sandbox we can't respawn locally.
+      if (session.cloudSandboxId) throw err
+      const unreachable = isBrokerUnreachableError(err)
+      if (!unreachable) {
+        if (!isBrokerTimeoutError(err)) throw err
+        const timeouts = (this.brokerTimeoutCounts.get(timeoutKey) ?? 0) + 1
+        this.brokerTimeoutCounts.set(timeoutKey, timeouts)
+        if (timeouts < MAX_BROKER_TIMEOUTS_BEFORE_REVIVE) {
+          if (options.degradeOnTimeout) return fallback
+          throw err
+        }
+        console.warn(
+          `[broker] ${label}: broker for project ${session.projectId} timed out ${timeouts}x; ` +
+          `restarting it on a fresh port`
+        )
+      }
+      // Restart on a fresh port and retry once against the new session; if
+      // recovery fails, degrade to `fallback` rather than rejecting.
+      this.brokerTimeoutCounts.delete(timeoutKey)
+      const revived = await this.reviveSession(session.projectId)
+      const next = revived ? this.sessions.get(session.projectId) : undefined
+      if (!next) {
+        console.warn(`[broker] ${label}: broker for project ${session.projectId} is unreachable; degrading`)
+        return fallback
+      }
+      try {
+        const result = await run(next)
+        this.brokerTimeoutCounts.delete(`${next.projectId}:${label}`)
+        return result
+      } catch (retryErr) {
+        console.warn(
+          `[broker] ${label}: broker for project ${session.projectId} is still unreachable after restart; degrading:`,
+          retryErr
+        )
+        return fallback
+      }
+    }
+  }
+
   async listAgents(projectId?: string): Promise<Array<ListAgent & {
     projectId: string
     inboundDeliveryMode?: InboundDeliveryMode
@@ -2098,52 +2175,19 @@ export class BrokerManager {
             ...Array.from(this.startPromises.keys())
           ])).map((id) => this.getOrAwaitSession(id).catch(() => undefined))
         )).filter((session): session is BrokerSession => !!session)
+    // degradeOnTimeout stays false: a below-threshold timeout rethrows so the
+    // renderer keeps its stale agent list rather than flickering to empty. A
+    // dead/unrecoverable broker still degrades to [] for that one project so a
+    // single bad session can't fail the whole call.
     const results = await Promise.all(
-      sessions.map(async (session) => {
-        try {
-          return await this.collectSessionAgents(session)
-        } catch (err) {
-          if (session.cloudSandboxId) {
-            throw err
-          }
-          // A dead broker (connection refused) is a definitive signal — respawn
-          // immediately. A wedged broker (request timeout) might just be a slow
-          // response, so only respawn after MAX consecutive timeouts; below the
-          // threshold we rethrow so the renderer keeps its stale agent list
-          // rather than flickering to empty on a transient blip.
-          const unreachable = isBrokerUnreachableError(err)
-          if (!unreachable) {
-            if (!isBrokerTimeoutError(err)) throw err
-            const timeouts = (this.brokerTimeoutCounts.get(session.projectId) ?? 0) + 1
-            this.brokerTimeoutCounts.set(session.projectId, timeouts)
-            if (timeouts < MAX_BROKER_TIMEOUTS_BEFORE_REVIVE) throw err
-            console.warn(
-              `[broker] listAgents: broker for project ${session.projectId} timed out ${timeouts}x; ` +
-              `restarting it on a fresh port`
-            )
-          }
-          // Restart on a fresh port and retry once against the new session; if
-          // recovery fails, degrade to an empty list for this project rather
-          // than failing the whole call (other projects may still be healthy).
-          this.brokerTimeoutCounts.delete(session.projectId)
-          const revived = await this.reviveSession(session.projectId)
-          const next = revived ? this.sessions.get(session.projectId) : undefined
-          if (!next) {
-            console.warn(`[broker] listAgents: broker for project ${session.projectId} is unreachable; returning no agents`)
-            return []
-          }
-          try {
-            return await this.collectSessionAgents(next)
-          } catch (retryErr) {
-            console.warn(
-              `[broker] listAgents: broker for project ${session.projectId} is still unreachable after restart; ` +
-              `returning no agents:`,
-              retryErr
-            )
-            return []
-          }
-        }
-      })
+      sessions.map((session) =>
+        this.withWedgeRecovery<Array<ListAgent & { projectId: string; inboundDeliveryMode?: InboundDeliveryMode }>>(
+          session,
+          'listAgents',
+          [],
+          (current) => this.collectSessionAgents(current)
+        )
+      )
     )
     return results.flat()
   }
@@ -2155,7 +2199,7 @@ export class BrokerManager {
     const agents = await session.client.listAgents()
     // A successful poll means the broker is answering again — clear any wedge
     // streak so a future timeout starts counting from zero.
-    this.brokerTimeoutCounts.delete(session.projectId)
+    this.brokerTimeoutCounts.delete(`${session.projectId}:listAgents`)
     for (const agent of agents) {
       this.rememberAgentProject(agent.name, session.projectId)
     }
@@ -2303,9 +2347,17 @@ export class BrokerManager {
     }
   }
 
+  private clearBrokerTimeoutCountsForProject(projectId: string): void {
+    for (const key of Array.from(this.brokerTimeoutCounts.keys())) {
+      if (key.startsWith(`${projectId}:`)) {
+        this.brokerTimeoutCounts.delete(key)
+      }
+    }
+  }
+
   private dropSession(projectId: string, options: { disconnectOnly: boolean }): void {
     this.closeInputStreamsForProject(projectId)
-    this.brokerTimeoutCounts.delete(projectId)
+    this.clearBrokerTimeoutCountsForProject(projectId)
 
     const session = this.sessions.get(projectId)
     if (!session) return
