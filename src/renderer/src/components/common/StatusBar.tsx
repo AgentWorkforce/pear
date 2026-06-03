@@ -112,7 +112,7 @@ export function StatusBar(): React.ReactNode {
         ? 'bg-[var(--pear-red)]'
         : 'bg-[var(--pear-text-faint)]'
   const pullRequestMergeIconColor = pullRequests.some(pullRequestHasBlockingStatus)
-    ? 'text-[var(--pear-red)]'
+    ? 'text-[var(--pear-orange)]'
     : 'text-[var(--pear-green)]'
 
   return (
@@ -167,6 +167,7 @@ export function StatusBar(): React.ReactNode {
           <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
             {pullRequests.map((pullRequest) => {
               const blocked = pullRequestHasBlockingStatus(pullRequest)
+              const statusTitle = pullRequestStatusTitle(pullRequest)
               return (
                 <a
                   key={pullRequest.url}
@@ -174,7 +175,8 @@ export function StatusBar(): React.ReactNode {
                   target="_blank"
                   rel="noreferrer"
                   className="flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 tabular-nums text-[var(--pear-text-dim)] transition-colors hover:bg-[var(--pear-bg-overlay)] hover:text-[var(--pear-text)]"
-                  title={pullRequestStatusTitle(pullRequest)}
+                  title={statusTitle}
+                  aria-label={`Open PR #${pullRequest.number}. ${statusTitle}`}
                 >
                   <span>PR #{pullRequest.number}</span>
                   {blocked && <CircleX size={11} className="text-[var(--pear-red)]" aria-hidden="true" />}

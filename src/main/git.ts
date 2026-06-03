@@ -69,6 +69,14 @@ type GitHubRepo = {
   repo: string
 }
 
+type GitHubPullRequestLookup = {
+  baseRepo: GitHubRepo
+  head: {
+    owner: string
+    branch: string
+  }
+}
+
 type GitHubCommitAvatar = {
   authorAvatarUrl?: string
 }
@@ -964,23 +972,34 @@ function getRemoteFromUpstream(upstream: string, remotes: string[]): string | nu
     .sort((left, right) => right.length - left.length)[0] || null
 }
 
-async function getGitHubHeadRef(
+async function getGitHubPullRequestLookup(
   path: string,
-  baseRepo: GitHubRepo,
   localBranch: string
-): Promise<{ owner: string; branch: string }> {
-  const upstream = await getUpstreamBranch(path)
-  if (!upstream) return { owner: baseRepo.owner, branch: localBranch }
-
+): Promise<GitHubPullRequestLookup | null> {
   const remotes = await getRemotes(path)
-  const upstreamRemote = getRemoteFromUpstream(upstream, remotes)
-  if (!upstreamRemote) return { owner: baseRepo.owner, branch: localBranch }
+  const preferredRemote = remotes.includes('origin') ? 'origin' : remotes[0] || null
+  if (!preferredRemote) return null
 
-  const upstreamRepo = await getGitHubRepoForRemote(path, upstreamRemote)
-  const upstreamBranch = upstream.slice(upstreamRemote.length + 1).trim()
-  if (!upstreamRepo || !upstreamBranch) return { owner: baseRepo.owner, branch: localBranch }
+  const headRepo = await getGitHubRepoForRemote(path, preferredRemote)
+  if (!headRepo) return null
 
-  return { owner: upstreamRepo.owner, branch: upstreamBranch }
+  let baseRepo = headRepo
+  const upstreamRemote = remotes.includes('upstream')
+    ? 'upstream'
+    : getRemoteFromUpstream(await getUpstreamBranch(path) || '', remotes)
+
+  if (upstreamRemote) {
+    const upstreamRepo = await getGitHubRepoForRemote(path, upstreamRemote)
+    if (upstreamRepo) baseRepo = upstreamRepo
+  }
+
+  return {
+    baseRepo,
+    head: {
+      owner: headRepo.owner,
+      branch: localBranch
+    }
+  }
 }
 
 function isGitHubPullRequestUrl(value: unknown): value is string {
@@ -1149,7 +1168,7 @@ async function fetchOpenPullRequestsWithGitHubCli(
   path: string,
   branch: string,
   repo: GitHubRepo,
-  head: { owner: string; branch: string }
+  head: { branch: string }
 ): Promise<GitPullRequest[] | null> {
   try {
     const output = await runFirstAvailableCommand(GITHUB_CLI_CANDIDATES, [
@@ -1158,7 +1177,7 @@ async function fetchOpenPullRequestsWithGitHubCli(
       '--state',
       'open',
       '--head',
-      `${head.owner}:${head.branch}`,
+      head.branch,
       '--repo',
       `${repo.owner}/${repo.repo}`,
       '--json',
@@ -1317,14 +1336,13 @@ async function fetchOpenPullRequestsForBranch(
 }
 
 async function getActivePullRequestsForRoot(path: string): Promise<GitPullRequest[]> {
-  const [branch, repo] = await Promise.all([
-    getCurrentBranch(path),
-    getGitHubRepo(path)
-  ])
-  if (!branch || !repo) return []
+  const branch = await getCurrentBranch(path)
+  if (!branch) return []
 
-  const head = await getGitHubHeadRef(path, repo, branch)
-  return fetchOpenPullRequestsForBranch(path, branch, repo, head)
+  const lookup = await getGitHubPullRequestLookup(path, branch)
+  if (!lookup) return []
+
+  return fetchOpenPullRequestsForBranch(path, branch, lookup.baseRepo, lookup.head)
 }
 
 export async function getActivePullRequests(paths: string[]): Promise<GitPullRequest[]> {
