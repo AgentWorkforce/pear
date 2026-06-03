@@ -1041,7 +1041,7 @@ function collectPullRequestCiSignals(value: unknown, signals: string[] = []): st
     if (typeof signal === 'string') signals.push(signal)
   }
 
-  for (const key of ['nodes', 'checkRuns', 'checkSuites', 'contexts', 'statuses']) {
+  for (const key of ['nodes', 'checkRuns', 'check_runs', 'checkSuites', 'check_suites', 'contexts', 'statuses']) {
     collectPullRequestCiSignals(record[key], signals)
   }
 
