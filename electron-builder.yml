@@ -33,12 +33,16 @@ mac:
   # electron-builder notarizes via notarytool using the
   # APPLE_API_KEY / APPLE_API_KEY_ID / APPLE_API_ISSUER env vars.
   notarize: true
+  # Apple Silicon only. @agent-relay/sdk ships per-arch prebuilt broker
+  # binaries (broker-darwin-arm64 / -x64), so a universal build can't merge
+  # them on a single-arch CI runner. arm64 matches the runner and the broker
+  # binary that npm installs.
   target:
     - target: dmg
-      arch: universal
+      arch: arm64
 
 dmg:
-  artifactName: ${name}-${version}.${ext}
+  artifactName: ${name}-${version}-${arch}.${ext}
 
 # No native modules — skip the rebuild step.
 npmRebuild: false
