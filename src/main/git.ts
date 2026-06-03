@@ -1112,6 +1112,12 @@ function normalizePullRequestCiState(value: unknown): GitPullRequest['ciState'] 
   return 'unknown'
 }
 
+function pruneExpiredGitHubPullRequestCache(now = Date.now()): void {
+  for (const [key, entry] of gitHubPullRequestCache) {
+    if (entry.expiresAt <= now) gitHubPullRequestCache.delete(key)
+  }
+}
+
 function normalizePullRequestPayload(
   path: string,
   branch: string,
@@ -1299,6 +1305,7 @@ async function fetchOpenPullRequestsForBranch(
   repo: GitHubRepo,
   head: { owner: string; branch: string }
 ): Promise<GitPullRequest[]> {
+  pruneExpiredGitHubPullRequestCache()
   const cacheKey = `${repo.owner}/${repo.repo}:${head.owner}:${head.branch}`.toLowerCase()
   const cached = gitHubPullRequestCache.get(cacheKey)
   if (cached && cached.expiresAt > Date.now()) {
