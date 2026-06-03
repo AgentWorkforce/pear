@@ -3,7 +3,7 @@ import { rm } from 'fs/promises'
 import { randomUUID } from 'node:crypto'
 import { delimiter, basename, dirname, join } from 'path'
 import { execFileSync } from 'child_process'
-import { BrowserWindow } from 'electron'
+import { app, BrowserWindow } from 'electron'
 import {
   AgentRelayClient,
   type AgentRelaySpawnOptions,
@@ -143,10 +143,12 @@ function resolveBundledBrokerBinary(): string {
   }
 
   const suffix = `${process.platform}-${process.arch}`
-  return join(
+  const brokerBinary = join(
     __dirname, '..', '..', 'node_modules', '@agent-relay', 'sdk', 'bin',
     `agent-relay-broker-${suffix}`
   )
+
+  return app.isPackaged ? brokerBinary.replace('app.asar', 'app.asar.unpacked') : brokerBinary
 }
 
 type TerminalAttachMode = 'view' | 'drive' | 'passthrough'
