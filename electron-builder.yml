@@ -2,6 +2,10 @@ appId: com.agentrelay.pear
 productName: Pear by Agent Relay
 copyright: Copyright © 2026 Agent Relay
 
+# Keep the installed app named "Pear by Agent Relay" but ship clean, space-free
+# download filenames (e.g. Pear-1.0.0-arm64.dmg / -arm64-mac.zip).
+artifactName: Pear-${version}-${arch}.${ext}
+
 # electron-vite emits the compiled app into out/. We ship that plus the
 # production node_modules (native deps like ssh2/cpu-features are required at
 # runtime because they're externalized from the main bundle).
@@ -41,9 +45,6 @@ mac:
   extendInfo:
     # Surface a friendlier "open with" / about identity.
     NSHumanReadableCopyright: Copyright © 2026 Agent Relay
-
-dmg:
-  artifactName: ${productName}-${version}-${arch}.${ext}
 
 # afterSign runs notarization (build/notarize.cjs) once the app is signed.
 afterSign: build/notarize.cjs
