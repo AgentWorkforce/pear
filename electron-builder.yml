@@ -38,18 +38,18 @@ mac:
   # them on a single-arch CI runner. arm64 matches the runner and the broker
   # binary that npm installs.
   #
-  # dmg = the download users install; zip = the artifact electron-updater
-  # consumes for in-app auto-update (it also produces latest-mac.yml).
+  # dmg = the user-facing download; zip = the artifact electron-updater needs
+  # for in-app auto-update (its presence also generates latest-mac.yml).
   target:
     - target: dmg
       arch: arm64
     - target: zip
       arch: arm64
 
-# Clean, space-free filenames for both the DMG and the auto-update ZIP.
-artifactName: ${name}-${version}-${arch}.${ext}
+dmg:
+  artifactName: ${name}-${version}-${arch}.${ext}
 
-# No native modules to compile — the broker binary is a prebuilt, unpacked asset.
+# No native modules — skip the rebuild step.
 npmRebuild: false
 
 publish:
@@ -57,5 +57,4 @@ publish:
   owner: AgentWorkforce
   repo: pear
   # Upload to a DRAFT release so you review & click "Publish" manually.
-  # (Auto-update only sees the release once it's published.)
   releaseType: draft
