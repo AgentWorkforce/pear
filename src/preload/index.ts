@@ -147,7 +147,10 @@ function subscribe<T>(channel: string, callback: (payload: T) => void): () => vo
 
 const api = {
   app: {
-    confirmQuit: () => invoke<boolean>('app:confirm-quit')
+    confirmQuit: () => invoke<boolean>('app:confirm-quit'),
+    notifyCliReady: () => {
+      ipcRenderer.send('cli:renderer-ready')
+    }
   },
   project: {
     list: () => invoke<ProjectListResult>('project:list'),

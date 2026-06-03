@@ -589,6 +589,7 @@ export interface ProjectListResult {
 export interface PearAPI {
   app: {
     confirmQuit: () => Promise<boolean>
+    notifyCliReady: () => void
   }
   project: {
     list: () => Promise<ProjectListResult>

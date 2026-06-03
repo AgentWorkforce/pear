@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, Menu, protocol, nativeImage } from 'electron'
+import { app, BrowserWindow, shell, Menu, protocol, nativeImage, ipcMain } from 'electron'
 import { existsSync } from 'fs'
 import { join, resolve } from 'path'
 import { registerIpcHandlers } from './ipc-handlers'
@@ -28,8 +28,8 @@ protocol.registerSchemesAsPrivileged([
 let mainWindow: BrowserWindow | null = null
 let shutdownPromise: Promise<void> | null = null
 let quitAfterShutdown = false
-// Path requested via `pear open <dir>` before the window exists; applied once
-// the renderer is ready to receive the active-project switch.
+// Path requested via `pear open <dir>` before the renderer has registered its
+// listener; applied once the renderer sends `cli:renderer-ready`.
 let pendingOpenPath: string | null = null
 let rendererReadyForCliOpen = false
 
@@ -129,13 +129,6 @@ function createWindow(): void {
 
   mainWindow.webContents.on('did-start-loading', () => {
     rendererReadyForCliOpen = false
-  })
-
-  // Apply a queued `pear open <dir>` request once the renderer has loaded and
-  // registered its `cli:open-project` listener.
-  mainWindow.webContents.on('did-finish-load', () => {
-    rendererReadyForCliOpen = true
-    flushPendingOpen()
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
@@ -266,6 +259,12 @@ if (!gotSingleInstanceLock) {
     }
   })
 
+  ipcMain.on('cli:renderer-ready', (event) => {
+    if (!mainWindow || event.sender !== mainWindow.webContents) return
+    rendererReadyForCliOpen = true
+    flushPendingOpen()
+  })
+
   app.whenReady().then(() => {
     const appIcon = getAppIcon()
     app.setAboutPanelOptions({
@@ -285,7 +284,7 @@ if (!gotSingleInstanceLock) {
     })
     createMenu()
     // Resolve any `pear open <dir>` from the initial launch; queued until the
-    // renderer finishes loading (see `did-finish-load` in createWindow).
+    // renderer registers its listener and sends `cli:renderer-ready`.
     handleOpenCommand(process.argv, process.cwd())
     createWindow()
 

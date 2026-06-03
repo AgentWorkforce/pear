@@ -119,6 +119,7 @@ export function useBrokerEvents(): void {
         await useProjectStore.getState().setActiveProject(projectId)
       })()
     })
+    pear.app.notifyCliReady()
 
     return () => {
       unsubEvent()
