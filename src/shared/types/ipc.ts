@@ -288,6 +288,12 @@ export interface BrokerSpawnAgentInput {
   channels?: string[]
   cwd?: string
   args?: string[]
+  /**
+   * Which of the project's broker sessions to spawn on when both a local
+   * broker and a cloud sandbox are attached. Defaults to the local broker
+   * (or the cloud session when it is the only one running).
+   */
+  broker?: 'local' | 'cloud'
 }
 
 export interface BrokerSpawnAgentResult {

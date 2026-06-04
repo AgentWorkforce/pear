@@ -202,7 +202,7 @@ export function registerIpcHandlers(): void {
     return brokerManager.autoFixRuntime(projectId, cwd, name, win, channels, errorMessage)
   })
 
-  ipcMain.handle('broker:spawn-agent', async (_, projectId: string, input: SpawnPtyInput) => {
+  ipcMain.handle('broker:spawn-agent', async (_, projectId: string, input: SpawnPtyInput & { broker?: 'local' | 'cloud' }) => {
     return brokerManager.spawnAgent(projectId, input)
   })
 

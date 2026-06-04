@@ -402,6 +402,9 @@ export default function CloudAgentPicker({
         name: requestedName,
         cli,
         cwd: '/workspace',
+        // The cloud worker must land on the sandbox broker — a local broker
+        // may be running side by side for this project.
+        broker: 'cloud',
         ...(attachingAgent?.defaultModel ? { model: attachingAgent.defaultModel } : {})
       })
       const name = spawned.name || requestedName
