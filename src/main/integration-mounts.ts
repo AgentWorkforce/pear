@@ -1,4 +1,4 @@
-import { chmod, mkdir } from 'node:fs/promises'
+import { chmod, mkdir, rm } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -13,6 +13,13 @@ const MOUNT_READY_TIMEOUT_MS = 60_000
 type IntegrationMountInput = {
   provider: string
   mountPaths: string[]
+}
+
+type IntegrationMountSpec = {
+  remotePath: string
+  localDir: string
+  agentName: string
+  scopes: string[]
 }
 
 function toErrorMessage(error: unknown): string {
@@ -35,7 +42,7 @@ function remotePathSegments(remotePath: string): string[] {
 }
 
 export function integrationMountRootForWorkspace(workspaceId: string): string {
-  return join(integrationMountWorkspaceRoot(workspaceId), 'integrations')
+  return integrationMountWorkspaceRoot(workspaceId)
 }
 
 function integrationMountWorkspaceRoot(workspaceId: string): string {
@@ -65,23 +72,24 @@ export function integrationProviderRoot(mountPath: string): string | null {
   return withoutRoot.length > 0 ? `/${withoutRoot[0]}` : null
 }
 
+function discoveryRootForProvider(providerRoot: string): string {
+  return `/discovery/${providerRoot.slice(1)}`
+}
+
 async function ensureProtectedDirectory(path: string): Promise<void> {
   await mkdir(path, { recursive: true, mode: 0o700 })
   await chmod(path, 0o700).catch(() => undefined)
 }
 
 export class IntegrationMountManager {
-  // One mount per provider root (e.g. '/github' → <root>/integrations/github).
+  // One mount per provider root (e.g. '/github' → <workspace>/github),
+  // plus one shared read-only discovery mount at <workspace>/discovery.
   private handles = new Map<string, MountedWorkspaceHandle>()
   private workspaceId: string | null = null
   private pending: Promise<void> | null = null
 
   async ensureMounted(integrations: IntegrationMountInput[]): Promise<void> {
-    const providerRoots = Array.from(new Set(
-      integrations
-        .flatMap((integration) => integration.mountPaths.map(integrationProviderRoot))
-        .filter((root): root is string => !!root)
-    )).sort()
+    const providerRoots = providerRootsForIntegrations(integrations)
 
     if (!providerRoots.length) {
       await this.stop()
@@ -139,6 +147,7 @@ export class IntegrationMountManager {
     )).sort()
 
     return providerRoots.map((root) => integrationLocalPathForRemote(workspaceId, root))
+      .concat(providerRoots.map((root) => integrationLocalPathForRemote(workspaceId, discoveryRootForProvider(root))))
   }
 
   private async mount(providerRoots: string[]): Promise<void> {
@@ -175,48 +184,92 @@ export class IntegrationMountManager {
       }
     })
 
+    const mountSpecs = this.mountSpecsFor(providerRoots, mountRoot)
+    const expectedRemotePaths = mountSpecs.map((spec) => spec.remotePath)
+
     // Drop mounts for providers that are no longer connected.
-    for (const existingRoot of Array.from(this.handles.keys())) {
-      if (!providerRoots.includes(existingRoot)) {
-        await this.stopHandle(existingRoot)
+    for (const existingRemotePath of Array.from(this.handles.keys())) {
+      if (!expectedRemotePaths.includes(existingRemotePath)) {
+        await this.stopHandle(existingRemotePath)
       }
     }
 
-    for (const providerRoot of providerRoots) {
-      const existing = this.handles.get(providerRoot)
+    for (const spec of mountSpecs) {
+      const existing = this.handles.get(spec.remotePath)
       if (existing) {
         const status = await existing.status().catch(() => null)
         if (status?.ready) continue
-        await this.stopHandle(providerRoot)
+        await this.stopHandle(spec.remotePath)
       }
 
-      const providerSegment = providerRoot.slice(1)
-      const localDir = join(mountRoot, providerSegment)
-      await ensureProtectedDirectory(localDir)
+      await ensureProtectedDirectory(spec.localDir)
       try {
         const handle = await setup.mountWorkspace({
           workspaceId,
-          localDir,
-          remotePath: providerRoot,
+          localDir: spec.localDir,
+          remotePath: spec.remotePath,
           mode: 'poll',
           background: true,
-          agentName: `pear-integrations-${providerSegment}`,
-          scopes: [
-            `relayfile:fs:read:${providerRoot}/**`,
-            `relayfile:fs:write:${providerRoot}/**`
-          ],
+          agentName: spec.agentName,
+          scopes: spec.scopes,
           launcher: createPearMountLauncher(),
           readyTimeoutMs: MOUNT_READY_TIMEOUT_MS
         })
-        this.handles.set(providerRoot, handle)
+        this.handles.set(spec.remotePath, handle)
       } catch (error) {
         console.warn(
-          `[integration-mounts] Failed to start Relayfile mount for ${providerRoot}:`,
+          `[integration-mounts] Failed to start Relayfile mount for ${spec.remotePath}:`,
           toErrorMessage(error)
         )
       }
     }
+
+    await this.removeLegacyIntegrationMountRoot(mountRoot)
+  }
+
+  private mountSpecsFor(providerRoots: string[], mountRoot: string): IntegrationMountSpec[] {
+    const specs: IntegrationMountSpec[] = providerRoots.map((providerRoot) => {
+      const providerSegment = providerRoot.slice(1)
+      return {
+        remotePath: providerRoot,
+        localDir: join(mountRoot, providerSegment),
+        agentName: `pear-integrations-${providerSegment}`,
+        scopes: [
+          `relayfile:fs:read:${providerRoot}/**`,
+          `relayfile:fs:write:${providerRoot}/**`
+        ]
+      }
+    })
+
+    if (providerRoots.length > 0) {
+      specs.push({
+        remotePath: '/discovery',
+        localDir: join(mountRoot, 'discovery'),
+        agentName: 'pear-integrations-discovery',
+        scopes: ['relayfile:fs:read:/discovery/**']
+      })
+    }
+
+    return specs.sort((a, b) => a.remotePath.localeCompare(b.remotePath))
+  }
+
+  private async removeLegacyIntegrationMountRoot(mountRoot: string): Promise<void> {
+    const legacyRoot = join(mountRoot, 'integrations')
+    await rm(legacyRoot, { recursive: true, force: true }).catch((error) => {
+      console.warn(
+        `[integration-mounts] Failed to remove legacy Relayfile integration mount root ${legacyRoot}:`,
+        toErrorMessage(error)
+      )
+    })
   }
 }
 
 export const integrationMountManager = new IntegrationMountManager()
+
+function providerRootsForIntegrations(integrations: IntegrationMountInput[]): string[] {
+  return Array.from(new Set(
+    integrations
+      .flatMap((integration) => integration.mountPaths.map(integrationProviderRoot))
+      .filter((root): root is string => !!root)
+  )).sort()
+}

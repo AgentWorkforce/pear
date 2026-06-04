@@ -103,6 +103,14 @@ function pathName(path: string): string {
   return parts[parts.length - 1] || path
 }
 
+function rootLabel(path: string): string {
+  const parts = normalizeFsPath(path).split('/').filter(Boolean)
+  const last = parts[parts.length - 1]
+  const parent = parts[parts.length - 2]
+  if (parent === 'discovery' && last) return `discovery/${last}`
+  return last || path
+}
+
 function pathParent(path: string): string | null {
   const normalized = normalizeFsPath(path).replace(/\/+$/, '')
   const index = normalized.lastIndexOf('/')
@@ -178,7 +186,7 @@ function IntegrationRelayfileBrowser({
                 }`}
                 title={root}
               >
-                {pathName(root)}
+                {rootLabel(root)}
               </button>
             ))}
           </div>

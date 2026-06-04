@@ -43,6 +43,7 @@ const mock = vi.hoisted(() => {
     mountInputs,
     mkdir: vi.fn(async () => undefined),
     chmod: vi.fn(async () => undefined),
+    rm: vi.fn(async () => undefined),
     RelayfileSetup,
     get currentAuth() {
       return currentAuth
@@ -58,7 +59,8 @@ const mock = vi.hoisted(() => {
 
 vi.mock('node:fs/promises', () => ({
   chmod: mock.chmod,
-  mkdir: mock.mkdir
+  mkdir: mock.mkdir,
+  rm: mock.rm
 }))
 
 vi.mock('node:os', () => ({
@@ -86,6 +88,7 @@ describe('IntegrationMountManager', () => {
     mock.mountInputs.splice(0)
     mock.mkdir.mockClear()
     mock.chmod.mockClear()
+    mock.rm.mockClear()
     mock.currentAuth = {
       apiUrl: 'https://cloud.example',
       accessToken: 'account-token'
@@ -94,7 +97,7 @@ describe('IntegrationMountManager', () => {
     mock.getAccountWorkspaceId.mockClear()
   })
 
-  it('mounts each provider root with provider-scoped relayfile scopes', async () => {
+  it('mounts each provider root plus shared discovery with scoped relayfile permissions', async () => {
     const manager = new IntegrationMountManager()
 
     await manager.ensureMounted([
@@ -110,20 +113,30 @@ describe('IntegrationMountManager', () => {
       }
     ])
 
-    expect(mock.mountInputs).toHaveLength(2)
+    expect(mock.mountInputs).toHaveLength(3)
     expect(mock.mountInputs[0]).toMatchObject({
       workspaceId: 'account-workspace-id',
-      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/integrations/github',
+      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/discovery',
+      remotePath: '/discovery',
+      agentName: 'pear-integrations-discovery',
+      scopes: ['relayfile:fs:read:/discovery/**']
+    })
+    expect(mock.mountInputs[1]).toMatchObject({
+      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/github',
       remotePath: '/github',
       agentName: 'pear-integrations-github',
       scopes: ['relayfile:fs:read:/github/**', 'relayfile:fs:write:/github/**']
     })
-    expect(mock.mountInputs[1]).toMatchObject({
-      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/integrations/linear',
+    expect(mock.mountInputs[2]).toMatchObject({
+      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/linear',
       remotePath: '/linear',
       agentName: 'pear-integrations-linear',
       scopes: ['relayfile:fs:read:/linear/**', 'relayfile:fs:write:/linear/**']
     })
+    expect(mock.rm).toHaveBeenCalledWith(
+      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/integrations',
+      { recursive: true, force: true }
+    )
   })
 
   it('reports provider root local paths for browsing', () => {
@@ -133,7 +146,8 @@ describe('IntegrationMountManager', () => {
       provider: 'linear',
       mountPaths: ['/integrations/linear/teams', '/linear/projects']
     })).toEqual([
-      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/integrations/linear'
+      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/linear',
+      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/discovery/linear'
     ])
   })
 })
