@@ -1,7 +1,7 @@
 /**
  * Burn integration for Pear-spawned sessions.
  *
- * Registered as a `beforeAgentSpawn` listener on `AgentRelayClient`. For
+ * Registered as a `beforeAgentSpawn` listener on `HarnessDriverClient`. For
  * each session Pear spawns, it preallocates a session id (when the
  * launcher supports one) and writes a burn stamp so the session shows up
  * in `burn summary --tags spawner=pear`.
@@ -21,7 +21,7 @@
  *   matches by `cwd` + `spawnerPid` + `spawnStartTs`.
  *
  * Burn integration code stays here (in Pear) rather than in
- * `@agent-relay/sdk` so the SDK has zero burn dependency. Any other
+ * `@agent-relay/harness-driver` so the driver has zero burn dependency. Any other
  * launcher that wants the same behavior copies this pattern.
  */
 
@@ -29,13 +29,35 @@ import { randomUUID } from 'node:crypto'
 import { closeSync, existsSync, openSync, readSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, join } from 'node:path'
-import type {
-  BeforeAgentSpawnContext,
-  BeforeAgentSpawnHandler,
-  SpawnPatch,
+import type { SpawnPtyInput } from '@agent-relay/harness-driver'
+
+type SpawnProviderInput = {
+  name: string
+  provider: string
+  args?: string[]
+  cwd?: string
+  model?: string
+  team?: string
+}
+
+type PearSpawnInput = SpawnPtyInput | SpawnProviderInput
+
+export type SpawnPatch = Partial<Pick<
   SpawnPtyInput,
-  SpawnProviderInput
-} from '@agent-relay/sdk'
+  'args' | 'channels' | 'task' | 'model' | 'team' | 'agentToken' | 'harnessConfig'
+>>
+
+export interface BeforeAgentSpawnContext<TInput extends PearSpawnInput = PearSpawnInput> {
+  kind: 'pty' | 'cli' | 'headless' | 'provider'
+  input: Readonly<TInput>
+  spawnerPid: number
+  spawnStartTs: string
+  baseUrl: string
+}
+
+export type BeforeAgentSpawnHandler = (
+  ctx: BeforeAgentSpawnContext
+) => void | SpawnPatch | Promise<void | SpawnPatch>
 
 type Harness = 'claude' | 'codex' | 'opencode'
 
@@ -283,7 +305,7 @@ export async function stampPearBurnSpawnedAgent(
 /**
  * Build a `beforeAgentSpawn` handler that writes a burn stamp for the
  * session. Register it via `client.addListener('beforeAgentSpawn',
- * burnListener)` once per `AgentRelayClient`.
+ * burnListener)` once per `HarnessDriverClient`.
  */
 export function createPearBurnSpawnListener(
   options: PearBurnHookOptions = {}

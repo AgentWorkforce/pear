@@ -16,7 +16,7 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import { createPearBurnSpawnListener, stampPearBurnSpawnedAgent } from '../burn-spawn-hook.ts'
-import type { BeforeAgentSpawnContext } from '@agent-relay/sdk'
+import type { BeforeAgentSpawnContext } from '../burn-spawn-hook.ts'
 
 interface BurnCalls {
   writeStamp: Array<{ sessionId: string; enrichment: Record<string, string>; ts?: string; ledgerHome?: string }>

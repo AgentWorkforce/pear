@@ -744,6 +744,7 @@ export interface PearAPI {
     getPending: (projectId: string | undefined, name: string) => Promise<PendingRelayMessage[]>
     flushPending: (projectId: string | undefined, name: string) => Promise<{ flushed: number }>
     resizePty: (projectId: string | undefined, name: string, rows: number, cols: number) => Promise<void>
+    inputSrtt: (projectId: string | undefined, name: string) => Promise<number | null>
     sendMessage: (projectId: string | undefined, input: BrokerSendMessageInput) => Promise<void>
     subscribeAgentChannel: (projectId: string | undefined, name: string, channel: string) => Promise<void>
     unsubscribeAgentChannel: (projectId: string | undefined, name: string, channel: string) => Promise<void>

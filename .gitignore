@@ -10,3 +10,4 @@ bin/relayfile-mount
 .relay/
 relayfile-mount/
 .workflow-artifacts/
+/.agentworkforce/relay

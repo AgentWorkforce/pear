@@ -6,8 +6,8 @@ import { delimiter, basename, dirname, join } from 'path'
 import { execFileSync } from 'child_process'
 import { app, BrowserWindow } from 'electron'
 import {
-  AgentRelayClient,
-  type AgentRelaySpawnOptions,
+  HarnessDriverClient as AgentRelayClient,
+  type RuntimeSpawnOptions as AgentRelaySpawnOptions,
   type SpawnPtyInput,
   type SendMessageInput,
   type BrokerEvent,
@@ -15,10 +15,8 @@ import {
   type ListAgent,
   type InboundDeliveryMode,
   type PendingRelayMessage,
-  type PtyInputStream,
-  findPersona,
-  listPersonas
-} from '@agent-relay/sdk'
+  type PtyInputStream
+} from '@agent-relay/harness-driver'
 import { getAccessToken, getApiUrl } from './auth'
 import { assertDirectory } from './path-utils'
 import { createPearBurnSpawnListener, stampPearBurnSpawnedAgent } from './burn-spawn-hook'
@@ -138,6 +136,18 @@ function resolvePackageBin(packageName: string, binName: string): string | undef
   }
 }
 
+function resolvePackageVersion(packageName: string): string | undefined {
+  try {
+    const packageJsonPath = require.resolve(`${packageName}/package.json`)
+    const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as {
+      version?: string
+    }
+    return packageJson.version?.trim() || undefined
+  } catch {
+    return undefined
+  }
+}
+
 function resolveAgentWorkforceCommand(cwd: string): { cli: string; args: string[] } {
   const binaryName = process.platform === 'win32' ? 'agentworkforce.cmd' : 'agentworkforce'
   const localCandidates = [
@@ -165,9 +175,175 @@ function resolveAgentWorkforceCommand(cwd: string): { cli: string; args: string[
   throw new Error('AgentWorkforce CLI not found — install it to launch personas')
 }
 
-// Resolve the broker binary bundled inside @agent-relay/sdk.
-// The SDK normally resolves this via import.meta.url, but that breaks when
-// electron-vite bundles the SDK into the main process (import.meta.url points
+function resolveNodeCommandForMcp(): string | undefined {
+  const execBasename = basename(process.execPath).toLowerCase()
+  if (execBasename === 'node' || execBasename === 'node.exe') {
+    return process.execPath
+  }
+
+  return resolveCommandOnPath('node')
+}
+
+function resolveBundledAgentRelayMcpScript(): string | undefined {
+  const packageCommand = resolvePackageBin('agent-relay', 'agent-relay')
+  if (packageCommand) {
+    const sibling = join(dirname(packageCommand), 'agent-relay-mcp.js')
+    if (existsSync(sibling)) return sibling
+  }
+
+  try {
+    const packageJsonPath = require.resolve('agent-relay/package.json')
+    const candidate = join(dirname(packageJsonPath), 'dist', 'cli', 'agent-relay-mcp.js')
+    return existsSync(candidate) ? candidate : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function resolveAgentRelayMcpCommand(): string | undefined {
+  const configured = process.env.AGENT_RELAY_MCP_COMMAND?.trim()
+  if (configured) return configured
+
+  const bundledMcpScript = resolveBundledAgentRelayMcpScript()
+  const nodeCommand = bundledMcpScript ? resolveNodeCommandForMcp() : undefined
+  if (bundledMcpScript && nodeCommand) {
+    return `${nodeCommand} ${bundledMcpScript}`
+  }
+
+  const packageCommand = resolvePackageBin('agent-relay', 'agent-relay') || resolveCommandOnPath('agent-relay')
+  if (packageCommand) return `${packageCommand} mcp`
+
+  const npxCommand = resolveCommandOnPath('npx')
+  if (npxCommand) {
+    return `${npxCommand} -y agent-relay@${resolvePackageVersion('agent-relay') || AGENT_RELAY_CLI_VERSION} mcp`
+  }
+
+  return undefined
+}
+
+function parseAgentWorkforceJson<T>(output: string, label: string): T {
+  try {
+    return JSON.parse(output) as T
+  } catch (err) {
+    throw new Error(`Failed to parse AgentWorkforce ${label} JSON: ${toErrorMessage(err)}`)
+  }
+}
+
+function runAgentWorkforceJson<T>(
+  cwd: string,
+  command: { cli: string; args: string[] },
+  args: string[],
+  label: string
+): T {
+  const output = execFileSync(command.cli, [...command.args, ...args], {
+    cwd,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe']
+  })
+  return parseAgentWorkforceJson<T>(output, label)
+}
+
+function normalizePersonaTags(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined
+  const tags = value
+    .filter((tag): tag is string => typeof tag === 'string' && tag.trim().length > 0)
+    .map((tag) => tag.trim())
+  return tags.length > 0 ? tags : undefined
+}
+
+function normalizePersonaSummary(summary: AgentWorkforcePersonaSummary): WorkforcePersona | null {
+  const id = typeof summary.persona === 'string'
+    ? summary.persona.trim()
+    : typeof summary.id === 'string'
+      ? summary.id.trim()
+      : ''
+  if (!id) return null
+
+  const description = typeof summary.description === 'string' && summary.description.trim()
+    ? summary.description.trim()
+    : undefined
+  const harness = typeof summary.harness === 'string' && summary.harness.trim()
+    ? summary.harness.trim()
+    : undefined
+  const source = typeof summary.source === 'string' && summary.source.trim()
+    ? summary.source.trim()
+    : undefined
+  const tags = normalizePersonaTags(summary.tags)
+
+  return {
+    id,
+    ...(description ? { description } : {}),
+    ...(harness ? { harness } : {}),
+    ...(tags ? { tags } : {}),
+    ...(source ? { source } : {})
+  }
+}
+
+function normalizeResolvedPersona(output: AgentWorkforceShowOutput, requestedId: string): ResolvedWorkforcePersona {
+  const spec = output.spec
+  if (!spec || typeof spec !== 'object') {
+    throw new Error(`Workforce persona not found: ${requestedId}`)
+  }
+
+  const raw = spec as Record<string, unknown>
+  const id = typeof raw.id === 'string' && raw.id.trim() ? raw.id.trim() : requestedId
+  const description = typeof raw.description === 'string' && raw.description.trim()
+    ? raw.description.trim()
+    : undefined
+  const harness = typeof raw.harness === 'string' && raw.harness.trim()
+    ? raw.harness.trim()
+    : undefined
+  const source = typeof output.source === 'string' && output.source.trim()
+    ? output.source.trim()
+    : undefined
+  const tags = normalizePersonaTags(raw.tags)
+
+  return {
+    ...(source ? { source } : {}),
+    spec: {
+      id,
+      ...(description ? { description } : {}),
+      ...(harness ? { harness } : {}),
+      ...(tags ? { tags } : {})
+    }
+  }
+}
+
+function listWorkforcePersonas(cwd: string): WorkforcePersona[] {
+  const command = resolveAgentWorkforceCommand(cwd)
+  const output = runAgentWorkforceJson<AgentWorkforceListOutput>(
+    cwd,
+    command,
+    ['list', '--json'],
+    'list'
+  )
+  const personas = Array.isArray(output.personas) ? output.personas : []
+  return personas
+    .map((persona) => normalizePersonaSummary(persona as AgentWorkforcePersonaSummary))
+    .filter((persona): persona is WorkforcePersona => persona !== null)
+}
+
+function findWorkforcePersona(
+  cwd: string,
+  personaId: string,
+  command = resolveAgentWorkforceCommand(cwd)
+): ResolvedWorkforcePersona {
+  try {
+    const output = runAgentWorkforceJson<AgentWorkforceShowOutput>(
+      cwd,
+      command,
+      ['show', personaId, '--json'],
+      'show'
+    )
+    return normalizeResolvedPersona(output, personaId)
+  } catch (err) {
+    throw new Error(`Workforce persona not found: ${personaId}: ${toErrorMessage(err)}`)
+  }
+}
+
+// Resolve the broker binary bundled with the v8 harness-driver runtime.
+// The runtime normally resolves this via import.meta.url, but that breaks when
+// electron-vite bundles the driver into the main process (import.meta.url points
 // to out/main/ instead of node_modules/).
 function resolveBundledBrokerBinary(): string {
   // Use local relay build if available (for development)
@@ -181,12 +357,23 @@ function resolveBundledBrokerBinary(): string {
   }
 
   const suffix = `${process.platform}-${process.arch}`
+  const unpackIfPackaged = (binary: string): string =>
+    app.isPackaged ? binary.replace('app.asar', 'app.asar.unpacked') : binary
+
+  // v8 ships the broker as a per-platform optional package (@agent-relay/broker-*).
+  const optionalPackageBinary = join(
+    __dirname, '..', '..', 'node_modules', '@agent-relay', `broker-${suffix}`, 'bin',
+    process.platform === 'win32' ? 'agent-relay-broker.exe' : 'agent-relay-broker'
+  )
+  if (canExecute(optionalPackageBinary)) return unpackIfPackaged(optionalPackageBinary)
+
+  // Backward-compatible fallback for SDK packages that still carry per-platform
+  // broker binaries directly.
   const brokerBinary = join(
     __dirname, '..', '..', 'node_modules', '@agent-relay', 'sdk', 'bin',
-    `agent-relay-broker-${suffix}`
+    `agent-relay-broker-${suffix}${process.platform === 'win32' ? '.exe' : ''}`
   )
-
-  return app.isPackaged ? brokerBinary.replace('app.asar', 'app.asar.unpacked') : brokerBinary
+  return unpackIfPackaged(brokerBinary)
 }
 
 type TerminalAttachMode = 'view' | 'drive' | 'passthrough'
@@ -247,7 +434,8 @@ const MAX_BROKER_TIMEOUTS_BEFORE_REVIVE = 2
 const BROKER_REVIVE_TERM_GRACE_MS = 1_500
 const PERSONA_REGISTRATION_TIMEOUT_MS = 5_000
 const PERSONA_REGISTRATION_STABILITY_MS = 1_000
-const AGENTWORKFORCE_CLI_VERSION = '3.0.22'
+const AGENTWORKFORCE_CLI_VERSION = '3.0.35'
+const AGENT_RELAY_CLI_VERSION = '8.1.2'
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
@@ -259,6 +447,36 @@ interface PearLineageEntry {
   parentAgentKey?: string
   cwd?: string
   cli?: string
+}
+
+interface AgentWorkforcePersonaSummary {
+  persona?: unknown
+  id?: unknown
+  source?: unknown
+  harness?: unknown
+  tags?: unknown
+  description?: unknown
+}
+
+interface AgentWorkforceListOutput {
+  personas?: unknown
+}
+
+interface AgentWorkforceShowOutput {
+  source?: unknown
+  spec?: unknown
+}
+
+interface AgentWorkforcePersonaSpec {
+  id: string
+  description?: string
+  harness?: string
+  tags?: string[]
+}
+
+interface ResolvedWorkforcePersona {
+  source?: string
+  spec: AgentWorkforcePersonaSpec
 }
 
 function getPearBurnSpawnEnrichment(
@@ -328,7 +546,7 @@ async function terminateOwnedBrokerProcess(pid: number | undefined): Promise<voi
   }
 }
 
-// NOTE: an earlier version of this file wrapped AgentRelayClient.spawn in an
+// NOTE: an earlier version of this file wrapped HarnessDriverClient.spawn in an
 // outer retry for retryable errors. That was unsafe: every spawn() call forks
 // a fresh broker child process (see client.js spawn → child_process.spawn),
 // and the SDK does NOT kill the child on partial failure. Retrying after the
@@ -461,7 +679,7 @@ function parsePortFromUrl(url: string | undefined): number | undefined {
 }
 
 function getClientBaseUrl(client: AgentRelayClient): string | undefined {
-  return normalizeBaseUrl((client as unknown as BrokerClientInternals).transport?.baseUrl)
+  return normalizeBaseUrl(client.baseUrl || (client as unknown as BrokerClientInternals).transport?.baseUrl)
 }
 
 function getClientApiKey(client: AgentRelayClient): string | undefined {
@@ -927,13 +1145,23 @@ export class BrokerManager {
         return
       }
 
+      const agentRelayMcpCommand = resolveAgentRelayMcpCommand()
+      if (agentRelayMcpCommand) {
+        console.log('[broker] Using Agent Relay MCP command:', agentRelayMcpCommand)
+      } else {
+        console.warn('[broker] Agent Relay MCP command could not be resolved; broker will use its default MCP command')
+      }
+
       const opts: AgentRelaySpawnOptions = {
         cwd,
         brokerName: name,
         channels: nextChannels,
         binaryArgs: { persist: true },
         binaryPath: resolveBundledBrokerBinary(),
-        env: { PATH: augmentedPath() },
+        env: {
+          PATH: augmentedPath(),
+          ...(agentRelayMcpCommand ? { AGENT_RELAY_MCP_COMMAND: agentRelayMcpCommand } : {})
+        },
         onStderr: (line: string) => {
           console.error(`[broker stderr:${normalizedProjectId}]`, line)
         }
@@ -1108,7 +1336,7 @@ export class BrokerManager {
 
       const unsubEvent = this.attachClient(normalizedProjectId, client, win)
       // The remote broker shuts itself down after 120s without an owner-lease
-      // renewal. AgentRelayClient.spawn handles this automatically, but the
+      // renewal. HarnessDriverClient.spawn handles this automatically, but the
       // attach-to-existing path (used here for cloud sandboxes) doesn't —
       // without this timer the broker dies mid-session and every subsequent
       // call surfaces as a 502/disconnect.
@@ -1334,12 +1562,9 @@ export class BrokerManager {
     // via `burn summary --tags spawner=pear`. The listener returns a SpawnPatch
     // for Claude (injects --session-id so burn can stamp by exact id), and
     // falls back to writePendingStamp for other launchers.
-    // `addListener` is typed to expect `(ctx) => void | Promise<void>`, but
-    // `beforeAgentSpawn` handlers are uniquely allowed to return a `SpawnPatch`
-    // — the SDK's internal `runBeforeSpawn` reads each listener's return value
-    // and folds it into the resolved input before POSTing. The public type
-    // signature in @agent-relay/sdk@7.0.0 doesn't carry that exception (a
-    // follow-up minor will add the overload), so cast at the call site here.
+    // `beforeAgentSpawn` handlers are uniquely allowed to return a SpawnPatch;
+    // cast at this boundary because Pear's listener supports both current and
+    // older hook shapes.
     const burnHandler = createPearBurnSpawnListener({
       ledgerHome: getBurnLedgerHome(),
       enrich: (ctx) => {
@@ -1645,13 +1870,7 @@ export class BrokerManager {
     const session = this.getSessionForProject(projectId)
 
     try {
-      return listPersonas({ cwd: session.cwd }).map((persona) => ({
-        id: persona.id,
-        description: persona.spec.description,
-        harness: persona.spec.harness,
-        tags: persona.spec.tags,
-        source: persona.path
-      }))
+      return listWorkforcePersonas(session.cwd)
     } catch (err) {
       console.warn(`[broker] Failed to list workforce personas for project ${projectId}:`, err)
       return []
@@ -1665,23 +1884,17 @@ export class BrokerManager {
       throw new Error('Persona id is required')
     }
 
-    const persona = findPersona(trimmedPersonaId, { cwd: session.cwd })
-    if (!persona) {
-      throw new Error(`Workforce persona not found: ${trimmedPersonaId}`)
-    }
-
-    // Resolve the harness straight from the discovered spec rather than
-    // loadPersona(): loadPersona throws when a persona has no `systemPrompt`,
-    // but personas that drive the prompt via `agentsMdContent` (e.g.
-    // nango-integrations) legitimately leave systemPrompt empty. The actual
-    // spawn is delegated to the workforce CLI (`agent --install-in-repo`),
-    // which reads the full persona itself, so the broker only needs the harness
-    // for the informational `cli` field it returns.
-    const resolvedHarness = persona.spec.harness ?? 'claude'
     const command = resolveAgentWorkforceCommand(session.cwd)
+    const persona = findWorkforcePersona(session.cwd, trimmedPersonaId, command)
+
+    // Resolve the harness from `agentworkforce show --json`. The actual spawn
+    // is delegated to the workforce CLI (`agent --install-in-repo`), which
+    // reads the full inherited persona itself, so the broker only needs the
+    // harness for the informational `cli` field it returns.
+    const resolvedHarness = persona.spec.harness ?? 'claude'
     const spawned = await this.spawnPersonaWithMode(session, {
       personaId: trimmedPersonaId,
-      baseName: persona.id,
+      baseName: persona.spec.id,
       command,
       resolvedHarness
     })
@@ -2049,6 +2262,23 @@ export class BrokerManager {
       if (/internal channel closed|internal reply dropped/i.test(message)) return
       console.warn(`[broker] sendInputFireAndForget failed for ${trimmedName}:`, err)
     })
+  }
+
+  // Latest smoothed input→ack round-trip (ms) for an agent's PTY input stream,
+  // or null if there's no open stream or no ack measured yet. Cheap latency
+  // signal the renderer's predictive echo bootstraps its adaptive engage
+  // decision from, so it engages promptly instead of waiting to measure a full
+  // echo-confirmation cycle itself. Safe to call for unknown agents.
+  getInputSrtt(projectId: string | undefined, name: string): number | null {
+    const trimmedName = typeof name === 'string' ? name.trim() : ''
+    if (!trimmedName) return null
+    try {
+      const session = this.getSessionForAgent(trimmedName, projectId)
+      const key = this.getInputStreamKey(session.projectId, trimmedName)
+      return this.inputStreams.get(key)?.srttMs ?? null
+    } catch {
+      return null
+    }
   }
 
   async setTerminalMode(

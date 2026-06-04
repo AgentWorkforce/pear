@@ -104,7 +104,7 @@ function matchesAgent(agent: Agent, projectId: string | undefined, name: string)
   return agent.name === name
 }
 
-// Matches the real BrokerEvent discriminated union from @agent-relay/sdk
+// Matches the real BrokerEvent discriminated union from @agent-relay/harness-driver
 interface BrokerEvent {
   kind: string
   projectId?: string

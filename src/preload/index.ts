@@ -236,6 +236,8 @@ const api = {
       invoke<{ flushed: number }>('broker:flush-pending', projectId, name),
     resizePty: (projectId: string | undefined, name: string, rows: number, cols: number) =>
       invoke<void>('broker:resize-pty', projectId, name, rows, cols),
+    inputSrtt: (projectId: string | undefined, name: string) =>
+      invoke<number | null>('broker:input-srtt', projectId, name),
     sendMessage: (projectId: string | undefined, input: BrokerSendMessageInput) =>
       invoke<void>('broker:send-message', projectId, input),
     subscribeAgentChannel: (projectId: string | undefined, name: string, channel: string) =>

@@ -7,7 +7,7 @@ import {
   type ProactiveDeploymentResponse,
   type ProactiveAgentRecord
 } from '@agent-relay/cloud'
-import { AgentRelayClient, type BrokerEvent } from '@agent-relay/sdk'
+import { HarnessDriverClient as AgentRelayClient, type BrokerEvent } from '@agent-relay/harness-driver'
 import {
   RelayfileSetup,
   type MountedWorkspaceHandle,
