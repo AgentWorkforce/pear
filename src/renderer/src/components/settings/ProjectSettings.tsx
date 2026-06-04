@@ -364,8 +364,35 @@ function IntegrationVisibilitySection({
     }
   }, [projectId])
 
-  const listSlackChannelResources = useCallback(async (provider: string): Promise<IntegrationAccessibleResource[]> => {
-    const options = await pear.integrations.listOptions(projectId, provider, 'channels')
+  const listSlackChannelResources = useCallback(async (integration: ConnectedIntegration): Promise<IntegrationAccessibleResource[]> => {
+    const listOptions = (pear.integrations as typeof pear.integrations & {
+      listOptions?: typeof pear.integrations.listOptions
+    }).listOptions
+    if (typeof listOptions !== 'function') {
+      const entries = await pear.integrations.listMountDir(projectId, integration.integrationId, '/channels')
+      return entries
+        .filter((entry) => entry.type === 'directory' && !entry.name.startsWith('_') && entry.name !== 'by-name')
+        .map((entry) => {
+          const id = entry.name.includes('__')
+            ? entry.name.split('__')[0]
+            : entry.name.includes('--')
+              ? entry.name.split('--').at(-1) || entry.name
+              : entry.name
+          const name = entry.name.includes('__')
+            ? entry.name.split('__').slice(1).join('__')
+            : entry.name.includes('--')
+              ? entry.name.split('--').slice(0, -1).join('--')
+              : entry.name
+          return {
+            id,
+            displayName: name || id,
+            name: name || id,
+            path: `/slack/channels/${entry.name}`
+          }
+        })
+    }
+
+    const options = await listOptions(projectId, integration.provider, 'channels')
     return options.map((option) => ({
       id: option.value,
       displayName: option.label,
@@ -540,7 +567,7 @@ function IntegrationVisibilitySection({
                       provider="slack"
                       disabled={busy}
                       initialSelectedIds={scopeStringList(integration.scope, 'channels')}
-                      listAccessibleResources={() => listSlackChannelResources(integration.provider)}
+                      listAccessibleResources={() => listSlackChannelResources(integration)}
                       onChange={setPendingScopeValue}
                     />
                     <div className="mt-3 flex justify-end gap-2">

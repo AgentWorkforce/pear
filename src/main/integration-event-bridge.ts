@@ -85,19 +85,61 @@ function toRelayfileProvider(provider: string): string {
   return normalized === 'gmail' ? 'google-mail' : normalized
 }
 
+function slackNormalizeSegment(value: string, fallback = 'unknown'): string {
+  const trimmed = value.trim()
+  if (!trimmed) return fallback
+  return trimmed.replace(/[^A-Za-z0-9._+=@-]+/g, '_').replace(/^_+|_+$/g, '') || fallback
+}
+
+function slackPathSlug(value: string): string {
+  return value
+    .replace(/[{}]/g, '')
+    .replace(/[^a-zA-Z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase()
+}
+
+function readScopeResourceLabel(scope: Record<string, unknown>, id: string): string | undefined {
+  const resources = scope.resources
+  if (!Array.isArray(resources)) return undefined
+  for (const resource of resources) {
+    if (!isRecord(resource)) continue
+    const resourceId = typeof resource.id === 'string' ? resource.id.trim() : ''
+    if (resourceId !== id) continue
+    for (const key of ['label', 'name', 'displayName', 'title', 'slug']) {
+      const value = resource[key]
+      if (typeof value === 'string' && value.trim()) return value.trim().replace(/^#/u, '')
+    }
+  }
+  return undefined
+}
+
+function slackScopedMountPaths(integration: ConnectedIntegration, provider: string): string[] {
+  if (provider !== 'slack') return []
+  return stringList(integration.scope.channels).flatMap((channelId) => {
+    const id = slackNormalizeSegment(channelId)
+    const label = readScopeResourceLabel(integration.scope, channelId)
+    const slug = label ? slackPathSlug(label) : ''
+    return [
+      `/${provider}/channels/${id}${slug ? `__${slug}` : ''}`,
+      ...(slug ? [`/${provider}/channels/${slug}--${id}`, `/${provider}/channels/${slug}`] : [])
+    ]
+  })
+}
+
 // Provider adapters materialize data at the workspace root (`/github/...`,
 // `/linear/...`), so watch globs must target the root-level provider layout.
 // Tolerates the legacy `/integrations/<provider>/...` catalog form.
 function canonicalMountPaths(integration: ConnectedIntegration): string[] {
-  if (integration.mountPaths.length === 0) return []
   const provider = toRelayfileProvider(integration.provider)
-  return dedupeStrings(integration.mountPaths.map((path) => {
+  const mountPaths = integration.mountPaths.map((path) => {
     const prefixed = path.match(/^\/integrations\/[^/]+(\/.*)?$/)
     if (prefixed) return `/${provider}${prefixed[1] ?? ''}`
     const rootLevel = path.match(/^\/[^/]+(\/.*)?$/)
     if (rootLevel) return `/${provider}${rootLevel[1] ?? ''}`
     return path
-  }))
+  })
+  return dedupeStrings([...mountPaths, ...slackScopedMountPaths(integration, provider)])
 }
 
 function watchGlobForPath(path: string): string {
