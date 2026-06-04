@@ -4,7 +4,7 @@ import {
   type EventStreamHandle,
   type WatchRegistration
 } from '@agent-relay/events'
-import { getAccountWorkspaceId, resolveCloudAuth } from './auth'
+import { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, resolveCloudAuth } from './auth'
 import { brokerManager } from './broker'
 import { getRelayWorkspaceManager } from './relay-workspace'
 import type { ConnectedIntegration } from './integrations'
@@ -268,7 +268,7 @@ export class IntegrationEventBridge {
   private async resolveEventsConfig(): Promise<CloudAgentEventsConfig> {
     const auth = await resolveCloudAuth()
     if (auth) {
-      const workspaceId = await getAccountWorkspaceId()
+      const workspaceId = await getAccountWorkspaceId(accountWorkspaceReadyRetryOptions())
       const response = await fetch(`${auth.apiUrl}/api/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-events`, {
         headers: { Authorization: `Bearer ${auth.accessToken}` }
       })

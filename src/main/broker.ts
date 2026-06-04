@@ -2,7 +2,7 @@ import { accessSync, constants, existsSync, readFileSync } from 'fs'
 import { rm } from 'fs/promises'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
-import { delimiter, basename, dirname, join } from 'path'
+import { delimiter, basename, dirname, isAbsolute, join } from 'path'
 import { execFileSync } from 'child_process'
 import { app, BrowserWindow } from 'electron'
 import {
@@ -116,6 +116,12 @@ function resolveCommandWithAugmentedPath(command: string): string | undefined {
   }
 
   return undefined
+}
+
+function executableCliPath(input: SpawnPtyInput): string {
+  return isAbsolute(input.cli)
+    ? input.cli
+    : join(input.cwd || process.cwd(), input.cli)
 }
 
 function resolvePackageBin(packageName: string, binName: string): string | undefined {
@@ -916,7 +922,7 @@ function normalizeCloudSpawnInput(input: SpawnPtyInput): SpawnPtyInput {
 function preflightSpawnCli(input: SpawnPtyInput): SpawnPtyInput {
   if (isShellLikeCommand(input.cli)) return input
   if (input.cli.includes('/') || input.cli.includes('\\')) {
-    if (!canExecute(input.cli)) {
+    if (!canExecute(executableCliPath(input))) {
       throw new Error(`Agent CLI is not executable: ${input.cli}`)
     }
     return input
