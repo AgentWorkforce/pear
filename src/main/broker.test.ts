@@ -1,4 +1,7 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // Covers the multi-session BrokerManager: a project's local broker and cloud
 // sandbox broker coexist instead of clobbering each other in the sessions map.
@@ -242,6 +245,47 @@ describe('BrokerManager local + cloud coexistence', () => {
     expect(firstCloud.shutdown).toHaveBeenCalled()
     expect(secondCloud).not.toBe(firstCloud)
     expect(local.shutdown).not.toHaveBeenCalled()
+
+    await manager.shutdown()
+  })
+})
+
+describe('BrokerManager spawnAgent CLI preflight', () => {
+  let tempDir: string | null = null
+
+  beforeEach(() => {
+    mock.state.spawnedClients.length = 0
+    mock.state.constructedClients.length = 0
+    mock.state.nextLocalAgents = []
+    mock.state.nextCloudAgents = []
+  })
+
+  afterEach(async () => {
+    if (tempDir) await rm(tempDir, { recursive: true, force: true })
+    tempDir = null
+  })
+
+  it('validates relative executable paths from the agent cwd', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'pear-broker-'))
+    const toolPath = join(tempDir, 'bin', 'tool')
+    await mkdir(join(tempDir, 'bin'), { recursive: true })
+    await writeFile(toolPath, '#!/bin/sh\nexit 0\n')
+    await chmod(toolPath, 0o755)
+
+    const manager = new BrokerManager()
+    const local = await startLocal(manager)
+
+    await expect(manager.spawnAgent(PROJECT_ID, {
+      name: 'local-tool',
+      cli: './bin/tool',
+      cwd: tempDir
+    })).resolves.toEqual({ name: 'local-tool', runtime: 'pty' })
+
+    expect(local.spawnPty).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'local-tool',
+      cli: './bin/tool',
+      cwd: tempDir
+    }))
 
     await manager.shutdown()
   })

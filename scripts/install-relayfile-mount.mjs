@@ -9,9 +9,9 @@
 //   3. GitHub release download      — relayfile-mount-<platform>-<arch> from the
 //                                     AgentWorkforce/relayfile release matching the
 //                                     installed @relayfile/sdk version
-import { access, chmod, copyFile, mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { access, chmod, copyFile, mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises'
 import { constants, createWriteStream } from 'node:fs'
-import { dirname, join, resolve } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { pipeline } from 'node:stream/promises'
 import { createRequire } from 'node:module'
@@ -45,7 +45,12 @@ async function canRead(path) {
 
 function sdkVersion() {
   try {
-    return require('@relayfile/sdk/package.json').version
+    const packageJsonPath = require.resolve('@relayfile/sdk/package.json')
+    const localNodeModules = join(pearRoot, 'node_modules') + sep
+    if (!packageJsonPath.startsWith(localNodeModules)) {
+      return null
+    }
+    return require(packageJsonPath).version
   } catch {
     return null
   }
@@ -65,6 +70,11 @@ function fail(message) {
 
 async function installFromFile(source) {
   await mkdir(dirname(target), { recursive: true })
+  if ((await realpath(source).catch(() => null)) === (await realpath(target).catch(() => null))) {
+    await chmod(target, 0o755)
+    console.log(`[relayfile-mount] already installed at ${target}`)
+    return
+  }
   await copyFile(source, target)
   await chmod(target, 0o755)
   console.log(`[relayfile-mount] installed ${source} -> ${target}`)

@@ -9,6 +9,7 @@ import {
 } from '@/stores/cloud-agent-store'
 import { getAgentKey, useAgentStore } from '@/stores/agent-store'
 import { useProjectStore, type CloudAgentWorkspaceMode } from '@/stores/project-store'
+import { useUIStore } from '@/stores/ui-store'
 
 function phaseLabel(progress: CloudAgentAttachProgress | undefined, elapsedSec: number): string {
   if (!progress) return elapsedSec > 1 ? `Starting attach… (${elapsedSec}s)` : 'Starting attach…'
@@ -415,6 +416,7 @@ export default function CloudAgentPicker({
       })
       useAgentStore.getState().trackSpawnedAgent(name, projectId, undefined, cli, '/workspace')
       useAgentStore.getState().setActiveAgentKey(getAgentKey(projectId, name))
+      useUIStore.getState().openTab({ kind: 'agents', projectId })
       await onAttach(attachingAgentId)
       if (projectId) {
         setAttachProgress(projectId, null)
