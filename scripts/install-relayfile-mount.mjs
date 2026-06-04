@@ -27,10 +27,12 @@ async function canRead(path) {
   }
 }
 
-const source = resolve(
-  process.env.RELAYFILE_DIST_DIR || join(pearRoot, '..', 'relayfile', 'dist'),
-  `relayfile-mount-${archSuffix()}`
-)
+const source = process.env.RELAYFILE_MOUNT_BIN
+  ? resolve(process.env.RELAYFILE_MOUNT_BIN)
+  : resolve(
+      process.env.RELAYFILE_DIST_DIR || join(pearRoot, '..', 'relayfile', 'dist'),
+      `relayfile-mount-${archSuffix()}`
+    )
 const target = join(pearRoot, 'bin', 'relayfile-mount')
 
 if (!await canRead(source)) {
@@ -40,7 +42,7 @@ if (!await canRead(source)) {
     process.exit(0)
   }
   console.error(`[relayfile-mount] ${message}`)
-  console.error('[relayfile-mount] Build relayfile first, set RELAYFILE_DIST_DIR, or set RELAYFILE_MOUNT_BIN at runtime.')
+  console.error('[relayfile-mount] Build relayfile first, set RELAYFILE_DIST_DIR, or set RELAYFILE_MOUNT_BIN.')
   process.exit(1)
 }
 

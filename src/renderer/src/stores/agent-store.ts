@@ -480,6 +480,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
           ...agent,
           cli: liveAgent.cli || agent.cli,
           model: liveAgent.model || agent.model,
+          status: 'running' as const,
           currentState,
           activity: activityFromCurrentState(currentState),
           channels,
