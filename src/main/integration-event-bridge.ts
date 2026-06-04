@@ -1,6 +1,4 @@
 import type { ChangeEvent, Subscription } from '@relayfile/sdk'
-import { brokerManager } from './broker'
-import { getRelayWorkspaceManager } from './relay-workspace'
 import type { ConnectedIntegration } from './integrations'
 
 type WatchRegistration = {
@@ -11,6 +9,14 @@ type WatchRegistration = {
 type DeliveryTargets = {
   agents: string[]
   channels: string[]
+}
+
+type SubscriptionSpec = {
+  integrationId: string
+  provider: string
+  mountPaths: string[]
+  watches: WatchRegistration[]
+  targets: DeliveryTargets
 }
 
 type ProjectSubscription = {
@@ -33,10 +39,27 @@ type BrokerEventBridge = {
   ) => Promise<void> | void
 }
 
+type RelayfileEventClient = {
+  subscribe(
+    globs: string[],
+    onChange: (event: ChangeEvent) => void,
+    options?: { coalesce?: 'none' | 'fire-once'; coalesceMs?: number }
+  ): Subscription
+}
+
+type RelayfileWorkspaceHandle = {
+  workspaceId: string
+  client(): RelayfileEventClient
+}
+
+type IntegrationEventBridgeDeps = {
+  broker?: BrokerEventBridge
+  getWorkspaceHandle?: () => Promise<RelayfileWorkspaceHandle>
+}
+
 export type IntegrationSubscriptionSummary = {
   provider: string
   watches: string[]
-  inboxes: string[]
   targets: string[]
 }
 
@@ -90,26 +113,6 @@ function watchRegistrationsFor(integrations: ConnectedIntegration[]): WatchRegis
     }))
 }
 
-function inboxSelectorsFor(integrations: ConnectedIntegration[]): string[] {
-  const selectors: string[] = []
-  for (const integration of integrations) {
-    if (integration.mountPaths.length === 0) continue
-    if (toRelayfileProvider(integration.provider) !== 'slack') continue
-    const scope = integration.scope
-    const rawSelectors = [
-      ...stringList(scope.inboxSelectors),
-      ...stringList(scope.inboxes),
-      ...stringList(scope.channels)
-    ]
-    for (const selector of rawSelectors) {
-      const trimmed = selector.trim()
-      if (!trimmed) continue
-      selectors.push(trimmed.startsWith('#') || trimmed.startsWith('@') ? trimmed : `#${trimmed}`)
-    }
-  }
-  return dedupeStrings(selectors)
-}
-
 function normalizeAgentTarget(value: string): string | null {
   const trimmed = value.trim()
   if (!trimmed || trimmed.startsWith('#')) return null
@@ -132,9 +135,7 @@ function deliveryTargetsFor(integrations: ConnectedIntegration[]): DeliveryTarge
         ...stringList(scope.notifyAgents),
         ...stringList(scope.notificationAgents),
         ...stringList(scope.listenerAgents),
-        ...stringList(scope.agentListeners),
-        ...stringList(scope.agentNames),
-        ...stringList(scope.agents)
+        ...stringList(scope.agentListeners)
       ].map(normalizeAgentTarget).filter((entry): entry is string => entry !== null)
     )
     channels.push(
@@ -157,6 +158,33 @@ function targetLabels(targets: DeliveryTargets): string[] {
   return [...targets.agents.map((agent) => `@${agent}`), ...targets.channels]
 }
 
+function subscriptionSpecsFor(integrations: ConnectedIntegration[]): SubscriptionSpec[] {
+  return integrations.map((integration) => {
+    const mountPaths = canonicalMountPaths(integration)
+    return {
+      integrationId: integration.integrationId,
+      provider: integration.provider,
+      mountPaths,
+      watches: mountPaths.map(watchGlobForPath).map((glob) => ({
+        glob,
+        coalesceMs: 750
+      })),
+      targets: deliveryTargetsFor([integration])
+    }
+  }).filter((spec) => spec.watches.length > 0)
+}
+
+function pathIsInsideMount(path: string, mountPath: string): boolean {
+  const normalizedPath = path.trim().replace(/\/+$/u, '') || '/'
+  const normalizedMountPath = mountPath.trim().replace(/\/+$/u, '') || '/'
+  return normalizedPath === normalizedMountPath || normalizedPath.startsWith(`${normalizedMountPath}/`)
+}
+
+function specsForEvent(event: ChangeEvent, specs: SubscriptionSpec[]): SubscriptionSpec[] {
+  const path = event.resource.path
+  return specs.filter((spec) => spec.mountPaths.some((mountPath) => pathIsInsideMount(path, mountPath)))
+}
+
 export function integrationSubscriptionSummaries(
   integrations: ConnectedIntegration[]
 ): IntegrationSubscriptionSummary[] {
@@ -167,11 +195,10 @@ export function integrationSubscriptionSummaries(
       return {
         provider: integration.provider,
         watches: watchRegistrationsFor([integration]).map((watch) => watch.glob),
-        inboxes: inboxSelectorsFor([integration]),
         targets: targetLabels(targets)
       }
     })
-    .filter((summary) => summary.watches.length > 0 || summary.inboxes.length > 0)
+    .filter((summary) => summary.watches.length > 0)
 }
 
 function eventSummaryValue(value: unknown): string | undefined {
@@ -247,6 +274,11 @@ function formatIntegrationEventMessage(event: ChangeEvent): string {
 
 export class IntegrationEventBridge {
   private subscriptions = new Map<string, ProjectSubscription>()
+  private readonly deps: IntegrationEventBridgeDeps
+
+  constructor(deps: IntegrationEventBridgeDeps = {}) {
+    this.deps = deps
+  }
 
   async reconcile(projectId: string, integrations: ConnectedIntegration[]): Promise<void> {
     const subscribed = integrations.filter((integration) => integration.subscribeAgent === true)
@@ -255,20 +287,26 @@ export class IntegrationEventBridge {
       return
     }
 
-    const watches = watchRegistrationsFor(subscribed)
-    const inbox = inboxSelectorsFor(subscribed)
+    const specs = subscriptionSpecsFor(subscribed)
+    const watches = dedupeStrings(specs.flatMap((spec) => spec.watches.map((watch) => watch.glob))).map((glob) => ({
+      glob,
+      coalesceMs: 750
+    }))
     if (watches.length === 0) {
       await this.close(projectId)
       return
     }
 
-    const handle = await getRelayWorkspaceManager().getWorkspaceHandle()
-    const targets = deliveryTargetsFor(subscribed)
+    const handle = await this.getWorkspaceHandle()
     const signature = JSON.stringify({
       workspaceId: handle.workspaceId,
       watches,
-      inbox,
-      targets
+      specs: specs.map((spec) => ({
+        integrationId: spec.integrationId,
+        provider: spec.provider,
+        mountPaths: spec.mountPaths,
+        targets: spec.targets
+      }))
     })
     if (this.subscriptions.get(projectId)?.signature === signature) return
 
@@ -279,7 +317,7 @@ export class IntegrationEventBridge {
         handle.client().subscribe(
           watches.map((watch) => watch.glob),
           (event) => {
-            void this.injectEvent(projectId, event, targets).catch((error) => {
+            void this.injectEvent(projectId, event, specs).catch((error) => {
               console.warn('[integration-events] Event delivery failed:', {
                 projectId,
                 eventId: event.id,
@@ -311,20 +349,30 @@ export class IntegrationEventBridge {
     await Promise.all(Array.from(this.subscriptions.keys()).map((projectId) => this.close(projectId)))
   }
 
-  private async injectEvent(projectId: string, event: ChangeEvent, targets: DeliveryTargets): Promise<void> {
+  private async injectEvent(projectId: string, event: ChangeEvent, specs: SubscriptionSpec[]): Promise<void> {
     if (!shouldNotifyRelayfileChange(event)) return
 
-    const bridge = this.bridge()
-    const explicitTargets = dedupeStrings([...targets.agents, ...targets.channels])
-    const agentTargets = explicitTargets.length > 0
-      ? targets.agents
-      : (await bridge.listAgents(projectId))
-        .filter((agent) => agent.projectId === undefined || agent.projectId === projectId)
-        .map((agent) => agent.name)
-    const recipients = dedupeStrings([...agentTargets, ...targets.channels])
+    const matchedSpecs = specsForEvent(event, specs)
+    if (matchedSpecs.length === 0) return
+
+    const bridge = await this.bridge()
+    let allProjectAgents: string[] | null = null
+    const recipients: string[] = []
+
+    for (const spec of matchedSpecs) {
+      const explicitTargets = dedupeStrings([...spec.targets.agents, ...spec.targets.channels])
+      if (explicitTargets.length === 0) {
+        allProjectAgents ??= (await bridge.listAgents(projectId))
+          .filter((agent) => agent.projectId === undefined || agent.projectId === projectId)
+          .map((agent) => agent.name)
+        recipients.push(...allProjectAgents)
+      } else {
+        recipients.push(...spec.targets.agents, ...spec.targets.channels)
+      }
+    }
 
     await Promise.all(
-      recipients.map((recipient) => bridge.sendMessage(projectId, {
+      dedupeStrings(recipients).map((recipient) => bridge.sendMessage(projectId, {
         to: recipient,
         from: 'integration',
         text: formatIntegrationEventMessage(event),
@@ -343,7 +391,15 @@ export class IntegrationEventBridge {
     )
   }
 
-  private bridge(): BrokerEventBridge {
+  private async getWorkspaceHandle(): Promise<RelayfileWorkspaceHandle> {
+    if (this.deps.getWorkspaceHandle) return this.deps.getWorkspaceHandle()
+    const { getRelayWorkspaceManager } = await import('./relay-workspace')
+    return getRelayWorkspaceManager().getWorkspaceHandle() as Promise<RelayfileWorkspaceHandle>
+  }
+
+  private async bridge(): Promise<BrokerEventBridge> {
+    if (this.deps.broker) return this.deps.broker
+    const { brokerManager } = await import('./broker')
     return brokerManager as unknown as BrokerEventBridge
   }
 }

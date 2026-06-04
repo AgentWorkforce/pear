@@ -1359,7 +1359,6 @@ export class IntegrationsManager {
       for (const subscription of subscriptions) {
         const parts = [
           subscription.watches.length > 0 ? `file changes at ${subscription.watches.join(', ')}` : '',
-          subscription.inboxes.length > 0 ? `provider inboxes at ${subscription.inboxes.join(', ')}` : '',
           subscription.targets.length > 0 ? `delivered to ${subscription.targets.join(', ')}` : 'delivered to all project agents'
         ].filter(Boolean)
         lines.push(`- ${subscription.provider}: ${parts.join('; ')}`)

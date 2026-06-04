@@ -187,8 +187,7 @@ const NOTIFICATION_AGENT_SCOPE_KEYS = [
   'notifyAgents',
   'notificationAgents',
   'listenerAgents',
-  'agentListeners',
-  'agentNames'
+  'agentListeners'
 ]
 
 const NOTIFICATION_CHANNEL_SCOPE_KEYS = [
