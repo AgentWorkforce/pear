@@ -9,11 +9,13 @@
     "pear": "bin/pear.mjs"
   },
   "scripts": {
+    "postinstall": "node scripts/install-relayfile-mount.mjs --optional",
+    "relayfile-mount:install": "node scripts/install-relayfile-mount.mjs",
     "dev": "electron-vite dev",
-    "build": "electron-vite build",
+    "build": "npm run relayfile-mount:install && electron-vite build",
     "preview": "electron-vite preview",
-    "dist:mac": "electron-vite build && electron-builder --mac --publish never",
-    "release:mac": "electron-vite build && electron-builder --mac --publish always",
+    "dist:mac": "npm run build && electron-builder --mac --publish never",
+    "release:mac": "npm run build && electron-builder --mac --publish always",
     "test": "node --experimental-strip-types --no-warnings --test 'src/main/__tests__/*.test.ts'",
     "personas:refresh": "npx --yes agentworkforce install @agentworkforce/persona-autonomous-actor --overwrite"
   },

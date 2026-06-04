@@ -52,7 +52,7 @@ export function useBrokerEvents(): void {
   const syncBrokerSnapshot = useCallback(async (projectId?: string): Promise<void> => {
     try {
       const agents = await pear.broker.listAgents(projectId)
-      syncBrokerAgents(agents)
+      syncBrokerAgents(agents, projectId)
       for (const [agentProjectId, channels] of collectAgentChannelsByProject(agents)) {
         rememberDiscoveredChannels(agentProjectId, channels)
       }

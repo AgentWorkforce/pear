@@ -1,6 +1,7 @@
 import { accessSync, constants, existsSync, readFileSync } from 'fs'
 import { rm } from 'fs/promises'
 import { randomUUID } from 'node:crypto'
+import { homedir } from 'node:os'
 import { delimiter, basename, dirname, join } from 'path'
 import { execFileSync } from 'child_process'
 import { app, BrowserWindow } from 'electron'
@@ -33,6 +34,10 @@ import type { WorkforcePersona } from '../shared/types/ipc'
 function isShellLikeCommand(cli: string): boolean {
   const normalized = basename(cli).toLowerCase()
   return ['shell', 'sh', 'bash', 'zsh', 'fish', 'nu', 'nushell', 'pwsh', 'powershell'].includes(normalized)
+}
+
+function spawnCliLabel(cli: string): string {
+  return basename(cli).toLowerCase()
 }
 
 function resolveShellCommand(): string {
@@ -80,6 +85,39 @@ function resolveCommandOnPath(command: string): string | undefined {
   } catch {
     return undefined
   }
+}
+
+function commonUserBinDirs(): string[] {
+  const home = homedir()
+  return [
+    join(home, '.local', 'bin'),
+    join(home, '.local', 'share', 'mise', 'shims'),
+    join(home, '.asdf', 'shims'),
+    '/opt/homebrew/bin',
+    '/usr/local/bin'
+  ]
+}
+
+function augmentedPath(): string {
+  const current = process.env.PATH || ''
+  const entries = new Set(current.split(delimiter).filter(Boolean))
+  for (const dir of commonUserBinDirs()) entries.add(dir)
+  return Array.from(entries).join(delimiter)
+}
+
+function resolveCommandWithAugmentedPath(command: string): string | undefined {
+  const resolved = resolveCommandOnPath(command)
+  if (resolved) return resolved
+
+  for (const dir of commonUserBinDirs()) {
+    const candidate = join(dir, command)
+    if (canExecute(candidate)) {
+      process.env.PATH = augmentedPath()
+      return candidate
+    }
+  }
+
+  return undefined
 }
 
 function resolvePackageBin(packageName: string, binName: string): string | undefined {
@@ -318,6 +356,10 @@ function isUnsupportedInputStreamError(err: unknown): boolean {
 
 function isMissingAgentError(err: unknown): boolean {
   return getErrorStatus(err) === 404 || /agent_not_found|no worker named|not found/i.test(toErrorMessage(err))
+}
+
+function isWorkspaceNotStartedError(err: unknown): boolean {
+  return /relay workspace not started|no relay workspace found/i.test(toErrorMessage(err))
 }
 
 // Walk an error's `cause` chain looking for any node that satisfies `predicate`.
@@ -622,6 +664,57 @@ function isAgentNameConflict(err: unknown): boolean {
   return /agent ['"].+['"] already exists/i.test(message) || message.includes('already exists')
 }
 
+function brokerErrorData(err: unknown): Record<string, unknown> | undefined {
+  if (typeof err !== 'object' || err === null || !('data' in err)) return undefined
+  const data = (err as { data?: unknown }).data
+  return data && typeof data === 'object' && !Array.isArray(data)
+    ? data as Record<string, unknown>
+    : undefined
+}
+
+function formatBrokerErrorData(data: Record<string, unknown> | undefined): string {
+  if (!data) return ''
+  const entries = Object.entries(data)
+    .filter(([, value]) => value !== undefined && value !== null && typeof value !== 'object')
+    .map(([key, value]) => `${key}=${String(value)}`)
+  return entries.length > 0 ? ` (${entries.join(', ')})` : ''
+}
+
+function buildSpawnFailureError(err: unknown, input: SpawnPtyInput, kind: 'local' | 'cloud' = 'local'): Error {
+  const data = brokerErrorData(err)
+  const detail = formatBrokerErrorData(data)
+  return new Error(
+    `Failed to spawn ${kind} agent "${input.name}" with ${input.cli} in ${input.cwd || process.cwd()}: ${toErrorMessage(err)}${detail}`
+  )
+}
+
+function normalizeCloudSpawnInput(input: SpawnPtyInput): SpawnPtyInput {
+  if (input.cwd && existsSync(input.cwd)) {
+    return { ...input, cwd: '/workspace' }
+  }
+  return input
+}
+
+function preflightSpawnCli(input: SpawnPtyInput): SpawnPtyInput {
+  if (isShellLikeCommand(input.cli)) return input
+  if (input.cli.includes('/') || input.cli.includes('\\')) {
+    if (!canExecute(input.cli)) {
+      throw new Error(`Agent CLI is not executable: ${input.cli}`)
+    }
+    return input
+  }
+
+  const label = spawnCliLabel(input.cli)
+  if (!['claude', 'codex', 'opencode'].includes(label)) return input
+  const resolved = resolveCommandWithAugmentedPath(input.cli)
+  if (!resolved) {
+    throw new Error(
+      `Agent CLI "${input.cli}" was not found on Pear's PATH. Launch Pear from a shell with ${input.cli} available, or install ${input.cli} globally.`
+    )
+  }
+  return { ...input, cli: resolved }
+}
+
 interface BrokerSession {
   projectId: string
   client: AgentRelayClient
@@ -840,6 +933,7 @@ export class BrokerManager {
         channels: nextChannels,
         binaryArgs: { persist: true },
         binaryPath: resolveBundledBrokerBinary(),
+        env: { PATH: augmentedPath() },
         onStderr: (line: string) => {
           console.error(`[broker stderr:${normalizedProjectId}]`, line)
         }
@@ -1498,6 +1592,9 @@ export class BrokerManager {
       ...relayAwareInput,
       name: getAvailableAgentName(relayAwareInput.name, existingNames)
     }
+    nextInput = session.cloudSandboxId
+      ? normalizeCloudSpawnInput(nextInput)
+      : preflightSpawnCli(nextInput)
 
     for (let attempt = 0; attempt < 20; attempt += 1) {
       try {
@@ -1531,7 +1628,7 @@ export class BrokerManager {
         return spawned
       } catch (err) {
         if (!isAgentNameConflict(err)) {
-          throw err
+          throw buildSpawnFailureError(err, nextInput, session.cloudSandboxId ? 'cloud' : 'local')
         }
         existingNames.add(nextInput.name)
         nextInput = {
@@ -1964,8 +2061,25 @@ export class BrokerManager {
       throw new Error('Agent name is required')
     }
 
-    const session = this.getSessionForAgent(trimmedName, projectId)
-    const result = await session.client.setInboundDeliveryMode(trimmedName, toInboundDeliveryMode(mode))
+    let session: BrokerSession
+    try {
+      session = this.getSessionForAgent(trimmedName, projectId)
+    } catch (err) {
+      if (isWorkspaceNotStartedError(err)) {
+        return { name: trimmedName, mode: toInboundDeliveryMode(mode), flushed: 0, pending: 0 }
+      }
+      throw err
+    }
+
+    let result: { mode: InboundDeliveryMode; flushed: number }
+    try {
+      result = await session.client.setInboundDeliveryMode(trimmedName, toInboundDeliveryMode(mode))
+    } catch (err) {
+      if (isMissingAgentError(err)) {
+        return { name: trimmedName, mode: toInboundDeliveryMode(mode), flushed: 0, pending: 0 }
+      }
+      throw err
+    }
     const pending = result.mode === 'manual_flush'
       ? await session.client.getPending(trimmedName).then((messages) => messages.length).catch(() => 0)
       : 0
@@ -1987,9 +2101,15 @@ export class BrokerManager {
     // When the project is known (the renderer always passes it for the 2.5s
     // poll), await any in-flight revive so a poll racing a respawn picks up the
     // fresh session instead of throwing "workspace not started".
-    const session = projectId?.trim()
-      ? await this.getOrAwaitSession(projectId)
-      : this.getSessionForAgent(trimmedName, projectId)
+    let session: BrokerSession
+    try {
+      session = projectId?.trim()
+        ? await this.getOrAwaitSession(projectId)
+        : this.getSessionForAgent(trimmedName, projectId)
+    } catch (err) {
+      if (isWorkspaceNotStartedError(err)) return []
+      throw err
+    }
     // A wedged `/api/pending` endpoint otherwise times out on every poll and
     // floods the IPC log; recover the broker and degrade to [] meanwhile. An
     // empty held-message list is harmless, so degradeOnTimeout is on.
@@ -2017,8 +2137,19 @@ export class BrokerManager {
   }
 
   async resizePty(projectId: string | undefined, name: string, rows: number, cols: number): Promise<void> {
-    const session = this.getSessionForAgent(name, projectId)
-    await session.client.resizePty(name, rows, cols)
+    let session: BrokerSession
+    try {
+      session = this.getSessionForAgent(name, projectId)
+    } catch (err) {
+      if (isWorkspaceNotStartedError(err)) return
+      throw err
+    }
+    try {
+      await session.client.resizePty(name, rows, cols)
+    } catch (err) {
+      if (isMissingAgentError(err)) return
+      throw err
+    }
   }
 
   async sendMessage(projectId: string | undefined, input: SendMessageInput): Promise<void> {

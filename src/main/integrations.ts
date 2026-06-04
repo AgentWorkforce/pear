@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { BrowserWindow, shell } from 'electron'
 import type { WorkspaceHandle } from '@relayfile/sdk'
-import { getAccountWorkspaceId, getApiUrl, resolveCloudAuth } from './auth'
+import { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, getApiUrl, resolveCloudAuth } from './auth'
 import { brokerManager } from './broker'
 import { cloudAgentManager } from './cloud-agent'
 import { integrationEventBridge, integrationSubscriptionSummaries } from './integration-event-bridge'
@@ -889,7 +889,7 @@ export class IntegrationsManager {
   }
 
   private async listCloudWorkspaceIntegrations(): Promise<ConnectedIntegration[]> {
-    const workspaceId = await getAccountWorkspaceId()
+    const workspaceId = await getAccountWorkspaceId(accountWorkspaceReadyRetryOptions())
     // The list is addressed by the account (app) workspace UUID, so it must be
     // authorized with the account access token, not the Relayfile workspace
     // handle. The handle's JWT is scoped to Pear's locally-created `rw_*`

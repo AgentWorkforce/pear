@@ -78,6 +78,10 @@ vi.mock('./relay-workspace', () => ({
   getRelayWorkspaceManager: mock.getRelayWorkspaceManager
 }))
 
+vi.mock('./relayfile-mount-launcher', () => ({
+  createPearMountLauncher: vi.fn(() => ({ start: vi.fn() }))
+}))
+
 import { IntegrationMountManager } from './integration-mounts'
 
 describe('IntegrationMountManager', () => {

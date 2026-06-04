@@ -341,7 +341,7 @@ interface AgentState {
     rootPath?: string,
     options?: TrackSpawnedAgentOptions
   ) => void
-  syncBrokerAgents: (agents: BrokerListAgent[]) => void
+  syncBrokerAgents: (agents: BrokerListAgent[], projectId?: string) => void
   syncBrokerDetailsStatus: (details: Pick<BrokerDetails, 'projectId' | 'health'>[]) => void
   hydrateBrokerEvents: (events: BrokerEventRecord[]) => void
   recordBrokerEvent: (event: BrokerEvent) => void
@@ -441,16 +441,30 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
     useTypingStore.getState().setFromState(getAgentKey(projectId, name), currentState, lastActivityAtMs)
   },
 
-  syncBrokerAgents: (liveAgents) => {
+  syncBrokerAgents: (liveAgents, snapshotProjectId) => {
     const now = Date.now()
     set((state) => {
       const liveByKey = new Map(
         liveAgents.map((agent) => [getAgentKey(agent.projectId, agent.name), agent])
       )
       const existingKeys = new Set(state.agents.map(getAgentKeyForAgent))
-      const nextAgents = state.agents.map((agent) => {
-        const liveAgent = liveByKey.get(getAgentKeyForAgent(agent))
-        if (!liveAgent) return agent
+      const staleKeys: string[] = []
+      const nextAgents = state.agents.flatMap((agent) => {
+        const key = getAgentKeyForAgent(agent)
+        const liveAgent = liveByKey.get(key)
+        if (!liveAgent) {
+          if (snapshotProjectId && agent.projectId === snapshotProjectId) {
+            staleKeys.push(key)
+            return [{
+              ...agent,
+              status: 'exited' as const,
+              activity: 'idle' as const,
+              currentState: 'idle' as const,
+              pendingDeliveryIds: []
+            }]
+          }
+          return [agent]
+        }
 
         const channels = normalizeChannelList(liveAgent.channels)
         const currentState = liveAgent.current_state || 'idle'
@@ -462,7 +476,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
         const terminalMode = terminalModeFromInboundDeliveryMode(liveAgent.inboundDeliveryMode)
         useTypingStore.getState().setFromState(getAgentKeyForAgent(agent), currentState, lastActivityAtMs)
 
-        return {
+        return [{
           ...agent,
           cli: liveAgent.cli || agent.cli,
           model: liveAgent.model || agent.model,
@@ -471,7 +485,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
           channels,
           parent: liveAgent.parent || agent.parent,
           terminalMode: terminalMode || agent.terminalMode
-        }
+        }]
       })
 
       for (const liveAgent of liveAgents) {
@@ -497,7 +511,20 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
         })
       }
 
-      return { agents: nextAgents }
+      for (const key of staleKeys) {
+        useTypingStore.getState().clear(key)
+      }
+      const needNewActive = state.activeAgentKey ? staleKeys.includes(state.activeAgentKey) : false
+      const nextActiveAgent = needNewActive
+        ? nextAgents.find((agent) => agent.status === 'running') || nextAgents[0]
+        : undefined
+
+      return {
+        agents: nextAgents,
+        ...(needNewActive
+          ? { activeAgentKey: nextActiveAgent ? getAgentKeyForAgent(nextActiveAgent) : null }
+          : {})
+      }
     })
   },
 

@@ -7,6 +7,7 @@ import {
 } from '@relayfile/sdk'
 import { resolveCloudAuth } from './auth'
 import { getRelayWorkspaceManager } from './relay-workspace'
+import { createPearMountLauncher } from './relayfile-mount-launcher'
 
 const INTEGRATIONS_REMOTE_ROOT = '/integrations'
 const MOUNT_READY_TIMEOUT_MS = 60_000
@@ -148,6 +149,7 @@ export class IntegrationMountManager {
       background: true,
       agentName: 'pear-integrations',
       scopes: ['relayfile:fs:read:/integrations/**', 'relayfile:fs:write:/integrations/**'],
+      launcher: createPearMountLauncher(),
       readyTimeoutMs: MOUNT_READY_TIMEOUT_MS
     })
     this.workspaceId = workspaceId

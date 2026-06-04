@@ -7,6 +7,7 @@ import {
   useCloudAgentStore,
   type CloudAgentAttachProgress
 } from '@/stores/cloud-agent-store'
+import { getAgentKey, useAgentStore } from '@/stores/agent-store'
 import { useProjectStore, type CloudAgentWorkspaceMode } from '@/stores/project-store'
 
 function phaseLabel(progress: CloudAgentAttachProgress | undefined, elapsedSec: number): string {
@@ -125,6 +126,23 @@ function StatusPill({ status }: { status: CloudAgentRecord['status'] }): React.R
       {status}
     </span>
   )
+}
+
+function cloudWorkerName(agent: CloudAgentRecord): string {
+  const base = (agent.name || agent.displayName || agent.id)
+    .trim()
+    .replace(/[^a-zA-Z0-9-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .toLowerCase()
+  return base || 'cloud-agent'
+}
+
+function cloudWorkerCli(agent: CloudAgentRecord): string {
+  const harness = agent.harness.trim().toLowerCase()
+  if (harness === 'claude' || harness === 'codex' || harness === 'opencode') return harness
+  if (harness === 'anthropic') return 'claude'
+  if (harness === 'openai' || harness === 'gpt' || harness === 'chatgpt') return 'codex'
+  return 'claude'
 }
 
 function cloudAgentWorkspaceMode(project: unknown): CloudAgentWorkspaceMode {
@@ -377,10 +395,24 @@ export default function CloudAgentPicker({
         updatedAt: Date.now()
       })
     }
-    Promise.resolve(onAttach(attachingAgentId)).catch((err) => {
-      if (mountedRef.current) setError(getErrorMessage(err))
-    })
-    pear.cloudAgent.attach(projectId, attachingAgentId).then(() => {
+    pear.cloudAgent.attach(projectId, attachingAgentId).then(async () => {
+      const cli = attachingAgent ? cloudWorkerCli(attachingAgent) : 'claude'
+      const requestedName = attachingAgent ? cloudWorkerName(attachingAgent) : 'cloud-agent'
+      const spawned = await pear.broker.spawnAgent(projectId, {
+        name: requestedName,
+        cli,
+        cwd: '/workspace',
+        ...(attachingAgent?.defaultModel ? { model: attachingAgent.defaultModel } : {})
+      })
+      const name = spawned.name || requestedName
+      await pear.broker.attachTerminal({
+        projectId,
+        name,
+        mode: 'passthrough'
+      })
+      useAgentStore.getState().trackSpawnedAgent(name, projectId, undefined, cli, '/workspace')
+      useAgentStore.getState().setActiveAgentKey(getAgentKey(projectId, name))
+      await onAttach(attachingAgentId)
       if (projectId) {
         setAttachProgress(projectId, null)
       }

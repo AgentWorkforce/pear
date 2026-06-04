@@ -10,14 +10,14 @@ import {
 import { AgentRelayClient, type BrokerEvent } from '@agent-relay/sdk'
 import {
   RelayfileSetup,
-  createDefaultMountLauncher,
   type MountedWorkspaceHandle,
   type MountedWorkspaceStatus,
   type MountLauncher
 } from '@relayfile/sdk'
-import { getAccountWorkspaceId, resolveCloudAuth } from './auth'
+import { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, resolveCloudAuth } from './auth'
 import { brokerManager } from './broker'
 import { getRelayWorkspaceManager } from './relay-workspace'
+import { createPearMountLauncher } from './relayfile-mount-launcher'
 import { loadStore, saveStore, type Project, type ProjectCloudAgent } from './store'
 import type {
   CloudAgentBinding,
@@ -45,6 +45,7 @@ const LOCAL_PRIORITY_IDLE_MS = 5_000
 const DIRECT_GIT_FILE_THRESHOLD = 5_000
 const DIRECT_GIT_BYTES_THRESHOLD = 200 * 1024 * 1024
 const SANDBOX_WORKSPACE_PATH = '/workspace'
+const CREATED_AGENT_CACHE_TTL_MS = 2 * 60_000
 
 type CloudAuth = {
   accessToken: string
@@ -397,8 +398,18 @@ function isExecFailure(error: unknown): error is Error {
 }
 
 function normalizeHttpsGitRemote(rawUrl: string): string | null {
+  const trimmed = rawUrl.trim()
+  const scpStyle = /^git@([^:]+):(.+)$/u.exec(trimmed)
+  if (scpStyle) {
+    const [, host, path] = scpStyle
+    return normalizeHttpsGitRemote(`https://${host}/${path}`)
+  }
+
   try {
-    const url = new URL(rawUrl.trim())
+    const url = new URL(trimmed)
+    if (url.protocol === 'ssh:' && url.username === 'git') {
+      return normalizeHttpsGitRemote(`https://${url.host}${url.pathname}`)
+    }
     if (url.protocol !== 'https:') return null
     url.username = ''
     url.password = ''
@@ -438,6 +449,7 @@ function workspaceSourceKey(source: CloudAgentWorkspaceSource): string {
 }
 
 export class CloudAgentManager {
+  private createdAgents = new Map<string, { record: CloudAgentRecord; createdAt: number }>()
   private bindings = new Map<string, CloudAgentBinding>()
   private sandboxes = new Map<string, CloudAgentSandbox>()
   private mounts = new Map<string, MountedWorkspaceHandle>()
@@ -463,7 +475,7 @@ export class CloudAgentManager {
   async list(): Promise<CloudAgentRecord[]> {
     const auth = await this.requireCloudAuth()
     const records = await cloudListProactiveAgents(auth)
-    return records.map(normalizeAgentRecord)
+    return this.withRecentlyCreatedAgents(records.map(normalizeAgentRecord))
   }
 
   async create(input: CreateCloudAgentInput): Promise<CloudAgentRecord> {
@@ -481,7 +493,7 @@ export class CloudAgentManager {
         ? record.id
         : normalizedInput.name
 
-    return normalizeAgentRecord({
+    const created = normalizeAgentRecord({
       ...record,
       id,
       name: typeof record.name === 'string' ? record.name : normalizedInput.name,
@@ -489,6 +501,8 @@ export class CloudAgentManager {
       defaultModel: typeof record.defaultModel === 'string' ? record.defaultModel : normalizedInput.model,
       status: typeof record.status === 'string' ? record.status : 'ready'
     })
+    this.createdAgents.set(created.id, { record: created, createdAt: Date.now() })
+    return created
   }
 
   async delete(id: string): Promise<void> {
@@ -928,13 +942,6 @@ export class CloudAgentManager {
         return { kind: 'relayfile' }
       }
 
-      const status = (await execFileAsync('git', ['status', '--porcelain'], {
-        cwd: project.rootPath
-      })).stdout.trim()
-      if (status) {
-        return { kind: 'relayfile' }
-      }
-
       const branch = (await execFileAsync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], {
         cwd: project.rootPath
       })).stdout.trim()
@@ -962,6 +969,25 @@ export class CloudAgentManager {
       const commit = (await execFileAsync('git', ['rev-parse', 'HEAD'], {
         cwd: project.rootPath
       })).stdout.trim()
+
+      if (mode === 'git-overlay') {
+        return {
+          kind: mode,
+          remoteUrl,
+          ref: upstreamBranch,
+          ...(commit && upstream === commit ? { commit } : {}),
+          shallow: true,
+          targetDir: SANDBOX_WORKSPACE_PATH
+        }
+      }
+
+      const status = (await execFileAsync('git', ['status', '--porcelain'], {
+        cwd: project.rootPath
+      })).stdout.trim()
+      if (status) {
+        return { kind: 'relayfile' }
+      }
+
       if (!commit || upstream !== commit) {
         return { kind: 'relayfile' }
       }
@@ -1023,7 +1049,7 @@ export class CloudAgentManager {
   }
 
   private async requireAccountTokenWorkspaceId(): Promise<string> {
-    return getAccountWorkspaceId()
+    return getAccountWorkspaceId(accountWorkspaceReadyRetryOptions())
   }
 
   private async warmBox(
@@ -1189,7 +1215,7 @@ export class CloudAgentManager {
   }
 
   private createConflictPolicyLauncher(projectId: string, policy: ConflictPolicy): MountLauncher {
-    const launcher = createDefaultMountLauncher()
+    const launcher = createPearMountLauncher()
     return {
       start: (input) => {
         return launcher.start({
@@ -1285,6 +1311,23 @@ export class CloudAgentManager {
         })
       })
     }
+  }
+
+  private withRecentlyCreatedAgents(records: CloudAgentRecord[]): CloudAgentRecord[] {
+    const now = Date.now()
+    for (const [id, entry] of Array.from(this.createdAgents.entries())) {
+      if (now - entry.createdAt > CREATED_AGENT_CACHE_TTL_MS) {
+        this.createdAgents.delete(id)
+      }
+    }
+
+    if (this.createdAgents.size === 0) return records
+
+    const byId = new Map(records.map((record) => [record.id, record]))
+    for (const [id, entry] of this.createdAgents.entries()) {
+      if (!byId.has(id)) byId.set(id, entry.record)
+    }
+    return Array.from(byId.values())
   }
 
   private async ensureMountConflictPolicy(projectId: string): Promise<void> {
