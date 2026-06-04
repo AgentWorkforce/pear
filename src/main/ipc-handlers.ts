@@ -556,6 +556,14 @@ export function registerIpcHandlers(): void {
     return integrationsManager.listConnectedForSettings(projectId)
   })
 
+  ipcMain.handle('integrations:list-mount-dir', async (_, projectId: string, integrationId: string, dirPath: string) => {
+    return integrationsManager.listMountDirectory(projectId, integrationId, dirPath)
+  })
+
+  ipcMain.handle('integrations:read-mount-preview', async (_, projectId: string, integrationId: string, filePath: string) => {
+    return integrationsManager.readMountPreview(projectId, integrationId, filePath)
+  })
+
   ipcMain.handle('integrations:start-connect', async (_, projectId: string, provider: string) => {
     return integrationsManager.startConnect(projectId, provider)
   })

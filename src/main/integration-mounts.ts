@@ -132,7 +132,13 @@ export class IntegrationMountManager {
   }
 
   localPathsFor(workspaceId: string, integration: IntegrationMountInput): string[] {
-    return integration.mountPaths.map((mountPath) => integrationLocalPathForRemote(workspaceId, mountPath))
+    const providerRoots = Array.from(new Set(
+      integration.mountPaths
+        .map(integrationProviderRoot)
+        .filter((root): root is string => !!root)
+    )).sort()
+
+    return providerRoots.map((root) => integrationLocalPathForRemote(workspaceId, root))
   }
 
   private async mount(providerRoots: string[]): Promise<void> {

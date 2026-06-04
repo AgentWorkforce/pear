@@ -1,0 +1,167 @@
+{
+  "version": "1.0.0",
+  "id": "c68ef35a-6dfc-431c-b4e9-ff04433f216c",
+  "timestamp": "2026-06-02T22:03:16.870Z",
+  "trajectory": "traj_v89y9b54btya",
+  "files": [
+    {
+      "path": "specs/05-integrations-connect.md",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 85,
+              "end_line": 93,
+              "revision": "723ebc15f25165659245d34917961932c623b797"
+            },
+            {
+              "start_line": 113,
+              "end_line": 121,
+              "revision": "723ebc15f25165659245d34917961932c623b797"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "src/main/cloud-agent.test.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 17,
+              "end_line": 23,
+              "revision": "723ebc15f25165659245d34917961932c623b797"
+            },
+            {
+              "start_line": 258,
+              "end_line": 265,
+              "revision": "723ebc15f25165659245d34917961932c623b797"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "src/main/cloud-agent.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 990,
+              "end_line": 996,
+              "revision": "723ebc15f25165659245d34917961932c623b797"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "src/main/integration-mounts.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 147,
+              "end_line": 153,
+              "revision": "723ebc15f25165659245d34917961932c623b797"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "src/main/integrations.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 876,
+              "end_line": 904,
+              "revision": "723ebc15f25165659245d34917961932c623b797"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "src/main/relay-workspace.test.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 31,
+              "end_line": 41,
+              "revision": "723ebc15f25165659245d34917961932c623b797"
+            },
+            {
+              "start_line": 54,
+              "end_line": 61,
+              "revision": "723ebc15f25165659245d34917961932c623b797"
+            },
+            {
+              "start_line": 67,
+              "end_line": 95,
+              "revision": "723ebc15f25165659245d34917961932c623b797"
+            },
+            {
+              "start_line": 142,
+              "end_line": 152,
+              "revision": "723ebc15f25165659245d34917961932c623b797"
+            },
+            {
+              "start_line": 190,
+              "end_line": 204,
+              "revision": "723ebc15f25165659245d34917961932c623b797"
+            },
+            {
+              "start_line": 223,
+              "end_line": 237,
+              "revision": "723ebc15f25165659245d34917961932c623b797"
+            },
+            {
+              "start_line": 242,
+              "end_line": 270,
+              "revision": "723ebc15f25165659245d34917961932c623b797"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "path": "src/main/relay-workspace.ts",
+      "conversations": [
+        {
+          "contributor": {
+            "type": "ai"
+          },
+          "ranges": [
+            {
+              "start_line": 5,
+              "end_line": 14,
+              "revision": "723ebc15f25165659245d34917961932c623b797"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

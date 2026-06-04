@@ -843,6 +843,8 @@ export interface PearAPI {
   integrations: {
     catalog: () => Promise<IntegrationAdapter[]>
     list: (projectId: string) => Promise<ConnectedIntegration[]>
+    listMountDir: (projectId: string, integrationId: string, dirPath: string) => Promise<FsDirEntry[]>
+    readMountPreview: (projectId: string, integrationId: string, filePath: string) => Promise<FsReadPreviewResult>
     startConnect: (projectId: string, provider: string) => Promise<IntegrationConnectSession>
     pollConnect: (sessionId: string) => Promise<IntegrationConnectSession>
     completeConnect: (

@@ -125,4 +125,15 @@ describe('IntegrationMountManager', () => {
       scopes: ['relayfile:fs:read:/linear/**', 'relayfile:fs:write:/linear/**']
     })
   })
+
+  it('reports provider root local paths for browsing', () => {
+    const manager = new IntegrationMountManager()
+
+    expect(manager.localPathsFor('account-workspace-id', {
+      provider: 'linear',
+      mountPaths: ['/integrations/linear/teams', '/linear/projects']
+    })).toEqual([
+      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/integrations/linear'
+    ])
+  })
 })

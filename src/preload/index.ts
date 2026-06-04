@@ -360,6 +360,10 @@ const api = {
   integrations: {
     catalog: () => invoke<IntegrationAdapter[]>('integrations:catalog'),
     list: (projectId: string) => invoke<ConnectedIntegration[]>('integrations:list', projectId),
+    listMountDir: (projectId: string, integrationId: string, dirPath: string) =>
+      invoke<FsDirEntry[]>('integrations:list-mount-dir', projectId, integrationId, dirPath),
+    readMountPreview: (projectId: string, integrationId: string, filePath: string) =>
+      invoke<FsReadPreviewResult>('integrations:read-mount-preview', projectId, integrationId, filePath),
     startConnect: (projectId: string, provider: string) =>
       invoke<IntegrationConnectSession>('integrations:start-connect', projectId, provider),
     pollConnect: (sessionId: string) =>

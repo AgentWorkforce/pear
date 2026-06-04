@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto'
+import { isAbsolute, relative, resolve } from 'node:path'
 import { BrowserWindow, shell } from 'electron'
 import type { WorkspaceHandle } from '@relayfile/sdk'
 import { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, getApiUrl, resolveCloudAuth } from './auth'
 import { brokerManager } from './broker'
 import { cloudAgentManager } from './cloud-agent'
+import * as filesystem from './filesystem'
 import { integrationEventBridge, integrationSubscriptionSummaries } from './integration-event-bridge'
 import { integrationMountManager } from './integration-mounts'
 import { INTEGRATIONS_CATALOG } from './integrations.catalog'
@@ -220,6 +222,11 @@ function stringList(value: unknown): string[] {
 
 function dedupeStrings(values: string[]): string[] {
   return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean))).sort()
+}
+
+function isPathWithinRoot(rootPath: string, targetPath: string): boolean {
+  const child = relative(rootPath, targetPath)
+  return child === '' || (!!child && !child.startsWith('..') && !isAbsolute(child))
 }
 
 function toRelayfileProvider(provider: string): string {
@@ -636,6 +643,16 @@ export class IntegrationsManager {
       console.warn('[integrations] Failed to hydrate cloud workspace integrations:', message)
       throw new Error(`Cloud integrations unavailable: ${message}`)
     }
+  }
+
+  async listMountDirectory(projectId: string, integrationId: string, dirPath: string): Promise<filesystem.ExplorerEntry[]> {
+    const resolvedPath = await this.resolveIntegrationMountPath(projectId, integrationId, dirPath)
+    return filesystem.listDirectory(resolvedPath)
+  }
+
+  async readMountPreview(projectId: string, integrationId: string, filePath: string): Promise<filesystem.FilePreview> {
+    const resolvedPath = await this.resolveIntegrationMountPath(projectId, integrationId, filePath)
+    return filesystem.readTextPreview(resolvedPath)
   }
 
   async startLocalMountDaemon(): Promise<void> {
@@ -1447,6 +1464,49 @@ export class IntegrationsManager {
         mountPaths: this.canonicalMountPathsForIntegration(integration)
       })
     }))
+  }
+
+  private async resolveIntegrationMountPath(projectId: string, integrationId: string, targetPath: string): Promise<string> {
+    const resolvedPath = resolve(targetPath)
+    const localIntegrations = await this.withLocalMountPaths(this.listConnected(projectId))
+    let integrations = localIntegrations
+    let integration = this.findIntegrationForMountPath(integrations, integrationId, resolvedPath)
+
+    if (!integration) {
+      integrations = await this.listConnectedForSettings(projectId).catch((error) => {
+        console.warn('[integrations] Failed to refresh integrations for mount browser:', toErrorMessage(error))
+        return localIntegrations
+      })
+      integration = this.findIntegrationForMountPath(integrations, integrationId, resolvedPath)
+    }
+
+    if (!integration) {
+      throw new Error('Integration is not connected to this project')
+    }
+
+    const roots = (integration.localMountPaths || []).map((entry) => resolve(entry)).filter(Boolean)
+    if (roots.length === 0) {
+      throw new Error('Relayfile mount is not available for this integration')
+    }
+
+    if (!roots.some((root) => isPathWithinRoot(root, resolvedPath))) {
+      throw new Error('Path is outside this integration Relayfile mount')
+    }
+
+    return resolvedPath
+  }
+
+  private findIntegrationForMountPath(
+    integrations: ConnectedIntegration[],
+    integrationId: string,
+    resolvedPath: string
+  ): ConnectedIntegration | undefined {
+    return integrations.find((integration) => integration.integrationId === integrationId)
+      || integrations.find((integration) =>
+        (integration.localMountPaths || [])
+          .map((entry) => resolve(entry))
+          .some((root) => isPathWithinRoot(root, resolvedPath))
+      )
   }
 
   private visibleIntegrationsForProject(projectId: string): ConnectedIntegration[] {
