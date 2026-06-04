@@ -29,6 +29,10 @@ vi.mock('./burn-spawn-hook', () => ({
   stampPearBurnSpawnedAgent: vi.fn(async () => undefined)
 }))
 
+vi.mock('@agent-relay/harness-driver', () => ({
+  HarnessDriverClient: vi.fn()
+}))
+
 import { BrokerManager } from './broker'
 
 describe('BrokerManager spawnAgent CLI preflight', () => {
