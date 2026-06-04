@@ -51,9 +51,8 @@ const mock = vi.hoisted(() => {
       currentAuth = value
     },
     resolveCloudAuth: vi.fn(async () => currentAuth),
-    getRelayWorkspaceManager: vi.fn(() => ({
-      getWorkspaceId: vi.fn(async () => 'relay-workspace-id')
-    }))
+    getAccountWorkspaceId: vi.fn(async () => 'account-workspace-id'),
+    accountWorkspaceReadyRetryOptions: vi.fn(() => ({ retryAttempts: 1, retryDelayMs: 0 }))
   }
 })
 
@@ -71,11 +70,9 @@ vi.mock('@relayfile/sdk', () => ({
 }))
 
 vi.mock('./auth', () => ({
-  resolveCloudAuth: mock.resolveCloudAuth
-}))
-
-vi.mock('./relay-workspace', () => ({
-  getRelayWorkspaceManager: mock.getRelayWorkspaceManager
+  resolveCloudAuth: mock.resolveCloudAuth,
+  getAccountWorkspaceId: mock.getAccountWorkspaceId,
+  accountWorkspaceReadyRetryOptions: mock.accountWorkspaceReadyRetryOptions
 }))
 
 vi.mock('./relayfile-mount-launcher', () => ({
@@ -94,7 +91,7 @@ describe('IntegrationMountManager', () => {
       accessToken: 'account-token'
     }
     mock.resolveCloudAuth.mockClear()
-    mock.getRelayWorkspaceManager.mockClear()
+    mock.getAccountWorkspaceId.mockClear()
   })
 
   it('mounts integrations with separate relayfile read and write scopes', async () => {
@@ -109,8 +106,8 @@ describe('IntegrationMountManager', () => {
 
     expect(mock.mountInputs).toHaveLength(1)
     expect(mock.mountInputs[0]).toMatchObject({
-      workspaceId: 'relay-workspace-id',
-      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/relay-workspace-id/integrations',
+      workspaceId: 'account-workspace-id',
+      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/integrations',
       remotePath: '/integrations',
       agentName: 'pear-integrations',
       scopes: ['relayfile:fs:read:/integrations/**', 'relayfile:fs:write:/integrations/**']

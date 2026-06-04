@@ -5,8 +5,7 @@ import {
   RelayfileSetup,
   type MountedWorkspaceHandle
 } from '@relayfile/sdk'
-import { resolveCloudAuth } from './auth'
-import { getRelayWorkspaceManager } from './relay-workspace'
+import { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, resolveCloudAuth } from './auth'
 import { createPearMountLauncher } from './relayfile-mount-launcher'
 
 const INTEGRATIONS_REMOTE_ROOT = '/integrations'
@@ -118,7 +117,12 @@ export class IntegrationMountManager {
       return
     }
 
-    const workspaceId = await getRelayWorkspaceManager().getWorkspaceId()
+    // Integrations are bound to the account (app) workspace UUID on cloud —
+    // the same workspace listCloudWorkspaceIntegrations reads from. Pear's
+    // locally-created `rw_*` Relayfile workspace has no integration data, so
+    // mounting it yields an empty /integrations tree (see
+    // workspace-integration-identity notes in integrations.ts).
+    const workspaceId = await getAccountWorkspaceId(accountWorkspaceReadyRetryOptions())
     if (this.handle && this.workspaceId === workspaceId) {
       const status = await this.handle.status().catch(() => null)
       if (status?.ready) return
