@@ -1,3 +1,6 @@
+import { watch, type FSWatcher } from 'node:fs'
+import { stat } from 'node:fs/promises'
+import { join, relative, resolve, sep } from 'node:path'
 import {
   RelayFileClient,
   RelayFileSync,
@@ -11,6 +14,7 @@ import type { ConnectedIntegration } from './integrations'
 const INTEGRATION_EVENT_AGENT_NAME = 'pear-integration-events'
 const INTEGRATION_EVENT_SCOPES = ['relayfile:fs:read:/**']
 const PROJECT_INTEGRATIONS_LINK_NAME = '.integrations'
+const RECENT_INJECTION_TTL_MS = 10_000
 
 type WatchRegistration = {
   glob: string
@@ -33,6 +37,10 @@ type SubscriptionSpec = {
 type ProjectSubscription = {
   subscriptions: Subscription[]
   signature: string
+}
+
+type LocalMountSubscription = Subscription & {
+  localRoots: string[]
 }
 
 type BrokerEventBridge = {
@@ -84,6 +92,7 @@ export type IntegrationSubscriptionSummary = {
 }
 
 let accountIntegrationEventHandle: EventWorkspaceHandleCache | null = null
+let localEventSequence = 0
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -105,6 +114,10 @@ function dedupeStrings(values: string[]): string[] {
 function toRelayfileProvider(provider: string): string {
   const normalized = provider.trim().toLowerCase()
   return normalized === 'gmail' ? 'google-mail' : normalized
+}
+
+function pathSegments(path: string): string[] {
+  return path.split(/[\\/]+/u).filter(Boolean)
 }
 
 function slackNormalizeSegment(value: string, fallback = 'unknown'): string {
@@ -273,7 +286,7 @@ function shouldPublishFilesystemEvent(event: FilesystemEvent): boolean {
 }
 
 function filesystemEventToChangeEvent(
-  client: RelayFileClient,
+  client: RelayFileClient | null,
   workspaceId: string,
   event: FilesystemEvent
 ): ChangeEvent {
@@ -306,19 +319,22 @@ function filesystemEventToChangeEvent(
         }
       }
       if (level === 'full') {
-        try {
-          const resource = await client.getResourceAtEvent(event.eventId, { workspaceId })
-          return {
-            level,
-            path: resource.path,
-            data: resource.data
+        if (client) {
+          try {
+            const resource = await client.getResourceAtEvent(event.eventId, { workspaceId })
+            return {
+              level,
+              path: resource.path,
+              data: resource.data
+            }
+          } catch {
+            // Fall through to the local fallback below.
           }
-        } catch {
-          return {
-            level,
-            path,
-            data: { path, deleted: event.type === 'file.deleted' }
-          }
+        }
+        return {
+          level,
+          path,
+          data: { path, deleted: event.type === 'file.deleted' }
         }
       }
       throw new Error(`ChangeEvent.expand(${JSON.stringify(level)}) is not implemented for integration events`)
@@ -390,9 +406,128 @@ function createWorkspaceScopedEventClient(
   }
 }
 
+function localRootForIntegration(integration: ConnectedIntegration): { localRoot: string; remoteRoot: string } | null {
+  const provider = toRelayfileProvider(integration.provider)
+  const roots = integration.localMountPaths || []
+  const root = roots.find((entry) => {
+    const segments = pathSegments(entry)
+    return segments.at(-1)?.toLowerCase() === provider && !segments.includes('discovery')
+  })
+  return root ? { localRoot: root, remoteRoot: `/${provider}` } : null
+}
+
+function remotePathForLocalPath(localRoot: string, remoteRoot: string, localPath: string): string | null {
+  const relativePath = relative(localRoot, localPath)
+  if (!relativePath || relativePath.startsWith('..') || relativePath === '..') return null
+  const normalizedRelative = relativePath.split(sep).join('/')
+  return `${remoteRoot.replace(/\/+$/u, '')}/${normalizedRelative}`
+}
+
+async function fileEventForLocalPath(
+  workspaceId: string,
+  localPath: string,
+  remotePath: string,
+  eventType: string
+): Promise<FilesystemEvent | null> {
+  const stats = await stat(localPath).catch(() => null)
+  if (stats?.isDirectory()) return null
+  localEventSequence += 1
+  return {
+    eventId: `local:${workspaceId}:${remotePath}:${Date.now()}:${localEventSequence}`,
+    type: stats ? (eventType === 'rename' ? 'file.created' : 'file.updated') : 'file.deleted',
+    path: remotePath,
+    revision: stats ? `${Math.round(stats.mtimeMs)}:${stats.size}` : '',
+    timestamp: new Date().toISOString()
+  }
+}
+
+function watchLocalMounts(
+  workspaceId: string,
+  integrations: ConnectedIntegration[],
+  globs: string[],
+  onChange: (event: ChangeEvent) => void,
+  coalesceMs: number
+): LocalMountSubscription | null {
+  const roots = new Map<string, { localRoot: string; remoteRoot: string }>()
+  for (const integration of integrations) {
+    const root = localRootForIntegration(integration)
+    if (root) roots.set(resolve(root.localRoot), { localRoot: resolve(root.localRoot), remoteRoot: root.remoteRoot })
+  }
+  if (roots.size === 0) return null
+
+  let active = true
+  const watchers: FSWatcher[] = []
+  const pendingByPath = new Map<string, ReturnType<typeof setTimeout>>()
+
+  const schedule = (localRoot: string, remoteRoot: string, localPath: string, eventType: string): void => {
+    const remotePath = remotePathForLocalPath(localRoot, remoteRoot, localPath)
+    if (!remotePath || !globs.some((glob) => globMatchesPath(glob, remotePath))) return
+
+    const existing = pendingByPath.get(remotePath)
+    if (existing) clearTimeout(existing)
+    pendingByPath.set(remotePath, setTimeout(() => {
+      pendingByPath.delete(remotePath)
+      if (!active) return
+      void fileEventForLocalPath(workspaceId, localPath, remotePath, eventType)
+        .then((event) => {
+          if (!event || !active) return
+          logIntegrationEvent('local mount event', {
+            workspaceId,
+            path: event.path,
+            type: event.type,
+            localPath
+          })
+          onChange(filesystemEventToChangeEvent(null, workspaceId, event))
+        })
+        .catch((error) => {
+          console.warn('[integration-events] Local mount event failed:', toErrorMessage(error))
+        })
+    }, coalesceMs))
+  }
+
+  for (const { localRoot, remoteRoot } of roots.values()) {
+    try {
+      const watcher = watch(localRoot, { recursive: true }, (eventType, filename) => {
+        if (!active || !filename) return
+        schedule(localRoot, remoteRoot, join(localRoot, String(filename)), eventType)
+      })
+      watcher.on('error', (error) => {
+        console.warn('[integration-events] Local mount watcher error:', toErrorMessage(error))
+      })
+      watchers.push(watcher)
+    } catch (error) {
+      console.warn('[integration-events] Failed to watch local integration mount:', {
+        localRoot,
+        error: toErrorMessage(error)
+      })
+    }
+  }
+
+  if (watchers.length === 0) return null
+  return {
+    localRoots: Array.from(roots.keys()),
+    async unsubscribe() {
+      active = false
+      for (const timer of pendingByPath.values()) clearTimeout(timer)
+      pendingByPath.clear()
+      await Promise.all(watchers.map((watcher) => new Promise<void>((resolveClose) => {
+        watcher.once('close', resolveClose)
+        watcher.close()
+      })))
+    }
+  }
+}
+
 function specsForEvent(event: ChangeEvent, specs: SubscriptionSpec[]): SubscriptionSpec[] {
   const path = event.resource.path
   return specs.filter((spec) => spec.mountPaths.some((mountPath) => pathIsInsideMount(path, mountPath)))
+}
+
+function injectionDeduplicationKey(projectId: string, event: ChangeEvent): string {
+  const path = event.resource.path.startsWith('/') ? event.resource.path : `/${event.resource.path}`
+  const slackMessage = path.match(/^\/slack\/(?:channels|dms)\/[^/]+\/messages\/([^/]+)\/meta\.json$/u)
+  if (slackMessage) return `${projectId}:slack:message:${slackMessage[1]}`
+  return `${projectId}:${event.type}:${path}`
 }
 
 function logIntegrationEvent(message: string, metadata: Record<string, unknown>): void {
@@ -492,6 +627,7 @@ function formatIntegrationEventMessage(event: ChangeEvent): string {
 
 export class IntegrationEventBridge {
   private subscriptions = new Map<string, ProjectSubscription>()
+  private recentInjections = new Map<string, number>()
   private readonly deps: IntegrationEventBridgeDeps
 
   constructor(deps: IntegrationEventBridgeDeps = {}) {
@@ -566,6 +702,36 @@ export class IntegrationEventBridge {
           }
         )
       )
+      const localSubscription = watchLocalMounts(
+        handle.workspaceId,
+        subscribed,
+        watches.map((watch) => watch.glob),
+        (event) => {
+          logIntegrationEvent('received', {
+            projectId,
+            eventId: event.id,
+            type: event.type,
+            path: event.resource.path,
+            source: 'local-mount'
+          })
+          void this.injectEvent(projectId, event, specs).catch((error) => {
+            console.warn('[integration-events] Local event delivery failed:', {
+              projectId,
+              eventId: event.id,
+              error: toErrorMessage(error)
+            })
+          })
+        },
+        Math.max(...watches.map((watch) => watch.coalesceMs), 750)
+      )
+      if (localSubscription) {
+        logIntegrationEvent('watching local mounts', {
+          projectId,
+          workspaceId: handle.workspaceId,
+          localRoots: localSubscription.localRoots
+        })
+        subscriptions.push(localSubscription)
+      }
       this.subscriptions.set(projectId, { subscriptions, signature })
     } catch (error) {
       await Promise.all(subscriptions.map((subscription) => subscription.unsubscribe().catch(() => undefined)))
@@ -601,6 +767,17 @@ export class IntegrationEventBridge {
         eventId: event.id,
         path: event.resource.path,
         mountPaths: specs.flatMap((spec) => spec.mountPaths)
+      })
+      return
+    }
+
+    const duplicateKey = injectionDeduplicationKey(projectId, event)
+    if (this.wasRecentlyInjected(duplicateKey)) {
+      logIntegrationEvent('skipped duplicate path', {
+        projectId,
+        eventId: event.id,
+        path: event.resource.path,
+        duplicateKey
       })
       return
     }
@@ -646,6 +823,16 @@ export class IntegrationEventBridge {
         }
       }))
     )
+  }
+
+  private wasRecentlyInjected(key: string): boolean {
+    const now = Date.now()
+    for (const [entryKey, expiresAt] of this.recentInjections.entries()) {
+      if (expiresAt <= now) this.recentInjections.delete(entryKey)
+    }
+    if (this.recentInjections.has(key)) return true
+    this.recentInjections.set(key, now + RECENT_INJECTION_TTL_MS)
+    return false
   }
 
   private async getWorkspaceHandle(): Promise<RelayfileWorkspaceHandle> {

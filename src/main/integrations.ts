@@ -1465,7 +1465,10 @@ export class IntegrationsManager {
 
   private async syncEventSubscriptions(projectId: string): Promise<boolean> {
     try {
-      await integrationEventBridge.reconcile(projectId, this.visibleIntegrationsForProject(projectId))
+      await integrationEventBridge.reconcile(
+        projectId,
+        await this.withLocalMountPaths(this.visibleIntegrationsForProject(projectId))
+      )
       return true
     } catch (error) {
       console.warn('[integrations] Failed to reconcile integration event subscriptions:', toErrorMessage(error))

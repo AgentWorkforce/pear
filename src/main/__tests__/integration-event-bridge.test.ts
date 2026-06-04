@@ -183,7 +183,7 @@ test('slack channel scopes watch relayfile id slug channel directories', async (
   await harness.emit(changeEvent('/slack/channels/C123ABC__proj-cloud/messages/1713220123_001100/meta.json', 'slack'))
   await harness.emit(changeEvent('/slack/channels/C123ABC/messages/1713220123_001100/meta.json', 'slack'))
 
-  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'alice'])
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
   assert.match(harness.sent[0].input.text, /Path: \.integrations\/slack\/channels\/C123ABC__proj-cloud\/messages\/1713220123_001100\/meta\.json/u)
   assert.match(harness.sent[0].input.text, /Relayfile path: \/slack\/channels\/C123ABC__proj-cloud\/messages\/1713220123_001100\/meta\.json/u)
 })
