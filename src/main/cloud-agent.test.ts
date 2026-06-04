@@ -138,8 +138,8 @@ vi.mock('./auth', () => ({
   getAccountWorkspaceId: mock.getAccountWorkspaceId
 }))
 
-vi.mock('@agent-relay/sdk', () => ({
-  AgentRelayClient: vi.fn()
+vi.mock('@agent-relay/harness-driver', () => ({
+  HarnessDriverClient: vi.fn()
 }))
 
 vi.mock('@relayfile/sdk', () => ({

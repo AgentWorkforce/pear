@@ -1,6 +1,6 @@
 import { app, ipcMain, dialog, BrowserWindow, shell } from 'electron'
 import { resolve } from 'path'
-import type { SpawnPtyInput, SendMessageInput } from '@agent-relay/sdk'
+import type { SpawnPtyInput, SendMessageInput } from '@agent-relay/harness-driver'
 import {
   loadStore,
   addProject,
@@ -248,6 +248,10 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('broker:resize-pty', async (_, projectId: string | undefined, name: string, rows: number, cols: number) => {
     await brokerManager.resizePty(projectId, name, rows, cols)
+  })
+
+  ipcMain.handle('broker:input-srtt', (_, projectId: string | undefined, name: string) => {
+    return brokerManager.getInputSrtt(projectId, name)
   })
 
   ipcMain.handle('broker:send-message', async (_, projectId: string | undefined, input: SendMessageInput) => {

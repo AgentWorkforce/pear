@@ -7,6 +7,8 @@ import { pear, type TerminalAttachMode } from '@/lib/ipc'
 import { useAgentStore, getAgentKey } from '@/stores/agent-store'
 import { getPtyChunks, subscribePtyBuffer } from '@/stores/pty-buffer-store'
 import { recordChunkEchoed, recordKeystrokeSent } from '@/lib/typing-trace'
+import { createPredictiveEcho } from '@/lib/predictive-echo'
+import type { PredictiveEcho } from '@agent-relay/harness-driver/predictive-echo'
 import { useUIStore, type Theme } from '@/stores/ui-store'
 
 const DARK_THEME = {
@@ -146,6 +148,7 @@ export function useTerminal(
 ): Terminal | null {
   const termRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
+  const predictiveEchoRef = useRef<PredictiveEcho | null>(null)
   const writtenChunksRef = useRef<number>(0)
   const activeRef = useRef(active)
   const terminalModeRef = useRef<TerminalAttachMode>(terminalMode)
@@ -177,9 +180,18 @@ export function useTerminal(
     let resizeObserver: ResizeObserver | null = null
     let disposed = false
     let cleanupBounce: (() => void) | null = null
+    let disposePredictiveEcho: (() => void) | null = null
+    // Latest broker input→ack SRTT (ms), refreshed by the poll below. Backs the
+    // engine's adaptive engage decision; SRTT is a slow-moving EWMA so a ~1s
+    // poll is responsive enough and cheap.
+    let inputSrttMs: number | null = null
+    let srttPoll: ReturnType<typeof setInterval> | null = null
 
     const sendInput = (data: string): void => {
       if (terminalModeRef.current === 'view') return
+      // Optimistically echo before the round trip; the engine reconciles
+      // against authoritative output and stays dormant on fast local links.
+      predictiveEchoRef.current?.onUserInput(data)
       recordKeystrokeSent(data)
       pear.broker.sendInputFast(projectId, agentName!, data)
     }
@@ -213,6 +225,7 @@ export function useTerminal(
     const safeFitAndSync = (): TerminalSize | null => {
       const size = fitTerminal()
       if (size) {
+        predictiveEchoRef.current?.onResize(size.cols, size.rows)
         pear.broker.resizePty(projectId, agentName!, size.rows, size.cols).catch(() => {})
       }
       return size
@@ -230,7 +243,13 @@ export function useTerminal(
         if (newChunks.length === 0) return
         for (const chunk of newChunks) {
           recordChunkEchoed(chunk)
-          targetTerm.write(chunk)
+          if (predictiveEchoRef.current) {
+            // The engine owns pass-through to the live terminal and reconciles
+            // outstanding predictions against this confirmed output.
+            void predictiveEchoRef.current.onServerOutput(chunk)
+          } else {
+            targetTerm.write(chunk)
+          }
         }
         writtenChunksRef.current = ptyBuffer.length
       }
@@ -259,6 +278,10 @@ export function useTerminal(
 
         if (result.snapshot?.screen && hasVisibleTerminalContent(result.snapshot.screen)) {
           targetTerm.write(result.snapshot.screen)
+          // Prime the engine's confirmed-screen model with the same bytes (this
+          // does not re-write to the terminal) so its cursor matches the real
+          // screen before any prediction is made.
+          await predictiveEchoRef.current?.seed(result.snapshot.screen)
           writtenChunksRef.current = useAgentStore.getState().getAgentBuffer(projectId, agentName!).length
           shouldReplayBuffer = false
         }
@@ -270,6 +293,10 @@ export function useTerminal(
 
       if (shouldReplayBuffer) {
         writtenChunksRef.current = 0
+        // No snapshot to prime from; mark the model seeded so predictions can
+        // engage. The buffer replay below feeds confirmed output through the
+        // engine, keeping the model in sync.
+        await predictiveEchoRef.current?.seed('')
       }
 
       subscribeToBuffer(targetTerm)
@@ -316,6 +343,34 @@ export function useTerminal(
 
       term.open(container)
       const initialSize = fitTerminal()
+
+      // Mosh-style predictive local echo: optimistically renders printable
+      // keystrokes and reconciles against authoritative server output. Adaptive
+      // on measured latency, so it stays dormant (invisible) on fast local
+      // links and only engages when driving a high-latency / remote agent.
+      const liveTerm = term
+      const predictiveEcho = createPredictiveEcho({
+        write: (data) => liveTerm.write(data),
+        cols: term.cols,
+        rows: term.rows,
+        getInputSrtt: () => inputSrttMs
+      })
+      predictiveEchoRef.current = predictiveEcho.engine
+      disposePredictiveEcho = predictiveEcho.dispose
+
+      // Keep the SRTT estimate warm so prediction engages promptly. Refresh
+      // immediately, then on an interval; failures leave the last value intact.
+      const refreshSrtt = (): void => {
+        pear.broker
+          .inputSrtt(projectId, agentName!)
+          .then((srtt) => {
+            if (!disposed) inputSrttMs = srtt
+          })
+          .catch(() => {})
+      }
+      refreshSrtt()
+      srttPoll = setInterval(refreshSrtt, 1000)
+
       void attachAndSeedTerminal(term, initialSize)
 
       termRef.current = term
@@ -404,6 +459,9 @@ export function useTerminal(
       container.removeEventListener('keydown', handleKeyDown)
       container.removeEventListener('paste', handlePaste)
       resizeObserver?.disconnect()
+      if (srttPoll) clearInterval(srttPoll)
+      disposePredictiveEcho?.()
+      predictiveEchoRef.current = null
       term?.dispose()
       termRef.current = null
       fitAddonRef.current = null
@@ -425,6 +483,7 @@ export function useTerminal(
       fitAddonRef.current.fit()
       const { rows, cols } = termRef.current
       if (rows > 0 && cols > 0 && agentName) {
+        predictiveEchoRef.current?.onResize(cols, rows)
         pear.broker.resizePty(projectId, agentName, rows, cols)
       }
     } catch {
@@ -450,6 +509,7 @@ export function useTerminal(
 
     const sendInput = (data: string): void => {
       if (terminalModeRef.current === 'view') return
+      predictiveEchoRef.current?.onUserInput(data)
       pear.broker.sendInputFast(projectId, agentName, data)
     }
 
