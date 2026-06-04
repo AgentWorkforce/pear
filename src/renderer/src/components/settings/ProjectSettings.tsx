@@ -183,7 +183,57 @@ function visibilityMountPaths(integration: ConnectedIntegration, visibility: Pro
   return [providerMountRoot(integration.provider)]
 }
 
-function IntegrationVisibilitySection({ projectId }: { projectId: string }): React.ReactNode {
+const NOTIFICATION_AGENT_SCOPE_KEYS = [
+  'notifyAgents',
+  'notificationAgents',
+  'listenerAgents',
+  'agentListeners',
+  'agentNames'
+]
+
+const NOTIFICATION_CHANNEL_SCOPE_KEYS = [
+  'notifyChannels',
+  'notificationChannels',
+  'listenerChannels',
+  'channelListeners',
+  'relayChannels'
+]
+
+function firstScopeString(scope: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = scope[key]
+    if (!Array.isArray(value)) continue
+    const first = value.find((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+    if (first) return first.trim()
+  }
+  return null
+}
+
+function notificationTargetValue(scope: Record<string, unknown>): string {
+  const agent = firstScopeString(scope, NOTIFICATION_AGENT_SCOPE_KEYS)
+  if (agent) return `agent:${agent.replace(/^@/u, '')}`
+  const channel = firstScopeString(scope, NOTIFICATION_CHANNEL_SCOPE_KEYS)
+  if (channel) return `channel:${channel.replace(/^#/u, '')}`
+  return 'all'
+}
+
+function clearNotificationTargetScope(scope: Record<string, unknown>): Record<string, unknown> {
+  const nextScope = { ...scope }
+  for (const key of [...NOTIFICATION_AGENT_SCOPE_KEYS, ...NOTIFICATION_CHANNEL_SCOPE_KEYS]) {
+    delete nextScope[key]
+  }
+  return nextScope
+}
+
+function IntegrationVisibilitySection({
+  projectId,
+  channels,
+  agentNames
+}: {
+  projectId: string
+  channels: string[]
+  agentNames: string[]
+}): React.ReactNode {
   const [integrations, setIntegrations] = useState<ConnectedIntegration[]>([])
   const [loading, setLoading] = useState(true)
   const [busyIntegrationId, setBusyIntegrationId] = useState<string | null>(null)
@@ -265,6 +315,37 @@ function IntegrationVisibilitySection({ projectId }: { projectId: string }): Rea
     }
   }, [projectId])
 
+  const setNotificationTarget = useCallback(async (integration: ConnectedIntegration, value: string) => {
+    const nextScope = clearNotificationTargetScope(integration.scope)
+    if (value.startsWith('agent:')) {
+      const agent = value.slice('agent:'.length).trim()
+      if (agent) nextScope.notifyAgents = [agent]
+    } else if (value.startsWith('channel:')) {
+      const channel = value.slice('channel:'.length).trim().replace(/^#/u, '')
+      if (channel) nextScope.notifyChannels = [`#${channel}`]
+    }
+
+    setBusyIntegrationId(integration.integrationId)
+    setError(null)
+    try {
+      const nextIntegration = await pear.integrations.updateScope(
+        projectId,
+        integration.integrationId,
+        nextScope,
+        integration.mountPaths
+      )
+      setIntegrations((current) =>
+        current.map((entry) =>
+          entry.integrationId === nextIntegration.integrationId ? nextIntegration : entry
+        )
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusyIntegrationId(null)
+    }
+  }, [projectId])
+
   return (
     <Section
       title="Integration visibility"
@@ -286,6 +367,12 @@ function IntegrationVisibilitySection({ projectId }: { projectId: string }): Rea
             const visible = integration.visibleInProject !== false
             const subscribed = integration.subscribeAgent === true
             const busy = busyIntegrationId === integration.integrationId
+            const notificationTarget = notificationTargetValue(integration.scope)
+            const knownTargetValues = new Set([
+              'all',
+              ...agentNames.map((agent) => `agent:${agent}`),
+              ...channels.map((channel) => `channel:${channel}`)
+            ])
 
             return (
               <div
@@ -321,6 +408,35 @@ function IntegrationVisibilitySection({ projectId }: { projectId: string }): Rea
                 >
                   {subscribed ? <Bell size={13} /> : <BellOff size={13} />}
                 </button>
+                {subscribed && (
+                  <select
+                    value={notificationTarget}
+                    disabled={busy}
+                    onChange={(event) => void setNotificationTarget(integration, event.target.value)}
+                    className="h-8 max-w-[160px] rounded-md border border-[var(--pear-border)] bg-[var(--pear-bg-raised)] px-2 text-xs text-[var(--pear-text-dim)] outline-none disabled:opacity-40"
+                    title="Integration event delivery target"
+                    aria-label="Integration event delivery target"
+                  >
+                    {!knownTargetValues.has(notificationTarget) && (
+                      <option value={notificationTarget}>{notificationTarget.replace(/^agent:/u, '@').replace(/^channel:/u, '#')}</option>
+                    )}
+                    <option value="all">All agents</option>
+                    {agentNames.length > 0 && (
+                      <optgroup label="Agents">
+                        {agentNames.map((agent) => (
+                          <option key={`agent:${agent}`} value={`agent:${agent}`}>@{agent}</option>
+                        ))}
+                      </optgroup>
+                    )}
+                    {channels.length > 0 && (
+                      <optgroup label="Channels">
+                        {channels.map((channel) => (
+                          <option key={`channel:${channel}`} value={`channel:${channel}`}>#{channel}</option>
+                        ))}
+                      </optgroup>
+                    )}
+                  </select>
+                )}
                 <button
                   type="button"
                   disabled={busy}
@@ -696,7 +812,11 @@ export function ProjectSettings(): React.ReactNode {
           </div>
         </Section>
 
-        <IntegrationVisibilitySection projectId={project.id} />
+        <IntegrationVisibilitySection
+          projectId={project.id}
+          channels={project.channels}
+          agentNames={agents.map((agent) => agent.name)}
+        />
 
         <Section title="Danger">
           <button

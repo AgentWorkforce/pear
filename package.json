@@ -21,7 +21,6 @@
   },
   "dependencies": {
     "@agent-relay/cloud": "^8.1.2",
-    "@agent-relay/events": "^7.1.1",
     "@agent-relay/harness-driver": "^8.1.2",
     "@agent-relay/sdk": "^8.1.2",
     "@agentworkforce/deploy": "^3.0.42",

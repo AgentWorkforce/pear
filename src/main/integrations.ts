@@ -8,6 +8,7 @@ import { cloudAgentManager } from './cloud-agent'
 import * as filesystem from './filesystem'
 import { integrationEventBridge, integrationSubscriptionSummaries } from './integration-event-bridge'
 import { integrationMountManager, integrationMountRootForWorkspace } from './integration-mounts'
+import { ensureProjectIntegrationsLink, removeProjectIntegrationsLink } from './integration-symlinks'
 import { INTEGRATIONS_CATALOG } from './integrations.catalog'
 import { getRelayWorkspaceManager } from './relay-workspace'
 import { loadStore, saveStore, type ProjectIntegration } from './store'
@@ -661,6 +662,13 @@ export class IntegrationsManager {
   }
 
   async shutdownLocalMounts(): Promise<void> {
+    // Unlink the per-project `.integrations` symlinks before stopping the
+    // mounts so a closed app leaves no dangling links in project trees.
+    await Promise.all(
+      loadStore().projects.map((project) =>
+        removeProjectIntegrationsLink(project.rootPath).catch(() => undefined)
+      )
+    )
     await Promise.all([
       integrationMountManager.stop(),
       integrationEventBridge.closeAll()
@@ -1342,7 +1350,7 @@ export class IntegrationsManager {
     const subscriptions = integrationSubscriptionSummaries(integrations)
     lines.push('')
     if (!subscriptionsReady && subscriptions.length > 0) {
-      lines.push('Integration event subscriptions are requested for this project, but Pear could not register them with the event gateway yet.')
+      lines.push('Integration event subscriptions are requested for this project, but Pear could not register them with Relayfile yet.')
       lines.push('Do not assume notifications will arrive until a later integrations update confirms active subscriptions; read the mounted integration files when the user asks for current state.')
     } else if (subscriptions.length === 0) {
       lines.push('No integration event subscriptions are active for this project.')
@@ -1351,7 +1359,8 @@ export class IntegrationsManager {
       for (const subscription of subscriptions) {
         const parts = [
           subscription.watches.length > 0 ? `file changes at ${subscription.watches.join(', ')}` : '',
-          subscription.inboxes.length > 0 ? `inbox messages at ${subscription.inboxes.join(', ')}` : ''
+          subscription.inboxes.length > 0 ? `provider inboxes at ${subscription.inboxes.join(', ')}` : '',
+          subscription.targets.length > 0 ? `delivered to ${subscription.targets.join(', ')}` : 'delivered to all project agents'
         ].filter(Boolean)
         lines.push(`- ${subscription.provider}: ${parts.join('; ')}`)
       }
@@ -1451,6 +1460,29 @@ export class IntegrationsManager {
     } catch (error) {
       console.warn('[integrations] Failed to reconcile local integration mount:', toErrorMessage(error))
     }
+    await this.syncProjectIntegrationLinks(integrations.length > 0)
+  }
+
+  // Mirror the workspace's integration data into each project via a
+  // git-ignored `.integrations` symlink so local agents can read it from
+  // their cwd. Removed on app shutdown (see shutdownLocalMounts).
+  private async syncProjectIntegrationLinks(hasIntegrations: boolean): Promise<void> {
+    const workspaceId = integrationMountManager.currentWorkspaceId()
+    const projects = loadStore().projects
+    await Promise.all(projects.map(async (project) => {
+      try {
+        if (hasIntegrations && workspaceId) {
+          await ensureProjectIntegrationsLink(project.rootPath, workspaceId)
+        } else {
+          await removeProjectIntegrationsLink(project.rootPath)
+        }
+      } catch (error) {
+        console.warn(
+          `[integrations] Failed to sync integration symlink for ${project.rootPath}:`,
+          toErrorMessage(error)
+        )
+      }
+    }))
   }
 
   private async withLocalMountPaths(integrations: ConnectedIntegration[]): Promise<ConnectedIntegration[]> {
