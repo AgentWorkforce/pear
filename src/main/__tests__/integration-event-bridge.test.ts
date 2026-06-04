@@ -169,14 +169,16 @@ test('slack channel scopes watch relayfile id slug channel directories', async (
   ])
 
   assert.deepEqual(harness.subscribeCalls[0].globs, [
+    '/slack/channels/C123ABC/**',
     '/slack/channels/C123ABC__proj-cloud/**',
     '/slack/channels/proj-cloud--C123ABC/**',
     '/slack/channels/proj-cloud/**'
   ])
 
   await harness.emit(changeEvent('/slack/channels/C123ABC__proj-cloud/messages/1713220123_001100/meta.json', 'slack'))
+  await harness.emit(changeEvent('/slack/channels/C123ABC/messages/1713220123_001100/meta.json', 'slack'))
 
-  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'alice'])
 })
 
 test('generic provider agent scope keys are not treated as notification targets', async () => {

@@ -365,10 +365,7 @@ function IntegrationVisibilitySection({
   }, [projectId])
 
   const listSlackChannelResources = useCallback(async (integration: ConnectedIntegration): Promise<IntegrationAccessibleResource[]> => {
-    const listOptions = (pear.integrations as typeof pear.integrations & {
-      listOptions?: typeof pear.integrations.listOptions
-    }).listOptions
-    if (typeof listOptions !== 'function') {
+    const listMountedSlackChannels = async (): Promise<IntegrationAccessibleResource[]> => {
       const entries = await pear.integrations.listMountDir(projectId, integration.integrationId, '/channels')
       return entries
         .filter((entry) => entry.type === 'directory' && !entry.name.startsWith('_') && entry.name !== 'by-name')
@@ -391,14 +388,24 @@ function IntegrationVisibilitySection({
           }
         })
     }
+    const listOptions = (pear.integrations as typeof pear.integrations & {
+      listOptions?: typeof pear.integrations.listOptions
+    }).listOptions
+    if (typeof listOptions !== 'function') {
+      return listMountedSlackChannels()
+    }
 
-    const options = await listOptions(projectId, integration.provider, 'channels')
-    return options.map((option) => ({
-      id: option.value,
-      displayName: option.label,
-      name: option.label.replace(/^#/u, ''),
-      metadata: option.hint ? { hint: option.hint } : undefined
-    }))
+    try {
+      const options = await listOptions(projectId, integration.provider, 'channels')
+      return options.map((option) => ({
+        id: option.value,
+        displayName: option.label,
+        name: option.label.replace(/^#/u, ''),
+        metadata: option.hint ? { hint: option.hint } : undefined
+      }))
+    } catch {
+      return listMountedSlackChannels()
+    }
   }, [projectId])
 
   const saveSlackSourceChannels = useCallback(async (integration: ConnectedIntegration) => {

@@ -121,6 +121,7 @@ function slackScopedMountPaths(integration: ConnectedIntegration, provider: stri
     const label = readScopeResourceLabel(integration.scope, channelId)
     const slug = label ? slackPathSlug(label) : ''
     return [
+      `/${provider}/channels/${id}`,
       `/${provider}/channels/${id}${slug ? `__${slug}` : ''}`,
       ...(slug ? [`/${provider}/channels/${slug}--${id}`, `/${provider}/channels/${slug}`] : [])
     ]
