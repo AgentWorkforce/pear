@@ -1324,9 +1324,23 @@ export class BrokerManager {
       throw new Error('Cloud sandbox exec URL is required')
     }
 
-    await this.shutdown(normalizedProjectId)
+    // Serialize with start(): both paths end in a bare sessions.set(), so a
+    // local broker start racing this attach (e.g. user spawns a local agent
+    // while the sandbox is still warming) silently clobbers whichever side
+    // lands first — the cloud session "disappears" and leaks its lease timer.
+    // Waiting on the in-flight start and then claiming the slot makes start()
+    // reuse the cloud session instead (its inFlight branch re-checks sessions).
+    const inFlightStart = this.startPromises.get(normalizedProjectId)
+    if (inFlightStart) await inFlightStart.catch(() => undefined)
+    let releaseAttachGate!: () => void
+    const attachGate = new Promise<void>((resolve) => {
+      releaseAttachGate = resolve
+    })
+    this.startPromises.set(normalizedProjectId, attachGate)
 
     try {
+      await this.shutdown(normalizedProjectId)
+
       console.log('[broker] Connecting to cloud broker via SDK:', execUrl)
       const client = new AgentRelayClient({
         baseUrl: execUrl,
@@ -1372,6 +1386,11 @@ export class BrokerManager {
       console.error(`[broker] Failed to connect cloud broker for project ${normalizedProjectId}:`, err)
       this.sendStatusToWindow(win, normalizedProjectId, 'error', String(err))
       throw err
+    } finally {
+      releaseAttachGate()
+      if (this.startPromises.get(normalizedProjectId) === attachGate) {
+        this.startPromises.delete(normalizedProjectId)
+      }
     }
   }
 
