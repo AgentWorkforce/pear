@@ -94,23 +94,35 @@ describe('IntegrationMountManager', () => {
     mock.getAccountWorkspaceId.mockClear()
   })
 
-  it('mounts integrations with separate relayfile read and write scopes', async () => {
+  it('mounts each provider root with provider-scoped relayfile scopes', async () => {
     const manager = new IntegrationMountManager()
 
     await manager.ensureMounted([
       {
         provider: 'github',
+        // Legacy catalog form — the manager derives the real root-level
+        // provider path (`/github`) that adapters actually materialize.
         mountPaths: ['/integrations/github/repos']
+      },
+      {
+        provider: 'linear',
+        mountPaths: ['/linear/issues']
       }
     ])
 
-    expect(mock.mountInputs).toHaveLength(1)
+    expect(mock.mountInputs).toHaveLength(2)
     expect(mock.mountInputs[0]).toMatchObject({
       workspaceId: 'account-workspace-id',
-      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/integrations',
-      remotePath: '/integrations',
-      agentName: 'pear-integrations',
-      scopes: ['relayfile:fs:read:/integrations/**', 'relayfile:fs:write:/integrations/**']
+      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/integrations/github',
+      remotePath: '/github',
+      agentName: 'pear-integrations-github',
+      scopes: ['relayfile:fs:read:/github/**', 'relayfile:fs:write:/github/**']
+    })
+    expect(mock.mountInputs[1]).toMatchObject({
+      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/integrations/linear',
+      remotePath: '/linear',
+      agentName: 'pear-integrations-linear',
+      scopes: ['relayfile:fs:read:/linear/**', 'relayfile:fs:write:/linear/**']
     })
   })
 })

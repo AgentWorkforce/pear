@@ -241,10 +241,17 @@ function isHttpStatus(error: unknown, status: number): boolean {
     || record.response?.status === status
 }
 
+// Provider adapters materialize data at the workspace ROOT — `/github/...`,
+// `/linear/...` (see each adapter's LAYOUT.md in the relayfile workspace).
+// The catalog historically assumed `/integrations/<provider>/...`, which does
+// not exist on the server, so every mount mirrored an empty tree. Rewrite
+// both forms to the real root-level layout.
 function rewriteIntegrationMountPath(mountPath: string, relayfileProvider: string): string {
-  const match = mountPath.match(/^\/integrations\/[^/]+(\/.*)?$/)
-  if (!match) return mountPath
-  return `/integrations/${relayfileProvider}${match[1] ?? ''}`
+  const prefixed = mountPath.match(/^\/integrations\/[^/]+(\/.*)?$/)
+  if (prefixed) return `/${relayfileProvider}${prefixed[1] ?? ''}`
+  const rootLevel = mountPath.match(/^\/[^/]+(\/.*)?$/)
+  if (rootLevel) return `/${relayfileProvider}${rootLevel[1] ?? ''}`
+  return mountPath
 }
 
 function normalizeCapabilities(value: unknown): IntegrationCapabilities {

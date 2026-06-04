@@ -65,12 +65,18 @@ function toRelayfileProvider(provider: string): string {
   return normalized === 'gmail' ? 'google-mail' : normalized
 }
 
+// Provider adapters materialize data at the workspace root (`/github/...`,
+// `/linear/...`), so watch globs must target the root-level provider layout.
+// Tolerates the legacy `/integrations/<provider>/...` catalog form.
 function canonicalMountPaths(integration: ConnectedIntegration): string[] {
   if (integration.mountPaths.length === 0) return []
   const provider = toRelayfileProvider(integration.provider)
   return dedupeStrings(integration.mountPaths.map((path) => {
-    const match = path.match(/^\/integrations\/[^/]+(\/.*)?$/)
-    return match ? `/integrations/${provider}${match[1] ?? ''}` : path
+    const prefixed = path.match(/^\/integrations\/[^/]+(\/.*)?$/)
+    if (prefixed) return `/${provider}${prefixed[1] ?? ''}`
+    const rootLevel = path.match(/^\/[^/]+(\/.*)?$/)
+    if (rootLevel) return `/${provider}${rootLevel[1] ?? ''}`
+    return path
   }))
 }
 

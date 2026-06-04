@@ -10,6 +10,10 @@ type MockClient = {
   getSession: ReturnType<typeof vi.fn>
   listAgents: ReturnType<typeof vi.fn>
   getInboundDeliveryMode: ReturnType<typeof vi.fn>
+  setInboundDeliveryMode: ReturnType<typeof vi.fn>
+  snapshot: ReturnType<typeof vi.fn>
+  resizePty: ReturnType<typeof vi.fn>
+  getPending: ReturnType<typeof vi.fn>
   spawnPty: ReturnType<typeof vi.fn>
   onEvent: ReturnType<typeof vi.fn>
   addListener: ReturnType<typeof vi.fn>
@@ -35,6 +39,10 @@ const mock = vi.hoisted(() => {
         client.agentNames.push(input.name)
         return { name: input.name, runtime: 'pty' }
       }),
+      setInboundDeliveryMode: vi.fn(async (_name: string, mode: string) => ({ mode, flushed: 0 })),
+      snapshot: vi.fn(async () => ({ rows: 24, cols: 80, cursor: { x: 0, y: 0 }, screen: 'aGVsbG8=' })),
+      resizePty: vi.fn(async () => undefined),
+      getPending: vi.fn(async () => []),
       onEvent: vi.fn(() => () => undefined),
       addListener: vi.fn(() => () => undefined),
       connectEvents: vi.fn(),
@@ -217,6 +225,20 @@ describe('BrokerManager local + cloud coexistence', () => {
     await expect(
       manager.spawnAgent(PROJECT_ID, { name: 'worker', cli: 'fake-cli', broker: 'cloud' })
     ).rejects.toThrowError(/Cloud sandbox is not attached/)
+
+    await manager.shutdown()
+  })
+
+  it('attaches terminals to the session that owns the agent', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, [])
+    const cloud = await attachCloud(manager, ['cloud-agent'])
+
+    const result = await manager.attachTerminal(PROJECT_ID, { name: 'cloud-agent', mode: 'passthrough' })
+    expect(result.name).toBe('cloud-agent')
+    expect(cloud.snapshot).toHaveBeenCalled()
+    expect(local.snapshot).not.toHaveBeenCalled()
+    expect(local.setInboundDeliveryMode).not.toHaveBeenCalled()
 
     await manager.shutdown()
   })

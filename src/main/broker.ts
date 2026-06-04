@@ -2127,6 +2127,37 @@ export class BrokerManager {
     return false
   }
 
+  // Resolve which of the project's sessions actually has `name` registered,
+  // polling every candidate until the registration deadline. With a local +
+  // cloud session pair the ownership map may not know a freshly-spawned agent
+  // yet, and defaulting to the wrong broker makes every downstream call burn
+  // its full agent_not_found retry budget (~7.5s each) before failing — the
+  // "switching to a cloud agent terminal is painfully slow" symptom. Probing
+  // both brokers up front attaches to the right one in a single round-trip.
+  private async locateSessionForAgent(
+    name: string,
+    projectId?: string
+  ): Promise<{ session: BrokerSession; registered: boolean }> {
+    const fallback = this.getSessionForAgent(name, projectId)
+    const candidates = projectId?.trim() ? this.sessionsForProject(projectId) : [fallback]
+    if (candidates.length <= 1) {
+      return { session: fallback, registered: await this.waitForAgentRegistration(fallback, name) }
+    }
+
+    const deadline = Date.now() + 15_000
+    while (Date.now() < deadline) {
+      for (const candidate of candidates) {
+        const agents = await candidate.client.listAgents().catch(() => null)
+        if (agents?.some((agent) => agent.name === name)) {
+          this.rememberAgentSession(name, sessionKeyFor(candidate))
+          return { session: candidate, registered: true }
+        }
+      }
+      await delay(250)
+    }
+    return { session: fallback, registered: false }
+  }
+
   // Retry a broker call that targets a specific agent name on
   // agent_not_found. Closes the residual race between
   // waitForAgentRegistration returning true and the next call hitting a
@@ -2263,19 +2294,19 @@ export class BrokerManager {
       throw new Error('Agent name is required')
     }
 
-    const session = this.getSessionForAgent(name, projectId)
+    // Wait for the broker to register the worker — and resolve WHICH broker
+    // owns it when the project runs local + cloud sessions side by side.
+    // spawnAgent (used by the Conversations panel's Resume flow and Add Agent
+    // dialog) returns as soon as the CLI process is forked, before the worker
+    // has connected to the broker, so the renderer races: spawn → mount
+    // terminal → attach → broker 404. claude --resume in particular reads
+    // session history first and can take 10+ seconds to register.
+    const { session, registered } = await this.locateSessionForAgent(name, projectId)
     const client = session.client
     // A re-attach (window reload, restart, tab re-open) is a fresh start for
     // this terminal — clear any stale HTTP-only fallback so the WS fast path
     // gets retried instead of being stuck on HTTP for the agent's lifetime.
     this.resetInputStreamFallback(this.getInputStreamKey(sessionKeyFor(session), name))
-    // Wait for the broker to register the worker. spawnAgent (used by the
-    // Conversations panel's Resume flow and Add Agent dialog) returns as
-    // soon as the CLI process is forked, before the worker has connected
-    // to the broker, so the renderer races: spawn → mount terminal →
-    // attach → broker 404. claude --resume in particular reads session
-    // history first and can take 10+ seconds to register.
-    const registered = await this.waitForAgentRegistration(session, name)
     if (!registered) {
       console.warn(`[broker] attachTerminal: ${name} did not appear in listAgents within wait window; falling through to per-call retry`)
     }
