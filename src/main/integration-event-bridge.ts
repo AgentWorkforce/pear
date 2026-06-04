@@ -1,8 +1,16 @@
-import { RelayfileSetup, type ChangeEvent, type Subscription } from '@relayfile/sdk'
+import {
+  RelayFileClient,
+  RelayFileSync,
+  RelayfileSetup,
+  type ChangeEvent,
+  type FilesystemEvent,
+  type Subscription
+} from '@relayfile/sdk'
 import type { ConnectedIntegration } from './integrations'
 
 const INTEGRATION_EVENT_AGENT_NAME = 'pear-integration-events'
 const INTEGRATION_EVENT_SCOPES = ['relayfile:fs:read:/**']
+const PROJECT_INTEGRATIONS_LINK_NAME = '.integrations'
 
 type WatchRegistration = {
   glob: string
@@ -54,6 +62,8 @@ type RelayfileWorkspaceHandle = {
   workspaceId: string
   client(): RelayfileEventClient
 }
+
+type TokenProvider = () => Promise<string | undefined>
 
 type IntegrationEventBridgeDeps = {
   broker?: BrokerEventBridge
@@ -235,6 +245,151 @@ function pathIsInsideMount(path: string, mountPath: string): boolean {
   return normalizedPath === normalizedMountPath || normalizedPath.startsWith(`${normalizedMountPath}/`)
 }
 
+function projectIntegrationPathForRelayfilePath(path: string): string {
+  const normalized = path.trim().startsWith('/') ? path.trim() : `/${path.trim()}`
+  return `${PROJECT_INTEGRATIONS_LINK_NAME}${normalized}`
+}
+
+function normalizeChangePath(path: string): string[] {
+  const normalized = path.startsWith('/') ? path : `/${path}`
+  const trimmed = normalized.replace(/\/+$/u, '')
+  return trimmed === '' ? [] : trimmed.split('/').filter(Boolean)
+}
+
+function globMatchesPath(glob: string, path: string): boolean {
+  const pattern = normalizeChangePath(glob)
+  const target = normalizeChangePath(path)
+  if (pattern.at(-1) === '**') {
+    const prefix = pattern.slice(0, -1)
+    return target.length >= prefix.length &&
+      prefix.every((segment, index) => segment === '*' || segment === target[index])
+  }
+  return pattern.length === target.length &&
+    pattern.every((segment, index) => segment === '*' || segment === target[index])
+}
+
+function shouldPublishFilesystemEvent(event: FilesystemEvent): boolean {
+  return event.type === 'file.created' || event.type === 'file.updated' || event.type === 'file.deleted'
+}
+
+function filesystemEventToChangeEvent(
+  client: RelayFileClient,
+  workspaceId: string,
+  event: FilesystemEvent
+): ChangeEvent {
+  const path = event.path.startsWith('/') ? event.path : `/${event.path}`
+  const provider = event.provider || path.split('/').filter(Boolean)[0] || 'relayfile'
+  const resourceId = path.split('/').filter(Boolean).at(-1) || path
+  const summary = {
+    title: path
+  }
+
+  return {
+    id: event.eventId || `${workspaceId}:${path}:${event.revision}`,
+    workspace: workspaceId,
+    type: 'relayfile.changed',
+    occurredAt: event.timestamp || new Date().toISOString(),
+    resource: {
+      path,
+      provider,
+      kind: 'record',
+      id: resourceId
+    },
+    summary,
+    digest: event.revision ? `revision:${event.revision}` : undefined,
+    expand: async (level = 'summary') => {
+      if (level === 'summary') {
+        return {
+          level,
+          path,
+          summary
+        }
+      }
+      if (level === 'full') {
+        try {
+          const resource = await client.getResourceAtEvent(event.eventId, { workspaceId })
+          return {
+            level,
+            path: resource.path,
+            data: resource.data
+          }
+        } catch {
+          return {
+            level,
+            path,
+            data: { path, deleted: event.type === 'file.deleted' }
+          }
+        }
+      }
+      throw new Error(`ChangeEvent.expand(${JSON.stringify(level)}) is not implemented for integration events`)
+    }
+  } as ChangeEvent
+}
+
+function createWorkspaceScopedEventClient(
+  client: RelayFileClient,
+  workspaceId: string,
+  tokenProvider: TokenProvider
+): RelayfileEventClient {
+  return {
+    subscribe(globs, onChange, options) {
+      let active = true
+      const pendingByPath = new Map<string, ReturnType<typeof setTimeout>>()
+      const coalesceMs = Math.max(0, Math.floor(options?.coalesceMs ?? 750))
+      const shouldCoalesce = (options?.coalesce ?? 'fire-once') !== 'none'
+
+      const dispatch = (event: FilesystemEvent): void => {
+        if (!active) return
+        const changeEvent = filesystemEventToChangeEvent(client, workspaceId, event)
+        Promise.resolve(onChange(changeEvent)).catch((error) => {
+          console.warn('[integration-events] Change handler failed:', toErrorMessage(error))
+        })
+      }
+
+      const handleEvent = (event: FilesystemEvent): void => {
+        if (!active || !shouldPublishFilesystemEvent(event)) return
+        const path = event.path.startsWith('/') ? event.path : `/${event.path}`
+        if (!globs.some((glob) => globMatchesPath(glob, path))) return
+
+        if (!shouldCoalesce) {
+          dispatch({ ...event, path })
+          return
+        }
+
+        const existing = pendingByPath.get(path)
+        if (existing) clearTimeout(existing)
+        pendingByPath.set(path, setTimeout(() => {
+          pendingByPath.delete(path)
+          dispatch({ ...event, path })
+        }, coalesceMs))
+      }
+
+      const sync = new RelayFileSync({
+        client,
+        workspaceId,
+        token: tokenProvider,
+        onPollingFallback: (info) => {
+          console.warn('[integration-events] Relayfile event stream using polling fallback:', info.reason)
+        }
+      })
+      sync.on('event', handleEvent)
+      sync.on('error', (error) => {
+        console.warn('[integration-events] Relayfile event stream error:', toErrorMessage(error))
+      })
+      sync.start()
+
+      return {
+        async unsubscribe() {
+          active = false
+          for (const timer of pendingByPath.values()) clearTimeout(timer)
+          pendingByPath.clear()
+          await sync.stop()
+        }
+      }
+    }
+  }
+}
+
 function specsForEvent(event: ChangeEvent, specs: SubscriptionSpec[]): SubscriptionSpec[] {
   const path = event.resource.path
   return specs.filter((spec) => spec.mountPaths.some((mountPath) => pathIsInsideMount(path, mountPath)))
@@ -253,7 +408,9 @@ export function integrationSubscriptionSummaries(
       const targets = deliveryTargetsFor([integration])
       return {
         provider: integration.provider,
-        watches: watchRegistrationsFor([integration]).map((watch) => watch.glob),
+        watches: watchRegistrationsFor([integration])
+          .map((watch) => watch.glob)
+          .map(projectIntegrationPathForRelayfilePath),
         targets: targetLabels(targets)
       }
     })
@@ -296,7 +453,8 @@ function formatIntegrationEventMessage(event: ChangeEvent): string {
   const summary = isRecord(event.summary) ? event.summary : {}
   const resource = isRecord(event.resource) ? event.resource : {}
   const provider = eventSummaryValue(resource.provider) || 'integration'
-  const path = eventSummaryValue(resource.path)
+  const relayfilePath = eventSummaryValue(resource.path)
+  const projectPath = relayfilePath ? projectIntegrationPathForRelayfilePath(relayfilePath) : undefined
   const resourceKind = eventSummaryValue(resource.kind)
   const resourceId = eventSummaryValue(resource.id)
   const title = eventSummaryValue(summary.title)
@@ -315,7 +473,8 @@ function formatIntegrationEventMessage(event: ChangeEvent): string {
     `Event id: ${event.id}`
   ]
 
-  if (path) lines.push(`Path: ${path}`)
+  if (projectPath) lines.push(`Path: ${projectPath}`)
+  if (relayfilePath) lines.push(`Relayfile path: ${relayfilePath}`)
   if (resourceKind) lines.push(`Resource kind: ${resourceKind}`)
   if (resourceId) lines.push(`Resource id: ${resourceId}`)
   if (title) lines.push(`Title: ${title}`)
@@ -325,7 +484,7 @@ function formatIntegrationEventMessage(event: ChangeEvent): string {
   if (labels) lines.push(`Labels: ${labels}`)
 
   lines.push(
-    'Handle this like an incoming user-relevant integration update. Use the mounted integration files for context and the existing writeback/messaging path when a response is needed.',
+    'Handle this like an incoming user-relevant integration update. Use the .integrations project paths for context and the existing writeback/messaging path when a response is needed.',
     '</integration-event>'
   )
   return lines.join('\n')
@@ -508,17 +667,26 @@ export class IntegrationEventBridge {
       return accountIntegrationEventHandle.handle
     }
 
+    const tokenProvider = async (): Promise<string | undefined> => {
+      const fresh = await resolveCloudAuth()
+      return fresh?.accessToken ?? auth.accessToken
+    }
     const setup = new RelayfileSetup({
       cloudApiUrl: auth.apiUrl,
-      accessToken: async () => {
-        const fresh = await resolveCloudAuth()
-        return fresh?.accessToken ?? auth.accessToken
-      }
+      accessToken: tokenProvider
     })
-    const handle = await setup.joinWorkspace(workspaceId, {
+    const joined = await setup.joinWorkspace(workspaceId, {
       agentName: INTEGRATION_EVENT_AGENT_NAME,
       scopes: INTEGRATION_EVENT_SCOPES
-    }) as RelayfileWorkspaceHandle
+    })
+    const client = new RelayFileClient({
+      baseUrl: joined.info.relayfileUrl,
+      token: tokenProvider
+    })
+    const handle: RelayfileWorkspaceHandle = {
+      workspaceId,
+      client: () => createWorkspaceScopedEventClient(client, workspaceId, tokenProvider)
+    }
     accountIntegrationEventHandle = {
       apiUrl: auth.apiUrl,
       accountKey: auth.accountKey,

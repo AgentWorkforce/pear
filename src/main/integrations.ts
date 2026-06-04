@@ -8,7 +8,11 @@ import { cloudAgentManager } from './cloud-agent'
 import * as filesystem from './filesystem'
 import { integrationEventBridge, integrationSubscriptionSummaries } from './integration-event-bridge'
 import { integrationMountManager, integrationMountRootForWorkspace } from './integration-mounts'
-import { ensureProjectIntegrationsLink, removeProjectIntegrationsLink } from './integration-symlinks'
+import {
+  PROJECT_INTEGRATIONS_LINK_NAME,
+  ensureProjectIntegrationsLink,
+  removeProjectIntegrationsLink
+} from './integration-symlinks'
 import { INTEGRATIONS_CATALOG } from './integrations.catalog'
 import { getRelayWorkspaceManager } from './relay-workspace'
 import { loadStore, saveStore, type ProjectIntegration } from './store'
@@ -266,6 +270,12 @@ function rewriteIntegrationMountPath(mountPath: string, relayfileProvider: strin
   const rootLevel = mountPath.match(/^\/[^/]+(\/.*)?$/)
   if (rootLevel) return `/${relayfileProvider}${rootLevel[1] ?? ''}`
   return mountPath
+}
+
+function projectIntegrationPathForRelayfilePath(mountPath: string): string {
+  const trimmed = mountPath.trim()
+  const normalized = trimmed.startsWith('/') ? trimmed : `/${trimmed}`
+  return `${PROJECT_INTEGRATIONS_LINK_NAME}${normalized}`
 }
 
 function normalizeCapabilities(value: unknown): IntegrationCapabilities {
@@ -669,10 +679,16 @@ export class IntegrationsManager {
     const normalizedResource = resource.trim().toLowerCase()
     if (!normalizedResource) throw new Error('Integration option resource is required')
 
-    const payload = await this.fetchJson<unknown>(
-      'GET',
-      `api/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(normalizedProvider)}/options/${encodeURIComponent(normalizedResource)}`
-    )
+    let payload: unknown
+    try {
+      payload = await this.fetchJson<unknown>(
+        'GET',
+        `api/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(normalizedProvider)}/options/${encodeURIComponent(normalizedResource)}`
+      )
+    } catch (error) {
+      if (isHttpStatus(error, 404) || /\b404\b/u.test(toErrorMessage(error))) return []
+      throw error
+    }
 
     const rawOptions = isRecord(payload) && Array.isArray(payload.options) ? payload.options : []
     return rawOptions
@@ -1370,6 +1386,7 @@ export class IntegrationsManager {
         const scopeLabels = collectScopeLabels(integration.scope)
         const scopeSummary = scopeLabels.length > 0 ? scopeLabels.join(', ') : 'all configured scope'
         const mountPaths = this.canonicalMountPathsForIntegration(integration)
+          .map(projectIntegrationPathForRelayfilePath)
         const mountClause = mountPaths.length > 0
           ? ` (mounted at ${mountPaths.join(', ')})`
           : ' (no mount paths configured)'
@@ -1399,7 +1416,7 @@ export class IntegrationsManager {
     }
 
     lines.push(
-      'When relevant to the user\'s request, read these mounts to access live data. Edits to JSON files in writeback-enabled paths will push back to the SaaS API.',
+      `When relevant to the user's request, read these mounts through ${PROJECT_INTEGRATIONS_LINK_NAME}/ from the project root. Edits to JSON files in writeback-enabled paths will push back to the SaaS API.`,
       '</integrations-update>'
     )
     return lines.join('\n')

@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import type { ChangeEvent, Subscription } from '@relayfile/sdk'
-import { IntegrationEventBridge } from '../integration-event-bridge.ts'
+import { IntegrationEventBridge, integrationSubscriptionSummaries } from '../integration-event-bridge.ts'
 import type { ConnectedIntegration } from '../integrations.ts'
 
 type SentMessage = {
@@ -154,19 +154,18 @@ test('channel notification targets do not fall back to all project agents', asyn
 
 test('slack channel scopes watch relayfile id slug channel directories', async () => {
   const harness = makeHarness()
+  const slackIntegration = integration({
+    provider: 'slack',
+    integrationId: 'slack-1',
+    mountPaths: ['/integrations/slack/channels/proj-cloud'],
+    scope: {
+      channels: ['C123ABC'],
+      resources: [{ id: 'C123ABC', label: '#proj-cloud' }],
+      notifyAgents: ['alice']
+    }
+  })
 
-  await harness.bridge.reconcile('project-1', [
-    integration({
-      provider: 'slack',
-      integrationId: 'slack-1',
-      mountPaths: ['/integrations/slack/channels/proj-cloud'],
-      scope: {
-        channels: ['C123ABC'],
-        resources: [{ id: 'C123ABC', label: '#proj-cloud' }],
-        notifyAgents: ['alice']
-      }
-    })
-  ])
+  await harness.bridge.reconcile('project-1', [slackIntegration])
 
   assert.deepEqual(harness.subscribeCalls[0].globs, [
     '/slack/channels/C123ABC/**',
@@ -174,11 +173,19 @@ test('slack channel scopes watch relayfile id slug channel directories', async (
     '/slack/channels/proj-cloud--C123ABC/**',
     '/slack/channels/proj-cloud/**'
   ])
+  assert.deepEqual(integrationSubscriptionSummaries([slackIntegration])[0].watches, [
+    '.integrations/slack/channels/C123ABC/**',
+    '.integrations/slack/channels/C123ABC__proj-cloud/**',
+    '.integrations/slack/channels/proj-cloud--C123ABC/**',
+    '.integrations/slack/channels/proj-cloud/**'
+  ])
 
   await harness.emit(changeEvent('/slack/channels/C123ABC__proj-cloud/messages/1713220123_001100/meta.json', 'slack'))
   await harness.emit(changeEvent('/slack/channels/C123ABC/messages/1713220123_001100/meta.json', 'slack'))
 
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'alice'])
+  assert.match(harness.sent[0].input.text, /Path: \.integrations\/slack\/channels\/C123ABC__proj-cloud\/messages\/1713220123_001100\/meta\.json/u)
+  assert.match(harness.sent[0].input.text, /Relayfile path: \/slack\/channels\/C123ABC__proj-cloud\/messages\/1713220123_001100\/meta\.json/u)
 })
 
 test('generic provider agent scope keys are not treated as notification targets', async () => {

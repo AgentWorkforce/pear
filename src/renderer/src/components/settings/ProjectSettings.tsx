@@ -421,6 +421,7 @@ function IntegrationVisibilitySection({
 
     try {
       const options = await listOptions(projectId, integration.provider, 'channels')
+      if (options.length === 0) return listMountedSlackChannels()
       return options.map((option) => ({
         id: option.value,
         displayName: option.label,
