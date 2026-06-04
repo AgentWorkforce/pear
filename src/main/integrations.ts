@@ -7,7 +7,7 @@ import { brokerManager } from './broker'
 import { cloudAgentManager } from './cloud-agent'
 import * as filesystem from './filesystem'
 import { integrationEventBridge, integrationSubscriptionSummaries } from './integration-event-bridge'
-import { integrationMountManager } from './integration-mounts'
+import { integrationMountManager, integrationMountRootForWorkspace } from './integration-mounts'
 import { INTEGRATIONS_CATALOG } from './integrations.catalog'
 import { getRelayWorkspaceManager } from './relay-workspace'
 import { loadStore, saveStore, type ProjectIntegration } from './store'
@@ -1481,6 +1481,15 @@ export class IntegrationsManager {
     }
 
     if (!integration) {
+      // The integration list is refreshed from cloud, and a transient status
+      // filter (e.g. webhook health) can drop an integration between the UI
+      // render and the click. Its mirrored files are still on disk, so fall
+      // back to confining the path to the workspace's integrations mount
+      // root — the same boundary the per-integration roots live under.
+      const workspaceId = integrationMountManager.currentWorkspaceId()
+      if (workspaceId && isPathWithinRoot(resolve(integrationMountRootForWorkspace(workspaceId)), resolvedPath)) {
+        return resolvedPath
+      }
       throw new Error('Integration is not connected to this project')
     }
 
