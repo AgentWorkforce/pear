@@ -96,6 +96,14 @@ const mock = vi.hoisted(() => {
           json: async () => ({ agents: [] })
         }
       }
+      if (normalizedUrl.endsWith('/api/v1/cloud-agents/created-agent-1') && init?.method === 'DELETE') {
+        return {
+          ok: true,
+          status: 204,
+          statusText: 'No Content',
+          json: async () => ({})
+        }
+      }
       const parsedUrl = new URL(normalizedUrl)
       if (parsedUrl.pathname.endsWith('/api/v1/workspaces/account-workspace-id/cloud-agents/cloud-agent-1/box')) {
         const queued = boxResponses.shift()
@@ -268,6 +276,19 @@ describe('CloudAgentManager', () => {
     expect(agents).toEqual(expect.arrayContaining([
       expect.objectContaining({ id: 'created-agent-1', name: 'review-agent' })
     ]))
+  })
+
+  it('removes deleted cloud agents from the recently-created cache', async () => {
+    const manager = new CloudAgentManager()
+
+    await manager.create({
+      name: 'review-agent',
+      harness: 'claude',
+      model: 'claude-opus-4-7'
+    })
+    await manager.delete('created-agent-1')
+
+    await expect(manager.list()).resolves.toEqual([])
   })
 
   it('warms a box using the token account workspace, not the relay workspace', async () => {

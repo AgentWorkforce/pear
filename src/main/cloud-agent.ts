@@ -520,6 +520,7 @@ export class CloudAgentManager {
     const attachedProjects = data.projects.filter((project) => project.cloudAgent?.id === cloudAgentId)
     await Promise.all(attachedProjects.map((project) => this.detach(project.id)))
     await cloudDeleteCloudAgent(auth, cloudAgentId)
+    this.createdAgents.delete(cloudAgentId)
   }
 
   async prewarm(projectId: string, cloudAgentId: string): Promise<void> {
