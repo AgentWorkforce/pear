@@ -228,6 +228,10 @@ function specsForEvent(event: ChangeEvent, specs: SubscriptionSpec[]): Subscript
   return specs.filter((spec) => spec.mountPaths.some((mountPath) => pathIsInsideMount(path, mountPath)))
 }
 
+function logIntegrationEvent(message: string, metadata: Record<string, unknown>): void {
+  console.info(`[integration-events] ${message}`, metadata)
+}
+
 export function integrationSubscriptionSummaries(
   integrations: ConnectedIntegration[]
 ): IntegrationSubscriptionSummary[] {
@@ -356,10 +360,27 @@ export class IntegrationEventBridge {
     await this.close(projectId)
     const subscriptions: Subscription[] = []
     try {
+      logIntegrationEvent('subscribing', {
+        projectId,
+        workspaceId: handle.workspaceId,
+        globs: watches.map((watch) => watch.glob),
+        specs: specs.map((spec) => ({
+          integrationId: spec.integrationId,
+          provider: spec.provider,
+          mountPaths: spec.mountPaths,
+          targets: targetLabels(spec.targets)
+        }))
+      })
       subscriptions.push(
         handle.client().subscribe(
           watches.map((watch) => watch.glob),
           (event) => {
+            logIntegrationEvent('received', {
+              projectId,
+              eventId: event.id,
+              type: event.type,
+              path: event.resource.path
+            })
             void this.injectEvent(projectId, event, specs).catch((error) => {
               console.warn('[integration-events] Event delivery failed:', {
                 projectId,
@@ -393,10 +414,25 @@ export class IntegrationEventBridge {
   }
 
   private async injectEvent(projectId: string, event: ChangeEvent, specs: SubscriptionSpec[]): Promise<void> {
-    if (!shouldNotifyRelayfileChange(event)) return
+    if (!shouldNotifyRelayfileChange(event)) {
+      logIntegrationEvent('skipped filtered path', {
+        projectId,
+        eventId: event.id,
+        path: event.resource.path
+      })
+      return
+    }
 
     const matchedSpecs = specsForEvent(event, specs)
-    if (matchedSpecs.length === 0) return
+    if (matchedSpecs.length === 0) {
+      logIntegrationEvent('skipped unmatched path', {
+        projectId,
+        eventId: event.id,
+        path: event.resource.path,
+        mountPaths: specs.flatMap((spec) => spec.mountPaths)
+      })
+      return
+    }
 
     const bridge = await this.bridge()
     let allProjectAgents: string[] | null = null
@@ -414,8 +450,15 @@ export class IntegrationEventBridge {
       }
     }
 
+    const uniqueRecipients = dedupeStrings(recipients)
+    logIntegrationEvent('injecting', {
+      projectId,
+      eventId: event.id,
+      path: event.resource.path,
+      recipients: uniqueRecipients
+    })
     await Promise.all(
-      dedupeStrings(recipients).map((recipient) => bridge.sendMessage(projectId, {
+      uniqueRecipients.map((recipient) => bridge.sendMessage(projectId, {
         to: recipient,
         from: 'integration',
         text: formatIntegrationEventMessage(event),

@@ -31,7 +31,7 @@ export function SlackChannelPicker(props: ScopePickerProps): React.ReactNode {
       {...props}
       title="Choose channels"
       resourceNoun="channels"
-      baseMountPath="/integrations/slack/channels"
+      baseMountPath="/slack/channels"
       scopeKey="channels"
       getResourceLabel={(resource) => {
         const name = channelName(resource)

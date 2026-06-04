@@ -169,7 +169,7 @@ function projectVisibilityFromScope(scope: Record<string, unknown>): ProjectVisi
 }
 
 function providerMountRoot(provider: string): string {
-  return `/integrations/${provider}`
+  return `/${provider}`
 }
 
 function isSlackProvider(provider: string): boolean {
@@ -223,6 +223,27 @@ function scopeStringList(scope: Record<string, unknown>, key: string): string[] 
   return Array.isArray(value)
     ? value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
     : []
+}
+
+function localPathSegments(path: string): string[] {
+  return path.split(/[\\/]+/u).filter(Boolean)
+}
+
+function providerLocalMountPath(integration: ConnectedIntegration, provider: string): string | null {
+  const providerSegment = provider.trim().toLowerCase()
+  const providerRoots = (integration.localMountPaths || [])
+    .filter((root) => localPathSegments(root).at(-1)?.toLowerCase() === providerSegment)
+  return providerRoots.find((root) => !localPathSegments(root).includes('discovery'))
+    || providerRoots[0]
+    || null
+}
+
+function joinLocalPath(root: string, ...segments: string[]): string {
+  const suffix = segments
+    .map((segment) => segment.replace(/^[/\\]+|[/\\]+$/gu, ''))
+    .filter(Boolean)
+    .join('/')
+  return suffix ? `${root.replace(/[/\\]+$/u, '')}/${suffix}` : root
 }
 
 function notificationTargetValue(scope: Record<string, unknown>): string {
@@ -366,7 +387,10 @@ function IntegrationVisibilitySection({
 
   const listSlackChannelResources = useCallback(async (integration: ConnectedIntegration): Promise<IntegrationAccessibleResource[]> => {
     const listMountedSlackChannels = async (): Promise<IntegrationAccessibleResource[]> => {
-      const entries = await pear.integrations.listMountDir(projectId, integration.integrationId, '/channels')
+      const slackRoot = providerLocalMountPath(integration, 'slack')
+      if (!slackRoot) throw new Error('Slack Relayfile mount is not available yet.')
+      const channelsPath = joinLocalPath(slackRoot, 'channels')
+      const entries = await pear.integrations.listMountDir(projectId, integration.integrationId, channelsPath)
       return entries
         .filter((entry) => entry.type === 'directory' && !entry.name.startsWith('_') && entry.name !== 'by-name')
         .map((entry) => {
@@ -384,7 +408,7 @@ function IntegrationVisibilitySection({
             id,
             displayName: name || id,
             name: name || id,
-            path: `/slack/channels/${entry.name}`
+            path: joinLocalPath(channelsPath, entry.name)
           }
         })
     }
