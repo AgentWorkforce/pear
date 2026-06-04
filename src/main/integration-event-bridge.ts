@@ -120,6 +120,25 @@ function pathSegments(path: string): string[] {
   return path.split(/[\\/]+/u).filter(Boolean)
 }
 
+function decodeBase64UrlJson(value: string): Record<string, unknown> | null {
+  try {
+    const padded = value.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(value.length / 4) * 4, '=')
+    const decoded = Buffer.from(padded, 'base64').toString('utf8')
+    const parsed = JSON.parse(decoded)
+    return isRecord(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function workspaceIdFromJwt(token: string | undefined): string | null {
+  if (!token) return null
+  const parts = token.split('.')
+  if (parts.length !== 3 || !parts[1]) return null
+  const claims = decodeBase64UrlJson(parts[1])
+  return typeof claims?.workspace_id === 'string' && claims.workspace_id ? claims.workspace_id : null
+}
+
 function slackNormalizeSegment(value: string, fallback = 'unknown'): string {
   const trimmed = value.trim()
   if (!trimmed) return fallback
@@ -350,6 +369,7 @@ function createWorkspaceScopedEventClient(
   return {
     subscribe(globs, onChange, options) {
       let active = true
+      let sync: RelayFileSync | null = null
       const pendingByPath = new Map<string, ReturnType<typeof setTimeout>>()
       const coalesceMs = Math.max(0, Math.floor(options?.coalesceMs ?? 750))
       const shouldCoalesce = (options?.coalesce ?? 'fire-once') !== 'none'
@@ -380,26 +400,41 @@ function createWorkspaceScopedEventClient(
         }, coalesceMs))
       }
 
-      const sync = new RelayFileSync({
-        client,
-        workspaceId,
-        token: tokenProvider,
-        onPollingFallback: (info) => {
-          console.warn('[integration-events] Relayfile event stream using polling fallback:', info.reason)
-        }
-      })
-      sync.on('event', handleEvent)
-      sync.on('error', (error) => {
-        console.warn('[integration-events] Relayfile event stream error:', toErrorMessage(error))
-      })
-      sync.start()
+      void tokenProvider()
+        .then((token) => {
+          if (!active) return
+          const tokenWorkspaceId = workspaceIdFromJwt(token)
+          if (tokenWorkspaceId !== workspaceId) {
+            logIntegrationEvent('skipping remote stream without workspace JWT', {
+              workspaceId,
+              tokenWorkspaceId
+            })
+            return
+          }
+          sync = new RelayFileSync({
+            client,
+            workspaceId,
+            token,
+            onPollingFallback: (info) => {
+              console.warn('[integration-events] Relayfile event stream using polling fallback:', info.reason)
+            }
+          })
+          sync.on('event', handleEvent)
+          sync.on('error', (error) => {
+            console.warn('[integration-events] Relayfile event stream error:', toErrorMessage(error))
+          })
+          sync.start()
+        })
+        .catch((error) => {
+          console.warn('[integration-events] Relayfile event stream token check failed:', toErrorMessage(error))
+        })
 
       return {
         async unsubscribe() {
           active = false
           for (const timer of pendingByPath.values()) clearTimeout(timer)
           pendingByPath.clear()
-          await sync.stop()
+          await sync?.stop()
         }
       }
     }
