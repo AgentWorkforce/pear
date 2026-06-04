@@ -1,5 +1,8 @@
-import type { ChangeEvent, Subscription } from '@relayfile/sdk'
+import { RelayfileSetup, type ChangeEvent, type Subscription } from '@relayfile/sdk'
 import type { ConnectedIntegration } from './integrations'
+
+const INTEGRATION_EVENT_AGENT_NAME = 'pear-integration-events'
+const INTEGRATION_EVENT_SCOPES = ['relayfile:fs:read:/**']
 
 type WatchRegistration = {
   glob: string
@@ -57,11 +60,20 @@ type IntegrationEventBridgeDeps = {
   getWorkspaceHandle?: () => Promise<RelayfileWorkspaceHandle>
 }
 
+type EventWorkspaceHandleCache = {
+  apiUrl: string
+  accountKey: string
+  workspaceId: string
+  handle: RelayfileWorkspaceHandle
+}
+
 export type IntegrationSubscriptionSummary = {
   provider: string
   watches: string[]
   targets: string[]
 }
+
+let accountIntegrationEventHandle: EventWorkspaceHandleCache | null = null
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -479,8 +491,41 @@ export class IntegrationEventBridge {
 
   private async getWorkspaceHandle(): Promise<RelayfileWorkspaceHandle> {
     if (this.deps.getWorkspaceHandle) return this.deps.getWorkspaceHandle()
-    const { getRelayWorkspaceManager } = await import('./relay-workspace')
-    return getRelayWorkspaceManager().getWorkspaceHandle() as Promise<RelayfileWorkspaceHandle>
+    const { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, resolveCloudAuth } = await import('./auth.ts')
+    const auth = await resolveCloudAuth()
+    if (!auth) {
+      accountIntegrationEventHandle = null
+      throw new Error('cloud-auth-required')
+    }
+
+    const workspaceId = await getAccountWorkspaceId(accountWorkspaceReadyRetryOptions())
+    if (
+      accountIntegrationEventHandle &&
+      accountIntegrationEventHandle.apiUrl === auth.apiUrl &&
+      accountIntegrationEventHandle.accountKey === auth.accountKey &&
+      accountIntegrationEventHandle.workspaceId === workspaceId
+    ) {
+      return accountIntegrationEventHandle.handle
+    }
+
+    const setup = new RelayfileSetup({
+      cloudApiUrl: auth.apiUrl,
+      accessToken: async () => {
+        const fresh = await resolveCloudAuth()
+        return fresh?.accessToken ?? auth.accessToken
+      }
+    })
+    const handle = await setup.joinWorkspace(workspaceId, {
+      agentName: INTEGRATION_EVENT_AGENT_NAME,
+      scopes: INTEGRATION_EVENT_SCOPES
+    }) as RelayfileWorkspaceHandle
+    accountIntegrationEventHandle = {
+      apiUrl: auth.apiUrl,
+      accountKey: auth.accountKey,
+      workspaceId,
+      handle
+    }
+    return handle
   }
 
   private async bridge(): Promise<BrokerEventBridge> {
