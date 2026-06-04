@@ -20,6 +20,11 @@ import {
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
 import { ProactiveAgentsSection } from '@/components/proactive/ProactiveAgentsSection'
 import { pear, type ConnectedIntegration } from '@/lib/ipc'
+import {
+  SlackChannelPicker,
+  type IntegrationAccessibleResource,
+  type ScopePickerValue
+} from '@/components/settings/scope-pickers'
 import { useAgentStore } from '@/stores/agent-store'
 import {
   normalizeChannelName,
@@ -167,6 +172,11 @@ function providerMountRoot(provider: string): string {
   return `/integrations/${provider}`
 }
 
+function isSlackProvider(provider: string): boolean {
+  const normalized = provider.trim().toLowerCase().replace(/-(app-oauth|app|oauth|bot-oauth|bot|api-key|apikey)$/, '')
+  return normalized === 'slack' || normalized.startsWith('slack-')
+}
+
 function cloudAgentWorkspaceMode(project: unknown): CloudAgentWorkspaceMode {
   const mode = project && typeof project === 'object'
     ? (project as { cloudAgentWorkspaceMode?: unknown }).cloudAgentWorkspaceMode
@@ -208,6 +218,13 @@ function firstScopeString(scope: Record<string, unknown>, keys: string[]): strin
   return null
 }
 
+function scopeStringList(scope: Record<string, unknown>, key: string): string[] {
+  const value = scope[key]
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+    : []
+}
+
 function notificationTargetValue(scope: Record<string, unknown>): string {
   const agent = firstScopeString(scope, NOTIFICATION_AGENT_SCOPE_KEYS)
   if (agent) return `agent:${agent.replace(/^@/u, '')}`
@@ -237,6 +254,8 @@ function IntegrationVisibilitySection({
   const [loading, setLoading] = useState(true)
   const [busyIntegrationId, setBusyIntegrationId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [scopeEditorIntegrationId, setScopeEditorIntegrationId] = useState<string | null>(null)
+  const [pendingScopeValue, setPendingScopeValue] = useState<ScopePickerValue | null>(null)
 
   const load = useCallback(async () => {
     setError(null)
@@ -345,6 +364,49 @@ function IntegrationVisibilitySection({
     }
   }, [projectId])
 
+  const listSlackChannelResources = useCallback(async (provider: string): Promise<IntegrationAccessibleResource[]> => {
+    const options = await pear.integrations.listOptions(projectId, provider, 'channels')
+    return options.map((option) => ({
+      id: option.value,
+      displayName: option.label,
+      name: option.label.replace(/^#/u, ''),
+      metadata: option.hint ? { hint: option.hint } : undefined
+    }))
+  }, [projectId])
+
+  const saveSlackSourceChannels = useCallback(async (integration: ConnectedIntegration) => {
+    if (!pendingScopeValue) return
+    const nextScope = {
+      ...integration.scope,
+      provider: pendingScopeValue.scope.provider,
+      selection: pendingScopeValue.scope.selection,
+      channels: pendingScopeValue.scope.channels,
+      resources: pendingScopeValue.scope.resources
+    }
+
+    setBusyIntegrationId(integration.integrationId)
+    setError(null)
+    try {
+      const nextIntegration = await pear.integrations.updateScope(
+        projectId,
+        integration.integrationId,
+        nextScope,
+        pendingScopeValue.mountPaths
+      )
+      setIntegrations((current) =>
+        current.map((entry) =>
+          entry.integrationId === nextIntegration.integrationId ? nextIntegration : entry
+        )
+      )
+      setScopeEditorIntegrationId(null)
+      setPendingScopeValue(null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusyIntegrationId(null)
+    }
+  }, [pendingScopeValue, projectId])
+
   return (
     <Section
       title="Integration visibility"
@@ -367,6 +429,8 @@ function IntegrationVisibilitySection({
             const subscribed = integration.subscribeAgent === true
             const busy = busyIntegrationId === integration.integrationId
             const notificationTarget = notificationTargetValue(integration.scope)
+            const slack = isSlackProvider(integration.provider)
+            const scopeEditorOpen = scopeEditorIntegrationId === integration.integrationId
             const knownTargetValues = new Set([
               'all',
               ...agentNames.map((agent) => `agent:${agent}`),
@@ -374,82 +438,135 @@ function IntegrationVisibilitySection({
             ])
 
             return (
-              <div
-                key={integration.integrationId}
-                className="flex items-center gap-3 rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-3 py-2.5"
-              >
-                <Plug size={15} className="shrink-0 text-[var(--pear-text-faint)]" />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm text-[var(--pear-text)]">{integration.provider}</div>
-                  <div className="truncate text-xs text-[var(--pear-text-faint)]">
-                    {visible
-                      ? visibilityMountPaths(integration, visibility).join(', ')
-                      : providerMountRoot(integration.provider)}
-                  </div>
-                  {integration.localMountPaths && integration.localMountPaths.length > 0 && (
-                    <div className="truncate text-[11px] text-[var(--pear-text-faint)]">
-                      {integration.localMountPaths.join(', ')}
+              <div key={integration.integrationId} className="space-y-2">
+                <div className="flex items-center gap-3 rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-3 py-2.5">
+                  <Plug size={15} className="shrink-0 text-[var(--pear-text-faint)]" />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm text-[var(--pear-text)]">{integration.provider}</div>
+                    <div className="truncate text-xs text-[var(--pear-text-faint)]">
+                      {visible
+                        ? visibilityMountPaths(integration, visibility).join(', ')
+                        : providerMountRoot(integration.provider)}
                     </div>
+                    {integration.localMountPaths && integration.localMountPaths.length > 0 && (
+                      <div className="truncate text-[11px] text-[var(--pear-text-faint)]">
+                        {integration.localMountPaths.join(', ')}
+                      </div>
+                    )}
+                  </div>
+                  {slack && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => {
+                        setPendingScopeValue(null)
+                        setScopeEditorIntegrationId(scopeEditorOpen ? null : integration.integrationId)
+                      }}
+                      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md border transition-colors disabled:opacity-40 ${
+                        scopeEditorOpen
+                          ? 'border-[var(--pear-accent-dim)] text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)]'
+                          : 'border-[var(--pear-border)] text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]'
+                      }`}
+                      aria-expanded={scopeEditorOpen}
+                      title="Choose Slack channels to listen to"
+                      aria-label="Choose Slack channels to listen to"
+                    >
+                      <Hash size={13} />
+                    </button>
                   )}
-                </div>
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void setSubscription(integration, !subscribed)}
-                  className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md border transition-colors disabled:opacity-40 ${
-                    subscribed
-                      ? 'border-[var(--pear-accent-dim)] text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)]'
-                      : 'border-[var(--pear-border)] text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]'
-                  }`}
-                  aria-pressed={subscribed}
-                  title={subscribed ? 'Stop sending events to agents' : 'Send events to agents'}
-                  aria-label={subscribed ? 'Stop sending events to agents' : 'Send events to agents'}
-                >
-                  {subscribed ? <Bell size={13} /> : <BellOff size={13} />}
-                </button>
-                {subscribed && (
-                  <select
-                    value={notificationTarget}
+                  <button
+                    type="button"
                     disabled={busy}
-                    onChange={(event) => void setNotificationTarget(integration, event.target.value)}
-                    className="h-8 max-w-[160px] rounded-md border border-[var(--pear-border)] bg-[var(--pear-bg-raised)] px-2 text-xs text-[var(--pear-text-dim)] outline-none disabled:opacity-40"
-                    title="Integration event delivery target"
-                    aria-label="Integration event delivery target"
+                    onClick={() => void setSubscription(integration, !subscribed)}
+                    className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md border transition-colors disabled:opacity-40 ${
+                      subscribed
+                        ? 'border-[var(--pear-accent-dim)] text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)]'
+                        : 'border-[var(--pear-border)] text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]'
+                    }`}
+                    aria-pressed={subscribed}
+                    title={subscribed ? 'Stop sending events to agents' : 'Send events to agents'}
+                    aria-label={subscribed ? 'Stop sending events to agents' : 'Send events to agents'}
                   >
-                    {!knownTargetValues.has(notificationTarget) && (
-                      <option value={notificationTarget}>{notificationTarget.replace(/^agent:/u, '@').replace(/^channel:/u, '#')}</option>
-                    )}
-                    <option value="all">All agents</option>
-                    {agentNames.length > 0 && (
-                      <optgroup label="Agents">
-                        {agentNames.map((agent) => (
-                          <option key={`agent:${agent}`} value={`agent:${agent}`}>@{agent}</option>
-                        ))}
-                      </optgroup>
-                    )}
-                    {channels.length > 0 && (
-                      <optgroup label="Channels">
-                        {channels.map((channel) => (
-                          <option key={`channel:${channel}`} value={`channel:${channel}`}>#{channel}</option>
-                        ))}
-                      </optgroup>
-                    )}
-                  </select>
+                    {subscribed ? <Bell size={13} /> : <BellOff size={13} />}
+                  </button>
+                  {subscribed && (
+                    <select
+                      value={notificationTarget}
+                      disabled={busy}
+                      onChange={(event) => void setNotificationTarget(integration, event.target.value)}
+                      className="h-8 max-w-[160px] rounded-md border border-[var(--pear-border)] bg-[var(--pear-bg-raised)] px-2 text-xs text-[var(--pear-text-dim)] outline-none disabled:opacity-40"
+                      title="Integration event delivery target"
+                      aria-label="Integration event delivery target"
+                    >
+                      {!knownTargetValues.has(notificationTarget) && (
+                        <option value={notificationTarget}>{notificationTarget.replace(/^agent:/u, '@').replace(/^channel:/u, '#')}</option>
+                      )}
+                      <option value="all">All agents</option>
+                      {agentNames.length > 0 && (
+                        <optgroup label="Agents">
+                          {agentNames.map((agent) => (
+                            <option key={`agent:${agent}`} value={`agent:${agent}`}>@{agent}</option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {channels.length > 0 && (
+                        <optgroup label="Channels">
+                          {channels.map((channel) => (
+                            <option key={`channel:${channel}`} value={`channel:${channel}`}>#{channel}</option>
+                          ))}
+                        </optgroup>
+                      )}
+                    </select>
+                  )}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void setVisibility(integration, !visible)}
+                    className={`flex h-8 items-center gap-2 rounded-md border px-3 text-xs transition-colors disabled:opacity-40 ${
+                      visible
+                        ? 'border-[var(--pear-accent-dim)] text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)]'
+                        : 'border-[var(--pear-border)] text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]'
+                    }`}
+                    aria-pressed={visible}
+                  >
+                    {visible ? <Eye size={13} /> : <EyeOff size={13} />}
+                    {visible ? 'Visible' : 'Hidden'}
+                  </button>
+                </div>
+
+                {scopeEditorOpen && slack && (
+                  <div className="pl-0 md:pl-8">
+                    <SlackChannelPicker
+                      provider="slack"
+                      disabled={busy}
+                      initialSelectedIds={scopeStringList(integration.scope, 'channels')}
+                      listAccessibleResources={() => listSlackChannelResources(integration.provider)}
+                      onChange={setPendingScopeValue}
+                    />
+                    <div className="mt-3 flex justify-end gap-2">
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => {
+                          setScopeEditorIntegrationId(null)
+                          setPendingScopeValue(null)
+                        }}
+                        className="h-8 rounded-md border border-[var(--pear-border)] px-3 text-xs text-[var(--pear-text-dim)] hover:text-[var(--pear-text)] disabled:opacity-40"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy || !pendingScopeValue}
+                        onClick={() => void saveSlackSourceChannels(integration)}
+                        className="flex h-8 items-center gap-2 rounded-md border border-[var(--pear-accent-dim)] px-3 text-xs text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)] disabled:opacity-40"
+                      >
+                        {busy ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+                        Save
+                      </button>
+                    </div>
+                  </div>
                 )}
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void setVisibility(integration, !visible)}
-                  className={`flex h-8 items-center gap-2 rounded-md border px-3 text-xs transition-colors disabled:opacity-40 ${
-                    visible
-                      ? 'border-[var(--pear-accent-dim)] text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)]'
-                      : 'border-[var(--pear-border)] text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]'
-                  }`}
-                  aria-pressed={visible}
-                >
-                  {visible ? <Eye size={13} /> : <EyeOff size={13} />}
-                  {visible ? 'Visible' : 'Hidden'}
-                </button>
               </div>
             )
           })

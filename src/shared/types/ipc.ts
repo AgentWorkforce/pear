@@ -650,6 +650,12 @@ export type IntegrationConnectSession = {
   error?: string
 }
 
+export type IntegrationOption = {
+  value: string
+  label: string
+  hint?: string
+}
+
 export type IntegrationsEvent =
   | { type: 'session-update'; sessionId: string; session: IntegrationConnectSession }
   | { type: 'integration-added'; projectId: string; integration: ConnectedIntegration }
@@ -845,6 +851,7 @@ export interface PearAPI {
     list: (projectId: string) => Promise<ConnectedIntegration[]>
     listMountDir: (projectId: string, integrationId: string, dirPath: string) => Promise<FsDirEntry[]>
     readMountPreview: (projectId: string, integrationId: string, filePath: string) => Promise<FsReadPreviewResult>
+    listOptions: (projectId: string, provider: string, resource: string) => Promise<IntegrationOption[]>
     startConnect: (projectId: string, provider: string) => Promise<IntegrationConnectSession>
     pollConnect: (sessionId: string) => Promise<IntegrationConnectSession>
     completeConnect: (

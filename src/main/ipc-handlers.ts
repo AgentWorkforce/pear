@@ -564,6 +564,10 @@ export function registerIpcHandlers(): void {
     return integrationsManager.readMountPreview(projectId, integrationId, filePath)
   })
 
+  ipcMain.handle('integrations:list-options', async (_, projectId: string, provider: string, resource: string) => {
+    return integrationsManager.listOptions(projectId, provider, resource)
+  })
+
   ipcMain.handle('integrations:start-connect', async (_, projectId: string, provider: string) => {
     return integrationsManager.startConnect(projectId, provider)
   })

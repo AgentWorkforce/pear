@@ -65,6 +65,12 @@ export type IntegrationConnectSession = {
   error?: string
 }
 
+export type IntegrationOption = {
+  value: string
+  label: string
+  hint?: string
+}
+
 export type IntegrationsEvent =
   | { type: 'session-update'; sessionId: string; session: IntegrationConnectSession }
   | { type: 'integration-added'; projectId: string; integration: ConnectedIntegration }
@@ -654,6 +660,30 @@ export class IntegrationsManager {
   async readMountPreview(projectId: string, integrationId: string, filePath: string): Promise<filesystem.FilePreview> {
     const resolvedPath = await this.resolveIntegrationMountPath(projectId, integrationId, filePath)
     return filesystem.readTextPreview(resolvedPath)
+  }
+
+  async listOptions(projectId: string, provider: string, resource: string): Promise<IntegrationOption[]> {
+    if (!this.findProject(projectId)) throw new Error(`Project not found: ${projectId}`)
+    const workspaceId = await getAccountWorkspaceId(accountWorkspaceReadyRetryOptions())
+    const normalizedProvider = toRelayfileProvider(provider)
+    const normalizedResource = resource.trim().toLowerCase()
+    if (!normalizedResource) throw new Error('Integration option resource is required')
+
+    const payload = await this.fetchJson<unknown>(
+      'GET',
+      `api/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(normalizedProvider)}/options/${encodeURIComponent(normalizedResource)}`
+    )
+
+    const rawOptions = isRecord(payload) && Array.isArray(payload.options) ? payload.options : []
+    return rawOptions
+      .filter((entry): entry is Record<string, unknown> => isRecord(entry))
+      .map((entry) => {
+        const value = readString(entry.value)
+        const label = readString(entry.label) || value
+        const hint = readString(entry.hint)
+        return value && label ? { value, label, ...(hint ? { hint } : {}) } : null
+      })
+      .filter((entry): entry is IntegrationOption => entry !== null)
   }
 
   async startLocalMountDaemon(): Promise<void> {

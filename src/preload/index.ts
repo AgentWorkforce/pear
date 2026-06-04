@@ -50,6 +50,7 @@ import type {
   GitSummary,
   IntegrationAdapter,
   IntegrationConnectSession,
+  IntegrationOption,
   IntegrationsEvent,
   PearAPI,
   PendingRelayMessage,
@@ -364,6 +365,8 @@ const api = {
       invoke<FsDirEntry[]>('integrations:list-mount-dir', projectId, integrationId, dirPath),
     readMountPreview: (projectId: string, integrationId: string, filePath: string) =>
       invoke<FsReadPreviewResult>('integrations:read-mount-preview', projectId, integrationId, filePath),
+    listOptions: (projectId: string, provider: string, resource: string) =>
+      invoke<IntegrationOption[]>('integrations:list-options', projectId, provider, resource),
     startConnect: (projectId: string, provider: string) =>
       invoke<IntegrationConnectSession>('integrations:start-connect', projectId, provider),
     pollConnect: (sessionId: string) =>
