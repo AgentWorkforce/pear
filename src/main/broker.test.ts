@@ -1,4 +1,4 @@
-import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -230,6 +230,24 @@ describe('resolveAgentRelayMcpCommand', () => {
 
     expect(command).toBe(launcherPath)
     expect(command).not.toContain('app.asar')
+  })
+
+  it('uses a no-space shim for packaged MCP launcher paths containing spaces', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'pear mcp resources-'))
+    const launcherPath = join(tempDir, 'agent-relay-mcp', process.platform === 'win32' ? 'launch.cmd' : 'launch.sh')
+    await mkdir(dirname(launcherPath), { recursive: true })
+    await writeFile(launcherPath, process.platform === 'win32' ? '@echo off\r\n' : '#!/bin/sh\n')
+    await chmod(launcherPath, 0o755)
+    electronMock.app.isPackaged = true
+    delete process.env.AGENT_RELAY_MCP_COMMAND
+    setProcessResourcesPath(tempDir)
+
+    const command = resolveAgentRelayMcpCommand()
+
+    expect(command).toMatch(/pear-agent-relay-mcp/)
+    expect(command).not.toContain('app.asar')
+    expect(command).not.toMatch(/\s/)
+    expect(await readFile(command!, 'utf8')).toContain(launcherPath)
   })
 
   it('fails packaged MCP resolution when the external launcher is missing', async () => {

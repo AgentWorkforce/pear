@@ -1,6 +1,8 @@
-import { accessSync, constants, existsSync, readFileSync } from 'fs'
+import { accessSync, chmodSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { execFileSync } from 'child_process'
+import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
 import { basename, delimiter, dirname, join } from 'path'
 
 const requireForResolve = createRequire(import.meta.url)
@@ -107,6 +109,46 @@ function resolvePackagedAgentRelayMcpLauncher(resourcesPath?: string): string {
   return candidate
 }
 
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`
+}
+
+function windowsCmdQuote(value: string): string {
+  return `"${value.replace(/"/g, '""')}"`
+}
+
+function packagedMcpShimRoot(): string {
+  // Use /tmp on POSIX so the MCP command handed to Codex has no spaces even
+  // when the app is installed as "Pear by Agent Relay.app".
+  return process.platform === 'win32' ? tmpdir() : '/tmp'
+}
+
+function materializePackagedAgentRelayMcpShim(launcherPath: string): string {
+  if (!/\s/.test(launcherPath)) return launcherPath
+
+  const hash = createHash('sha256').update(launcherPath).digest('hex').slice(0, 16)
+  const shimDir = join(packagedMcpShimRoot(), 'pear-agent-relay-mcp', hash)
+  const shimPath = join(shimDir, process.platform === 'win32' ? 'launch.cmd' : 'launch.sh')
+  const content = process.platform === 'win32'
+    ? `@echo off\r\n${windowsCmdQuote(launcherPath)} %*\r\n`
+    : `#!/bin/sh\nexec ${shellQuote(launcherPath)} "$@"\n`
+
+  try {
+    mkdirSync(shimDir, { recursive: true })
+    if (!existsSync(shimPath) || readFileSync(shimPath, 'utf8') !== content) {
+      writeFileSync(shimPath, content, 'utf8')
+    }
+    if (process.platform !== 'win32') chmodSync(shimPath, 0o755)
+  } catch (err) {
+    throw new Error(`Unable to create packaged Agent Relay MCP launcher shim for ${launcherPath}: ${err instanceof Error ? err.message : String(err)}`)
+  }
+
+  if (!canExecute(shimPath)) {
+    throw new Error(`Packaged Agent Relay MCP launcher shim is missing or not executable: ${shimPath}`)
+  }
+  return shimPath
+}
+
 function resolveBundledAgentRelayMcpScript(): string | undefined {
   const packageCommand = resolvePackageBin('agent-relay', 'agent-relay')
   if (packageCommand) {
@@ -130,7 +172,7 @@ export function resolveAgentRelayMcpCommand(options: AgentRelayMcpCommandOptions
   }
 
   if (options.isPackaged) {
-    return assertNoAsarMcpCommand(resolvePackagedAgentRelayMcpLauncher(options.resourcesPath))
+    return assertNoAsarMcpCommand(materializePackagedAgentRelayMcpShim(resolvePackagedAgentRelayMcpLauncher(options.resourcesPath)))
   }
 
   const bundledMcpScript = resolveBundledAgentRelayMcpScript()

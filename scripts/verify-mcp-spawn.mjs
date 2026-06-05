@@ -243,8 +243,23 @@ const resourcesPath = appResourcesPath(appPath)
 const { launcherPath } = assertExternalPayload(rootDir, resourcesPath)
 const commandPath = await resolvePackagedMcpCommand(rootDir, resourcesPath, appExecutablePath(appPath))
 
-if (commandPath !== launcherPath) {
-  fail(`resolver emitted ${commandPath}, expected packaged launcher ${launcherPath}`)
+if (!existsSync(commandPath)) {
+  fail(`resolver emitted missing MCP command path: ${commandPath}`)
+}
+if (!statSync(commandPath).isFile()) {
+  fail(`resolver emitted non-file MCP command path: ${commandPath}`)
+}
+if (process.platform !== 'win32' && (statSync(commandPath).mode & 0o111) === 0) {
+  fail(`resolver emitted non-executable MCP command path: ${commandPath}`)
+}
+if (commandPath.includes('app.asar')) {
+  fail(`resolver emitted app.asar MCP command path: ${commandPath}`)
+}
+if (/\s/.test(commandPath)) {
+  fail(`resolver emitted MCP command path with whitespace: ${commandPath}`)
+}
+if (commandPath !== launcherPath && !commandPath.includes(`${sep}pear-agent-relay-mcp${sep}`)) {
+  fail(`resolver emitted unexpected MCP shim path ${commandPath}, packaged launcher was ${launcherPath}`)
 }
 
 await verifyInitialize(commandPath).catch((error) => fail(error.message))
