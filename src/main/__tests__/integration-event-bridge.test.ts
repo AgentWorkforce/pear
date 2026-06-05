@@ -207,7 +207,7 @@ test('integration events watch selected relayfile mount paths', async () => {
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
 })
 
-test('local fallback watchers include glob-implied roots and dynamic parents', () => {
+test('local fallback watchers are disabled when historical download is off', () => {
   const roots = localWatchRootsFor(
     'workspace-id',
     [
@@ -228,24 +228,81 @@ test('local fallback watchers include glob-implied roots and dynamic parents', (
     ]
   )
 
+  assert.deepEqual(roots, [])
+})
+
+test('local fallback watchers do not watch broad provider history paths', () => {
+  const roots = localWatchRootsFor(
+    'workspace-id',
+    [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        downloadHistoricalData: true,
+        localMountPaths: [
+          join('/tmp', 'relayfile', 'workspaces', 'workspace-id', 'slack', 'channels', 'C123ABC__proj-cloud')
+        ]
+      })
+    ],
+    [
+      '/slack/channels/C123ABC/**',
+      '/slack/channels/C123ABC__proj-cloud/**'
+    ]
+  )
+
+  assert.deepEqual(roots, [])
+})
+
+test('local fallback watchers are limited to bounded command roots when historical download is on', () => {
+  const roots = localWatchRootsFor(
+    'workspace-id',
+    [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/.outbox'],
+        downloadHistoricalData: true,
+        localMountPaths: [
+          join('/tmp', 'relayfile', 'workspaces', 'workspace-id', 'slack', '.outbox')
+        ]
+      })
+    ],
+    [
+      '/slack/.outbox/**',
+      '/slack/channels/C123ABC/**'
+    ]
+  )
+
   const byRemoteRoot = new Map(roots.map((root) => [root.remoteRoot, root.localRoot]))
 
   assert.equal(
-    byRemoteRoot.get('/slack/channels/C123ABC')?.endsWith(join('workspace-id', 'slack', 'channels', 'C123ABC')),
+    byRemoteRoot.get('/slack/.outbox')?.endsWith(join('workspace-id', 'slack', '.outbox')),
     true
   )
-  assert.equal(
-    byRemoteRoot.get('/slack/channels')?.endsWith(join('workspace-id', 'slack', 'channels')),
-    true
+  assert.deepEqual(Array.from(byRemoteRoot.keys()), ['/slack/.outbox'])
+})
+
+test('local fallback watchers accept legacy integration command mount paths', () => {
+  const roots = localWatchRootsFor(
+    'workspace-id',
+    [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/integrations/slack/.outbox'],
+        downloadHistoricalData: true,
+        localMountPaths: [
+          join('/tmp', 'relayfile', 'workspaces', 'workspace-id', 'slack', '.outbox')
+        ]
+      })
+    ],
+    [
+      '/slack/.outbox/**'
+    ]
   )
-  assert.equal(
-    byRemoteRoot.get('/slack/dms')?.endsWith(join('workspace-id', 'slack', 'dms')),
-    true
-  )
-  assert.equal(
-    byRemoteRoot.get('/slack/dms/D123ABC')?.endsWith(join('workspace-id', 'slack', 'dms', 'D123ABC')),
-    true
-  )
+
+  assert.equal(roots.some((root) => root.remoteRoot === '/slack/.outbox'), true)
 })
 
 test('integration events preserve discovery mount paths', async () => {
