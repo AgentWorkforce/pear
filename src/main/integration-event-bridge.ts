@@ -36,9 +36,17 @@ const MAX_EVENT_CONTEXT_PREVIEW_BYTES = 32 * 1024
 const MAX_DISPATCH_QUEUE_EVENTS = 50
 const MAX_DISPATCH_SUMMARY_GROUPS = 10
 const MAX_DISPATCHED_EVENTS_PER_SECOND = 25
+const PROJECT_AGENT_RECIPIENT_CACHE_TTL_MS = 2_000
+const MAX_BROKER_SENDS_PER_SECOND = 25
 
-type IntegrationEventCounterName = 'eventsReceived' | 'eventsInjected' | 'eventsCoalesced' | 'eventsDropped'
-type IntegrationEventGaugeName = 'queueDepth' | 'mountCount'
+type IntegrationEventCounterName =
+  | 'eventsReceived'
+  | 'eventsInjected'
+  | 'eventsCoalesced'
+  | 'eventsDropped'
+  | 'brokerSends'
+  | 'brokerSendsDeferred'
+type IntegrationEventGaugeName = 'queueDepth' | 'mountCount' | 'brokerSendQueueDepth'
 
 type WatchRegistration = {
   glob: string
@@ -87,6 +95,24 @@ type DispatchSummary = {
   label: string
   specs: SubscriptionSpec[]
   latestEvent: ChangeEvent
+}
+
+type BrokerMessageInput = Parameters<BrokerEventBridge['sendMessage']>[1]
+
+type ProjectAgentRecipientCacheEntry = {
+  agents: string[]
+  expiresAt: number
+  pending?: Promise<string[]>
+}
+
+type CachedSpecTargets = {
+  agents: string[]
+  channels: string[]
+}
+
+type NotificationTargetCacheEntry = {
+  specs: CachedSpecTargets[]
+  needsProjectAgents: boolean
 }
 
 type LocalMountSubscription = Subscription & {
@@ -181,8 +207,11 @@ function emptyIntegrationEventCounters(): IntegrationEventTelemetryCounters {
     eventsInjected: 0,
     eventsCoalesced: 0,
     eventsDropped: 0,
+    brokerSends: 0,
+    brokerSendsDeferred: 0,
     queueDepth: 0,
-    mountCount: 0
+    mountCount: 0,
+    brokerSendQueueDepth: 0
   }
 }
 
@@ -1055,6 +1084,15 @@ function dispatchSummaryKey(summary: DispatchSummary): string {
   return `${summary.provider}:${summary.groupPath}`
 }
 
+function notificationTargetCacheKey(matchedSpecs: SubscriptionSpec[]): string {
+  return matchedSpecs.map((spec) => JSON.stringify({
+    integrationId: spec.integrationId,
+    provider: spec.provider,
+    agents: spec.targets.agents,
+    channels: spec.targets.channels
+  })).join('|')
+}
+
 function compactedSummaryTitle(summary: DispatchSummary): string {
   const providerLabel = summary.provider.charAt(0).toUpperCase() + summary.provider.slice(1)
   if (summary.provider === 'slack') {
@@ -1531,14 +1569,126 @@ class ProjectEventDispatcher {
   }
 }
 
+class ProjectBrokerSendPacer {
+  private readonly queue: Array<{
+    input: BrokerMessageInput
+    resolve: () => void
+    reject: (error: unknown) => void
+  }> = []
+  private readonly projectId: string
+  private readonly send: (input: BrokerMessageInput) => Promise<void>
+  private drainTimer: ReturnType<typeof setTimeout> | null = null
+  private draining = false
+  private active = true
+  private windowStartedAt = 0
+  private sentInWindow = 0
+
+  constructor(projectId: string, send: (input: BrokerMessageInput) => Promise<void>) {
+    this.projectId = projectId
+    this.send = send
+  }
+
+  enqueue(input: BrokerMessageInput): Promise<void> {
+    if (!this.active) return Promise.resolve()
+    const deferred = this.queue.length > 0 || this.nextRateLimitDelayMs() > 0 || this.draining
+    if (deferred) incrementIntegrationEventCounter(this.projectId, 'brokerSendsDeferred')
+    return new Promise((resolveSend, rejectSend) => {
+      this.queue.push({ input, resolve: resolveSend, reject: rejectSend })
+      this.updateDepthGauge()
+      this.scheduleDrain(0)
+    })
+  }
+
+  dispose(): void {
+    this.active = false
+    if (this.drainTimer) clearTimeout(this.drainTimer)
+    this.drainTimer = null
+    const error = new Error('integration event broker send pacer disposed')
+    for (const item of this.queue.splice(0)) item.reject(error)
+    this.updateDepthGauge()
+  }
+
+  private scheduleDrain(delayMs: number): void {
+    if (!this.active || this.drainTimer || this.draining) return
+    this.drainTimer = setTimeout(() => {
+      this.drainTimer = null
+      void this.drain()
+    }, delayMs)
+  }
+
+  private async drain(): Promise<void> {
+    if (!this.active || this.draining) return
+    this.draining = true
+    try {
+      while (this.active && this.queue.length > 0) {
+        const waitMs = this.nextRateLimitDelayMs()
+        if (waitMs > 0) {
+          this.scheduleDrain(waitMs)
+          return
+        }
+
+        const item = this.queue.shift()
+        if (!item) continue
+        this.updateDepthGauge()
+        this.sentInWindow += 1
+        try {
+          await this.send(item.input)
+          incrementIntegrationEventCounter(this.projectId, 'brokerSends')
+          item.resolve()
+        } catch (error) {
+          item.reject(error)
+        }
+      }
+    } finally {
+      this.draining = false
+      this.updateDepthGauge()
+      if (this.active && this.queue.length > 0) {
+        this.scheduleDrain(this.nextRateLimitDelayMs())
+      }
+    }
+  }
+
+  private nextRateLimitDelayMs(): number {
+    const now = Date.now()
+    if (this.windowStartedAt === 0 || now - this.windowStartedAt >= 1_000) {
+      this.windowStartedAt = now
+      this.sentInWindow = 0
+    }
+    if (this.sentInWindow < MAX_BROKER_SENDS_PER_SECOND) return 0
+    return Math.max(1, 1_000 - (now - this.windowStartedAt))
+  }
+
+  private updateDepthGauge(): void {
+    setIntegrationEventGauge(this.projectId, 'brokerSendQueueDepth', this.queue.length)
+  }
+}
+
 export class IntegrationEventBridge {
   private subscriptions = new Map<string, ProjectSubscription>()
   private dispatchers = new Map<string, ProjectEventDispatcher>()
   private recentInjections = new Map<string, number>()
+  private projectAgentRecipientCache = new Map<string, ProjectAgentRecipientCacheEntry>()
+  private notificationTargetCache = new Map<string, NotificationTargetCacheEntry>()
+  private brokerSendPacers = new Map<string, ProjectBrokerSendPacer>()
   private readonly deps: IntegrationEventBridgeDeps
 
   constructor(deps: IntegrationEventBridgeDeps = {}) {
     this.deps = deps
+  }
+
+  invalidateProjectAgentCache(projectId?: string): void {
+    if (projectId) {
+      this.projectAgentRecipientCache.delete(projectId)
+      return
+    }
+    this.projectAgentRecipientCache.clear()
+  }
+
+  private invalidateNotificationTargetCache(projectId: string): void {
+    const prefix = `${projectId}:`
+    for (const key of Array.from(this.notificationTargetCache.keys())) {
+      if (key.startsWith(prefix)) this.notificationTargetCache.delete(key)
+    }
   }
 
   async reconcile(projectId: string, integrations: ConnectedIntegration[]): Promise<void> {
@@ -1574,6 +1724,7 @@ export class IntegrationEventBridge {
     })
     if (this.subscriptions.get(projectId)?.signature === signature) return
 
+    this.invalidateNotificationTargetCache(projectId)
     await this.close(projectId)
     const subscriptions: Subscription[] = []
     try {
@@ -1691,8 +1842,13 @@ export class IntegrationEventBridge {
     this.subscriptions.delete(projectId)
     this.dispatchers.get(projectId)?.dispose()
     this.dispatchers.delete(projectId)
+    this.brokerSendPacers.get(projectId)?.dispose()
+    this.brokerSendPacers.delete(projectId)
+    this.invalidateProjectAgentCache(projectId)
+    this.invalidateNotificationTargetCache(projectId)
     setIntegrationEventGauge(projectId, 'queueDepth', 0)
     setIntegrationEventGauge(projectId, 'mountCount', 0)
+    setIntegrationEventGauge(projectId, 'brokerSendQueueDepth', 0)
     if (!subscription) return
     await Promise.all(subscription.subscriptions.map((entry) => entry.unsubscribe().catch(() => undefined)))
   }
@@ -1796,31 +1952,7 @@ export class IntegrationEventBridge {
     }
 
     const bridge = await this.bridge()
-    let allProjectAgents: string[] | null = null
-    const recipients: string[] = []
-    const listProjectAgents = async (): Promise<string[]> => {
-      allProjectAgents ??= (await bridge.listAgents(projectId))
-        .filter((agent) => agent.projectId === undefined || agent.projectId === projectId)
-        .map((agent) => agent.name)
-      return allProjectAgents
-    }
-
-    for (const spec of matchedSpecs) {
-      const projectAgents = spec.targets.agents.length > 0
-        ? await listProjectAgents()
-        : null
-      const onlineExplicitAgents = projectAgents
-        ? spec.targets.agents.filter((agent) => projectAgents.includes(agent))
-        : []
-      const explicitTargets = dedupeStrings([...onlineExplicitAgents, ...spec.targets.channels])
-      if (explicitTargets.length === 0) {
-        recipients.push(...await listProjectAgents())
-      } else {
-        recipients.push(...explicitTargets)
-      }
-    }
-
-    const uniqueRecipients = dedupeStrings(recipients)
+    const uniqueRecipients = await this.recipientsForMatchedSpecs(projectId, matchedSpecs, bridge)
     if (uniqueRecipients.length === 0) {
       incrementIntegrationEventCounter(projectId, 'eventsDropped')
       logIntegrationEvent('skipped no recipients', {
@@ -1859,13 +1991,103 @@ export class IntegrationEventBridge {
           ...eventMetadata
         }
       } as const
-      if (bridge.sendMessageAndWaitForDelivery) {
-        await bridge.sendMessageAndWaitForDelivery(projectId, input)
-      } else {
-        await bridge.sendMessage(projectId, input)
-      }
+      await this.sendBrokerMessage(projectId, input, bridge)
     }
     incrementIntegrationEventCounter(projectId, 'eventsInjected')
+  }
+
+  private async recipientsForMatchedSpecs(
+    projectId: string,
+    matchedSpecs: SubscriptionSpec[],
+    bridge: BrokerEventBridge
+  ): Promise<string[]> {
+    const targetGroups = this.notificationTargetsFor(projectId, matchedSpecs)
+    const projectAgents = targetGroups.needsProjectAgents
+      ? await this.listProjectAgentsCached(projectId, bridge)
+      : null
+    const recipients: string[] = []
+
+    for (const targets of targetGroups.specs) {
+      const onlineExplicitAgents = projectAgents
+        ? targets.agents.filter((agent) => projectAgents.includes(agent))
+        : []
+      const explicitTargets = dedupeStrings([...onlineExplicitAgents, ...targets.channels])
+      if (explicitTargets.length === 0) {
+        recipients.push(...(projectAgents ?? await this.listProjectAgentsCached(projectId, bridge)))
+      } else {
+        recipients.push(...explicitTargets)
+      }
+    }
+
+    return dedupeStrings(recipients)
+  }
+
+  private notificationTargetsFor(projectId: string, matchedSpecs: SubscriptionSpec[]): NotificationTargetCacheEntry {
+    const key = `${projectId}:${notificationTargetCacheKey(matchedSpecs)}`
+    const cached = this.notificationTargetCache.get(key)
+    if (cached) return cached
+
+    const specs = matchedSpecs.map((spec) => ({
+      agents: spec.targets.agents,
+      channels: spec.targets.channels
+    }))
+    const needsProjectAgents = specs.some((targets) =>
+      targets.agents.length > 0 || (targets.agents.length === 0 && targets.channels.length === 0)
+    )
+    const entry = { specs, needsProjectAgents }
+    this.notificationTargetCache.set(key, entry)
+    return entry
+  }
+
+  private async listProjectAgentsCached(projectId: string, bridge: BrokerEventBridge): Promise<string[]> {
+    const now = Date.now()
+    const cached = this.projectAgentRecipientCache.get(projectId)
+    if (cached?.pending) return cached.pending
+    if (cached && cached.expiresAt > now) return cached.agents
+
+    const pending = bridge.listAgents(projectId)
+      .then((agents) => dedupeStrings(
+        agents
+          .filter((agent) => agent.projectId === undefined || agent.projectId === projectId)
+          .map((agent) => agent.name)
+      ))
+      .then((agents) => {
+        // If an explicit invalidation races with this in-flight refresh, the
+        // short TTL bounds how long the older roster can be reused.
+        this.projectAgentRecipientCache.set(projectId, {
+          agents,
+          expiresAt: Date.now() + PROJECT_AGENT_RECIPIENT_CACHE_TTL_MS
+        })
+        return agents
+      })
+      .catch((error) => {
+        this.projectAgentRecipientCache.delete(projectId)
+        throw error
+      })
+    this.projectAgentRecipientCache.set(projectId, {
+      agents: cached?.agents ?? [],
+      expiresAt: 0,
+      pending
+    })
+    return pending
+  }
+
+  private async sendBrokerMessage(
+    projectId: string,
+    input: BrokerMessageInput,
+    bridge: BrokerEventBridge
+  ): Promise<void> {
+    let pacer = this.brokerSendPacers.get(projectId)
+    if (!pacer) {
+      // Integration-event delivery is paced on broker send acceptance. Waiting
+      // for delivery confirmation here can head-of-line block every later event
+      // behind a slow agent receipt path.
+      pacer = new ProjectBrokerSendPacer(projectId, (message) =>
+        Promise.resolve(bridge.sendMessage(projectId, message))
+      )
+      this.brokerSendPacers.set(projectId, pacer)
+    }
+    await pacer.enqueue(input)
   }
 
   private wasRecentlyInjected(key: string, ttlMs = RECENT_INJECTION_TTL_MS): boolean {

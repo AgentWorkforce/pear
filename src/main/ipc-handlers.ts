@@ -22,7 +22,7 @@ import * as auth from './auth'
 import { cloudAgentManager } from './cloud-agent'
 import { proactiveAgentManager } from './proactive-agent'
 import { integrationsManager } from './integrations'
-import { getIntegrationEventTelemetrySnapshot } from './integration-event-bridge'
+import { getIntegrationEventTelemetrySnapshot, integrationEventBridge } from './integration-event-bridge'
 import { aiHistManager } from './ai-hist'
 import { burnManager, type BurnAgentInput, type BurnProjectInput, type BurnSessionBreakdownInput, type BurnFingerprintInput } from './burn'
 import { resetRelayWorkspaceManager } from './relay-workspace'
@@ -210,7 +210,9 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('broker:spawn-agent', async (_, projectId: string, input: SpawnPtyInput & { broker?: 'local' | 'cloud' }) => {
-    return brokerManager.spawnAgent(projectId, input)
+    const result = await brokerManager.spawnAgent(projectId, input)
+    integrationEventBridge.invalidateProjectAgentCache(projectId)
+    return result
   })
 
   ipcMain.handle('broker:list-personas', async (_, projectId: string) => {
@@ -218,7 +220,9 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('broker:spawn-persona', async (_, projectId: string, personaId: string) => {
-    return brokerManager.spawnPersona(projectId, personaId)
+    const result = await brokerManager.spawnPersona(projectId, personaId)
+    integrationEventBridge.invalidateProjectAgentCache(projectId)
+    return result
   })
 
   ipcMain.handle('broker:attach-terminal', async (_, input: {
@@ -286,6 +290,7 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('broker:release-agent', async (_, projectId: string | undefined, name: string) => {
     await brokerManager.releaseAgent(projectId, name)
+    integrationEventBridge.invalidateProjectAgentCache(projectId)
   })
 
   ipcMain.handle('broker:list-agents', async (_, projectId?: string) => {
