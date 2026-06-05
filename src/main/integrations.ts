@@ -279,6 +279,10 @@ function projectIntegrationPathForRelayfilePath(mountPath: string): string {
   return `${PROJECT_INTEGRATIONS_LINK_NAME}${normalized}`
 }
 
+function discoveryMountPathForProvider(provider: string): string {
+  return `/discovery/${toRelayfileProvider(provider)}`
+}
+
 function normalizeCapabilities(value: unknown): IntegrationCapabilities {
   const record = isRecord(value) ? value : {}
   return {
@@ -681,21 +685,15 @@ export class IntegrationsManager {
 
   async listOptions(projectId: string, provider: string, resource: string): Promise<IntegrationOption[]> {
     if (!this.findProject(projectId)) throw new Error(`Project not found: ${projectId}`)
-    const workspaceId = await getAccountWorkspaceId(accountWorkspaceReadyRetryOptions())
     const normalizedProvider = toRelayfileProvider(provider)
     const normalizedResource = resource.trim().toLowerCase()
     if (!normalizedResource) throw new Error('Integration option resource is required')
 
-    let payload: unknown
-    try {
-      payload = await this.fetchJson<unknown>(
-        'GET',
-        `api/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(normalizedProvider)}/options/${encodeURIComponent(normalizedResource)}`
-      )
-    } catch (error) {
-      if (isHttpStatus(error, 404) || /\b404\b/u.test(toErrorMessage(error))) return []
-      throw error
-    }
+    const payload = await this.withWorkspaceHandle(async (handle) => await handle.requestJson({
+      operation: 'listIntegrationOptions',
+      method: 'GET',
+      path: `api/v1/workspaces/${handle.workspaceId}/integrations/${encodeURIComponent(normalizedProvider)}/options/${encodeURIComponent(normalizedResource)}`
+    }) as unknown)
 
     const rawOptions = isRecord(payload) && Array.isArray(payload.options) ? payload.options : []
     return rawOptions
@@ -1379,8 +1377,7 @@ export class IntegrationsManager {
     return dedupeStrings(
       this.listConnected(projectId)
         .filter((integration) => this.isVisibleInProject(projectId, integration.integrationId))
-        .filter((integration) => integration.downloadHistoricalData === true)
-        .flatMap((integration) => this.canonicalMountPathsForIntegration(integration))
+        .flatMap((integration) => this.mountPathsForAgentWorkspace(integration))
     )
   }
 
@@ -1415,13 +1412,16 @@ export class IntegrationsManager {
         const scopeSummary = scopeLabels.length > 0 ? scopeLabels.join(', ') : 'all configured scope'
         const mountPaths = this.canonicalMountPathsForIntegration(integration)
           .map(projectIntegrationPathForRelayfilePath)
+        const discoveryPath = projectIntegrationPathForRelayfilePath(discoveryMountPathForProvider(integration.provider))
         const scopeClause = mountPaths.length > 0
           ? ` (event scope ${mountPaths.join(', ')})`
           : ' (no event scope configured)'
         const historyClause = integration.downloadHistoricalData === true
-          ? ' Historical file download is enabled.'
-          : ' Historical file download is off.'
-        lines.push(`- ${integration.provider}: ${scopeSummary}${scopeClause}.${historyClause}`)
+          ? ` Historical provider records are available at ${mountPaths.join(', ') || 'the configured provider paths'}.`
+          : ' Historical provider records are not mounted.'
+        lines.push(
+          `- ${integration.provider}: ${scopeSummary}${scopeClause}. Writeback discovery is available at ${discoveryPath}. ${historyClause}`
+        )
       }
     }
 
@@ -1429,7 +1429,7 @@ export class IntegrationsManager {
     lines.push('')
     if (!subscriptionsReady && subscriptions.length > 0) {
       lines.push('Integration event subscriptions are requested for this project, but Pear could not register them with Relayfile yet.')
-      lines.push('Do not assume notifications will arrive until a later integrations update confirms active subscriptions; read the mounted integration files when the user asks for current state.')
+      lines.push('Do not assume notifications will arrive until a later integrations update confirms active subscriptions. If historical provider records are mounted for an integration, read them when the user asks for current state; otherwise rely on incoming events and explicit user-provided context.')
     } else if (subscriptions.length === 0) {
       lines.push('No integration event subscriptions are active for this project.')
     } else {
@@ -1447,10 +1447,23 @@ export class IntegrationsManager {
     }
 
     lines.push(
-      `Historical files are downloaded and mounted through ${PROJECT_INTEGRATIONS_LINK_NAME}/ only for integrations where historical download is enabled. Incoming webhook events do not require downloading history.`,
+      `Writeback discovery schemas and examples are mounted through ${PROJECT_INTEGRATIONS_LINK_NAME}/discovery/<provider>/ for connected integrations. Historical provider records are mounted through ${PROJECT_INTEGRATIONS_LINK_NAME}/ only when historical download is enabled. Incoming webhook events do not require downloading history.`,
       '</integrations-update>'
     )
     return lines.join('\n')
+  }
+
+  private mountPathsForAgentWorkspace(integration: ConnectedIntegration): string[] {
+    return dedupeStrings([
+      discoveryMountPathForProvider(integration.provider),
+      ...(integration.downloadHistoricalData === true
+        ? this.canonicalMountPathsForIntegration(integration)
+        : [])
+    ])
+  }
+
+  private mountPathsForLocalSync(integration: ConnectedIntegration): string[] {
+    return this.mountPathsForAgentWorkspace(integration)
   }
 
   private canonicalMountPathsForIntegration(integration: ConnectedIntegration): string[] {
@@ -1518,17 +1531,24 @@ export class IntegrationsManager {
         integration
       }))
     )
-    const byProvider = new Map<string, ConnectedIntegration>()
+    const byProvider = new Map<string, { integration: ConnectedIntegration; mountPaths: Set<string> }>()
     for (const { projectId, integration } of localEntries) {
       if (!this.isVisibleInProject(projectId, integration.integrationId)) continue
-      if (integration.downloadHistoricalData !== true) continue
-      byProvider.set(`${toRelayfileProvider(integration.provider)}:${integration.integrationId}`, integration)
+      const key = `${toRelayfileProvider(integration.provider)}:${integration.integrationId}`
+      const entry = byProvider.get(key) ?? {
+        integration,
+        mountPaths: new Set<string>()
+      }
+      for (const mountPath of this.mountPathsForLocalSync(integration)) {
+        entry.mountPaths.add(mountPath)
+      }
+      byProvider.set(key, entry)
     }
     const integrations = Array.from(byProvider.values())
     try {
-      await integrationMountManager.ensureMounted(integrations.map((integration) => ({
+      await integrationMountManager.ensureMounted(integrations.map(({ integration, mountPaths }) => ({
         provider: integration.provider,
-        mountPaths: this.canonicalMountPathsForIntegration(integration)
+        mountPaths: Array.from(mountPaths)
       })))
     } catch (error) {
       console.warn('[integrations] Failed to reconcile local integration mount:', toErrorMessage(error))

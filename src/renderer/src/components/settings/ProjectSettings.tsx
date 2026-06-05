@@ -443,14 +443,17 @@ function IntegrationVisibilitySection({
 
     try {
       const options = await listOptions(projectId, integration.provider, 'channels')
-      if (options.length === 0) return listMountedSlackChannels()
       return options.map((option) => ({
         id: option.value,
         displayName: option.label,
         name: option.label.replace(/^#/u, ''),
         metadata: option.hint ? { hint: option.hint } : undefined
       }))
-    } catch {
+    } catch (err) {
+      if (!providerLocalMountPath(integration, 'slack')) {
+        const message = err instanceof Error ? err.message : String(err)
+        throw new Error(`Slack channel options are unavailable: ${message}`)
+      }
       return listMountedSlackChannels()
     }
   }, [projectId])
