@@ -179,8 +179,8 @@ export class IntegrationMountManager {
         .map((mountPath) => canonicalIntegrationMountPath(mountPath, integration.provider))
         .filter((mountPath): mountPath is string => !!mountPath)
     )).sort()
-    if (this.workspaceId === workspaceId && this.desiredMountPaths.length > 0) {
-      const mountedPaths = new Set(this.desiredMountPaths)
+    if (this.workspaceId === workspaceId && this.handles.size > 0) {
+      const mountedPaths = new Set(this.handles.keys())
       mountPaths = mountPaths.filter((mountPath) => mountedPaths.has(mountPath))
     }
 

@@ -334,7 +334,7 @@ describe('IntegrationsManager', () => {
   it('does not block updateScope on integration state sync', async () => {
     let finishMountReconcile!: () => void
     mock.setMountReconcilePromise(new Promise((resolve) => {
-      finishMountReconcile = resolve
+      finishMountReconcile = () => resolve()
     }))
     const manager = new IntegrationsManager()
 
