@@ -1124,7 +1124,7 @@ export class BrokerManager {
     name: string,
     win: BrowserWindow,
     channels: string[] = []
-  ): Promise<void> {
+  ): Promise<boolean> {
     const normalizedProjectId = projectId.trim()
     if (!normalizedProjectId) {
       throw new Error('Project id is required')
@@ -1140,7 +1140,7 @@ export class BrokerManager {
       await this.syncChannels(normalizedProjectId, nextChannels)
       await this.refreshEventStream(normalizedProjectId, 'existing-session-start', win)
       this.sendStatus(normalizedProjectId, 'connected')
-      return
+      return false
     }
 
     const inFlight = this.startPromises.get(normalizedProjectId)
@@ -1156,14 +1156,14 @@ export class BrokerManager {
         started.name = name
         await this.syncChannels(normalizedProjectId, nextChannels)
         this.sendStatus(normalizedProjectId, 'connected')
-        return
+        return false
       } catch (err) {
         this.sendStatusToWindow(win, normalizedProjectId, 'error', String(err))
         throw err
       }
     }
 
-    const startBroker = async (): Promise<void> => {
+    const startBroker = async (): Promise<boolean> => {
       const existingClient = await this.connectExistingBroker(normalizedProjectId, cwd)
       if (existingClient) {
         const unsubEvent = this.attachClient(normalizedProjectId, existingClient, win)
@@ -1190,7 +1190,7 @@ export class BrokerManager {
           source: 'local'
         })
         this.sendStatus(normalizedProjectId, 'connected')
-        return
+        return true
       }
 
       const agentRelayMcpCommand = resolveAgentRelayMcpCommand()
@@ -1241,12 +1241,13 @@ export class BrokerManager {
         source: 'local'
       })
       this.sendStatus(normalizedProjectId, 'connected')
+      return true
     }
 
     const startPromise = startBroker()
     this.startPromises.set(normalizedProjectId, startPromise)
     try {
-      await startPromise
+      return await startPromise
     } catch (err) {
       console.error(`[broker] Failed to start for project ${normalizedProjectId}:`, err)
       this.sendStatusToWindow(win, normalizedProjectId, 'error', String(err))

@@ -270,6 +270,22 @@ describe('BrokerManager local + cloud coexistence', () => {
     expect(cloud.shutdown).toHaveBeenCalled()
   })
 
+  it('reports an existing local broker start as reused', async () => {
+    const manager = new BrokerManager()
+    mock.state.nextLocalAgents = []
+
+    const firstStart = await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', undefined as never, [])
+    const local = lastSpawned()
+    const secondStart = await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', undefined as never, [])
+
+    expect(firstStart).toBe(true)
+    expect(secondStart).toBe(false)
+    expect(mock.HarnessDriverClient.spawn).toHaveBeenCalledTimes(1)
+    expect(local.shutdown).not.toHaveBeenCalled()
+
+    await manager.shutdown()
+  })
+
   it('keeps the cloud session alive when a local broker starts afterwards', async () => {
     const manager = new BrokerManager()
     const cloud = await attachCloud(manager, ['cloud-agent'])
