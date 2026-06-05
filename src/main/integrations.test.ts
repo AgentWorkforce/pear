@@ -70,6 +70,10 @@ const mock = vi.hoisted(() => {
       })
     }
 
+    if (parsed.pathname === '/api/v1/workspaces/account-workspace-id/integrations') {
+      return jsonResponse({ integrations: [] })
+    }
+
     if (parsed.pathname === '/api/v1/workspaces/account-workspace-id/integrations/google-mail/options/channels') {
       return jsonResponse({
         options: [
@@ -275,7 +279,9 @@ describe('IntegrationsManager', () => {
       scope: { channels: ['C123'] },
       mountPaths: ['/slack/channels/C123']
     })
-    expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalled()
+    await vi.waitFor(() => {
+      expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalled()
+    })
 
     finishMountReconcile()
   })

@@ -107,7 +107,7 @@ function isUnauthorizedError(error: unknown): boolean {
     (error as { httpStatus?: unknown; status?: unknown }).status
   if (status === 401 || status === 403) return true
   const message = (error as { message?: unknown }).message
-  return typeof message === 'string' && /\b(401|403|unauthor|forbidden)\b/i.test(message)
+  return typeof message === 'string' && /\b(401|403|unauthori[sz]ed?|forbidden)\b/i.test(message)
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
