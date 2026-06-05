@@ -214,6 +214,7 @@ const POLL_INTERVAL_MS = 2_000
 const POLL_TIMEOUT_MS = 5 * 60_000
 const CATALOG_CACHE_MS = 5 * 60_000
 const SYSTEM_MESSAGE_DEBOUNCE_MS = 1_000
+const SYSTEM_MESSAGE_DEDUPE_MS = 30_000
 const SYSTEM_MESSAGE_AGENT_WAIT_TIMEOUT_MS = 8_000
 const SYSTEM_MESSAGE_AGENT_WAIT_INTERVAL_MS = 500
 const LOCAL_MOUNT_CLOUD_HYDRATION_THROTTLE_MS = 30_000
@@ -719,6 +720,7 @@ export class IntegrationsManager {
   private sessionMetadata = new Map<string, SessionMetadata>()
   private pollTimers = new Map<string, NodeJS.Timeout>()
   private systemMessageTimers = new Map<string, NodeJS.Timeout>()
+  private recentlyInjectedSystemMessages = new Map<string, number>()
   private catalogCache: IntegrationAdapter[] | null = null
   private catalogFetchedAt = 0
   private localMountCloudHydrationStartedAt = 0
@@ -932,8 +934,10 @@ export class IntegrationsManager {
   }
 
   async startLocalMountDaemon(): Promise<void> {
-    await this.syncLocalMounts()
     await this.syncActiveEventSubscriptions()
+    void this.syncLocalMounts().catch((error) => {
+      console.warn('[integrations] Failed to start local integration mounts:', toErrorMessage(error))
+    })
   }
 
   async notifyAgentState(projectId: string): Promise<void> {
@@ -1637,9 +1641,6 @@ export class IntegrationsManager {
     systemMessageOptions: IntegrationSystemMessageOptions = {}
   ): Promise<void> {
     let integrations = this.visibleIntegrationsForProject(projectId)
-    await this.syncLocalMounts()
-    integrations = await this.withLocalMountPaths(integrations)
-    await this.safeUpdateMountPaths(projectId, this.mountPathsFor(projectId))
     const subscriptionsReady = await this.syncEventSubscriptions(projectId)
 
     if (notifyAgent) {
@@ -1649,6 +1650,15 @@ export class IntegrationsManager {
         systemMessageOptions
       )
     }
+
+    void this.syncLocalIntegrationState(projectId).catch((error) => {
+      console.warn('[integrations] Failed to sync local integration state:', toErrorMessage(error))
+    })
+  }
+
+  private async syncLocalIntegrationState(projectId: string): Promise<void> {
+    await this.syncLocalMounts()
+    await this.safeUpdateMountPaths(projectId, this.mountPathsFor(projectId))
   }
 
   private buildSystemMessageSnippet(integrations: ConnectedIntegration[], subscriptionsReady: boolean): string {
@@ -1770,6 +1780,14 @@ export class IntegrationsManager {
     options: IntegrationSystemMessageOptions = {}
   ): Promise<void> {
     try {
+      const messageKey = `${projectId}\0${message}`
+      const now = Date.now()
+      for (const [key, expiresAt] of Array.from(this.recentlyInjectedSystemMessages.entries())) {
+        if (expiresAt <= now) this.recentlyInjectedSystemMessages.delete(key)
+      }
+      if (this.recentlyInjectedSystemMessages.has(messageKey)) return
+      this.recentlyInjectedSystemMessages.set(messageKey, now + SYSTEM_MESSAGE_DEDUPE_MS)
+
       const bridge = brokerManager as unknown as IntegrationSystemMessageBridge
       const agents = await this.listSystemMessageAgents(bridge, projectId, options.waitForAgent === true)
       await Promise.all(
@@ -1830,7 +1848,7 @@ export class IntegrationsManager {
       await integrationEventBridge.closeAllExcept(projectId)
       await integrationEventBridge.reconcile(
         projectId,
-        await this.withLocalMountPaths(this.visibleIntegrationsForProject(projectId))
+        this.visibleIntegrationsForProject(projectId)
       )
       return true
     } catch (error) {

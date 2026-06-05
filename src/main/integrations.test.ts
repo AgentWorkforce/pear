@@ -100,6 +100,21 @@ const mock = vi.hoisted(() => {
       })
     }
 
+    if (parsed.pathname === '/api/v1/workspaces/account-workspace-id/integrations') {
+      return jsonResponse({
+        integrations: [
+          {
+            provider: 'slack',
+            integrationId: 'slack-integration-1',
+            mountPaths: ['/slack/channels'],
+            scope: {},
+            connectedAt: '2026-06-05T00:00:00.000Z',
+            ready: true
+          }
+        ]
+      })
+    }
+
     if (parsed.pathname === '/api/v1/workspaces/account-workspace-id/integrations/google-mail/options/channels') {
       return jsonResponse({
         options: [
@@ -155,7 +170,8 @@ const mock = vi.hoisted(() => {
     },
     integrationEventBridge: {
       reconcile: vi.fn(async () => undefined),
-      closeAll: vi.fn(async () => undefined)
+      closeAll: vi.fn(async () => undefined),
+      closeAllExcept: vi.fn(async () => undefined)
     },
     cloudAgentManager: {
       updateMountPaths: vi.fn(async () => undefined)
@@ -250,6 +266,8 @@ describe('IntegrationsManager', () => {
     mock.integrationMountManager.localPathsFor.mockClear()
     mock.integrationMountManager.stop.mockClear()
     mock.integrationEventBridge.reconcile.mockClear()
+    mock.integrationEventBridge.closeAll.mockClear()
+    mock.integrationEventBridge.closeAllExcept.mockClear()
     mock.cloudAgentManager.updateMountPaths.mockClear()
     mock.readFileCalls.splice(0)
     mock.relayClient.readFile.mockClear()
@@ -420,6 +438,36 @@ describe('IntegrationsManager', () => {
           kind: 'integrations-update',
           system: true
         }
+      })
+    )
+  })
+
+  it('subscribes integration events before waiting on local Relayfile mounts', async () => {
+    vi.useFakeTimers()
+    mock.setMountReconcilePromise(new Promise(() => undefined))
+    mock.brokerManager.listAgents.mockResolvedValue([{ name: 'claude-1', projectId: 'project-1' }])
+    const manager = new IntegrationsManager()
+
+    await manager.notifyAgentState('project-1')
+
+    expect(mock.integrationEventBridge.closeAllExcept).toHaveBeenCalledWith('project-1')
+    expect(mock.integrationEventBridge.reconcile).toHaveBeenCalledWith(
+      'project-1',
+      expect.arrayContaining([
+        expect.objectContaining({
+          provider: 'slack',
+          integrationId: 'slack-integration-1'
+        })
+      ])
+    )
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(mock.brokerManager.sendMessage).toHaveBeenCalledWith(
+      'project-1',
+      expect.objectContaining({
+        to: 'claude-1',
+        from: 'system',
+        text: expect.stringContaining('<integrations-update>')
       })
     )
   })
