@@ -206,10 +206,17 @@ type IntegrationSystemMessageBridge = {
   ) => Promise<unknown>
 }
 
+type IntegrationSystemMessageOptions = {
+  waitForAgent?: boolean
+}
+
 const POLL_INTERVAL_MS = 2_000
 const POLL_TIMEOUT_MS = 5 * 60_000
 const CATALOG_CACHE_MS = 5 * 60_000
 const SYSTEM_MESSAGE_DEBOUNCE_MS = 1_000
+const SYSTEM_MESSAGE_DEDUPE_MS = 30_000
+const SYSTEM_MESSAGE_AGENT_WAIT_TIMEOUT_MS = 8_000
+const SYSTEM_MESSAGE_AGENT_WAIT_INTERVAL_MS = 500
 const LOCAL_MOUNT_CLOUD_HYDRATION_THROTTLE_MS = 30_000
 const CATALOG_PATH = '/api/v1/integrations/catalog'
 const MAX_REMOTE_DIRECTORY_ENTRIES = 5_000
@@ -713,6 +720,7 @@ export class IntegrationsManager {
   private sessionMetadata = new Map<string, SessionMetadata>()
   private pollTimers = new Map<string, NodeJS.Timeout>()
   private systemMessageTimers = new Map<string, NodeJS.Timeout>()
+  private recentlyInjectedSystemMessages = new Map<string, number>()
   private catalogCache: IntegrationAdapter[] | null = null
   private catalogFetchedAt = 0
   private localMountCloudHydrationStartedAt = 0
@@ -926,12 +934,18 @@ export class IntegrationsManager {
   }
 
   async startLocalMountDaemon(): Promise<void> {
-    await this.syncLocalMounts()
-    await this.syncAllEventSubscriptions()
+    await this.syncActiveEventSubscriptions()
+    void this.syncLocalMounts().catch((error) => {
+      console.warn('[integrations] Failed to start local integration mounts:', toErrorMessage(error))
+    })
   }
 
   async notifyAgentState(projectId: string): Promise<void> {
-    await this.syncAgentState(projectId, true)
+    await this.syncAgentState(projectId, true, { waitForAgent: true })
+  }
+
+  async refreshAgentState(projectId: string): Promise<void> {
+    await this.syncAgentState(projectId, false)
   }
 
   async shutdownLocalMounts(): Promise<void> {
@@ -1136,6 +1150,14 @@ export class IntegrationsManager {
   async hydrateProject(projectId: string): Promise<void> {
     await this.syncAgentState(projectId, true)
     await this.syncEventSubscriptions(projectId)
+  }
+
+  async hydrateActiveProject(projectId: string | null): Promise<void> {
+    if (!projectId) {
+      await integrationEventBridge.closeAll()
+      return
+    }
+    await this.hydrateProject(projectId)
   }
 
   private emit(event: IntegrationsEvent): void {
@@ -1617,16 +1639,30 @@ export class IntegrationsManager {
     })
   }
 
-  private async syncAgentState(projectId: string, notifyAgent: boolean): Promise<void> {
+  private async syncAgentState(
+    projectId: string,
+    notifyAgent: boolean,
+    systemMessageOptions: IntegrationSystemMessageOptions = {}
+  ): Promise<void> {
     let integrations = this.visibleIntegrationsForProject(projectId)
-    await this.syncLocalMounts()
-    integrations = await this.withLocalMountPaths(integrations)
-    await this.safeUpdateMountPaths(projectId, this.mountPathsFor(projectId))
     const subscriptionsReady = await this.syncEventSubscriptions(projectId)
 
     if (notifyAgent) {
-      this.scheduleSystemMessage(projectId, this.buildSystemMessageSnippet(integrations, subscriptionsReady))
+      this.scheduleSystemMessage(
+        projectId,
+        this.buildSystemMessageSnippet(integrations, subscriptionsReady),
+        systemMessageOptions
+      )
     }
+
+    void this.syncLocalIntegrationState(projectId).catch((error) => {
+      console.warn('[integrations] Failed to sync local integration state:', toErrorMessage(error))
+    })
+  }
+
+  private async syncLocalIntegrationState(projectId: string): Promise<void> {
+    await this.syncLocalMounts()
+    await this.safeUpdateMountPaths(projectId, this.mountPathsFor(projectId))
   }
 
   private buildSystemMessageSnippet(integrations: ConnectedIntegration[], subscriptionsReady: boolean): string {
@@ -1702,6 +1738,15 @@ export class IntegrationsManager {
     return lines.join('\n')
   }
 
+  initialSpawnInstructions(projectId: string): string | undefined {
+    const integrations = this.visibleIntegrationsForProject(projectId)
+    if (integrations.length === 0) return undefined
+    return [
+      'Initial project integration context. Treat this as setup context, not as the user task.',
+      this.buildSystemMessageSnippet(integrations, true)
+    ].join('\n')
+  }
+
   private mountPathsForAgentWorkspace(integration: ConnectedIntegration): string[] {
     return dedupeStrings([
       discoveryMountPathForProvider(integration.provider),
@@ -1726,13 +1771,40 @@ export class IntegrationsManager {
     return canonicalMountPathsForConnectedIntegration(integration)
   }
 
-  private async safeInjectSystemMessage(projectId: string, message: string): Promise<void> {
+  private async listSystemMessageAgents(
+    bridge: IntegrationSystemMessageBridge,
+    projectId: string,
+    waitForAgent: boolean
+  ): Promise<Array<{ name: string; projectId?: string }>> {
+    const startedAt = Date.now()
+
+    for (;;) {
+      const agents = (await bridge.listAgents(projectId))
+        .filter((agent) => agent.projectId === undefined || agent.projectId === projectId)
+      if (agents.length > 0 || !waitForAgent) return agents
+      if (Date.now() - startedAt >= SYSTEM_MESSAGE_AGENT_WAIT_TIMEOUT_MS) return agents
+      await new Promise((resolve) => setTimeout(resolve, SYSTEM_MESSAGE_AGENT_WAIT_INTERVAL_MS))
+    }
+  }
+
+  private async safeInjectSystemMessage(
+    projectId: string,
+    message: string,
+    options: IntegrationSystemMessageOptions = {}
+  ): Promise<void> {
     try {
+      const messageKey = `${projectId}\0${message}`
+      const now = Date.now()
+      for (const [key, expiresAt] of Array.from(this.recentlyInjectedSystemMessages.entries())) {
+        if (expiresAt <= now) this.recentlyInjectedSystemMessages.delete(key)
+      }
+      if (this.recentlyInjectedSystemMessages.has(messageKey)) return
+
       const bridge = brokerManager as unknown as IntegrationSystemMessageBridge
-      const agents = await bridge.listAgents(projectId)
+      const agents = await this.listSystemMessageAgents(bridge, projectId, options.waitForAgent === true)
+      if (agents.length === 0) return
       await Promise.all(
         agents
-          .filter((agent) => agent.projectId === undefined || agent.projectId === projectId)
           .map((agent) => {
             const input = {
               to: agent.name,
@@ -1750,18 +1822,23 @@ export class IntegrationsManager {
               : bridge.sendMessage(projectId, input)
           })
       )
+      this.recentlyInjectedSystemMessages.set(messageKey, Date.now() + SYSTEM_MESSAGE_DEDUPE_MS)
     } catch (error) {
       console.warn('[integrations] Failed to inject integration system message:', toErrorMessage(error))
     }
   }
 
-  private scheduleSystemMessage(projectId: string, message: string): void {
+  private scheduleSystemMessage(
+    projectId: string,
+    message: string,
+    options: IntegrationSystemMessageOptions = {}
+  ): void {
     const existing = this.systemMessageTimers.get(projectId)
     if (existing) clearTimeout(existing)
 
     const timer = setTimeout(() => {
       this.systemMessageTimers.delete(projectId)
-      void this.safeInjectSystemMessage(projectId, message)
+      void this.safeInjectSystemMessage(projectId, message, options)
     }, SYSTEM_MESSAGE_DEBOUNCE_MS)
     this.systemMessageTimers.set(projectId, timer)
   }
@@ -1777,9 +1854,15 @@ export class IntegrationsManager {
 
   private async syncEventSubscriptions(projectId: string): Promise<boolean> {
     try {
+      const activeProjectId = loadStore().activeProjectId
+      if (projectId !== activeProjectId) {
+        await integrationEventBridge.close(projectId)
+        return true
+      }
+      await integrationEventBridge.closeAllExcept(projectId)
       await integrationEventBridge.reconcile(
         projectId,
-        await this.withLocalMountPaths(this.visibleIntegrationsForProject(projectId))
+        this.visibleIntegrationsForProject(projectId)
       )
       return true
     } catch (error) {
@@ -1788,8 +1871,13 @@ export class IntegrationsManager {
     }
   }
 
-  private async syncAllEventSubscriptions(): Promise<void> {
-    await Promise.all(loadStore().projects.map((project) => this.syncEventSubscriptions(project.id)))
+  private async syncActiveEventSubscriptions(): Promise<void> {
+    const activeProjectId = loadStore().activeProjectId
+    if (!activeProjectId) {
+      await integrationEventBridge.closeAll()
+      return
+    }
+    await this.syncEventSubscriptions(activeProjectId)
   }
 
   private async hydrateCloudIntegrationsForLocalMounts(): Promise<void> {
