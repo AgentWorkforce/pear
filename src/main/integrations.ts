@@ -187,6 +187,18 @@ type IntegrationSystemMessageBridge = {
       mode?: 'wait' | 'steer'
     }
   ) => Promise<void> | void
+  sendMessageAndWaitForDelivery?: (
+    projectId: string,
+    input: {
+      to: string
+      text: string
+      from?: string
+      data?: Record<string, unknown>
+      priority?: number
+      mode?: 'wait' | 'steer'
+    },
+    options?: { timeoutMs?: number }
+  ) => Promise<unknown>
 }
 
 const POLL_INTERVAL_MS = 2_000
@@ -1535,14 +1547,15 @@ export class IntegrationsManager {
         const mountPaths = this.canonicalMountPathsForIntegration(integration)
           .map(projectIntegrationPathForRelayfilePath)
         const discoveryPath = projectIntegrationPathForRelayfilePath(discoveryMountPathForProvider(integration.provider))
+        const writebackPaths = mountPaths.join(', ') || 'the configured provider paths'
         const scopeClause = mountPaths.length > 0
           ? ` (event scope ${mountPaths.join(', ')})`
           : ' (no event scope configured)'
         const historyClause = integration.downloadHistoricalData === true
-          ? ` Historical provider records are available at ${mountPaths.join(', ') || 'the configured provider paths'}.`
-          : ' Historical provider records are not mounted.'
+          ? ` Historical provider records are available at ${writebackPaths}.`
+          : ` Live/writeback provider paths are mounted at ${writebackPaths}, but historical provider records are not intentionally downloaded.`
         lines.push(
-          `- ${integration.provider}: ${scopeSummary}${scopeClause}. Writeback discovery is available at ${discoveryPath}. ${historyClause}`
+          `- ${integration.provider}: ${scopeSummary}${scopeClause}. Writeback schemas and examples are available at ${discoveryPath}; create writeback files under ${writebackPaths}, not under discovery. ${historyClause}`
         )
       }
     }
@@ -1569,7 +1582,7 @@ export class IntegrationsManager {
     }
 
     lines.push(
-      `Writeback discovery schemas and examples are mounted through ${PROJECT_INTEGRATIONS_LINK_NAME}/discovery/<provider>/ for connected integrations. Historical provider records are mounted through ${PROJECT_INTEGRATIONS_LINK_NAME}/ only when historical download is enabled. Incoming webhook events do not require downloading history.`,
+      `Writeback discovery schemas and examples are mounted through ${PROJECT_INTEGRATIONS_LINK_NAME}/discovery/<provider>/ for connected integrations. Use those schemas to create files under the provider paths such as ${PROJECT_INTEGRATIONS_LINK_NAME}/slack/channels/<channelId>/messages; do not create provider records inside discovery. Historical provider records are only intentionally downloaded when historical download is enabled. Incoming webhook events do not require downloading history.`,
       '</integrations-update>'
     )
     return lines.join('\n')
@@ -1578,9 +1591,7 @@ export class IntegrationsManager {
   private mountPathsForAgentWorkspace(integration: ConnectedIntegration): string[] {
     return dedupeStrings([
       discoveryMountPathForProvider(integration.provider),
-      ...(integration.downloadHistoricalData === true
-        ? this.canonicalMountPathsForIntegration(integration)
-        : [])
+      ...this.canonicalMountPathsForIntegration(integration)
     ])
   }
 
@@ -1612,17 +1623,22 @@ export class IntegrationsManager {
       await Promise.all(
         agents
           .filter((agent) => agent.projectId === undefined || agent.projectId === projectId)
-          .map((agent) => bridge.sendMessage(projectId, {
-            to: agent.name,
-            from: 'system',
-            text: message,
-            priority: 0,
-            mode: 'steer',
-            data: {
-              kind: 'integrations-update',
-              system: true
-            }
-          }))
+          .map((agent) => {
+            const input = {
+              to: agent.name,
+              from: 'system',
+              text: message,
+              priority: 0,
+              mode: 'steer',
+              data: {
+                kind: 'integrations-update',
+                system: true
+              }
+            } as const
+            return bridge.sendMessageAndWaitForDelivery
+              ? bridge.sendMessageAndWaitForDelivery(projectId, input)
+              : bridge.sendMessage(projectId, input)
+          })
       )
     } catch (error) {
       console.warn('[integrations] Failed to inject integration system message:', toErrorMessage(error))

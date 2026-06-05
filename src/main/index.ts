@@ -31,6 +31,7 @@ protocol.registerSchemesAsPrivileged([
 let mainWindow: BrowserWindow | null = null
 let shutdownPromise: Promise<void> | null = null
 let quitAfterShutdown = false
+const integrationAgentRefreshTimers = new Map<string, ReturnType<typeof setTimeout>>()
 // Path requested via `pear open <dir>` before the renderer has registered its
 // listener; applied once the renderer sends `cli:renderer-ready`.
 let pendingOpenPath: string | null = null
@@ -91,6 +92,8 @@ function getAppIcon(): Electron.NativeImage | undefined {
 }
 
 function shutdownBrokerOnce(): Promise<void> {
+  for (const timer of integrationAgentRefreshTimers.values()) clearTimeout(timer)
+  integrationAgentRefreshTimers.clear()
   if (!shutdownPromise) {
     shutdownPromise = Promise.all([
       cloudAgentManager.shutdownAll(),
@@ -258,6 +261,27 @@ function createMenu(): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(template))
 }
 
+function scheduleIntegrationAgentRefresh(projectId: string): void {
+  if (!projectId.trim()) return
+  const existing = integrationAgentRefreshTimers.get(projectId)
+  if (existing) clearTimeout(existing)
+
+  const timer = setTimeout(() => {
+    integrationAgentRefreshTimers.delete(projectId)
+    void integrationsManager.notifyAgentState(projectId).catch((error) => {
+      console.warn('[integrations] Failed to notify newly ready agent:', error instanceof Error ? error.message : String(error))
+    })
+  }, 2_000)
+  integrationAgentRefreshTimers.set(projectId, timer)
+}
+
+function registerIntegrationBrokerHooks(): void {
+  brokerManager.onBrokerEvent((projectId, event) => {
+    if (event.kind !== 'agent_spawned' && event.kind !== 'worker_ready') return
+    scheduleIntegrationAgentRefresh(projectId)
+  })
+}
+
 // Ensure a single running instance so `pear open <dir>` from a second launch is
 // routed to the existing window instead of starting a duplicate app.
 const gotSingleInstanceLock = app.requestSingleInstanceLock()
@@ -297,6 +321,7 @@ if (!gotSingleInstanceLock) {
     registerIpcHandlers()
     registerUpdaterIpc()
     registerCliInstallIpc()
+    registerIntegrationBrokerHooks()
     initAutoUpdater()
     // Prime the burn ledger off the critical path so the first burn view (and the
     // status-bar summary) queries a warm binding/DB instead of stalling ~1.5-4s.

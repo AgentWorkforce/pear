@@ -305,6 +305,11 @@ export interface CloudAgentSandboxHandle {
 
 type BrokerEventObserver = (projectId: string, event: BrokerEvent) => void
 
+type DeliveryConfirmationResult = {
+  eventId: string
+  targets: string[]
+}
+
 export interface AttachTerminalInput {
   name: string
   rows?: number
@@ -340,6 +345,7 @@ const COMMIT_DRAFT_MAX_DIFF_CHARS = 80_000
 const COMMIT_DRAFT_TIMEOUT_MS = 180_000
 const MAX_BROKER_EVENT_HISTORY = 3_000
 const BROKER_EVENT_HISTORY_TTL_MS = 12 * 60 * 60 * 1_000
+const DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS = 15_000
 const DEFAULT_RECONCILE_MESSAGE_LIMIT = 50
 const MAX_RECONCILE_MESSAGE_LIMIT = 100
 const EVENT_STREAM_REBIND_COOLDOWN_MS = 5_000
@@ -363,6 +369,56 @@ const AGENTWORKFORCE_CLI_VERSION = '3.0.35'
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function spawnRequestKey(
+  projectId: string,
+  input: SpawnPtyInput & { broker?: 'local' | 'cloud' },
+  options: { parentAgentName?: string }
+): string {
+  return JSON.stringify({
+    projectId,
+    broker: input.broker || 'auto',
+    name: input.name,
+    cli: input.cli,
+    cwd: input.cwd || '',
+    args: input.args || [],
+    task: input.task || '',
+    model: input.model || '',
+    parentAgentName: options.parentAgentName || ''
+  })
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null
+}
+
+function brokerEventString(event: BrokerEvent, key: string): string | undefined {
+  const value = (event as unknown as Record<string, unknown>)[key]
+  return typeof value === 'string' ? value : undefined
+}
+
+function isDeliveryEventForMessage(event: BrokerEvent, eventId: string, targets: string[]): boolean {
+  const kind = brokerEventString(event, 'kind')
+  if (![
+    'delivery_ack',
+    'delivery_verified',
+    'delivery_failed',
+    'message_delivery_confirmed',
+    'message_delivery_failed'
+  ].includes(kind || '')) {
+    return false
+  }
+  if (brokerEventString(event, 'event_id') !== eventId) return false
+  const name = brokerEventString(event, 'name')
+  return !name || targets.length === 0 || targets.includes(name)
+}
+
+function deliveryFailureMessage(event: BrokerEvent): string {
+  if (!isRecord(event)) return 'Broker delivery failed'
+  const reason = typeof event.reason === 'string' ? event.reason : undefined
+  const lastError = typeof event.lastError === 'string' ? event.lastError : undefined
+  return reason || lastError || 'Broker delivery failed'
 }
 
 interface PearLineageEntry {
@@ -1119,6 +1175,7 @@ export class BrokerManager {
   private sessions = new Map<string, BrokerSession>()
   private startPromises = new Map<string, Promise<boolean | void>>()
   private revivePromises = new Map<string, Promise<boolean>>()
+  private inFlightSpawnRequests = new Map<string, Promise<{ name: string; runtime: string }>>()
   // Which broker sessions (by session key) an agent name is registered on.
   // Both a project's local and cloud brokers join the same relay workspace,
   // so agent names are project-unique in practice — the set tracks which
@@ -2224,6 +2281,25 @@ export class BrokerManager {
     spawnInput: SpawnPtyInput & { broker?: 'local' | 'cloud' },
     options: { parentAgentName?: string } = {}
   ): Promise<{ name: string; runtime: string }> {
+    const requestKey = spawnRequestKey(projectId, spawnInput, options)
+    const inFlight = this.inFlightSpawnRequests.get(requestKey)
+    if (inFlight) return inFlight
+
+    let promise!: Promise<{ name: string; runtime: string }>
+    promise = this.spawnAgentOnce(projectId, spawnInput, options).finally(() => {
+      if (this.inFlightSpawnRequests.get(requestKey) === promise) {
+        this.inFlightSpawnRequests.delete(requestKey)
+      }
+    })
+    this.inFlightSpawnRequests.set(requestKey, promise)
+    return promise
+  }
+
+  private async spawnAgentOnce(
+    projectId: string,
+    spawnInput: SpawnPtyInput & { broker?: 'local' | 'cloud' },
+    options: { parentAgentName?: string } = {}
+  ): Promise<{ name: string; runtime: string }> {
     // `broker` selects which of the project's sessions the agent spawns on.
     // Default: local-first via getSessionForProject (cloud only when no local
     // broker is running, preserving the cloud-only flow).
@@ -2862,6 +2938,97 @@ export class BrokerManager {
       ? this.getSessionForProject(projectId || '')
       : this.getSessionForAgent(input.to, projectId)
     await session.client.sendMessage(input)
+  }
+
+  async sendMessageAndWaitForDelivery(
+    projectId: string | undefined,
+    input: SendMessageInput,
+    options: { timeoutMs?: number } = {}
+  ): Promise<DeliveryConfirmationResult> {
+    const session = input.to.startsWith('#')
+      ? this.getSessionForProject(projectId || '')
+      : this.getSessionForAgent(input.to, projectId)
+    const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS)
+    const observedEvents: BrokerEvent[] = []
+    let eventId: string | undefined
+    let targets: string[] = []
+    let pendingTargets = new Set<string>()
+    let settled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let resolveWait: (() => void) | undefined
+    let rejectWait: ((error: Error) => void) | undefined
+
+    const waitForConfirmation = new Promise<void>((resolve, reject) => {
+      resolveWait = resolve
+      rejectWait = reject
+      timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        const pending = Array.from(pendingTargets)
+        const targetSummary = pending.length > 0 ? ` (${pending.join(', ')})` : ''
+        reject(new Error(`Timed out waiting for delivery confirmation for ${eventId || input.to}${targetSummary}`))
+      }, timeoutMs)
+    })
+
+    const maybeComplete = (event: BrokerEvent): void => {
+      if (settled || !eventId) return
+      if (!isDeliveryEventForMessage(event, eventId, targets)) return
+      const name = brokerEventString(event, 'name')
+
+      if (
+        event.kind === 'delivery_ack' ||
+        event.kind === 'delivery_verified' ||
+        event.kind === 'message_delivery_confirmed'
+      ) {
+        if (!name || pendingTargets.size === 0) {
+          settled = true
+          resolveWait?.()
+          return
+        }
+        pendingTargets.delete(name)
+        if (pendingTargets.size === 0) {
+          settled = true
+          resolveWait?.()
+        }
+        return
+      }
+
+      if (event.kind === 'delivery_failed' || event.kind === 'message_delivery_failed') {
+        settled = true
+        rejectWait?.(new Error(deliveryFailureMessage(event)))
+      }
+    }
+
+    const unsubscribe = session.client.onEvent((event) => {
+      observedEvents.push(event)
+      maybeComplete(event)
+    })
+
+    try {
+      const rawResult = await session.client.sendMessage(input) as unknown
+      const result = isRecord(rawResult) ? rawResult : {}
+      eventId = typeof result.event_id === 'string' ? result.event_id : 'unsupported_operation'
+      const reportedTargets = Array.isArray(result.targets)
+        ? result.targets.filter((target): target is string => typeof target === 'string' && target.trim().length > 0)
+        : []
+      targets = reportedTargets.length > 0 || input.to.startsWith('#')
+        ? reportedTargets
+        : [input.to]
+      pendingTargets = new Set(targets)
+      if (targets.length === 0 || eventId === 'unsupported_operation') {
+        settled = true
+        return { eventId, targets }
+      }
+      for (const event of observedEvents) {
+        maybeComplete(event)
+        if (settled) break
+      }
+      await waitForConfirmation
+      return { eventId, targets }
+    } finally {
+      if (timer) clearTimeout(timer)
+      unsubscribe()
+    }
   }
 
   async subscribeAgentChannel(projectId: string | undefined, name: string, channel: string): Promise<void> {
