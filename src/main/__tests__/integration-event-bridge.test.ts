@@ -3,7 +3,12 @@ import { join } from 'node:path'
 import { test } from 'node:test'
 
 import type { ChangeEvent, Subscription } from '@relayfile/sdk'
-import { IntegrationEventBridge, integrationSubscriptionSummaries, localWatchRootsFor } from '../integration-event-bridge.ts'
+import {
+  IntegrationEventBridge,
+  integrationSubscriptionSummaries,
+  localWatchEventPathsForFilename,
+  localWatchRootsFor
+} from '../integration-event-bridge.ts'
 import type { ConnectedIntegration } from '../integrations.ts'
 
 type SentMessage = {
@@ -38,7 +43,11 @@ function integration(overrides: Partial<ConnectedIntegration> & {
   }
 }
 
-function changeEvent(path: string, provider = path.split('/')[1] || 'github'): ChangeEvent {
+function changeEvent(
+  path: string,
+  provider = path.split('/')[1] || 'github',
+  overrides: { digest?: string; origin?: string; revision?: string } = {}
+): ChangeEvent {
   return {
     id: `evt:${path}`,
     workspace: 'workspace-id',
@@ -48,11 +57,15 @@ function changeEvent(path: string, provider = path.split('/')[1] || 'github'): C
       path,
       provider,
       kind: 'record',
-      id: path.split('/').pop() || path
+      id: path.split('/').pop() || path,
+      origin: overrides.origin,
+      revision: overrides.revision
     },
     summary: {
       title: path
     },
+    digest: overrides.digest,
+    origin: overrides.origin,
     expand: async () => ({
       level: 'summary',
       path,
@@ -305,6 +318,38 @@ test('local fallback watchers accept legacy integration command mount paths', ()
   assert.equal(roots.some((root) => root.remoteRoot === '/slack/.outbox'), true)
 })
 
+test('local watcher path construction does not duplicate remote path segments', () => {
+  const messageLocalRoot = join('/tmp', 'relayfile', 'workspaces', 'workspace-id', 'slack', 'channels', 'C0AD7UU0J1G', 'messages', '1780019742_971719')
+  const messageRemoteRoot = '/slack/channels/C0AD7UU0J1G/messages/1780019742_971719'
+
+  assert.deepEqual(
+    localWatchEventPathsForFilename(
+      messageLocalRoot,
+      messageRemoteRoot,
+      '/slack/channels/C0AD7UU0J1G/messages/1780019742_971719/meta.json'
+    ),
+    {
+      localPath: join(messageLocalRoot, 'meta.json'),
+      remotePath: '/slack/channels/C0AD7UU0J1G/messages/1780019742_971719/meta.json'
+    }
+  )
+
+  const messagesLocalRoot = join('/tmp', 'relayfile', 'workspaces', 'workspace-id', 'slack', 'channels', 'C0AD7UU0J1G', 'messages')
+  const messagesRemoteRoot = '/slack/channels/C0AD7UU0J1G/messages'
+
+  assert.deepEqual(
+    localWatchEventPathsForFilename(
+      messagesLocalRoot,
+      messagesRemoteRoot,
+      'slack/channels/C0AD7UU0J1G/messages/1779632411_869369/meta.json'
+    ),
+    {
+      localPath: join(messagesLocalRoot, '1779632411_869369', 'meta.json'),
+      remotePath: '/slack/channels/C0AD7UU0J1G/messages/1779632411_869369/meta.json'
+    }
+  )
+})
+
 test('integration events preserve discovery mount paths', async () => {
   const harness = makeHarness()
   const slackIntegration = integration({
@@ -346,6 +391,33 @@ test('resource alias mount paths inject the same relative event only once', asyn
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
 })
 
+test('resource alias mount paths with the same revision inject one logical change only once', async () => {
+  const harness = makeHarness()
+  const slackIntegration = integration({
+    provider: 'slack',
+    integrationId: 'slack-1',
+    mountPaths: ['/slack/channels/C123ABC', '/slack/channels/C123ABC__proj-cloud'],
+    scope: {
+      notifyAgents: ['alice']
+    }
+  })
+
+  await harness.bridge.reconcile('project-1', [slackIntegration])
+
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC/messages/1780607825_485189/meta.json',
+    'slack',
+    { revision: 'same-content' }
+  ))
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC__proj-cloud/messages/1780607825_485189/meta.json',
+    'slack',
+    { revision: 'same-content' }
+  ))
+
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
+})
+
 test('generic provider agent scope keys are not treated as notification targets', async () => {
   const harness = makeHarness()
 
@@ -366,7 +438,7 @@ test('generic provider agent scope keys are not treated as notification targets'
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'bob'])
 })
 
-test('integration events ignore index, discovery, and local writeback command files', async () => {
+test('integration events ignore index, discovery, tmp, dotfile, and local writeback command files', async () => {
   const harness = makeHarness()
 
   await harness.bridge.reconcile('project-1', [
@@ -374,13 +446,46 @@ test('integration events ignore index, discovery, and local writeback command fi
       provider: 'github',
       integrationId: 'github-1',
       mountPaths: ['/github/repos']
+    }),
+    integration({
+      provider: 'slack',
+      integrationId: 'slack-1',
+      mountPaths: ['/slack/channels/C123ABC']
     })
   ])
 
   await harness.emit(changeEvent('/github/repos/_index.json', 'github'))
   await harness.emit(changeEvent('/github/repos/discovery/schema.json', 'github'))
+  await harness.emit(changeEvent('/github/repos/acme/widgets/.meta.json.tmp-3507823867', 'github'))
+  await harness.emit(changeEvent('/github/repos/acme/widgets/.internal.json', 'github'))
   await harness.emit(changeEvent('/github/repos/draft@alice.json', 'github'))
   await harness.emit(changeEvent('/github/repos/create.json', 'github'))
+  await harness.emit(changeEvent('/slack/channels/C123ABC/messages/claude-1-codex-spawned.json', 'slack'))
+  await harness.emit(changeEvent('/slack/channels/C123ABC/threads/1780607825_485189/replies/claude-1-issue82-ack.json', 'slack'))
+
+  assert.deepEqual(harness.sent, [])
+  assert.deepEqual(harness.listAgentsCalls, [])
+})
+
+test('integration events ignore agent-originated Relayfile writes', async () => {
+  const harness = makeHarness()
+
+  await harness.bridge.reconcile('project-1', [
+    integration({
+      provider: 'slack',
+      integrationId: 'slack-1',
+      mountPaths: ['/slack/channels/C123ABC'],
+      scope: {
+        notifyAgents: ['alice']
+      }
+    })
+  ])
+
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC/messages/1780607825_485189/meta.json',
+    'slack',
+    { origin: 'agent_write', revision: 'local-write' }
+  ))
 
   assert.deepEqual(harness.sent, [])
   assert.deepEqual(harness.listAgentsCalls, [])
