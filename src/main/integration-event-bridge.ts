@@ -1021,10 +1021,7 @@ function slackRecordContextLines(record: unknown): string[] {
 }
 
 async function localEventContextLines(event: ChangeEvent, localMountWorkspaceId: string): Promise<string[]> {
-  const provider = eventSummaryValue(event.resource.provider)
   const path = event.resource.path
-  if (provider !== 'slack' || !slackEventContextPath(path)) return []
-
   const localPath = localPathForRemoteRoot(localMountWorkspaceId, path)
   const raw = await readFile(localPath, 'utf8').catch(() => null)
   if (!raw) return []
@@ -1033,6 +1030,26 @@ async function localEventContextLines(event: ChangeEvent, localMountWorkspaceId:
   } catch {
     return []
   }
+}
+
+async function expandedEventContextLines(event: ChangeEvent): Promise<string[]> {
+  try {
+    const expanded = await event.expand('full')
+    if (!isRecord(expanded)) return []
+    const data = isRecord(expanded.data) ? expanded.data : expanded
+    return slackRecordContextLines(data)
+  } catch {
+    return []
+  }
+}
+
+async function eventContextLines(event: ChangeEvent, localMountWorkspaceId: string): Promise<string[]> {
+  const provider = eventSummaryValue(event.resource.provider)
+  const path = event.resource.path
+  if (provider !== 'slack' || !slackEventContextPath(path)) return []
+
+  const expandedLines = await expandedEventContextLines(event)
+  return expandedLines.length > 0 ? expandedLines : localEventContextLines(event, localMountWorkspaceId)
 }
 
 function formatIntegrationEventMessage(event: ChangeEvent, contextLines: string[] = []): string {
@@ -1303,7 +1320,7 @@ export class IntegrationEventBridge {
       })
       return
     }
-    const contextLines = await localEventContextLines(event, localMountWorkspaceId)
+    const contextLines = await eventContextLines(event, localMountWorkspaceId)
     logIntegrationEvent('injecting', {
       projectId,
       eventId: event.id,

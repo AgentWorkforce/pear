@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
-import { mkdir, rm, writeFile } from 'node:fs/promises'
-import { homedir } from 'node:os'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beforeEach, test } from 'node:test'
 
@@ -82,6 +82,29 @@ function changeEvent(
         title: path
       }
     })
+  } as ChangeEvent
+}
+
+function changeEventWithFullData(
+  path: string,
+  provider: string,
+  data: Record<string, unknown>
+): ChangeEvent {
+  return {
+    ...changeEvent(path, provider),
+    expand: async (level = 'summary') => level === 'full'
+      ? {
+          level,
+          path,
+          data
+        }
+      : {
+          level,
+          path,
+          summary: {
+            title: path
+          }
+        }
   } as ChangeEvent
 }
 
@@ -240,6 +263,86 @@ test('integration events watch selected relayfile mount paths', async () => {
   harness.sent.splice(0)
   await harness.emit(changeEvent('/slack/channels/C123ABC/messages/1713220124_001100/meta.json', 'slack'))
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
+})
+
+test('slack thread reply events include local message text in the injected system message', async () => {
+  const harness = makeHarness(['alice'])
+  const workspaceId = 'workspace-id'
+  const originalHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'pear-integration-event-'))
+
+  try {
+    process.env.HOME = tempHome
+    const replyPath = '/slack/channels/C123ABC__proj-cloud/threads/1780667635_192799/replies/1780668181_544139.json'
+    const localPath = join(tempHome, '.agentworkforce', 'pear', 'relayfile', 'workspaces', workspaceId, ...replyPath.split('/').filter(Boolean))
+    await mkdir(join(localPath, '..'), { recursive: true })
+    await writeFile(localPath, JSON.stringify({
+      provider: 'slack',
+      objectType: 'thread_reply',
+      payload: {
+        text: '<@U123> please handle this thread request',
+        channel: 'C123ABC',
+        thread_ts: '1780667635.192799',
+        ts: '1780668181.544139',
+        user: 'U456'
+      }
+    }))
+
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+
+    await harness.emit(changeEvent(replyPath, 'slack'))
+    await waitForSent(harness, 1)
+
+    assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
+    assert.match(harness.sent[0].input.text, /Slack text: <@U123> please handle this thread request/u)
+    assert.match(harness.sent[0].input.text, /Slack thread ts: 1780667635\.192799/u)
+  } finally {
+    await harness.bridge.close('project-1')
+    if (originalHome === undefined) {
+      delete process.env.HOME
+    } else {
+      process.env.HOME = originalHome
+    }
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
+test('remote slack events include expanded message text before local mount sync catches up', async () => {
+  const harness = makeHarness(['alice'])
+  const replyPath = '/slack/channels/C123ABC__proj-cloud/threads/1780667635_192799/replies/1780668181_544139.json'
+
+  await harness.bridge.reconcile('project-1', [
+    integration({
+      provider: 'slack',
+      integrationId: 'slack-1',
+      mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+      scope: { notifyAgents: ['alice'] }
+    })
+  ])
+
+  await harness.emit(changeEventWithFullData(replyPath, 'slack', {
+    provider: 'slack',
+    objectType: 'thread_reply',
+    payload: {
+      text: '<@U123> remote stream text',
+      channel: 'C123ABC',
+      thread_ts: '1780667635.192799',
+      ts: '1780668181.544139',
+      user: 'U456'
+    }
+  }))
+  await waitForSent(harness, 1)
+
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
+  assert.match(harness.sent[0].input.text, /Slack text: <@U123> remote stream text/u)
+  assert.match(harness.sent[0].input.text, /Slack thread ts: 1780667635\.192799/u)
 })
 
 test('local fallback watchers are disabled when historical download is off', () => {
