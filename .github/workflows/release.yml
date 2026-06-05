@@ -28,6 +28,7 @@ jobs:
 
       - name: Generate changelog
         id: changelog
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -98,7 +99,7 @@ jobs:
             --notes-file "${{ steps.changelog.outputs.notes_file }}"
 
       - name: Upload macOS build artifacts
-        if: always()
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: pear-macos-${{ github.run_id }}
