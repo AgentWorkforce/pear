@@ -398,6 +398,12 @@ function brokerEventString(event: BrokerEvent, key: string): string | undefined 
   return typeof value === 'string' ? value : undefined
 }
 
+function brokerEventRecipient(event: BrokerEvent): string | undefined {
+  return brokerEventString(event, 'name') ||
+    brokerEventString(event, 'target') ||
+    brokerEventString(event, 'to')
+}
+
 function isDeliveryEventForMessage(event: BrokerEvent, eventId: string, targets: string[]): boolean {
   const kind = brokerEventString(event, 'kind')
   if (![
@@ -410,8 +416,8 @@ function isDeliveryEventForMessage(event: BrokerEvent, eventId: string, targets:
     return false
   }
   if (brokerEventString(event, 'event_id') !== eventId) return false
-  const name = brokerEventString(event, 'name')
-  return !name || targets.length === 0 || targets.includes(name)
+  const recipient = brokerEventRecipient(event)
+  return !recipient || targets.length === 0 || targets.includes(recipient)
 }
 
 function deliveryFailureMessage(event: BrokerEvent): string {
@@ -2973,19 +2979,19 @@ export class BrokerManager {
     const maybeComplete = (event: BrokerEvent): void => {
       if (settled || !eventId) return
       if (!isDeliveryEventForMessage(event, eventId, targets)) return
-      const name = brokerEventString(event, 'name')
+      const recipient = brokerEventRecipient(event)
 
       if (
         event.kind === 'delivery_ack' ||
         event.kind === 'delivery_verified' ||
         event.kind === 'message_delivery_confirmed'
       ) {
-        if (!name || pendingTargets.size === 0) {
+        if (!recipient || pendingTargets.size === 0) {
           settled = true
           resolveWait?.()
           return
         }
-        pendingTargets.delete(name)
+        pendingTargets.delete(recipient)
         if (pendingTargets.size === 0) {
           settled = true
           resolveWait?.()

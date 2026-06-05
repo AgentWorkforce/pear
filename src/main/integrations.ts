@@ -1522,7 +1522,7 @@ export class IntegrationsManager {
 
   private async syncAgentState(projectId: string, notifyAgent: boolean): Promise<void> {
     let integrations = this.visibleIntegrationsForProject(projectId)
-    await this.syncLocalMounts()
+    await this.syncLocalMounts({ hydrateCloud: false })
     integrations = await this.withLocalMountPaths(integrations)
     await this.safeUpdateMountPaths(projectId, this.mountPathsFor(projectId))
     const subscriptionsReady = await this.syncEventSubscriptions(projectId)

@@ -898,6 +898,45 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('waits for every reported target when confirmations use target field', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, ['alice', 'bob'])
+    let listener!: (event: unknown) => void
+    local.sendMessage.mockResolvedValueOnce({ event_id: 'evt-channel', targets: ['alice', 'bob'] })
+    local.onEvent.mockImplementationOnce((nextListener) => {
+      listener = nextListener
+      return () => undefined
+    })
+
+    const delivery = manager.sendMessageAndWaitForDelivery(PROJECT_ID, {
+      to: '#team',
+      text: '<integration-event>ping</integration-event>'
+    })
+    await Promise.resolve()
+
+    listener({
+      kind: 'message_delivery_confirmed',
+      event_id: 'evt-channel',
+      target: 'alice'
+    })
+    await expect(Promise.race([
+      delivery.then(() => 'resolved'),
+      new Promise((resolve) => setImmediate(() => resolve('pending')))
+    ])).resolves.toBe('pending')
+
+    listener({
+      kind: 'message_delivery_confirmed',
+      event_id: 'evt-channel',
+      target: 'bob'
+    })
+    await expect(delivery).resolves.toEqual({
+      eventId: 'evt-channel',
+      targets: ['alice', 'bob']
+    })
+
+    await manager.shutdown()
+  })
+
   it('keeps repeated no-identity PTY chunks after intervening output', async () => {
     const manager = new BrokerManager()
     const win = createMockWindow()
