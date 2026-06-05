@@ -1,3 +1,4 @@
 - [Cloud credential sources](cloud-credential-sources.md) — Pear's two auth stores and the resolveCloudAuth() helper that unifies them with ../workforce and ../cloud
 - [Cloud agent semantics](cloud-agent-semantics.md) — a Pear "cloud agent" is a provider credential; delete fixed, attach/warm still unbuilt
 - [Relayfile workspace model](relayfile-workspace-model.md) — relayWorkspaceId is a fake random UUID; integrations Connect must use the SDK; account-wide workspace decided; catalog logos/filter done
+- [Duplicate event hardening](duplicate-event-hardening.md) — broker starts, event streams, PTY chunks, spawned personas, and integration notifications must be idempotent and replay-tolerant
