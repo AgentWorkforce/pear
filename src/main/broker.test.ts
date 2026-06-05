@@ -26,7 +26,9 @@ type MockClient = {
   release: ReturnType<typeof vi.fn>
   subscribeChannels: ReturnType<typeof vi.fn>
   unsubscribeChannels: ReturnType<typeof vi.fn>
+  getStatus: ReturnType<typeof vi.fn>
   brokerPid?: number
+  baseUrl?: string
   agentNames: string[]
 }
 
@@ -45,6 +47,10 @@ const mock = vi.hoisted(() => {
       snapshot: vi.fn(async () => ({ rows: 24, cols: 80, cursor: { x: 0, y: 0 }, screen: 'aGVsbG8=' })),
       resizePty: vi.fn(async () => undefined),
       getPending: vi.fn(async () => []),
+      getStatus: vi.fn(async () => ({
+        agents: client.agentNames.map((name) => ({ name, runtime: 'pty', channels: [] })),
+        pending_delivery_count: 0
+      })),
       onEvent: vi.fn(() => () => undefined),
       addListener: vi.fn(() => () => undefined),
       connectEvents: vi.fn(),
@@ -63,8 +69,11 @@ const mock = vi.hoisted(() => {
   const state = {
     spawnedClients: [] as MockClient[],
     constructedClients: [] as MockClient[],
+    connectedClients: [] as MockClient[],
     nextLocalAgents: [] as string[],
-    nextCloudAgents: [] as string[]
+    nextCloudAgents: [] as string[],
+    nextConnectedAgents: [] as string[],
+    nextConnectedSessionErrors: [] as Error[]
   }
 
   class HarnessDriverClient {
@@ -75,7 +84,13 @@ const mock = vi.hoisted(() => {
     })
 
     static connect = vi.fn(() => {
-      throw new Error('not used in tests')
+      const client = createMockClient(state.nextConnectedAgents.splice(0))
+      const sessionError = state.nextConnectedSessionErrors.shift()
+      if (sessionError) {
+        client.getSession.mockRejectedValueOnce(sessionError)
+      }
+      state.connectedClients.push(client)
+      return client
     })
 
     constructor() {
@@ -314,9 +329,13 @@ describe('BrokerManager local + cloud coexistence', () => {
   beforeEach(() => {
     mock.state.spawnedClients.length = 0
     mock.state.constructedClients.length = 0
+    mock.state.connectedClients.length = 0
     mock.state.nextLocalAgents = []
     mock.state.nextCloudAgents = []
+    mock.state.nextConnectedAgents = []
+    mock.state.nextConnectedSessionErrors = []
     mock.HarnessDriverClient.spawn.mockClear()
+    mock.HarnessDriverClient.connect.mockClear()
   })
 
   it('keeps the local session alive when a cloud sandbox attaches', async () => {
@@ -352,6 +371,107 @@ describe('BrokerManager local + cloud coexistence', () => {
     expect(local.shutdown).not.toHaveBeenCalled()
 
     await manager.shutdown()
+  })
+
+  it('reuses current harness-driver connection files instead of spawning another broker', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'pear-current-connection-'))
+    const connectionPath = join(tempDir, '.agentworkforce', 'relay', 'connection.json')
+    await mkdir(dirname(connectionPath), { recursive: true })
+    await writeFile(connectionPath, JSON.stringify({
+      url: 'http://127.0.0.1:43210',
+      apiKey: 'test-key',
+      pid: 4242
+    }))
+
+    try {
+      const manager = new BrokerManager()
+      mock.state.nextConnectedAgents = ['codex-1']
+
+      const started = await manager.start(PROJECT_ID, tempDir, 'pear-project-1', undefined as never, [])
+
+      expect(started).toBe(true)
+      expect(mock.HarnessDriverClient.connect).toHaveBeenCalledWith({ cwd: tempDir, connectionPath })
+      expect(mock.HarnessDriverClient.spawn).not.toHaveBeenCalled()
+      expect(mock.state.connectedClients).toHaveLength(1)
+
+      await manager.shutdown()
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('reports the matching connection file when a stale current file and matching legacy file coexist', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'pear-connection-status-'))
+    const currentConnectionPath = join(tempDir, '.agentworkforce', 'relay', 'connection.json')
+    const legacyConnectionPath = join(tempDir, '.agent-relay', 'connection.json')
+    await mkdir(dirname(currentConnectionPath), { recursive: true })
+    await mkdir(dirname(legacyConnectionPath), { recursive: true })
+
+    try {
+      const manager = new BrokerManager()
+      mock.state.nextLocalAgents = []
+      await manager.start(PROJECT_ID, tempDir, 'pear-project-1', undefined as never, [])
+      const local = lastSpawned()
+      local.baseUrl = 'http://127.0.0.1:43210'
+      local.brokerPid = 4242
+
+      await writeFile(currentConnectionPath, JSON.stringify({
+        url: 'http://127.0.0.1:1',
+        api_key: 'stale-key',
+        pid: 1
+      }))
+      await writeFile(legacyConnectionPath, JSON.stringify({
+        url: 'http://127.0.0.1:43210/',
+        api_key: 'legacy-key',
+        pid: 4242
+      }))
+
+      const [details] = await manager.listBrokerDetails()
+
+      expect(details.connectionPath).toBe(legacyConnectionPath)
+      expect(details.connectionFileStatus).toBe('matches')
+      expect(details.apiKey).toBe('legacy-key')
+
+      await manager.shutdown()
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('disconnects failed broker connection probes before trying the next candidate', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'pear-connection-fallback-'))
+    const currentConnectionPath = join(tempDir, '.agentworkforce', 'relay', 'connection.json')
+    const legacyConnectionPath = join(tempDir, '.agent-relay', 'connection.json')
+    await mkdir(dirname(currentConnectionPath), { recursive: true })
+    await mkdir(dirname(legacyConnectionPath), { recursive: true })
+    await writeFile(currentConnectionPath, JSON.stringify({
+      url: 'http://127.0.0.1:1',
+      api_key: 'stale-key',
+      pid: 1
+    }))
+    await writeFile(legacyConnectionPath, JSON.stringify({
+      url: 'http://127.0.0.1:43210',
+      api_key: 'legacy-key',
+      pid: 4242
+    }))
+
+    try {
+      const manager = new BrokerManager()
+      mock.state.nextConnectedSessionErrors = [new Error('stale broker')]
+
+      const started = await manager.start(PROJECT_ID, tempDir, 'pear-project-1', undefined as never, [])
+
+      expect(started).toBe(true)
+      expect(mock.HarnessDriverClient.connect).toHaveBeenCalledTimes(2)
+      expect(mock.HarnessDriverClient.connect).toHaveBeenNthCalledWith(1, { cwd: tempDir, connectionPath: currentConnectionPath })
+      expect(mock.HarnessDriverClient.connect).toHaveBeenNthCalledWith(2, { cwd: tempDir, connectionPath: legacyConnectionPath })
+      expect(mock.state.connectedClients[0].disconnect).toHaveBeenCalledTimes(1)
+      expect(mock.HarnessDriverClient.spawn).not.toHaveBeenCalled()
+
+      await manager.shutdown()
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
   })
 
   it('keeps the cloud session alive when a local broker starts afterwards', async () => {
