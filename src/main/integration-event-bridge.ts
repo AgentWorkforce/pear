@@ -594,6 +594,8 @@ function shouldNotifyRelayfilePath(pathValue: string): boolean {
     leaf === '_index.json' ||
     leaf === '.schema.json' ||
     leaf === '.create.example.json' ||
+    path === '/discovery' ||
+    path.startsWith('/discovery/') ||
     path.includes('/discovery/') ||
     path.includes('/.relay/') ||
     path.includes('/.relayfile-') ||

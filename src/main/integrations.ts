@@ -242,6 +242,12 @@ function isPathWithinRoot(rootPath: string, targetPath: string): boolean {
   return child === '' || (!!child && !child.startsWith('..') && !isAbsolute(child))
 }
 
+function isRelayfilePathWithinRoot(rootPath: string, targetPath: string): boolean {
+  const normalizedRoot = rootPath.trim().replace(/\/+$/u, '') || '/'
+  const normalizedTarget = targetPath.trim().replace(/\/+$/u, '') || '/'
+  return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(`${normalizedRoot}/`)
+}
+
 function toRelayfileProvider(provider: string): string {
   const normalized = provider.trim().toLowerCase()
   return normalized === 'gmail' ? 'google-mail' : normalized
@@ -287,8 +293,9 @@ function projectIntegrationPathForRelayfilePath(mountPath: string): string {
   return `${PROJECT_INTEGRATIONS_LINK_NAME}${normalized}`
 }
 
-function normalizeRemoteDirectoryPath(remotePath: string): string {
+function normalizeRemoteDirectoryPath(remotePath: string): string | null {
   const segments = remotePath.split('/').map((segment) => segment.trim()).filter(Boolean)
+  if (segments.some((segment) => segment === '.' || segment === '..')) return null
   return `/${segments.join('/')}`
 }
 
@@ -703,7 +710,10 @@ export class IntegrationsManager {
   async listRemoteDirectory(projectId: string, remotePath: string): Promise<filesystem.ExplorerEntry[]> {
     if (!this.findProject(projectId)) throw new Error(`Project not found: ${projectId}`)
     const path = normalizeRemoteDirectoryPath(remotePath)
-    if (path === '/') throw new Error('Integration remote directory path is required')
+    if (!path || path === '/') throw new Error('Integration remote directory path is required')
+    if (!this.canListRemoteDirectory(projectId, path)) {
+      throw new Error('Integration remote directory is outside this project integration scope')
+    }
 
     return this.withWorkspaceHandle(async (handle) => {
       const entries: filesystem.ExplorerEntry[] = []
@@ -717,6 +727,7 @@ export class IntegrationsManager {
         }) as TreeResponse
 
         for (const entry of tree.entries) {
+          if (entry.path === path) continue
           entries.push({
             name: remotePathName(entry.path),
             path: entry.path,
@@ -1521,6 +1532,17 @@ export class IntegrationsManager {
 
   private mountPathsForLocalSync(integration: ConnectedIntegration): string[] {
     return this.mountPathsForAgentWorkspace(integration)
+  }
+
+  private canListRemoteDirectory(projectId: string, remotePath: string): boolean {
+    return this.visibleIntegrationsForProject(projectId).some((integration) =>
+      [
+        discoveryMountPathForProvider(integration.provider),
+        ...this.canonicalMountPathsForIntegration(integration)
+      ].some((mountPath) =>
+        isRelayfilePathWithinRoot(mountPath, remotePath) || isRelayfilePathWithinRoot(remotePath, mountPath)
+      )
+    )
   }
 
   private canonicalMountPathsForIntegration(integration: ConnectedIntegration): string[] {

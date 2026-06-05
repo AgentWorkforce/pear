@@ -197,6 +197,10 @@ test('integration events preserve discovery mount paths', async () => {
   assert.deepEqual(integrationSubscriptionSummaries([slackIntegration])[0].watches, [
     '.integrations/discovery/slack/**'
   ])
+
+  await harness.emit(changeEvent('/discovery/slack/actions/create-message/.schema.json', 'slack'))
+  assert.deepEqual(harness.sent, [])
+  assert.deepEqual(harness.listAgentsCalls, [])
 })
 
 test('resource alias mount paths inject the same relative event only once', async () => {
