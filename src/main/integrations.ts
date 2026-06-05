@@ -1627,17 +1627,11 @@ export class IntegrationsManager {
     const workspaceId = integrationMountManager.currentWorkspaceId()
     if (!workspaceId) return integrations
     return integrations.map((integration) => {
-      if (integration.downloadHistoricalData !== true) {
-        return {
-          ...integration,
-          localMountPaths: []
-        }
-      }
       return {
         ...integration,
         localMountPaths: integrationMountManager.localPathsFor(workspaceId, {
           provider: integration.provider,
-          mountPaths: this.canonicalMountPathsForIntegration(integration)
+          mountPaths: this.mountPathsForLocalSync(integration)
         })
       }
     })

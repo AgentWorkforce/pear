@@ -143,8 +143,17 @@ function canBrowseSyncedData(integration: ConnectedIntegration): boolean {
   return integration.downloadHistoricalData === true
 }
 
+function localPathSegments(path: string): string[] {
+  return path.split(/[\\/]+/u).filter(Boolean)
+}
+
+function historicalLocalMountPaths(integration: ConnectedIntegration): string[] {
+  return (integration.localMountPaths || [])
+    .filter((root) => !localPathSegments(root).includes('discovery'))
+}
+
 function IntegrationRelayfileBrowser({
-  integration,
+  roots,
   currentPath,
   entries,
   preview,
@@ -154,7 +163,7 @@ function IntegrationRelayfileBrowser({
   onOpenFile,
   onRefresh
 }: {
-  integration: ConnectedIntegration
+  roots: string[]
   currentPath: string | null
   entries: FsDirEntry[]
   preview: { path: string; result: FsReadPreviewResult } | null
@@ -164,7 +173,6 @@ function IntegrationRelayfileBrowser({
   onOpenFile: (path: string) => void
   onRefresh: () => void
 }): React.ReactNode {
-  const roots = integration.localMountPaths || []
   const currentRoot = rootForPath(roots, currentPath)
   const parent = currentPath ? pathParent(currentPath) : null
   const canGoUp = !!parent && !!currentRoot && pathWithinRoot(currentRoot, parent)
@@ -519,6 +527,7 @@ export function AccountSettings(): React.ReactNode {
   const toggleMountBrowser = useCallback((integration: ConnectedIntegration) => {
     if (!canBrowseSyncedData(integration)) return
 
+    const roots = historicalLocalMountPaths(integration)
     if (expandedIntegrationId === integration.integrationId) {
       setExpandedIntegrationId(null)
       setBrowserPath(null)
@@ -528,7 +537,7 @@ export function AccountSettings(): React.ReactNode {
       return
     }
 
-    const root = integration.localMountPaths?.[0]
+    const root = roots[0]
     setExpandedIntegrationId(integration.integrationId)
     setBrowserPath(root || null)
     setBrowserEntries([])
@@ -629,6 +638,7 @@ export function AccountSettings(): React.ReactNode {
                 const adapter = adapterByProvider.get(canonicalProviderKey(integration.provider))
                 const expanded = expandedIntegrationId === integration.integrationId
                 const browsable = canBrowseSyncedData(integration)
+                const browserRoots = historicalLocalMountPaths(integration)
                 return (
                   <div key={integration.integrationId} className="space-y-2">
                     <div className="flex items-center gap-3 rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-3 py-2.5">
@@ -685,7 +695,7 @@ export function AccountSettings(): React.ReactNode {
 
                     {expanded && browsable && (
                       <IntegrationRelayfileBrowser
-                        integration={integration}
+                        roots={browserRoots}
                         currentPath={browserPath}
                         entries={browserEntries}
                         preview={browserPreview}
@@ -694,7 +704,7 @@ export function AccountSettings(): React.ReactNode {
                         onOpenDirectory={(path) => void openMountDirectory(integration, path)}
                         onOpenFile={(path) => void openMountPreview(integration, path)}
                         onRefresh={() => {
-                          const root = integration.localMountPaths?.[0] || null
+                          const root = browserRoots[0] || null
                           if (browserPath) {
                             void openMountDirectory(integration, browserPath)
                           } else if (root) {
