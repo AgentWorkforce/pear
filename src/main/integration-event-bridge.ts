@@ -1022,6 +1022,7 @@ function slackRecordContextLines(record: unknown): string[] {
 
 async function localEventContextLines(event: ChangeEvent, localMountWorkspaceId: string): Promise<string[]> {
   const path = event.resource.path
+  if (pathSegments(path).some((segment) => segment === '.' || segment === '..')) return []
   const localPath = localPathForRemoteRoot(localMountWorkspaceId, path)
   const raw = await readFile(localPath, 'utf8').catch(() => null)
   if (!raw) return []

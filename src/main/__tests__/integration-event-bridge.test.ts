@@ -349,6 +349,47 @@ test('remote slack events include expanded message text before local mount sync 
   assert.match(harness.sent[0].input.text, /Slack thread ts: 1780667635\.192799/u)
 })
 
+test('slack local event context rejects traversal paths', async () => {
+  const harness = makeHarness(['alice'])
+  const workspaceId = 'workspace-id'
+  const originalHome = process.env.HOME
+  const tempHome = await mkdtemp(join(tmpdir(), 'pear-integration-event-'))
+
+  try {
+    process.env.HOME = tempHome
+    const escapedPath = join(tempHome, '.agentworkforce', 'pear', 'relayfile', 'workspaces', 'leak.json')
+    await mkdir(join(escapedPath, '..'), { recursive: true })
+    await writeFile(escapedPath, JSON.stringify({
+      payload: {
+        text: 'escaped local file should not be injected'
+      }
+    }))
+
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+
+    await harness.emit(changeEvent('/slack/channels/C123ABC__proj-cloud/threads/../../../../../leak.json', 'slack'))
+    await waitForSent(harness, 1)
+
+    assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
+    assert.doesNotMatch(harness.sent[0].input.text, /escaped local file should not be injected/u)
+  } finally {
+    await harness.bridge.close('project-1')
+    if (originalHome === undefined) {
+      delete process.env.HOME
+    } else {
+      process.env.HOME = originalHome
+    }
+    await rm(tempHome, { recursive: true, force: true })
+  }
+})
+
 test('local fallback watchers are disabled when historical download is off', () => {
   const roots = localWatchRootsFor(
     'workspace-id',
