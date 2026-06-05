@@ -345,6 +345,7 @@ const MAX_RECONCILE_MESSAGE_LIMIT = 100
 const EVENT_STREAM_REBIND_COOLDOWN_MS = 5_000
 const PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS = 60_000
 const PTY_CHUNK_CONTENT_DEDUPE_TTL_MS = 1_000
+const PTY_CHUNK_DIAGNOSTIC_TTL_MS = 60_000
 const MAX_PTY_CHUNK_DEDUPE_ENTRIES = 2_000
 // After this many consecutive failures to open a PTY input stream, give up on
 // the WS fast path for that agent briefly and send over HTTP while it cools down.
@@ -1105,6 +1106,7 @@ export class BrokerManager {
   private eventObservers = new Set<BrokerEventObserver>()
   private eventHistory: BrokerEventRecord[] = []
   private recentPtyChunks = new Map<string, number>()
+  private recentPtyChunkDiagnostics = new Map<string, number>()
   private eventSerial = 0
 
   get cwd(): string | null {
@@ -1726,6 +1728,40 @@ export class BrokerManager {
     })
   }
 
+  private emitPtyChunkDiagnostic(
+    sessionKey: string,
+    name: string,
+    event: BrokerEvent,
+    status: 'pty-duplicate-suppressed' | 'pty-missing-identity',
+    reason: string
+  ): void {
+    const now = Date.now()
+    for (const [key, seenAt] of this.recentPtyChunkDiagnostics) {
+      if (now - seenAt > PTY_CHUNK_DIAGNOSTIC_TTL_MS) {
+        this.recentPtyChunkDiagnostics.delete(key)
+      }
+    }
+
+    const diagnosticKey = `${status}:${sessionKey}:${name}:${reason}`
+    const previous = this.recentPtyChunkDiagnostics.get(diagnosticKey)
+    if (previous !== undefined && now - previous <= PTY_CHUNK_DIAGNOSTIC_TTL_MS) {
+      return
+    }
+
+    this.recentPtyChunkDiagnostics.set(diagnosticKey, now)
+    const seq = brokerEventSeq(event)
+    const eventId = brokerEventId(event)
+    this.emitEventStreamDiagnostic(sessionKey, this.sessions.get(sessionKey)?.window, {
+      projectId: projectIdFromSessionKey(sessionKey),
+      status,
+      reason,
+      at: now,
+      eventKind: event.kind,
+      ...(eventId ? { eventId } : {}),
+      ...(seq !== undefined ? { seq } : {})
+    })
+  }
+
   async refreshEventStream(projectId?: string, reason = 'manual', win?: BrowserWindow): Promise<void> {
     const normalizedProjectId = projectId?.trim()
     let sessions: BrokerSession[]
@@ -1980,6 +2016,9 @@ export class BrokerManager {
     const identity = eventId || (seq ? `seq:${seq}` : '')
     const chunk = typeof eventRecord.chunk === 'string' ? eventRecord.chunk : ''
     if (!identity && !chunk) return false
+    if (!identity) {
+      this.emitPtyChunkDiagnostic(sessionKey, name, event, 'pty-missing-identity', 'content-fallback')
+    }
 
     const contentKeyPrefix = `chunk:${sessionKey}:${name}:`
     const key = identity
@@ -1990,6 +2029,13 @@ export class BrokerManager {
       : PTY_CHUNK_CONTENT_DEDUPE_TTL_MS
     const previous = this.recentPtyChunks.get(key)
     if (previous !== undefined && now - previous <= ttl) {
+      this.emitPtyChunkDiagnostic(
+        sessionKey,
+        name,
+        event,
+        'pty-duplicate-suppressed',
+        identity ? 'identity' : 'content-fallback'
+      )
       return true
     }
 

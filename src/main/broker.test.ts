@@ -513,6 +513,23 @@ describe('BrokerManager local + cloud coexistence', () => {
     const ptyCalls = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
       .filter(([channel]) => channel === 'broker:pty-chunk')
     expect(ptyCalls).toEqual([['broker:pty-chunk', PROJECT_ID, 'claude-1', 'pong\n']])
+    const diagnostics = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([channel]) => channel === 'broker:event-stream-diagnostic')
+      .map(([, diagnostic]) => diagnostic)
+    expect(diagnostics).toEqual([
+      expect.objectContaining({
+        projectId: PROJECT_ID,
+        status: 'pty-missing-identity',
+        reason: 'content-fallback',
+        eventKind: 'worker_stream'
+      }),
+      expect.objectContaining({
+        projectId: PROJECT_ID,
+        status: 'pty-duplicate-suppressed',
+        reason: 'content-fallback',
+        eventKind: 'worker_stream'
+      })
+    ])
 
     await manager.shutdown()
   })

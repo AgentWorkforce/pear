@@ -237,7 +237,14 @@ export interface BrokerReconcileMessagesInput {
 
 export interface BrokerEventStreamDiagnostic {
   projectId: string
-  status: 'received' | 'rebind-started' | 'rebound' | 'rebind-skipped' | 'rebind-error'
+  status:
+    | 'received'
+    | 'rebind-started'
+    | 'rebound'
+    | 'rebind-skipped'
+    | 'rebind-error'
+    | 'pty-duplicate-suppressed'
+    | 'pty-missing-identity'
   reason?: string
   at: number
   eventKind?: string
