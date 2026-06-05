@@ -5,7 +5,7 @@ import {
   RelayfileSetup,
   type MountedWorkspaceHandle
 } from '@relayfile/sdk'
-import { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, resolveCloudAuth } from './auth'
+import { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, refreshCloudAuth, resolveCloudAuth } from './auth'
 import { createPearMountLauncher } from './relayfile-mount-launcher'
 
 const MOUNT_READY_TIMEOUT_MS = 60_000
@@ -27,6 +27,15 @@ type IntegrationMountSpec = {
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function isUnauthorizedError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const status = (error as { httpStatus?: unknown; status?: unknown }).httpStatus ??
+    (error as { httpStatus?: unknown; status?: unknown }).status
+  if (status === 401 || status === 403) return true
+  const message = (error as { message?: unknown }).message
+  return typeof message === 'string' && /\b(401|403|unauthor|forbidden)\b/i.test(message)
 }
 
 function sanitizePathSegment(value: string): string {
@@ -238,13 +247,8 @@ export class IntegrationMountManager {
     await ensureProtectedDirectory(integrationMountWorkspaceRoot(workspaceId))
     await ensureProtectedDirectory(mountRoot)
 
-    const setup = new RelayfileSetup({
-      cloudApiUrl: auth.apiUrl,
-      accessToken: async () => {
-        const fresh = await resolveCloudAuth()
-        return fresh?.accessToken ?? auth.accessToken
-      }
-    })
+    let activeAuth = auth
+    let setup = this.createSetup(activeAuth)
 
     const mountSpecs = this.mountSpecsFor(mountPaths, mountRoot)
     const expectedRemotePaths = mountSpecs.map((spec) => spec.remotePath)
@@ -269,7 +273,7 @@ export class IntegrationMountManager {
 
       await ensureProtectedDirectory(spec.localDir)
       try {
-        const handle = await setup.mountWorkspace({
+        const startMount = async (): Promise<MountedWorkspaceHandle> => setup.mountWorkspace({
           workspaceId,
           localDir: spec.localDir,
           remotePath: spec.remotePath,
@@ -287,6 +291,17 @@ export class IntegrationMountManager {
           }),
           readyTimeoutMs: MOUNT_READY_TIMEOUT_MS
         })
+        let handle: MountedWorkspaceHandle
+        try {
+          handle = await startMount()
+        } catch (error) {
+          if (!isUnauthorizedError(error)) throw error
+          const refreshed = await refreshCloudAuth()
+          if (!refreshed) throw error
+          activeAuth = refreshed
+          setup = this.createSetup(activeAuth)
+          handle = await startMount()
+        }
         this.handles.set(spec.remotePath, handle)
         this.scheduleRefresh(spec.remotePath, handle)
       } catch (error) {
@@ -298,6 +313,16 @@ export class IntegrationMountManager {
     }
 
     await this.removeLegacyIntegrationMountRoot(mountRoot)
+  }
+
+  private createSetup(auth: { apiUrl: string; accessToken: string }): RelayfileSetup {
+    return new RelayfileSetup({
+      cloudApiUrl: auth.apiUrl,
+      accessToken: async () => {
+        const fresh = await resolveCloudAuth()
+        return fresh?.accessToken ?? auth.accessToken
+      }
+    })
   }
 
   private mountSpecsFor(mountPaths: string[], mountRoot: string): IntegrationMountSpec[] {

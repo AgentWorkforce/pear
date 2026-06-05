@@ -101,6 +101,15 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function isUnauthorizedError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const status = (error as { httpStatus?: unknown; status?: unknown }).httpStatus ??
+    (error as { httpStatus?: unknown; status?: unknown }).status
+  if (status === 401 || status === 403) return true
+  const message = (error as { message?: unknown }).message
+  return typeof message === 'string' && /\b(401|403|unauthor|forbidden)\b/i.test(message)
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
@@ -933,8 +942,8 @@ export class IntegrationEventBridge {
 
   private async getWorkspaceHandle(): Promise<RelayfileWorkspaceHandle> {
     if (this.deps.getWorkspaceHandle) return this.deps.getWorkspaceHandle()
-    const { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, resolveCloudAuth } = await import('./auth.ts')
-    const auth = await resolveCloudAuth()
+    const { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, refreshCloudAuth, resolveCloudAuth } = await import('./auth.ts')
+    let auth = await resolveCloudAuth()
     if (!auth) {
       accountIntegrationEventHandle = null
       throw new Error('cloud-auth-required')
@@ -950,18 +959,31 @@ export class IntegrationEventBridge {
       return accountIntegrationEventHandle.handle
     }
 
-    const tokenProvider = async (): Promise<string | undefined> => {
-      const fresh = await resolveCloudAuth()
-      return fresh?.accessToken ?? auth.accessToken
+    const joinWorkspace = async () => {
+      const tokenProvider = async (): Promise<string | undefined> => {
+        const fresh = await resolveCloudAuth()
+        return fresh?.accessToken ?? auth?.accessToken
+      }
+      const setup = new RelayfileSetup({
+        cloudApiUrl: auth.apiUrl,
+        accessToken: tokenProvider
+      })
+      return setup.joinWorkspace(accountWorkspaceId, {
+        agentName: INTEGRATION_EVENT_AGENT_NAME,
+        scopes: INTEGRATION_EVENT_SCOPES
+      })
     }
-    const setup = new RelayfileSetup({
-      cloudApiUrl: auth.apiUrl,
-      accessToken: tokenProvider
-    })
-    const joined = await setup.joinWorkspace(accountWorkspaceId, {
-      agentName: INTEGRATION_EVENT_AGENT_NAME,
-      scopes: INTEGRATION_EVENT_SCOPES
-    })
+
+    let joined: Awaited<ReturnType<typeof joinWorkspace>>
+    try {
+      joined = await joinWorkspace()
+    } catch (error) {
+      if (!isUnauthorizedError(error)) throw error
+      const refreshed = await refreshCloudAuth()
+      if (!refreshed) throw error
+      auth = refreshed
+      joined = await joinWorkspace()
+    }
     const relayWorkspaceId = joined.workspaceId
     const workspaceTokenProvider = async (): Promise<string> => {
       await joined.refreshToken()

@@ -564,6 +564,15 @@ export interface CloudAuth {
   accountKey: string
 }
 
+function cloudAuthFromStored(tokens: StoredTokens): CloudAuth {
+  const apiUrl = normalizeCloudApiUrl(tokens.apiUrl)
+  return {
+    accessToken: tokens.accessToken,
+    apiUrl,
+    accountKey: deriveCloudAuthAccountKey(apiUrl, tokens.accessToken, tokens.user)
+  }
+}
+
 function normalizeCloudApiUrl(url: string | undefined): string {
   return (url || getApiUrl()).trim().replace(/\/+$/, '')
 }
@@ -623,12 +632,7 @@ export async function resolveCloudAuth(): Promise<CloudAuth | null> {
       ? (await refreshStoredTokens(pearAuth)) ?? (loadTokens() ?? null)
       : pearAuth
     if (usable) {
-      const apiUrl = normalizeCloudApiUrl(usable.apiUrl)
-      return {
-        accessToken: usable.accessToken,
-        apiUrl,
-        accountKey: deriveCloudAuthAccountKey(apiUrl, usable.accessToken, usable.user)
-      }
+      return cloudAuthFromStored(usable)
     }
   }
 
@@ -643,6 +647,13 @@ export async function resolveCloudAuth(): Promise<CloudAuth | null> {
   }
 
   return null
+}
+
+export async function refreshCloudAuth(): Promise<CloudAuth | null> {
+  const pearAuth = loadTokens()
+  if (!pearAuth) return null
+  const refreshed = await refreshStoredTokens(pearAuth)
+  return refreshed ? cloudAuthFromStored(refreshed) : null
 }
 
 export async function ensureAuthenticated(apiUrl?: string): Promise<AuthStatus> {
