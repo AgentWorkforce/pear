@@ -26,6 +26,28 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Compute date-based version
+        id: version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          YEAR="$(date +%Y)"
+          # 10# forces base-10 so "08"/"09" don't fail as invalid octal, and
+          # strips the leading zero so the version stays valid semver (2026.6.1,
+          # not 2026.06.1 — leading zeros are not valid semver).
+          MONTH="$((10#$(date +%m)))"
+          # Count this month's releases (drafts included) so re-running before
+          # publishing a draft doesn't reuse its version.
+          COUNT="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
+            --jq '.[].tag_name' | grep -Ec "^v${YEAR}\.${MONTH}\." || true)"
+          N="$((COUNT + 1))"
+          VERSION="${YEAR}.${MONTH}.${N}"
+          echo "Release #${N} for ${YEAR}-$(date +%m) -> v${VERSION}"
+          # Set transiently (not committed); electron-builder bakes this into the
+          # app, latest-mac.yml, and the GitHub release tag (v${version}).
+          npm version "$VERSION" --no-git-tag-version --allow-same-version
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+
       - name: Generate changelog
         id: changelog
         env:

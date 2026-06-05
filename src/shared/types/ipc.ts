@@ -777,6 +777,16 @@ export interface ProjectListResult {
   activeId: string | null
 }
 
+/**
+ * Snapshot of the main process's auto-update state, replayed to renderers that
+ * subscribe after the originating event fired. `null` means idle / up to date.
+ */
+export type UpdaterState =
+  | { kind: 'available'; version: string }
+  | { kind: 'downloading'; percent: number }
+  | { kind: 'downloaded'; version: string }
+  | { kind: 'error'; message: string }
+
 export interface PearAPI {
   app: {
     confirmQuit: () => Promise<boolean>
@@ -960,6 +970,15 @@ export interface PearAPI {
     stats: () => Promise<AiHistStats | null>
     resumeCommand: (entry: AiHistResumeEntry) => Promise<string | null>
     reload: () => Promise<void>
+  }
+  update: {
+    getState: () => Promise<UpdaterState | null>
+    download: () => Promise<void>
+    install: () => Promise<void>
+    onAvailable: (callback: (info: { version: string }) => void) => () => void
+    onProgress: (callback: (info: { percent: number }) => void) => () => void
+    onDownloaded: (callback: (info: { version: string }) => void) => () => void
+    onError: (callback: (info: { message: string }) => void) => () => void
   }
   onMenu: (channel: string, callback: (...args: unknown[]) => void) => () => void
 }

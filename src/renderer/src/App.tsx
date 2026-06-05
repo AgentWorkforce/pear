@@ -14,6 +14,7 @@ import ConversationsPanel from '@/components/ai-hist/ConversationsPanel'
 import { AppTopBar } from '@/components/common/AppTopBar'
 import { CommandMenu } from '@/components/common/CommandMenu'
 import { StatusBar } from '@/components/common/StatusBar'
+import { UpdateBanner } from '@/components/common/UpdateBanner'
 import { AddProjectDialog } from '@/components/sidebar/AddProjectDialog'
 import { AddChannelDialog } from '@/components/sidebar/AddChannelDialog'
 import { SpawnAgentDialog } from '@/components/sidebar/SpawnAgentDialog'
@@ -25,6 +26,7 @@ import { useBrokerEvents } from '@/hooks/use-broker-events'
 import { useCloudAgentEvents } from '@/hooks/use-cloud-agent'
 import { useGitStatus } from '@/hooks/use-git-status'
 import { useMessageReconciliation } from '@/hooks/use-message-reconciliation'
+import { useUpdateEvents } from '@/hooks/use-update-events'
 import { useAgentStore } from '@/stores/agent-store'
 import { initTypingTrace } from '@/lib/typing-trace'
 
@@ -47,6 +49,7 @@ export default function App(): React.ReactNode {
   useCloudAgentEvents()
   useGitStatus()
   useMessageReconciliation()
+  useUpdateEvents()
 
   useEffect(() => {
     load()
@@ -116,6 +119,7 @@ export default function App(): React.ReactNode {
   return (
     <div className="relative flex h-full flex-col">
       <AppTopBar />
+      <UpdateBanner />
 
       <div className="flex min-h-0 flex-1">
         <div

@@ -67,6 +67,7 @@ import type {
   ProactiveAgentTranscript,
   ProjectListResult,
   TerminalAttachMode,
+  UpdaterState,
   WorkforcePersona
 } from '../shared/types/ipc'
 
@@ -451,6 +452,15 @@ const api = {
     resumeCommand: (entry: AiHistResumeEntry) =>
       invoke<string | null>('ai-hist:resume-command', entry),
     reload: () => invoke<void>('ai-hist:reload')
+  },
+  update: {
+    getState: () => invoke<UpdaterState | null>('update:get-state'),
+    download: () => invoke<void>('update:download'),
+    install: () => invoke<void>('update:install'),
+    onAvailable: (callback) => subscribe<{ version: string }>('update:available', callback),
+    onProgress: (callback) => subscribe<{ percent: number }>('update:progress', callback),
+    onDownloaded: (callback) => subscribe<{ version: string }>('update:downloaded', callback),
+    onError: (callback) => subscribe<{ message: string }>('update:error', callback)
   },
   onMenu: (channel: string, callback: (...args: unknown[]) => void) => {
     const handler = (_: unknown, ...args: unknown[]): void => callback(...args)
