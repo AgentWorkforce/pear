@@ -145,6 +145,8 @@ function workspaceIdFromJwt(token: string | undefined): string | null {
 function canonicalMountPaths(integration: ConnectedIntegration): string[] {
   const provider = toRelayfileProvider(integration.provider)
   const mountPaths = integration.mountPaths.map((path) => {
+    const discovery = path.match(/^\/discovery(?:\/.*)?$/)
+    if (discovery) return path
     const prefixed = path.match(/^\/integrations\/[^/]+(\/.*)?$/)
     if (prefixed) return `/${provider}${prefixed[1] ?? ''}`
     const rootLevel = path.match(/^\/[^/]+(\/.*)?$/)

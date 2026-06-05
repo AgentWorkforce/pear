@@ -181,6 +181,24 @@ test('integration events watch selected relayfile mount paths', async () => {
   assert.match(harness.sent[0].input.text, /Relayfile path: \/slack\/channels\/C123ABC__proj-cloud\/messages\/1713220123_001100\/meta\.json/u)
 })
 
+test('integration events preserve discovery mount paths', async () => {
+  const harness = makeHarness()
+  const slackIntegration = integration({
+    provider: 'slack',
+    integrationId: 'slack-1',
+    mountPaths: ['/discovery/slack']
+  })
+
+  await harness.bridge.reconcile('project-1', [slackIntegration])
+
+  assert.deepEqual(harness.subscribeCalls[0].globs, [
+    '/discovery/slack/**'
+  ])
+  assert.deepEqual(integrationSubscriptionSummaries([slackIntegration])[0].watches, [
+    '.integrations/discovery/slack/**'
+  ])
+})
+
 test('resource alias mount paths inject the same relative event only once', async () => {
   const harness = makeHarness()
   const chatIntegration = integration({

@@ -76,7 +76,8 @@ function canonicalIntegrationMountPath(mountPath: string, provider: string): str
   const providerSegment = sanitizePathSegment(provider.trim().toLowerCase())
   const segments = remotePathSegments(mountPath)
   if (segments[0] === 'discovery') {
-    return `/${segments.join('/')}`
+    const discoverySegments = segments.length > 1 ? segments : ['discovery', providerSegment]
+    return `/${discoverySegments.join('/')}`
   }
   const withoutLegacyRoot = segments[0] === 'integrations' ? segments.slice(2) : segments.slice(1)
   if (segments[0] === 'integrations') {
