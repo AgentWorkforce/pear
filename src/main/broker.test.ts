@@ -517,6 +517,42 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('does not carry PTY chunk dedupe state across broker restarts', async () => {
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    const firstLocal = await startLocalWithWindow(manager, win)
+    const firstListener = firstLocal.onEvent.mock.calls.at(-1)?.[0]
+    expect(firstListener).toBeTypeOf('function')
+
+    firstListener?.({
+      kind: 'worker_stream',
+      name: 'claude-1',
+      chunk: 'first\n',
+      seq: 1
+    })
+
+    await manager.shutdown(PROJECT_ID)
+
+    const secondLocal = await startLocalWithWindow(manager, win)
+    const secondListener = secondLocal.onEvent.mock.calls.at(-1)?.[0]
+    expect(secondListener).toBeTypeOf('function')
+    secondListener?.({
+      kind: 'worker_stream',
+      name: 'claude-1',
+      chunk: 'second\n',
+      seq: 1
+    })
+
+    const ptyCalls = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([channel]) => channel === 'broker:pty-chunk')
+    expect(ptyCalls).toEqual([
+      ['broker:pty-chunk', PROJECT_ID, 'claude-1', 'first\n'],
+      ['broker:pty-chunk', PROJECT_ID, 'claude-1', 'second\n']
+    ])
+
+    await manager.shutdown()
+  })
+
   it('refreshEventStream rebinds the harness stream from the last seen sequence', async () => {
     const manager = new BrokerManager()
     const local = await startLocal(manager)

@@ -3136,9 +3136,19 @@ export class BrokerManager {
     }
   }
 
+  private clearRecentPtyChunksForSession(sessionKey: string): void {
+    const prefix = `${sessionKey}:`
+    for (const key of Array.from(this.recentPtyChunks.keys())) {
+      if (key.startsWith(prefix)) {
+        this.recentPtyChunks.delete(key)
+      }
+    }
+  }
+
   private dropSession(sessionKey: string, options: { disconnectOnly: boolean }): void {
     this.closeInputStreamsForSession(sessionKey)
     this.clearBrokerTimeoutCountsForProject(projectIdFromSessionKey(sessionKey))
+    this.clearRecentPtyChunksForSession(sessionKey)
 
     const session = this.sessions.get(sessionKey)
     if (!session) return
