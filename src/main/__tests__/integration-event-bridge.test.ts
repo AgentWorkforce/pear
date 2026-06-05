@@ -231,6 +231,28 @@ test('local fallback watchers are disabled when historical download is off', () 
   assert.deepEqual(roots, [])
 })
 
+test('local fallback watchers require historical download even for command roots', () => {
+  const roots = localWatchRootsFor(
+    'workspace-id',
+    [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/.outbox'],
+        downloadHistoricalData: false,
+        localMountPaths: [
+          join('/tmp', 'relayfile', 'workspaces', 'workspace-id', 'slack', '.outbox')
+        ]
+      })
+    ],
+    [
+      '/slack/.outbox/**'
+    ]
+  )
+
+  assert.deepEqual(roots, [])
+})
+
 test('local fallback watchers do not watch broad provider history paths', () => {
   const roots = localWatchRootsFor(
     'workspace-id',

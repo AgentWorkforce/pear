@@ -484,7 +484,7 @@ function allowsLocalMountWatching(integration: ConnectedIntegration): boolean {
 function isBoundedLocalCommandRoot(remoteRoot: string): boolean {
   const segments = pathSegments(remoteRoot)
   if (segments.length === 0) return false
-  return segments.some((segment) => segment === '.outbox' || segment === 'outbox')
+  return segments.some((segment) => segment === '.outbox')
 }
 
 function watchableLocalIntegrations(integrations: ConnectedIntegration[]): ConnectedIntegration[] {
