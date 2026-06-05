@@ -28,14 +28,9 @@ const EVENT_STREAM_RECONCILED_STATUSES = new Set<BrokerEventStreamDiagnostic['st
 export type MessageReconciliationRequest = BrokerReconcileMessagesInput
 
 interface BrokerWithMessageReconciliation {
-  reconcileMessages: (input: MessageReconciliationRequest) => Promise<BrokerReconciledChatMessage[]>
+  reconcileMessages?: (input: MessageReconciliationRequest) => Promise<BrokerReconciledChatMessage[]>
   refreshEventStream?: (projectId?: string, reason?: string) => Promise<void>
   onEventStreamDiagnostic?: (callback: (event: BrokerEventStreamDiagnostic) => void) => () => void
-}
-
-interface StoreWithMessageReconciliation {
-  reconcileMessages?: (messages: ChatMessage[]) => void
-  handleBrokerEvent: (event: Record<string, unknown> & { kind: string }) => void
 }
 
 interface MessageReconcilerDeps {
@@ -112,6 +107,7 @@ export function createMessageReconciler(deps: MessageReconcilerDeps): MessageRec
   let timer: number | null = null
   let disposed = false
   let inFlight: Promise<void> | null = null
+  let pendingRerun: string | null = null
 
   const debug = (event: Omit<MessageReconciliationDebugEvent, 'timestamp'>): void => {
     deps.debug?.({ ...event, timestamp: now() })
@@ -120,7 +116,8 @@ export function createMessageReconciler(deps: MessageReconcilerDeps): MessageRec
   const runNow = async (reason: string): Promise<void> => {
     if (disposed) return
     if (inFlight) {
-      debug({ kind: 'skipped', reason })
+      pendingRerun = reason
+      debug({ kind: 'scheduled', reason })
       return inFlight
     }
 
@@ -130,7 +127,7 @@ export function createMessageReconciler(deps: MessageReconcilerDeps): MessageRec
       return
     }
 
-    inFlight = (async () => {
+    const currentRun = (async () => {
       debug({ kind: 'started', reason })
       try {
         const messages = await deps.reconcileMessages(request)
@@ -147,11 +144,19 @@ export function createMessageReconciler(deps: MessageReconcilerDeps): MessageRec
         })
       }
     })()
+    inFlight = currentRun
 
     try {
-      await inFlight
+      await currentRun
     } finally {
-      inFlight = null
+      if (inFlight === currentRun) {
+        inFlight = null
+      }
+      const rerunReason = pendingRerun
+      pendingRerun = null
+      if (rerunReason && !disposed) {
+        await runNow(rerunReason)
+      }
     }
   }
 
@@ -181,23 +186,7 @@ export function createMessageReconciler(deps: MessageReconcilerDeps): MessageRec
 }
 
 function mergeReconciledMessages(messages: ChatMessage[]): void {
-  const state = useAgentStore.getState() as unknown as StoreWithMessageReconciliation
-  if (state.reconcileMessages) {
-    state.reconcileMessages(messages)
-    return
-  }
-
-  // Compatibility while the store merge action and IPC surface land together.
-  for (const message of messages) {
-    state.handleBrokerEvent({
-      kind: 'relay_inbound',
-      event_id: message.id,
-      from: message.from,
-      target: message.to,
-      body: message.body,
-      projectId: message.projectId
-    })
-  }
+  useAgentStore.getState().reconcileMessages(messages)
 }
 
 function debugReconciliation(event: MessageReconciliationDebugEvent): void {
@@ -208,8 +197,8 @@ function debugReconciliation(event: MessageReconciliationDebugEvent): void {
 
 function refreshEventStream(reason: string): void {
   const projectId = useProjectStore.getState().activeProjectId || undefined
-  const broker = window.pear.broker as PearAPI['broker'] & BrokerWithMessageReconciliation
-  void broker.refreshEventStream?.(projectId, reason).catch(() => undefined)
+  const broker = window.pear?.broker as (PearAPI['broker'] & BrokerWithMessageReconciliation) | undefined
+  void broker?.refreshEventStream?.(projectId, reason)?.catch(() => undefined)
 }
 
 export function useMessageReconciliation(): void {
@@ -233,8 +222,10 @@ export function useMessageReconciliation(): void {
         activeTab: getActiveTab(ui.tabs, ui.activeTabId)
       })
     },
-    reconcileMessages: (input) =>
-      (window.pear.broker as PearAPI['broker'] & BrokerWithMessageReconciliation).reconcileMessages(input),
+    reconcileMessages: (input) => {
+      const broker = window.pear?.broker as (PearAPI['broker'] & BrokerWithMessageReconciliation) | undefined
+      return broker?.reconcileMessages?.(input) ?? Promise.resolve([])
+    },
     mergeMessages: mergeReconciledMessages,
     setTimeout: window.setTimeout.bind(window),
     clearTimeout: window.clearTimeout.bind(window),
@@ -282,7 +273,7 @@ export function useMessageReconciliation(): void {
   }, [reconciler])
 
   useEffect(() => {
-    return window.pear.broker.onStatus((status) => {
+    return window.pear?.broker?.onStatus?.((status) => {
       if (BROKER_CONNECTED_STATUSES.has(status.status)) {
         refreshEventStream(`broker:${status.status}`)
         reconciler.schedule(`broker:${status.status}`)
@@ -291,8 +282,8 @@ export function useMessageReconciliation(): void {
   }, [reconciler])
 
   useEffect(() => {
-    const broker = window.pear.broker as PearAPI['broker'] & BrokerWithMessageReconciliation
-    if (!broker.onEventStreamDiagnostic) return
+    const broker = window.pear?.broker as (PearAPI['broker'] & BrokerWithMessageReconciliation) | undefined
+    if (!broker?.onEventStreamDiagnostic) return
     return broker.onEventStreamDiagnostic((event) => {
       if (EVENT_STREAM_RECONCILED_STATUSES.has(event.status)) {
         reconciler.schedule(`event-stream:${event.status}`)

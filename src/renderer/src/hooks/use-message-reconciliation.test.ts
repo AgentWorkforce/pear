@@ -36,6 +36,17 @@ const channelMessage: ChatMessage = {
   projectId: 'project-1'
 }
 
+function deferredMessages(): {
+  promise: Promise<ChatMessage[]>
+  resolve: (messages: ChatMessage[]) => void
+} {
+  let resolve!: (messages: ChatMessage[]) => void
+  const promise = new Promise<ChatMessage[]>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
 describe('getActiveMessageReconciliationRequest', () => {
   it('builds a bounded channel reconciliation request for the active tab', () => {
     expect(hooks.getActiveMessageReconciliationRequest({
@@ -134,6 +145,53 @@ describe('createMessageReconciler', () => {
     }))
   })
 
+  it('queues a rerun when a trigger fires during an in-flight reconciliation', async () => {
+    vi.useFakeTimers()
+    const request: MessageReconciliationRequest = {
+      projectId: 'project-1',
+      kind: 'channel',
+      channelName: 'general',
+      limit: 50
+    }
+    const firstFetch = deferredMessages()
+    const secondFetch = deferredMessages()
+    const secondMessage = { ...channelMessage, id: 'msg-2', body: 'arrived during first fetch' }
+    const reconcileMessages = vi.fn()
+      .mockReturnValueOnce(firstFetch.promise)
+      .mockReturnValueOnce(secondFetch.promise)
+    const mergeMessages = vi.fn()
+    const reconciler = hooks.createMessageReconciler({
+      getRequest: () => request,
+      reconcileMessages,
+      mergeMessages,
+      setTimeout: setTimeout as unknown as typeof window.setTimeout,
+      clearTimeout: clearTimeout as unknown as typeof window.clearTimeout,
+      debounceMs: 1
+    })
+
+    reconciler.schedule('initial')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(reconcileMessages).toHaveBeenCalledTimes(1)
+
+    reconciler.schedule('window-focus')
+    await vi.advanceTimersByTimeAsync(1)
+    expect(reconcileMessages).toHaveBeenCalledTimes(1)
+
+    firstFetch.resolve([channelMessage])
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(reconcileMessages).toHaveBeenCalledTimes(2)
+    expect(reconcileMessages).toHaveBeenNthCalledWith(2, request)
+
+    secondFetch.resolve([secondMessage])
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mergeMessages).toHaveBeenNthCalledWith(1, [channelMessage])
+    expect(mergeMessages).toHaveBeenNthCalledWith(2, [secondMessage])
+  })
+
   it('skips fetches when no active chat room can be reconciled', async () => {
     vi.useFakeTimers()
     const reconcileMessages = vi.fn(async () => [channelMessage])
@@ -171,5 +229,9 @@ describe('createMessageReconciler', () => {
       body: 'updated canonical body',
       timestamp: channelMessage.timestamp + 1
     })
+
+    const messagesAfterUpdate = agentStore.useAgentStore.getState().messages
+    store.reconcileMessages([messagesAfterUpdate[0]])
+    expect(agentStore.useAgentStore.getState().messages).toBe(messagesAfterUpdate)
   })
 })

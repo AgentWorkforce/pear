@@ -509,7 +509,7 @@ function isHumanSenderName(sender: string): boolean {
 }
 
 function senderNameFromRelayMessage(message: RelayMessage): string {
-  return message.from.name || message.from.id || 'unknown'
+  return message.from?.name || message.from?.id || 'unknown'
 }
 
 function directMessageTargetFromRelayMessage(
@@ -564,7 +564,7 @@ function normalizeRelayMessageForChat(
     reactions: message.reactions?.map((reaction) => ({
       emoji: reaction.emoji,
       count: reaction.count,
-      reactedByHuman: reaction.agents.some(isHumanSenderName)
+      reactedByHuman: Array.isArray(reaction.agents) && reaction.agents.some(isHumanSenderName)
     }))
   }
 }
@@ -1718,12 +1718,14 @@ export class BrokerManager {
   }
 
   async refreshEventStream(projectId?: string, reason = 'manual', win?: BrowserWindow): Promise<void> {
-    const sessions = projectId
-      ? await this.getOrAwaitSessionsForProject(projectId)
+    const normalizedProjectId = projectId?.trim()
+    const sessions = normalizedProjectId
+      ? await this.getOrAwaitSessionsForProject(normalizedProjectId)
       : Array.from(this.sessions.values())
+    const rebindWindow = normalizedProjectId ? win : undefined
 
     for (const session of sessions) {
-      await this.rebindSessionEventStream(sessionKeyFor(session), session, reason, win)
+      await this.rebindSessionEventStream(sessionKeyFor(session), session, reason, rebindWindow)
     }
   }
 
@@ -1764,10 +1766,14 @@ export class BrokerManager {
       ...(session.lastEventId ? { eventId: session.lastEventId } : {})
     })
 
+    const previousUnsubEvent = session.unsubEvent
+    let nextUnsubEvent: (() => void) | undefined
+
     try {
-      session.unsubEvent()
       session.client.disconnectEvents()
-      session.unsubEvent = this.attachClient(sessionKey, session.client, session.window)
+      nextUnsubEvent = this.attachClient(sessionKey, session.client, session.window)
+      session.unsubEvent = nextUnsubEvent
+      previousUnsubEvent()
       session.client.connectEvents(session.lastEventSeq)
       session.lastEventStreamRebindAt = now
       session.eventStreamRebinds = (session.eventStreamRebinds || 0) + 1
@@ -1790,7 +1796,9 @@ export class BrokerManager {
         error: toErrorMessage(err),
         reconnects: session.eventStreamRebinds || 0
       })
-      throw err
+      if (!nextUnsubEvent) {
+        session.unsubEvent = previousUnsubEvent
+      }
     }
   }
 

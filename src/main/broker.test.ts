@@ -164,9 +164,9 @@ async function startLocal(manager: BrokerManager, agents: string[] = []): Promis
   return lastSpawned()
 }
 
-function createMockWindow(): BrowserWindow {
+function createMockWindow(destroyed = false): BrowserWindow {
   return {
-    isDestroyed: vi.fn(() => false),
+    isDestroyed: vi.fn(() => destroyed),
     webContents: {
       send: vi.fn()
     }
@@ -176,10 +176,11 @@ function createMockWindow(): BrowserWindow {
 async function startLocalWithWindow(
   manager: BrokerManager,
   win: BrowserWindow,
-  agents: string[] = []
+  agents: string[] = [],
+  projectId = PROJECT_ID
 ): Promise<MockClient> {
   mock.state.nextLocalAgents = agents
-  await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', win, [])
+  await manager.start(projectId, `/tmp/${projectId}`, `pear-${projectId}`, win, [])
   return lastSpawned()
 }
 
@@ -399,6 +400,32 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('does not publish broker events to a destroyed captured window', async () => {
+    const manager = new BrokerManager()
+    const destroyedWindow = createMockWindow(true)
+    const local = await startLocalWithWindow(manager, destroyedWindow)
+    const listener = local.onEvent.mock.calls.at(-1)?.[0]
+    expect(listener).toBeTypeOf('function')
+
+    listener?.({
+      kind: 'relay_inbound',
+      from: 'codex-2',
+      target: '#general',
+      body: 'destroyed window proof',
+      event_id: 'evt-destroyed-window',
+      seq: 13
+    })
+
+    expect(destroyedWindow.webContents.send).not.toHaveBeenCalledWith(
+      'broker:event',
+      expect.objectContaining({
+        body: 'destroyed window proof'
+      })
+    )
+
+    await manager.shutdown()
+  })
+
   it('refreshEventStream rebinds the harness stream from the last seen sequence', async () => {
     const manager = new BrokerManager()
     const local = await startLocal(manager)
@@ -419,6 +446,83 @@ describe('BrokerManager local + cloud coexistence', () => {
     expect(local.disconnectEvents).toHaveBeenCalledTimes(1)
     expect(local.onEvent).toHaveBeenCalledTimes(2)
     expect(local.connectEvents).toHaveBeenLastCalledWith(477)
+
+    await manager.shutdown()
+  })
+
+  it('keeps a replacement event listener when reconnect throws during refreshEventStream', async () => {
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    const local = await startLocalWithWindow(manager, win)
+
+    local.connectEvents.mockImplementationOnce(() => {
+      throw new Error('connect failed')
+    })
+
+    await manager.refreshEventStream(PROJECT_ID, 'test-rebind-failure')
+
+    expect(local.disconnectEvents).toHaveBeenCalledTimes(1)
+    expect(local.onEvent).toHaveBeenCalledTimes(2)
+    expect(local.connectEvents).toHaveBeenLastCalledWith(undefined)
+
+    const replacementListener = local.onEvent.mock.calls.at(-1)?.[0]
+    expect(replacementListener).toBeTypeOf('function')
+    replacementListener?.({
+      kind: 'relay_inbound',
+      from: 'codex-2',
+      target: '#general',
+      body: 'rebind failure still subscribed',
+      event_id: 'evt-rebind-failure',
+      seq: 478
+    })
+
+    expect(win.webContents.send).toHaveBeenCalledWith(
+      'broker:event',
+      expect.objectContaining({
+        kind: 'relay_inbound',
+        body: 'rebind failure still subscribed',
+        projectId: PROJECT_ID
+      })
+    )
+
+    await manager.shutdown()
+  })
+
+  it('does not let a global event-stream refresh overwrite session windows', async () => {
+    const manager = new BrokerManager()
+    const firstWindow = createMockWindow()
+    const secondWindow = createMockWindow()
+    const intruderWindow = createMockWindow()
+    await startLocalWithWindow(manager, firstWindow, [], PROJECT_ID)
+    const secondClient = await startLocalWithWindow(manager, secondWindow, [], 'project-2')
+
+    await manager.refreshEventStream(undefined, 'global-refresh', intruderWindow)
+
+    const secondListener = secondClient.onEvent.mock.calls.at(-1)?.[0]
+    expect(secondListener).toBeTypeOf('function')
+    secondListener?.({
+      kind: 'relay_inbound',
+      from: 'codex-2',
+      target: '#general',
+      body: 'global refresh proof',
+      event_id: 'evt-global-refresh',
+      seq: 479
+    })
+
+    expect(intruderWindow.webContents.send).not.toHaveBeenCalledWith(
+      'broker:event',
+      expect.objectContaining({
+        body: 'global refresh proof'
+      })
+    )
+    expect(secondWindow.webContents.send).toHaveBeenCalledWith(
+      'broker:event',
+      expect.objectContaining({
+        kind: 'relay_inbound',
+        body: 'global refresh proof',
+        projectId: 'project-2'
+      })
+    )
 
     await manager.shutdown()
   })

@@ -264,8 +264,10 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('broker:refresh-event-stream', async (event, projectId?: string, reason?: string) => {
+    const normalizedProjectId = projectId?.trim()
+    if (!normalizedProjectId) return
     const win = BrowserWindow.fromWebContents(event.sender)
-    await brokerManager.refreshEventStream(projectId, reason || 'renderer-request', win || undefined)
+    await brokerManager.refreshEventStream(normalizedProjectId, reason || 'renderer-request', win || undefined)
   })
 
   ipcMain.handle('broker:subscribe-agent-channel', async (_, projectId: string | undefined, name: string, channel: string) => {

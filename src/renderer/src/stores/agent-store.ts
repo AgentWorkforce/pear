@@ -328,6 +328,46 @@ function isBrokerDebugEnabled(): boolean {
     localStorage.getItem('pear-broker-debug') === 'true'
 }
 
+function reactionsEqual(left: ChatReaction[] | undefined, right: ChatReaction[] | undefined): boolean {
+  if (left === right) return true
+  if (!left || !right || left.length !== right.length) return false
+  return left.every((reaction, index) => {
+    const candidate = right[index]
+    return candidate &&
+      reaction.emoji === candidate.emoji &&
+      reaction.count === candidate.count &&
+      reaction.reactedByHuman === candidate.reactedByHuman
+  })
+}
+
+function threadRepliesEqual(left: ChatThreadReply[] | undefined, right: ChatThreadReply[] | undefined): boolean {
+  if (left === right) return true
+  if (!left || !right || left.length !== right.length) return false
+  return left.every((reply, index) => {
+    const candidate = right[index]
+    return candidate &&
+      reply.id === candidate.id &&
+      reply.from === candidate.from &&
+      reply.body === candidate.body &&
+      reply.timestamp === candidate.timestamp &&
+      reply.isHuman === candidate.isHuman &&
+      reply.projectId === candidate.projectId
+  })
+}
+
+function chatMessagesEqual(left: ChatMessage, right: ChatMessage): boolean {
+  return left.kind === right.kind &&
+    left.from === right.from &&
+    left.to === right.to &&
+    left.body === right.body &&
+    left.timestamp === right.timestamp &&
+    left.isHuman === right.isHuman &&
+    left.projectId === right.projectId &&
+    left.conversationId === right.conversationId &&
+    reactionsEqual(left.reactions, right.reactions) &&
+    threadRepliesEqual(left.threadReplies, right.threadReplies)
+}
+
 function reconcileChatMessages(
   existingMessages: ChatMessage[],
   incomingMessages: BrokerReconciledChatMessage[]
@@ -344,13 +384,16 @@ function reconcileChatMessages(
     }
     const previous = byId.get(next.id)
     if (previous) {
-      byId.set(next.id, {
+      const merged = {
         ...previous,
         ...next,
         threadReplies: next.threadReplies || previous.threadReplies,
         reactions: next.reactions || previous.reactions
-      })
-      changed = true
+      }
+      if (!chatMessagesEqual(previous, merged)) {
+        byId.set(next.id, merged)
+        changed = true
+      }
       continue
     }
     byId.set(next.id, next)
