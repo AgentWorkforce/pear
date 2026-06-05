@@ -226,6 +226,18 @@ function scopeStringList(scope: Record<string, unknown>, key: string): string[] 
     : []
 }
 
+function scopeBooleanDefault(scope: Record<string, unknown>, keys: string[], defaultValue: boolean): boolean {
+  for (const key of keys) {
+    const value = scope[key]
+    if (typeof value === 'boolean') return value
+  }
+  return defaultValue
+}
+
+function slackListenDmsFromScope(scope: Record<string, unknown>): boolean {
+  return scopeBooleanDefault(scope, ['listenDms', 'listenDirectMessages', 'directMessages'], true)
+}
+
 function localPathSegments(path: string): string[] {
   return path.split(/[\\/]+/u).filter(Boolean)
 }
@@ -345,6 +357,7 @@ function IntegrationVisibilitySection({
   const [error, setError] = useState<string | null>(null)
   const [scopeEditorIntegrationId, setScopeEditorIntegrationId] = useState<string | null>(null)
   const [pendingScopeValue, setPendingScopeValue] = useState<ScopePickerValue | null>(null)
+  const [pendingSlackListenDms, setPendingSlackListenDms] = useState<boolean | null>(null)
   const resourceCacheRef = useRef(new Map<string, ResourceCacheEntry>())
 
   const load = useCallback(async () => {
@@ -560,13 +573,14 @@ function IntegrationVisibilitySection({
   }, [cachedResources, projectId])
 
   const saveSlackSourceChannels = useCallback(async (integration: ConnectedIntegration) => {
-    if (!pendingScopeValue) return
+    const listenDms = pendingSlackListenDms ?? slackListenDmsFromScope(integration.scope)
     const nextScope = {
       ...integration.scope,
-      provider: pendingScopeValue.scope.provider,
-      selection: pendingScopeValue.scope.selection,
-      channels: pendingScopeValue.scope.channels,
-      resources: pendingScopeValue.scope.resources
+      provider: pendingScopeValue?.scope.provider ?? integration.scope.provider ?? 'slack',
+      selection: pendingScopeValue?.scope.selection ?? integration.scope.selection ?? 'selected',
+      channels: pendingScopeValue?.scope.channels ?? integration.scope.channels ?? [],
+      resources: pendingScopeValue?.scope.resources ?? integration.scope.resources ?? [],
+      listenDms
     }
 
     setBusyIntegrationId(integration.integrationId)
@@ -576,7 +590,7 @@ function IntegrationVisibilitySection({
         projectId,
         integration.integrationId,
         nextScope,
-        pendingScopeValue.mountPaths
+        pendingScopeValue?.mountPaths ?? integration.mountPaths
       )
       setIntegrations((current) =>
         current.map((entry) =>
@@ -585,12 +599,13 @@ function IntegrationVisibilitySection({
       )
       setScopeEditorIntegrationId(null)
       setPendingScopeValue(null)
+      setPendingSlackListenDms(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusyIntegrationId(null)
     }
-  }, [pendingScopeValue, projectId])
+  }, [pendingScopeValue, pendingSlackListenDms, projectId])
 
   return (
     <Section
@@ -621,10 +636,15 @@ function IntegrationVisibilitySection({
             const busy = busyIntegrationId === integration.integrationId
             const slack = isSlackProvider(integration.provider)
             const scopeEditorOpen = scopeEditorIntegrationId === integration.integrationId
+            const savedSlackListenDms = slackListenDmsFromScope(integration.scope)
+            const slackListenDms = pendingSlackListenDms ?? savedSlackListenDms
             const selectedSlackSourceIds = Array.from(new Set([
               ...integration.mountPaths,
               ...scopeStringList(integration.scope, 'channels')
             ]))
+            const slackScopeDirty = !!pendingScopeValue || (
+              pendingSlackListenDms !== null && pendingSlackListenDms !== savedSlackListenDms
+            )
             const knownTargetValues = new Set([
               'all',
               ...agentNames.map((agent) => `agent:${agent}`),
@@ -656,6 +676,7 @@ function IntegrationVisibilitySection({
                       disabled={busy}
                       onClick={() => {
                         setPendingScopeValue(null)
+                        setPendingSlackListenDms(scopeEditorOpen ? null : savedSlackListenDms)
                         setScopeEditorIntegrationId(scopeEditorOpen ? null : integration.integrationId)
                       }}
                       className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md border transition-colors disabled:opacity-40 ${
@@ -751,6 +772,19 @@ function IntegrationVisibilitySection({
                       listAccessibleResources={() => listSlackChannelResources(integration)}
                       onChange={setPendingScopeValue}
                     />
+                    <label className="mt-3 flex items-center gap-3 rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-4 py-3">
+                      <input
+                        type="checkbox"
+                        checked={slackListenDms}
+                        disabled={busy}
+                        onChange={(event) => setPendingSlackListenDms(event.target.checked)}
+                        className="h-4 w-4 accent-[var(--pear-accent)]"
+                      />
+                      <span className="min-w-0">
+                        <span className="block text-sm text-[var(--pear-text)]">Direct messages</span>
+                        <span className="block text-xs text-[var(--pear-text-faint)]">Listen for Slack DMs</span>
+                      </span>
+                    </label>
                     <div className="mt-3 flex justify-end gap-2">
                       <button
                         type="button"
@@ -758,6 +792,7 @@ function IntegrationVisibilitySection({
                         onClick={() => {
                           setScopeEditorIntegrationId(null)
                           setPendingScopeValue(null)
+                          setPendingSlackListenDms(null)
                         }}
                         className="h-8 rounded-md border border-[var(--pear-border)] px-3 text-xs text-[var(--pear-text-dim)] hover:text-[var(--pear-text)] disabled:opacity-40"
                       >
@@ -765,7 +800,7 @@ function IntegrationVisibilitySection({
                       </button>
                       <button
                         type="button"
-                        disabled={busy || !pendingScopeValue}
+                        disabled={busy || !slackScopeDirty}
                         onClick={() => void saveSlackSourceChannels(integration)}
                         className="flex h-8 items-center gap-2 rounded-md border border-[var(--pear-accent-dim)] px-3 text-xs text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)] disabled:opacity-40"
                       >
