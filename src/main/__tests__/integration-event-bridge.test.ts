@@ -963,18 +963,21 @@ test('integration events ignore index, discovery, tmp, dotfile, and local writeb
 test('integration events notify nested non-numeric Slack message records', async () => {
   const harness = makeHarness()
 
-  await harness.bridge.reconcile('project-1', [
-    integration({
-      provider: 'slack',
-      integrationId: 'slack-1',
-      mountPaths: ['/slack/channels/C123ABC'],
-      scope: {
-        notifyAgents: ['alice']
-      }
-    })
-  ])
+  await withMockedNow('2026-06-04T21:20:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC'],
+        scope: {
+          notifyAgents: ['alice']
+        }
+      })
+    ])
 
-  await harness.emit(changeEvent('/slack/channels/C123ABC/messages/1780607825_485189/files/attachment.json', 'slack'))
+    await harness.emit(changeEvent('/slack/channels/C123ABC/messages/1780607825_485189/files/attachment.json', 'slack'))
+    await waitForSent(harness, 1)
+  })
 
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
   assert.equal(harness.sent[0].input.data?.path, '/slack/channels/C123ABC/messages/1780607825_485189/files/attachment.json')
