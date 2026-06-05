@@ -9,6 +9,11 @@ import * as filesystem from './filesystem'
 import { integrationEventBridge, integrationSubscriptionSummaries } from './integration-event-bridge'
 import { integrationMountManager, integrationMountRootForWorkspace } from './integration-mounts'
 import {
+  canListRemoteDirectoryForMountPaths,
+  normalizeRemoteDirectoryPath,
+  remotePathName
+} from './integration-remote-paths'
+import {
   PROJECT_INTEGRATIONS_LINK_NAME,
   ensureProjectIntegrationsLink,
   removeProjectIntegrationsLink
@@ -243,12 +248,6 @@ function isPathWithinRoot(rootPath: string, targetPath: string): boolean {
   return child === '' || (!!child && !child.startsWith('..') && !isAbsolute(child))
 }
 
-function isRelayfilePathWithinRoot(rootPath: string, targetPath: string): boolean {
-  const normalizedRoot = rootPath.trim().replace(/\/+$/u, '') || '/'
-  const normalizedTarget = targetPath.trim().replace(/\/+$/u, '') || '/'
-  return normalizedTarget === normalizedRoot || normalizedTarget.startsWith(`${normalizedRoot}/`)
-}
-
 function toRelayfileProvider(provider: string): string {
   const normalized = provider.trim().toLowerCase()
   return normalized === 'gmail' ? 'google-mail' : normalized
@@ -297,16 +296,6 @@ function projectIntegrationPathForRelayfilePath(mountPath: string): string {
   const trimmed = mountPath.trim()
   const normalized = trimmed.startsWith('/') ? trimmed : `/${trimmed}`
   return `${PROJECT_INTEGRATIONS_LINK_NAME}${normalized}`
-}
-
-function normalizeRemoteDirectoryPath(remotePath: string): string | null {
-  const segments = remotePath.split('/').map((segment) => segment.trim()).filter(Boolean)
-  if (segments.some((segment) => segment === '.' || segment === '..')) return null
-  return `/${segments.join('/')}`
-}
-
-function remotePathName(remotePath: string): string {
-  return remotePath.split('/').filter(Boolean).at(-1) || remotePath
 }
 
 function discoveryMountPathForProvider(provider: string): string {
@@ -1550,12 +1539,10 @@ export class IntegrationsManager {
 
   private canListRemoteDirectory(projectId: string, remotePath: string): boolean {
     return this.visibleIntegrationsForProject(projectId).some((integration) =>
-      [
+      canListRemoteDirectoryForMountPaths(remotePath, [
         discoveryMountPathForProvider(integration.provider),
         ...this.canonicalMountPathsForIntegration(integration)
-      ].some((mountPath) =>
-        isRelayfilePathWithinRoot(mountPath, remotePath) || isRelayfilePathWithinRoot(remotePath, mountPath)
-      )
+      ])
     )
   }
 
