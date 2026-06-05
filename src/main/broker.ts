@@ -17,6 +17,7 @@ import {
   type PendingRelayMessage,
   type PtyInputStream
 } from '@agent-relay/harness-driver'
+import { AgentRelay, type RelayMessage } from '@agent-relay/sdk'
 import { getAccessToken, getApiUrl } from './auth'
 import { assertDirectory } from './path-utils'
 import { createPearBurnSpawnListener, stampPearBurnSpawnedAgent } from './burn-spawn-hook'
@@ -27,7 +28,12 @@ import {
   type GeneratedCommitDraft
 } from './schemas'
 import { compactBrokerEvent, normalizeEventTimestamp } from '../shared/lib/broker-events'
-import type { WorkforcePersona } from '../shared/types/ipc'
+import type {
+  BrokerEventStreamDiagnostic,
+  BrokerReconciledChatMessage,
+  BrokerReconcileMessagesInput,
+  WorkforcePersona
+} from '../shared/types/ipc'
 import {
   canExecute,
   resolveAgentRelayMcpCommand as resolveAgentRelayMcpCommandForOptions,
@@ -334,6 +340,9 @@ const COMMIT_DRAFT_MAX_DIFF_CHARS = 80_000
 const COMMIT_DRAFT_TIMEOUT_MS = 180_000
 const MAX_BROKER_EVENT_HISTORY = 3_000
 const BROKER_EVENT_HISTORY_TTL_MS = 12 * 60 * 60 * 1_000
+const DEFAULT_RECONCILE_MESSAGE_LIMIT = 50
+const MAX_RECONCILE_MESSAGE_LIMIT = 100
+const EVENT_STREAM_REBIND_COOLDOWN_MS = 5_000
 // After this many consecutive failures to open a PTY input stream, give up on
 // the WS fast path for that agent briefly and send over HTTP while it cools down.
 const MAX_INPUT_STREAM_OPEN_FAILURES = 3
@@ -474,6 +483,101 @@ function toErrorMessage(err: unknown): string {
 }
 
 type BrokerEventRecordPayload = Record<string, unknown> & { kind: string }
+
+function isBrokerDebugEnabled(): boolean {
+  return process.env.PEAR_BROKER_DEBUG === '1' || process.env.PEAR_BROKER_DEBUG === 'true'
+}
+
+function normalizeReconcileLimit(limit: number | undefined): number {
+  if (!Number.isFinite(limit) || !limit || limit <= 0) return DEFAULT_RECONCILE_MESSAGE_LIMIT
+  return Math.min(Math.floor(limit), MAX_RECONCILE_MESSAGE_LIMIT)
+}
+
+function normalizeChatChannelTarget(channelName: string): string {
+  const normalized = channelName.trim().replace(/^#/, '')
+  return normalized ? `#${normalized}` : '#general'
+}
+
+function normalizeRelayTimestamp(value: string | undefined): number {
+  if (!value) return Date.now()
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : Date.now()
+}
+
+function isHumanSenderName(sender: string): boolean {
+  return sender.trim().toLowerCase() === 'human'
+}
+
+function senderNameFromRelayMessage(message: RelayMessage): string {
+  return message.from.name || message.from.id || 'unknown'
+}
+
+function directMessageTargetFromRelayMessage(
+  message: RelayMessage,
+  participants: string[] | undefined
+): string {
+  const from = senderNameFromRelayMessage(message)
+  const normalizedParticipants = (participants || [])
+    .map((participant) => participant.trim().replace(/^@+/, ''))
+    .filter(Boolean)
+  const target = message.target
+
+  if (target?.kind === 'agent' && target.agentName) return target.agentName
+  if (target?.kind === 'channel' && target.channelName) return normalizeChatChannelTarget(target.channelName)
+
+  if (normalizedParticipants.length > 0) {
+    const otherParticipants = normalizedParticipants.filter((participant) =>
+      participant.toLowerCase() !== from.toLowerCase()
+    )
+    if (otherParticipants.length > 0) return otherParticipants.join(', ')
+  }
+
+  const targetConversationId = target && 'conversationId' in target && typeof target.conversationId === 'string'
+    ? target.conversationId
+    : undefined
+  return message.conversationId || targetConversationId || 'direct-message'
+}
+
+function normalizeRelayMessageForChat(
+  message: RelayMessage,
+  input: BrokerReconcileMessagesInput
+): BrokerReconciledChatMessage | null {
+  const id = message.id || message.messageId
+  const body = message.text
+  if (!id || !body) return null
+
+  const from = senderNameFromRelayMessage(message)
+  const to = input.kind === 'channel'
+    ? normalizeChatChannelTarget(input.channelName || message.channel?.name || 'general')
+    : directMessageTargetFromRelayMessage(message, input.dmParticipants)
+
+  return {
+    id,
+    kind: 'message',
+    from,
+    to,
+    body,
+    timestamp: normalizeRelayTimestamp(message.createdAt || message.updatedAt),
+    isHuman: isHumanSenderName(from),
+    projectId: input.projectId,
+    ...(message.conversationId ? { conversationId: message.conversationId } : {}),
+    reactions: message.reactions?.map((reaction) => ({
+      emoji: reaction.emoji,
+      count: reaction.count,
+      reactedByHuman: reaction.agents.some(isHumanSenderName)
+    }))
+  }
+}
+
+function brokerEventSeq(event: BrokerEvent): number | undefined {
+  const seq = (event as Record<string, unknown>).seq
+  return typeof seq === 'number' && Number.isFinite(seq) ? seq : undefined
+}
+
+function brokerEventId(event: BrokerEvent): string | undefined {
+  const eventId = (event as Record<string, unknown>).event_id
+  return typeof eventId === 'string' && eventId.trim() ? eventId : undefined
+}
 
 function getErrorStatus(err: unknown): unknown {
   if (typeof err !== 'object' || err === null || !('status' in err)) return undefined
@@ -855,6 +959,11 @@ interface BrokerSession {
   channels: string[]
   cloudSandboxId: string | null
   pearLineage: Map<string, PearLineageEntry>
+  lastEventSeq?: number
+  lastEventAt?: number
+  lastEventId?: string
+  lastEventStreamRebindAt?: number
+  eventStreamRebinds?: number
   // For attach-to-remote-broker sessions (cloud sandboxes), the SDK doesn't
   // auto-renew the owner lease the way .spawn() does. The remote broker
   // auto-shuts-down after 120s without a lease renewal, so we own the timer
@@ -1029,6 +1138,7 @@ export class BrokerManager {
       existing.cwd = cwd
       existing.name = name
       await this.syncChannels(normalizedProjectId, nextChannels)
+      await this.refreshEventStream(normalizedProjectId, 'existing-session-start', win)
       this.sendStatus(normalizedProjectId, 'connected')
       return
     }
@@ -1071,7 +1181,7 @@ export class BrokerManager {
         existingClient.connectEvents()
 
         await this.syncChannels(normalizedProjectId, nextChannels)
-        this.publishBrokerEvent(normalizedProjectId, win, {
+        this.publishBrokerEvent(normalizedProjectId, normalizedProjectId, win, {
           kind: 'broker_initialized',
           name,
           cwd,
@@ -1121,7 +1231,7 @@ export class BrokerManager {
         pearLineage: new Map()
       })
 
-      this.publishBrokerEvent(normalizedProjectId, win, {
+      this.publishBrokerEvent(normalizedProjectId, normalizedProjectId, win, {
         kind: 'broker_initialized',
         name,
         cwd,
@@ -1320,7 +1430,7 @@ export class BrokerManager {
       })
       client.connectEvents()
 
-      this.publishBrokerEvent(normalizedProjectId, win, {
+      this.publishBrokerEvent(sessionKey, normalizedProjectId, win, {
         kind: 'broker_initialized',
         name: `cloud-${normalizedProjectId}`,
         url: getClientBaseUrl(client),
@@ -1564,6 +1674,173 @@ export class BrokerManager {
     }
   }
 
+  private windowForSession(sessionKey: string, fallback?: BrowserWindow): BrowserWindow | undefined {
+    const win = this.sessions.get(sessionKey)?.window || fallback
+    if (!win || win.isDestroyed()) return undefined
+    return win
+  }
+
+  private emitEventStreamDiagnostic(
+    sessionKey: string,
+    fallback: BrowserWindow | undefined,
+    diagnostic: BrokerEventStreamDiagnostic
+  ): void {
+    if (diagnostic.status === 'received' && !isBrokerDebugEnabled()) return
+
+    if (isBrokerDebugEnabled()) {
+      console.info('[broker:event-stream]', diagnostic)
+    }
+
+    const win = this.windowForSession(sessionKey, fallback)
+    if (win) {
+      win.webContents.send('broker:event-stream-diagnostic', diagnostic)
+    }
+  }
+
+  private noteBrokerEventReceipt(sessionKey: string, event: BrokerEvent): void {
+    const session = this.sessions.get(sessionKey)
+    const seq = brokerEventSeq(event)
+    const eventId = brokerEventId(event)
+    if (session) {
+      session.lastEventAt = Date.now()
+      if (seq !== undefined) session.lastEventSeq = seq
+      if (eventId) session.lastEventId = eventId
+    }
+
+    this.emitEventStreamDiagnostic(sessionKey, session?.window, {
+      projectId: projectIdFromSessionKey(sessionKey),
+      status: 'received',
+      at: Date.now(),
+      eventKind: event.kind,
+      ...(eventId ? { eventId } : {}),
+      ...(seq !== undefined ? { seq } : {})
+    })
+  }
+
+  async refreshEventStream(projectId?: string, reason = 'manual', win?: BrowserWindow): Promise<void> {
+    const sessions = projectId
+      ? await this.getOrAwaitSessionsForProject(projectId)
+      : Array.from(this.sessions.values())
+
+    for (const session of sessions) {
+      await this.rebindSessionEventStream(sessionKeyFor(session), session, reason, win)
+    }
+  }
+
+  private async rebindSessionEventStream(
+    sessionKey: string,
+    session: BrokerSession,
+    reason: string,
+    win?: BrowserWindow
+  ): Promise<void> {
+    const now = Date.now()
+    if (win && !win.isDestroyed()) {
+      session.window = win
+    }
+
+    if (
+      session.lastEventStreamRebindAt &&
+      now - session.lastEventStreamRebindAt < EVENT_STREAM_REBIND_COOLDOWN_MS
+    ) {
+      this.emitEventStreamDiagnostic(sessionKey, session.window, {
+        projectId: session.projectId,
+        status: 'rebind-skipped',
+        reason,
+        at: now,
+        reconnects: session.eventStreamRebinds || 0,
+        ...(session.lastEventSeq !== undefined ? { seq: session.lastEventSeq } : {}),
+        ...(session.lastEventId ? { eventId: session.lastEventId } : {})
+      })
+      return
+    }
+
+    this.emitEventStreamDiagnostic(sessionKey, session.window, {
+      projectId: session.projectId,
+      status: 'rebind-started',
+      reason,
+      at: now,
+      reconnects: session.eventStreamRebinds || 0,
+      ...(session.lastEventSeq !== undefined ? { seq: session.lastEventSeq } : {}),
+      ...(session.lastEventId ? { eventId: session.lastEventId } : {})
+    })
+
+    try {
+      session.unsubEvent()
+      session.client.disconnectEvents()
+      session.unsubEvent = this.attachClient(sessionKey, session.client, session.window)
+      session.client.connectEvents(session.lastEventSeq)
+      session.lastEventStreamRebindAt = now
+      session.eventStreamRebinds = (session.eventStreamRebinds || 0) + 1
+
+      this.emitEventStreamDiagnostic(sessionKey, session.window, {
+        projectId: session.projectId,
+        status: 'rebound',
+        reason,
+        at: Date.now(),
+        reconnects: session.eventStreamRebinds,
+        ...(session.lastEventSeq !== undefined ? { seq: session.lastEventSeq } : {}),
+        ...(session.lastEventId ? { eventId: session.lastEventId } : {})
+      })
+    } catch (err) {
+      this.emitEventStreamDiagnostic(sessionKey, session.window, {
+        projectId: session.projectId,
+        status: 'rebind-error',
+        reason,
+        at: Date.now(),
+        error: toErrorMessage(err),
+        reconnects: session.eventStreamRebinds || 0
+      })
+      throw err
+    }
+  }
+
+  async reconcileMessages(input: BrokerReconcileMessagesInput): Promise<BrokerReconciledChatMessage[]> {
+    const projectId = input.projectId.trim()
+    if (!projectId) throw new Error('Project id is required')
+    if (input.kind === 'channel' && !input.channelName?.trim()) {
+      throw new Error('Channel name is required for channel reconciliation')
+    }
+    if (input.kind === 'dm' && !input.conversationId?.trim()) {
+      throw new Error('Conversation id is required for DM reconciliation')
+    }
+
+    const [session] = await this.getOrAwaitSessionsForProject(projectId)
+    if (!session) return []
+
+    const metadata = await session.client.getSession()
+    const workspaceKey = metadata.workspace_key
+    if (!workspaceKey) {
+      throw new Error('Broker session does not expose a Relay workspace key')
+    }
+
+    const relay = new AgentRelay({
+      workspaceKey,
+      ...(process.env.RELAY_BASE_URL ? { baseUrl: process.env.RELAY_BASE_URL } : {})
+    })
+    const limit = normalizeReconcileLimit(input.limit)
+    const messages = input.kind === 'channel'
+      ? await relay.messages.list(input.channelName!, { limit })
+      : await relay.messages.listDirect({ conversationId: input.conversationId!, limit })
+
+    const normalized = messages
+      .map((message) => normalizeRelayMessageForChat(message, input))
+      .filter((message): message is BrokerReconciledChatMessage => message !== null)
+      .sort((left, right) => left.timestamp - right.timestamp)
+
+    if (isBrokerDebugEnabled()) {
+      console.info('[broker:reconcile]', {
+        projectId,
+        kind: input.kind,
+        channelName: input.channelName,
+        conversationId: input.conversationId,
+        requested: limit,
+        returned: normalized.length
+      })
+    }
+
+    return normalized
+  }
+
   private attachClient(sessionKey: string, client: AgentRelayClient, win?: BrowserWindow): () => void {
     const projectId = projectIdFromSessionKey(sessionKey)
     // Stamp every spawn this session does so burn can attribute Pear sessions
@@ -1584,6 +1861,7 @@ export class BrokerManager {
     const unsubBurn = client.addListener('beforeAgentSpawn', burnHandler)
 
     const unsubEvent = client.onEvent((event: BrokerEvent) => {
+      this.noteBrokerEventReceipt(sessionKey, event)
       // Fast path for PTY chunks: ship just (projectId, name, chunk) over a
       // dedicated channel so typing latency doesn't pay for compactBrokerEvent,
       // the broker:event metadata spread, or pushing into eventHistory per
@@ -1594,8 +1872,9 @@ export class BrokerManager {
         'name' in event && typeof event.name === 'string' &&
         'chunk' in event && typeof event.chunk === 'string'
       ) {
-        if (win && !win.isDestroyed()) {
-          win.webContents.send('broker:pty-chunk', projectId, event.name, event.chunk)
+        const targetWindow = this.windowForSession(sessionKey, win)
+        if (targetWindow && !targetWindow.isDestroyed()) {
+          targetWindow.webContents.send('broker:pty-chunk', projectId, event.name, event.chunk)
         }
         this.rememberAgentSession(event.name, sessionKey)
         if (this.sessions.get(sessionKey)?.cloudSandboxId) {
@@ -1606,7 +1885,7 @@ export class BrokerManager {
         return
       }
 
-      this.publishBrokerEvent(projectId, win, event as unknown as BrokerEventRecordPayload)
+      this.publishBrokerEvent(sessionKey, projectId, win, event as unknown as BrokerEventRecordPayload)
 
       if (event.kind === 'agent_spawned' && event.name) {
         this.rememberAgentSession(event.name, sessionKey)
@@ -1646,13 +1925,15 @@ export class BrokerManager {
   }
 
   private publishBrokerEvent(
+    sessionKey: string,
     projectId: string,
     win: BrowserWindow | undefined,
     event: BrokerEventRecordPayload
   ): BrokerEventRecord {
     const record = this.recordBrokerEvent(projectId, event)
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('broker:event', {
+    const targetWindow = this.windowForSession(sessionKey, win)
+    if (targetWindow && !targetWindow.isDestroyed()) {
+      targetWindow.webContents.send('broker:event', {
         ...event,
         projectId,
         observedAt: record.timestamp,

@@ -12,7 +12,10 @@ import type {
   BrokerAttachTerminalResult,
   BrokerDetails,
   BrokerEventRecord,
+  BrokerEventStreamDiagnostic,
   BrokerListAgent,
+  BrokerReconciledChatMessage,
+  BrokerReconcileMessagesInput,
   BrokerSendMessageInput,
   BrokerSetTerminalModeResult,
   BrokerSpawnAgentInput,
@@ -83,7 +86,10 @@ export type {
   BrokerAttachTerminalResult,
   BrokerDetails,
   BrokerEventRecord,
+  BrokerEventStreamDiagnostic,
   BrokerListAgent,
+  BrokerReconciledChatMessage,
+  BrokerReconcileMessagesInput,
   BrokerSendMessageInput,
   BrokerSetTerminalModeResult,
   BrokerSpawnAgentInput,
@@ -241,6 +247,10 @@ const api = {
       invoke<number | null>('broker:input-srtt', projectId, name),
     sendMessage: (projectId: string | undefined, input: BrokerSendMessageInput) =>
       invoke<void>('broker:send-message', projectId, input),
+    reconcileMessages: (input: BrokerReconcileMessagesInput) =>
+      invoke<BrokerReconciledChatMessage[]>('broker:reconcile-messages', input),
+    refreshEventStream: (projectId?: string, reason?: string) =>
+      invoke<void>('broker:refresh-event-stream', projectId, reason),
     subscribeAgentChannel: (projectId: string | undefined, name: string, channel: string) =>
       invoke<void>('broker:subscribe-agent-channel', projectId, name, channel),
     unsubscribeAgentChannel: (projectId: string | undefined, name: string, channel: string) =>
@@ -253,6 +263,8 @@ const api = {
     listEvents: () => invoke<BrokerEventRecord[]>('broker:list-events'),
     shutdown: () => invoke<void>('broker:shutdown'),
     onEvent: (callback: (event: unknown) => void) => subscribe<unknown>('broker:event', callback),
+    onEventStreamDiagnostic: (callback: (event: BrokerEventStreamDiagnostic) => void) =>
+      subscribe<BrokerEventStreamDiagnostic>('broker:event-stream-diagnostic', callback),
     onPtyChunk: (callback: (projectId: string, name: string, chunk: string) => void) => {
       const handler = (_: unknown, projectId: string, name: string, chunk: string): void =>
         callback(projectId, name, chunk)

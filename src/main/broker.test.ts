@@ -2,6 +2,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import type { BrowserWindow } from 'electron'
 
 // Covers the multi-session BrokerManager: a project's local broker and cloud
 // sandbox broker coexist instead of clobbering each other in the sessions map.
@@ -18,6 +19,7 @@ type MockClient = {
   onEvent: ReturnType<typeof vi.fn>
   addListener: ReturnType<typeof vi.fn>
   connectEvents: ReturnType<typeof vi.fn>
+  disconnectEvents: ReturnType<typeof vi.fn>
   renewLease: ReturnType<typeof vi.fn>
   shutdown: ReturnType<typeof vi.fn>
   disconnect: ReturnType<typeof vi.fn>
@@ -46,6 +48,7 @@ const mock = vi.hoisted(() => {
       onEvent: vi.fn(() => () => undefined),
       addListener: vi.fn(() => () => undefined),
       connectEvents: vi.fn(),
+      disconnectEvents: vi.fn(),
       renewLease: vi.fn(async () => undefined),
       shutdown: vi.fn(async () => undefined),
       disconnect: vi.fn(),
@@ -158,6 +161,25 @@ function lastConstructed(): MockClient {
 async function startLocal(manager: BrokerManager, agents: string[] = []): Promise<MockClient> {
   mock.state.nextLocalAgents = agents
   await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', undefined as never, [])
+  return lastSpawned()
+}
+
+function createMockWindow(): BrowserWindow {
+  return {
+    isDestroyed: vi.fn(() => false),
+    webContents: {
+      send: vi.fn()
+    }
+  } as unknown as BrowserWindow
+}
+
+async function startLocalWithWindow(
+  manager: BrokerManager,
+  win: BrowserWindow,
+  agents: string[] = []
+): Promise<MockClient> {
+  mock.state.nextLocalAgents = agents
+  await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', win, [])
   return lastSpawned()
 }
 
@@ -337,6 +359,66 @@ describe('BrokerManager local + cloud coexistence', () => {
     expect(firstCloud.shutdown).toHaveBeenCalled()
     expect(secondCloud).not.toBe(firstCloud)
     expect(local.shutdown).not.toHaveBeenCalled()
+
+    await manager.shutdown()
+  })
+
+  it('routes broker events to the current window after an existing session swaps windows', async () => {
+    const manager = new BrokerManager()
+    const firstWindow = createMockWindow()
+    const secondWindow = createMockWindow()
+    const local = await startLocalWithWindow(manager, firstWindow)
+
+    await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', secondWindow, [])
+
+    const listener = local.onEvent.mock.calls.at(-1)?.[0]
+    expect(listener).toBeTypeOf('function')
+    listener?.({
+      kind: 'relay_inbound',
+      from: 'codex-2',
+      target: '#general',
+      body: 'window swap proof',
+      event_id: 'evt-window-swap',
+      seq: 12
+    })
+
+    expect((firstWindow.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+      .some(([channel, payload]) =>
+        channel === 'broker:event' &&
+        (payload as { body?: string }).body === 'window swap proof'
+      )).toBe(false)
+    expect(secondWindow.webContents.send).toHaveBeenCalledWith(
+      'broker:event',
+      expect.objectContaining({
+        kind: 'relay_inbound',
+        body: 'window swap proof',
+        projectId: PROJECT_ID
+      })
+    )
+
+    await manager.shutdown()
+  })
+
+  it('refreshEventStream rebinds the harness stream from the last seen sequence', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager)
+    const listener = local.onEvent.mock.calls.at(-1)?.[0]
+    expect(listener).toBeTypeOf('function')
+
+    listener?.({
+      kind: 'relay_inbound',
+      from: 'codex-2',
+      target: '#general',
+      body: 'seq proof',
+      event_id: 'evt-seq-proof',
+      seq: 477
+    })
+
+    await manager.refreshEventStream(PROJECT_ID, 'test-rebind')
+
+    expect(local.disconnectEvents).toHaveBeenCalledTimes(1)
+    expect(local.onEvent).toHaveBeenCalledTimes(2)
+    expect(local.connectEvents).toHaveBeenLastCalledWith(477)
 
     await manager.shutdown()
   })

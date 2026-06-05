@@ -27,6 +27,7 @@ import { burnManager, type BurnAgentInput, type BurnProjectInput, type BurnSessi
 import { resetRelayWorkspaceManager } from './relay-workspace'
 import { assertDirectory, isDirectory } from './path-utils'
 import { findProjectForPath } from './cli'
+import type { BrokerReconcileMessagesInput } from '../shared/types/ipc'
 import type { ProactiveAgentDraft } from './proactive-agent.types'
 
 function getProjectIdForPath(targetPath: string): string | null {
@@ -256,6 +257,15 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('broker:send-message', async (_, projectId: string | undefined, input: SendMessageInput) => {
     await brokerManager.sendMessage(projectId, input)
+  })
+
+  ipcMain.handle('broker:reconcile-messages', async (_, input: BrokerReconcileMessagesInput) => {
+    return brokerManager.reconcileMessages(input)
+  })
+
+  ipcMain.handle('broker:refresh-event-stream', async (event, projectId?: string, reason?: string) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    await brokerManager.refreshEventStream(projectId, reason || 'renderer-request', win || undefined)
   })
 
   ipcMain.handle('broker:subscribe-agent-channel', async (_, projectId: string | undefined, name: string, channel: string) => {
