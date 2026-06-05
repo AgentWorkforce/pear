@@ -14,6 +14,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -23,6 +25,35 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Generate changelog
+        id: changelog
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          TAG="v${VERSION}"
+          PREVIOUS_TAG="$(git tag --sort=-version:refname | grep -E '^v[0-9]' | grep -v "^${TAG}$" | head -n 1 || true)"
+          NOTES_FILE="${RUNNER_TEMP}/release-notes.md"
+
+          args=(
+            -f "tag_name=${TAG}"
+            -f "target_commitish=${GITHUB_SHA}"
+          )
+          if [ -n "${PREVIOUS_TAG}" ]; then
+            args+=(-f "previous_tag_name=${PREVIOUS_TAG}")
+          fi
+
+          gh api "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            "${args[@]}" \
+            --jq ".body" > "${NOTES_FILE}"
+
+          {
+            echo "version=${VERSION}"
+            echo "tag=${TAG}"
+            echo "previous_tag=${PREVIOUS_TAG}"
+            echo "notes_file=${NOTES_FILE}"
+          } >> "${GITHUB_OUTPUT}"
 
       - name: Decode App Store Connect API key (.p8)
         env:
@@ -56,3 +87,23 @@ jobs:
           done
           echo "release failed after 3 attempts"
           exit 1
+
+      - name: Publish changelog to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release edit "${{ steps.changelog.outputs.tag }}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${{ steps.changelog.outputs.version }}" \
+            --notes-file "${{ steps.changelog.outputs.notes_file }}"
+
+      - name: Upload macOS build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pear-macos-${{ github.run_id }}
+          path: |
+            dist/*.dmg
+            dist/*.zip
+          if-no-files-found: warn
+          retention-days: 30
