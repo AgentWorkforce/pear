@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { beforeEach, test } from 'node:test'
 
@@ -134,6 +136,13 @@ beforeEach(() => {
   resetIntegrationEventTelemetryForTests()
   delete process.env.PEAR_INTEGRATION_EVENTS_DEBUG
 })
+
+async function waitForSent(harness: { sent: SentMessage[] }, count: number): Promise<void> {
+  const deadline = Date.now() + 1_000
+  while (harness.sent.length < count && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+}
 
 test('integration events route only to the targets for the matching integration path', async () => {
   const harness = makeHarness()
@@ -519,6 +528,7 @@ test('integration events ignore index, discovery, tmp, dotfile, and local writeb
   await harness.emit(changeEvent('/github/repos/create.json', 'github'))
   await harness.emit(changeEvent('/slack/channels/C123ABC/messages/claude-1-codex-spawned.json', 'slack'))
   await harness.emit(changeEvent('/slack/channels/C123ABC/threads/1780607825_485189/replies/claude-1-issue82-ack.json', 'slack'))
+  await harness.emit(changeEvent('/github/repos/.widgets.json.tmp-123', 'github'))
 
   assert.deepEqual(harness.sent, [])
   assert.deepEqual(harness.listAgentsCalls, [])

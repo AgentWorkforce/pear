@@ -1,5 +1,5 @@
 import { existsSync, watch, type FSWatcher } from 'node:fs'
-import { appendFile, mkdir, stat } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import {
@@ -24,6 +24,7 @@ const RECENT_LOGICAL_CHANGE_TTL_MS = 10 * 60_000
 const INTEGRATION_EVENT_LOG_PATH = join(homedir(), '.agentworkforce', 'pear', 'integration-events.log')
 const AGGREGATED_WARNING_REPEAT_EVERY = 25
 const MAX_AGGREGATED_WARNING_KEYS = 256
+const MAX_INLINE_EVENT_TEXT_CHARS = 4_000
 
 type IntegrationEventCounterName = 'eventsReceived' | 'eventsInjected' | 'eventsCoalesced' | 'eventsDropped'
 type IntegrationEventGaugeName = 'queueDepth' | 'mountCount'
@@ -174,6 +175,11 @@ export function resetIntegrationEventTelemetryForTests(): void {
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function truncateForSystemMessage(text: string, maxChars = MAX_INLINE_EVENT_TEXT_CHARS): string {
+  const normalized = text.trim()
+  return normalized.length > maxChars ? `${normalized.slice(0, maxChars)}...` : normalized
 }
 
 function isUnauthorizedError(error: unknown): boolean {
@@ -991,7 +997,45 @@ function shouldNotifyRelayfileChange(event: ChangeEvent): boolean {
   return shouldNotifyRelayfilePath(event.resource.path)
 }
 
-function formatIntegrationEventMessage(event: ChangeEvent): string {
+function slackEventContextPath(path: string): boolean {
+  return /^\/slack\/(?:channels|dms)\/[^/]+\/(?:messages|threads)\/.+\.json$/u.test(path)
+}
+
+function slackRecordContextLines(record: unknown): string[] {
+  if (!isRecord(record)) return []
+  const payload = isRecord(record.payload) ? record.payload : record
+  const rawEvent = isRecord(payload.raw_event) ? payload.raw_event : undefined
+  const text = eventSummaryValue(payload.text) || eventSummaryValue(rawEvent?.text)
+  const user = eventSummaryValue(payload.user) || eventSummaryValue(rawEvent?.user)
+  const channel = eventSummaryValue(payload.channel) || eventSummaryValue(payload.channelId) || eventSummaryValue(rawEvent?.channel)
+  const threadTs = eventSummaryValue(payload.thread_ts) || eventSummaryValue(payload.threadTs) || eventSummaryValue(rawEvent?.thread_ts)
+  const ts = eventSummaryValue(payload.ts) || eventSummaryValue(payload.replyTs) || eventSummaryValue(rawEvent?.ts)
+
+  const lines: string[] = []
+  if (text) lines.push(`Slack text: ${truncateForSystemMessage(text)}`)
+  if (channel) lines.push(`Slack channel: ${channel}`)
+  if (threadTs) lines.push(`Slack thread ts: ${threadTs}`)
+  if (ts) lines.push(`Slack message ts: ${ts}`)
+  if (user) lines.push(`Slack user: ${user}`)
+  return lines
+}
+
+async function localEventContextLines(event: ChangeEvent, localMountWorkspaceId: string): Promise<string[]> {
+  const provider = eventSummaryValue(event.resource.provider)
+  const path = event.resource.path
+  if (provider !== 'slack' || !slackEventContextPath(path)) return []
+
+  const localPath = localPathForRemoteRoot(localMountWorkspaceId, path)
+  const raw = await readFile(localPath, 'utf8').catch(() => null)
+  if (!raw) return []
+  try {
+    return slackRecordContextLines(JSON.parse(raw))
+  } catch {
+    return []
+  }
+}
+
+function formatIntegrationEventMessage(event: ChangeEvent, contextLines: string[] = []): string {
   const summary = isRecord(event.summary) ? event.summary : {}
   const resource = isRecord(event.resource) ? event.resource : {}
   const provider = eventSummaryValue(resource.provider) || 'integration'
@@ -1024,9 +1068,10 @@ function formatIntegrationEventMessage(event: ChangeEvent): string {
   if (actor) lines.push(`Actor: ${actor}`)
   if (fieldsChanged) lines.push(`Fields changed: ${fieldsChanged}`)
   if (labels) lines.push(`Labels: ${labels}`)
+  lines.push(...contextLines)
 
   lines.push(
-    'Handle this like an incoming user-relevant integration update. The Relayfile path above identifies the changed record; use the matching .integrations path for extra context only when historical download is enabled. Use the existing writeback or messaging path when a response is needed.',
+    'Handle this like an incoming user-relevant integration update. The Relayfile path above identifies the changed record; use any inline event context first, then read the matching .integrations path for more detail when available. Use the existing writeback or messaging path when a response is needed.',
     '</integration-event>'
   )
   return lines.join('\n')
@@ -1098,7 +1143,7 @@ export class IntegrationEventBridge {
               type: event.type,
               path: event.resource.path
             })
-            void this.injectEvent(projectId, event, specs).catch((error) => {
+            void this.injectEvent(projectId, event, specs, handle.localMountWorkspaceId).catch((error) => {
               const errorMessage = toErrorMessage(error)
               warnIntegrationEventAggregated(
                 `event delivery failed:${projectId}`,
@@ -1132,7 +1177,7 @@ export class IntegrationEventBridge {
             path: event.resource.path,
             source: 'local-mount'
           })
-          void this.injectEvent(projectId, event, specs).catch((error) => {
+          void this.injectEvent(projectId, event, specs, handle.localMountWorkspaceId).catch((error) => {
             const errorMessage = toErrorMessage(error)
             warnIntegrationEventAggregated(
               `local event delivery failed:${projectId}`,
@@ -1181,7 +1226,12 @@ export class IntegrationEventBridge {
     await Promise.all(Array.from(this.subscriptions.keys()).map((projectId) => this.close(projectId)))
   }
 
-  private async injectEvent(projectId: string, event: ChangeEvent, specs: SubscriptionSpec[]): Promise<void> {
+  private async injectEvent(
+    projectId: string,
+    event: ChangeEvent,
+    specs: SubscriptionSpec[],
+    localMountWorkspaceId: string
+  ): Promise<void> {
     if (!shouldNotifyRelayfileChange(event)) {
       incrementIntegrationEventCounter(projectId, 'eventsDropped')
       logIntegrationEvent('skipped filtered path', {
@@ -1253,6 +1303,7 @@ export class IntegrationEventBridge {
       })
       return
     }
+    const contextLines = await localEventContextLines(event, localMountWorkspaceId)
     logIntegrationEvent('injecting', {
       projectId,
       eventId: event.id,
@@ -1264,7 +1315,7 @@ export class IntegrationEventBridge {
         const input = {
           to: recipient,
           from: 'integration',
-          text: formatIntegrationEventMessage(event),
+          text: formatIntegrationEventMessage(event, contextLines),
           priority: 0,
           mode: 'steer',
           data: {
