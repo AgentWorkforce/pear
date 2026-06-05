@@ -95,10 +95,27 @@ describe('getActiveMessageReconciliationRequest', () => {
       }
     })).toBeNull()
   })
+
+  it('schedules reconciliation after a human message send timestamp changes', () => {
+    const reconciler = { schedule: vi.fn() }
+
+    hooks.scheduleHumanMessageSentReconciliation({
+      lastHumanMessageSentAt: 0,
+      reconciler
+    })
+    hooks.scheduleHumanMessageSentReconciliation({
+      lastHumanMessageSentAt: 1_717_000_000_000,
+      reconciler
+    })
+
+    expect(reconciler.schedule).toHaveBeenCalledTimes(1)
+    expect(reconciler.schedule).toHaveBeenCalledWith('human-message-sent')
+  })
 })
 
 describe('createMessageReconciler', () => {
   afterEach(() => {
+    vi.restoreAllMocks()
     vi.useRealTimers()
     agentStore.useAgentStore.getState().clearAll()
   })
@@ -233,5 +250,28 @@ describe('createMessageReconciler', () => {
     const messagesAfterUpdate = agentStore.useAgentStore.getState().messages
     store.reconcileMessages([messagesAfterUpdate[0]])
     expect(agentStore.useAgentStore.getState().messages).toBe(messagesAfterUpdate)
+  })
+
+  it('tracks optimistic human sends for reconciliation triggers', () => {
+    const now = 1_717_000_123_000
+    vi.spyOn(Date, 'now').mockReturnValue(now)
+
+    agentStore.useAgentStore.getState().addHumanMessage('#general', 'hello from human', 'project-1')
+
+    const state = agentStore.useAgentStore.getState()
+    expect(state.lastHumanMessageSentAt).toBe(now)
+    expect(state.messages[0]).toMatchObject({
+      from: 'human',
+      to: '#general',
+      body: 'hello from human',
+      projectId: 'project-1'
+    })
+  })
+
+  it('wires human message sends into the reconciliation hook', () => {
+    const source = hooks.useMessageReconciliation.toString()
+    expect(source).toContain('s.lastHumanMessageSentAt')
+    expect(source).toMatch(/scheduleHumanMessageSentReconciliation\([\s\S]*lastHumanMessageSentAt[\s\S]*reconciler/)
+    expect(source).toMatch(/\[lastHumanMessageSentAt,\s*reconciler\]/)
   })
 })
