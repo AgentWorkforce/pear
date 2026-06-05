@@ -26,6 +26,7 @@ const mock = vi.hoisted(() => {
   let currentAuth: MockCloudAuth | null = null
   let mountExpiresAt: string | null = null
   let mountSuggestedRefreshAt: string | null = null
+  let mountDelay: Promise<void> | null = null
 
   class RelayfileSetup {
     readonly cloudApiUrl: string
@@ -34,11 +35,12 @@ const mock = vi.hoisted(() => {
       this.cloudApiUrl = options.cloudApiUrl
     }
 
-    mountWorkspace(input: MountInput) {
+    async mountWorkspace(input: MountInput) {
       mountInputs.push({
         ...input,
         scopes: input.scopes ? [...input.scopes] : undefined
       })
+      if (mountDelay) await mountDelay
       return Promise.resolve({
         expiresAt: mountExpiresAt,
         suggestedRefreshAt: mountSuggestedRefreshAt,
@@ -71,6 +73,12 @@ const mock = vi.hoisted(() => {
     },
     set mountSuggestedRefreshAt(value: string | null) {
       mountSuggestedRefreshAt = value
+    },
+    get mountDelay() {
+      return mountDelay
+    },
+    set mountDelay(value: Promise<void> | null) {
+      mountDelay = value
     },
     resolveCloudAuth: vi.fn(async () => currentAuth),
     getAccountWorkspaceId: vi.fn(async () => 'account-workspace-id'),
@@ -118,6 +126,7 @@ describe('IntegrationMountManager', () => {
     mock.getAccountWorkspaceId.mockClear()
     mock.mountExpiresAt = null
     mock.mountSuggestedRefreshAt = null
+    mock.mountDelay = null
   })
 
   afterEach(() => {
@@ -243,6 +252,60 @@ describe('IntegrationMountManager', () => {
 
     expect(mock.mountInputs.map((input) => input.remotePath)).toContain('/github/repos')
     expect(mock.mountInputs.filter((input) => input.remotePath === '/github/repos')).toHaveLength(2)
+  })
+
+  it('caps local integration mount starts when selected resources exceed the mount budget', async () => {
+    const manager = new IntegrationMountManager()
+    const integrations = Array.from({ length: 30 }, (_, index) => ({
+      provider: 'slack',
+      mountPaths: [`/slack/channels/C${String(index).padStart(3, '0')}`]
+    }))
+
+    await manager.ensureMounted(integrations)
+
+    expect(mock.mountInputs).toHaveLength(24)
+    expect(mock.mountInputs.map((input) => input.remotePath)).toEqual(
+      Array.from({ length: 24 }, (_, index) => `/slack/channels/C${String(index).padStart(3, '0')}`)
+    )
+    expect(manager.localPathsFor('account-workspace-id', {
+      provider: 'slack',
+      mountPaths: integrations.flatMap((integration) => integration.mountPaths)
+    })).toEqual(
+      Array.from(
+        { length: 24 },
+        (_, index) => `/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/slack/channels/C${String(index).padStart(3, '0')}`
+      )
+    )
+  })
+
+  it('only reports actually started local paths while a reconcile is reused in flight', async () => {
+    let finishMount!: () => void
+    mock.mountDelay = new Promise((resolve) => {
+      finishMount = () => resolve()
+    })
+    const manager = new IntegrationMountManager()
+
+    const first = manager.ensureMounted([{
+      provider: 'slack',
+      mountPaths: ['/slack/channels/C001']
+    }])
+    await vi.waitFor(() => {
+      expect(mock.mountInputs.map((input) => input.remotePath)).toEqual(['/slack/channels/C001'])
+    })
+
+    const second = manager.ensureMounted([{
+      provider: 'slack',
+      mountPaths: ['/slack/channels/C002']
+    }])
+
+    finishMount!()
+    await first
+    await second
+
+    expect(manager.localPathsFor('account-workspace-id', {
+      provider: 'slack',
+      mountPaths: ['/slack/channels/C002']
+    })).toEqual([])
   })
 
   it('restarts a mounted provider after mount output reports an expired token', async () => {
