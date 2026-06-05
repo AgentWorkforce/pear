@@ -5,6 +5,7 @@ import type {
   BrokerDetails,
   BrokerEventRecord,
   BrokerListAgent,
+  BrokerReconciledChatMessage,
   InboundDeliveryMode,
   TerminalAttachMode
 } from '@/lib/ipc'
@@ -41,6 +42,7 @@ export interface ChatMessage {
   timestamp: number
   isHuman: boolean
   projectId?: string
+  conversationId?: string
   reactions?: ChatReaction[]
   threadReplies?: ChatThreadReply[]
 }
@@ -320,6 +322,92 @@ function appendJoinNotices(messages: ChatMessage[], notices: ChatMessage[]): Cha
   return capByCount(nextMessages, MAX_CHAT_MESSAGES)
 }
 
+function isBrokerDebugEnabled(): boolean {
+  if (typeof localStorage === 'undefined') return false
+  return localStorage.getItem('pear-broker-debug') === '1' ||
+    localStorage.getItem('pear-broker-debug') === 'true'
+}
+
+function reactionsEqual(left: ChatReaction[] | undefined, right: ChatReaction[] | undefined): boolean {
+  if (left === right) return true
+  if (!left || !right || left.length !== right.length) return false
+  return left.every((reaction, index) => {
+    const candidate = right[index]
+    return candidate &&
+      reaction.emoji === candidate.emoji &&
+      reaction.count === candidate.count &&
+      reaction.reactedByHuman === candidate.reactedByHuman
+  })
+}
+
+function threadRepliesEqual(left: ChatThreadReply[] | undefined, right: ChatThreadReply[] | undefined): boolean {
+  if (left === right) return true
+  if (!left || !right || left.length !== right.length) return false
+  return left.every((reply, index) => {
+    const candidate = right[index]
+    return candidate &&
+      reply.id === candidate.id &&
+      reply.from === candidate.from &&
+      reply.body === candidate.body &&
+      reply.timestamp === candidate.timestamp &&
+      reply.isHuman === candidate.isHuman &&
+      reply.projectId === candidate.projectId
+  })
+}
+
+function chatMessagesEqual(left: ChatMessage, right: ChatMessage): boolean {
+  return left.kind === right.kind &&
+    left.from === right.from &&
+    left.to === right.to &&
+    left.body === right.body &&
+    left.timestamp === right.timestamp &&
+    left.isHuman === right.isHuman &&
+    left.projectId === right.projectId &&
+    left.conversationId === right.conversationId &&
+    reactionsEqual(left.reactions, right.reactions) &&
+    threadRepliesEqual(left.threadReplies, right.threadReplies)
+}
+
+function reconcileChatMessages(
+  existingMessages: ChatMessage[],
+  incomingMessages: BrokerReconciledChatMessage[]
+): ChatMessage[] {
+  if (incomingMessages.length === 0) return existingMessages
+
+  const byId = new Map(existingMessages.map((message) => [message.id, message]))
+  let changed = false
+
+  for (const incoming of incomingMessages) {
+    const next: ChatMessage = {
+      ...incoming,
+      kind: incoming.kind || 'message'
+    }
+    const previous = byId.get(next.id)
+    if (previous) {
+      const merged = {
+        ...previous,
+        ...next,
+        threadReplies: next.threadReplies || previous.threadReplies,
+        reactions: next.reactions || previous.reactions
+      }
+      if (!chatMessagesEqual(previous, merged)) {
+        byId.set(next.id, merged)
+        changed = true
+      }
+      continue
+    }
+    byId.set(next.id, next)
+    changed = true
+  }
+
+  if (!changed) return existingMessages
+
+  return capByCount(
+    Array.from(byId.values()).sort((left, right) => left.timestamp - right.timestamp),
+    MAX_CHAT_MESSAGES
+  )
+}
+
 interface AgentState {
   agents: Agent[]
   activeAgentKey: string | null
@@ -345,6 +433,7 @@ interface AgentState {
   syncBrokerDetailsStatus: (details: Pick<BrokerDetails, 'projectId' | 'health'>[]) => void
   hydrateBrokerEvents: (events: BrokerEventRecord[]) => void
   recordBrokerEvent: (event: BrokerEvent) => void
+  reconcileMessages: (messages: BrokerReconciledChatMessage[]) => void
   handleBrokerEvent: (event: BrokerEvent) => void
   handleBrokerStatus: (status: { projectId?: string; status: string; error?: string }) => void
   addHumanMessage: (to: string, body: string, projectId?: string) => void
@@ -583,6 +672,21 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
     })
   },
 
+  reconcileMessages: (messages) => {
+    set((state) => {
+      const nextMessages = reconcileChatMessages(state.messages, messages)
+      if (nextMessages === state.messages) return {}
+      if (isBrokerDebugEnabled()) {
+        console.info('[broker:renderer-reconcile]', {
+          incoming: messages.length,
+          before: state.messages.length,
+          after: nextMessages.length
+        })
+      }
+      return { messages: nextMessages }
+    })
+  },
+
   handleBrokerEvent: (event) => {
     const { kind } = event
 
@@ -800,6 +904,16 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
         const messages = isHuman && isDuplicateHumanEcho(state.messages, msg)
           ? state.messages
           : capByCount([...state.messages, msg], MAX_CHAT_MESSAGES)
+
+        if (messages !== state.messages && isBrokerDebugEnabled()) {
+          console.info('[broker:renderer-receipt]', {
+            projectId,
+            eventId: msg.id,
+            kind,
+            from: msg.from,
+            to: msg.to
+          })
+        }
 
         return {
           agents: state.agents.map((a) => {

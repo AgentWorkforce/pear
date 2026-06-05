@@ -24,6 +24,7 @@ import { useUIStore } from '@/stores/ui-store'
 import { useBrokerEvents } from '@/hooks/use-broker-events'
 import { useCloudAgentEvents } from '@/hooks/use-cloud-agent'
 import { useGitStatus } from '@/hooks/use-git-status'
+import { useMessageReconciliation } from '@/hooks/use-message-reconciliation'
 import { useAgentStore } from '@/stores/agent-store'
 import { initTypingTrace } from '@/lib/typing-trace'
 
@@ -45,6 +46,7 @@ export default function App(): React.ReactNode {
   useBrokerEvents()
   useCloudAgentEvents()
   useGitStatus()
+  useMessageReconciliation()
 
   useEffect(() => {
     load()

@@ -201,6 +201,52 @@ export interface PendingRelayMessage {
   event_id?: string
 }
 
+export interface BrokerReconciledChatMessage {
+  id: string
+  kind?: 'message' | 'notice'
+  from: string
+  to: string
+  body: string
+  timestamp: number
+  isHuman: boolean
+  projectId?: string
+  conversationId?: string
+  reactions?: Array<{
+    emoji: string
+    count: number
+    reactedByHuman: boolean
+  }>
+  threadReplies?: Array<{
+    id: string
+    from: string
+    body: string
+    timestamp: number
+    isHuman: boolean
+    projectId?: string
+  }>
+}
+
+export interface BrokerReconcileMessagesInput {
+  projectId: string
+  kind: 'channel' | 'dm'
+  channelName?: string
+  conversationId?: string
+  dmParticipants?: string[]
+  limit?: number
+}
+
+export interface BrokerEventStreamDiagnostic {
+  projectId: string
+  status: 'received' | 'rebind-started' | 'rebound' | 'rebind-skipped' | 'rebind-error'
+  reason?: string
+  at: number
+  eventKind?: string
+  eventId?: string
+  seq?: number
+  reconnects?: number
+  error?: string
+}
+
 export interface BrokerListAgent {
   name: string
   projectId: string
@@ -759,6 +805,8 @@ export interface PearAPI {
     resizePty: (projectId: string | undefined, name: string, rows: number, cols: number) => Promise<void>
     inputSrtt: (projectId: string | undefined, name: string) => Promise<number | null>
     sendMessage: (projectId: string | undefined, input: BrokerSendMessageInput) => Promise<void>
+    reconcileMessages: (input: BrokerReconcileMessagesInput) => Promise<BrokerReconciledChatMessage[]>
+    refreshEventStream: (projectId?: string, reason?: string) => Promise<void>
     subscribeAgentChannel: (projectId: string | undefined, name: string, channel: string) => Promise<void>
     unsubscribeAgentChannel: (projectId: string | undefined, name: string, channel: string) => Promise<void>
     releaseAgent: (projectId: string | undefined, name: string) => Promise<void>
@@ -767,6 +815,7 @@ export interface PearAPI {
     listEvents: () => Promise<BrokerEventRecord[]>
     shutdown: () => Promise<void>
     onEvent: (callback: (event: unknown) => void) => () => void
+    onEventStreamDiagnostic: (callback: (event: BrokerEventStreamDiagnostic) => void) => () => void
     onPtyChunk: (callback: (projectId: string, name: string, chunk: string) => void) => () => void
     onStatus: (callback: (status: BrokerStatusEvent) => void) => () => void
   }
