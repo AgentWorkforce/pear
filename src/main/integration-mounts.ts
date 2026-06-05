@@ -174,11 +174,15 @@ export class IntegrationMountManager {
   }
 
   localPathsFor(workspaceId: string, integration: IntegrationMountInput): string[] {
-    const mountPaths = Array.from(new Set(
+    let mountPaths = Array.from(new Set(
       integration.mountPaths
         .map((mountPath) => canonicalIntegrationMountPath(mountPath, integration.provider))
         .filter((mountPath): mountPath is string => !!mountPath)
     )).sort()
+    if (this.workspaceId === workspaceId && this.desiredMountPaths.length > 0) {
+      const mountedPaths = new Set(this.desiredMountPaths)
+      mountPaths = mountPaths.filter((mountPath) => mountedPaths.has(mountPath))
+    }
 
     return mountPaths.map((mountPath) => integrationLocalPathForRemote(workspaceId, mountPath))
   }

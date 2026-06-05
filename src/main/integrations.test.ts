@@ -166,7 +166,8 @@ vi.mock('./store', () => ({
 
 vi.mock('./integration-mounts', () => ({
   integrationMountManager: mock.integrationMountManager,
-  integrationMountRootForWorkspace: vi.fn((workspaceId: string) => `/tmp/relayfile/${workspaceId}`)
+  integrationMountRootForWorkspace: vi.fn((workspaceId: string) => `/tmp/relayfile/${workspaceId}`),
+  MAX_LOCAL_INTEGRATION_MOUNT_PATHS: 24
 }))
 
 vi.mock('./integration-event-bridge', () => ({
@@ -268,7 +269,7 @@ describe('IntegrationsManager', () => {
       provider: 'slack',
       integrationId: 'slack-integration-1',
       scope: {},
-      mountPaths: ['/slack/channels', '/slack/channels/C123', '/slack/dms/D123'],
+      mountPaths: ['/discovery/slack', '/slack/channels', '/slack/channels/C123', '/slack/dms/D123'],
       connectedAt: '2026-06-05T00:00:00.000Z',
       notifyAgent: true,
       subscribeAgent: true,
@@ -285,7 +286,7 @@ describe('IntegrationsManager', () => {
       provider: 'slack',
       integrationId: 'slack-integration-1',
       scope: {},
-      mountPaths: ['/slack/channels', '/slack/channels/C123', '/integrations/slack/dms/D123'],
+      mountPaths: ['/discovery/slack', '/slack/channels', '/slack/channels/C123', '/integrations/slack/dms/D123'],
       connectedAt: '2026-06-05T00:00:00.000Z',
       notifyAgent: true,
       subscribeAgent: true,
@@ -349,7 +350,9 @@ describe('IntegrationsManager', () => {
       scope: { channels: ['C123'] },
       mountPaths: ['/slack/channels/C123']
     })
-    expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalled()
+    await vi.waitFor(() => {
+      expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalled()
+    })
 
     finishMountReconcile()
   })

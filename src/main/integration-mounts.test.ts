@@ -247,15 +247,25 @@ describe('IntegrationMountManager', () => {
 
   it('caps local integration mount starts when selected resources exceed the mount budget', async () => {
     const manager = new IntegrationMountManager()
-
-    await manager.ensureMounted(Array.from({ length: 30 }, (_, index) => ({
+    const integrations = Array.from({ length: 30 }, (_, index) => ({
       provider: 'slack',
       mountPaths: [`/slack/channels/C${String(index).padStart(3, '0')}`]
-    })))
+    }))
+
+    await manager.ensureMounted(integrations)
 
     expect(mock.mountInputs).toHaveLength(24)
     expect(mock.mountInputs.map((input) => input.remotePath)).toEqual(
       Array.from({ length: 24 }, (_, index) => `/slack/channels/C${String(index).padStart(3, '0')}`)
+    )
+    expect(manager.localPathsFor('account-workspace-id', {
+      provider: 'slack',
+      mountPaths: integrations.flatMap((integration) => integration.mountPaths)
+    })).toEqual(
+      Array.from(
+        { length: 24 },
+        (_, index) => `/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/slack/channels/C${String(index).padStart(3, '0')}`
+      )
     )
   })
 

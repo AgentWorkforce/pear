@@ -328,8 +328,11 @@ function canonicalMountPathsForConnectedIntegration(integration: ConnectedIntegr
 
 function isNarrowHistoricalMountPath(mountPath: string): boolean {
   const segments = mountPath.split('/').filter(Boolean)
-  if (segments[0] === 'discovery') return true
-  return segments.length >= 3
+  return segments[0] !== 'discovery' && segments.length >= 3
+}
+
+function isDiscoveryMountPath(mountPath: string): boolean {
+  return mountPath.split('/').filter(Boolean)[0] === 'discovery'
 }
 
 function outboxMountPathFor(mountPath: string): string {
@@ -354,7 +357,7 @@ export function localSyncMountPathsForIntegration(integration: ConnectedIntegrat
 function skippedHistoricalMountPathsForIntegration(integration: ConnectedIntegration): string[] {
   if (integration.downloadHistoricalData !== true) return []
   return canonicalMountPathsForConnectedIntegration(integration)
-    .filter((mountPath) => !isNarrowHistoricalMountPath(mountPath))
+    .filter((mountPath) => !isDiscoveryMountPath(mountPath) && !isNarrowHistoricalMountPath(mountPath))
 }
 
 function skippedCappedLocalSyncMountPathsForIntegration(integration: ConnectedIntegration): string[] {
