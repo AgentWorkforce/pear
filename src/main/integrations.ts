@@ -1503,14 +1503,18 @@ export class IntegrationsManager {
   }
 
   private syncAgentStateEventually(projectId: string, notifyAgent: boolean): void {
-    void this.syncAgentState(projectId, notifyAgent).catch((error) => {
+    void this.syncAgentState(projectId, notifyAgent, { hydrateCloud: false }).catch((error) => {
       console.warn('[integrations] Failed to sync integration state:', toErrorMessage(error))
     })
   }
 
-  private async syncAgentState(projectId: string, notifyAgent: boolean): Promise<void> {
+  private async syncAgentState(
+    projectId: string,
+    notifyAgent: boolean,
+    options: { hydrateCloud?: boolean } = {}
+  ): Promise<void> {
     let integrations = this.visibleIntegrationsForProject(projectId)
-    await this.syncLocalMounts()
+    await this.syncLocalMounts(options)
     integrations = await this.withLocalMountPaths(integrations)
     await this.safeUpdateMountPaths(projectId, this.mountPathsFor(projectId))
     const subscriptionsReady = await this.syncEventSubscriptions(projectId)

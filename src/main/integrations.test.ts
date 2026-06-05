@@ -99,6 +99,19 @@ const mock = vi.hoisted(() => {
       })
     }
 
+    if (parsed.pathname === '/api/v1/workspaces/account-workspace-id/integrations') {
+      return jsonResponse({
+        integrations: [
+          {
+            id: 'gmail-integration-1',
+            provider: 'google-mail',
+            ready: true,
+            connectedAt: '2026-06-05T01:00:00.000Z'
+          }
+        ]
+      })
+    }
+
     throw new Error(`unexpected fetch: ${normalizedUrl}`)
   })
 
@@ -278,5 +291,27 @@ describe('IntegrationsManager', () => {
     expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalled()
 
     finishMountReconcile()
+  })
+
+  it('coalesces concurrent cloud hydration for local mounts', async () => {
+    const manager = new IntegrationsManager()
+
+    await Promise.all([
+      manager.startLocalMountDaemon(),
+      manager.startLocalMountDaemon()
+    ])
+
+    const cloudListCalls = mock.fetchCalls.filter((call) =>
+      new URL(call.url).pathname === '/api/v1/workspaces/account-workspace-id/integrations'
+    )
+    expect(cloudListCalls).toHaveLength(1)
+    expect(mock.store.projects[0].integrations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          provider: 'google-mail',
+          integrationId: 'gmail-integration-1'
+        })
+      ])
+    )
   })
 })
