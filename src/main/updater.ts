@@ -16,14 +16,17 @@ function broadcast(channel: string, payload?: unknown): void {
 
 /**
  * Wire up GitHub-Releases auto-update. No-ops outside a packaged build (dev runs
- * have no update feed and electron-updater would throw). Downloads happen in the
- * background; the user is prompted to restart once an update is ready.
+ * have no update feed and electron-updater would throw). An available update is
+ * surfaced to the renderer as an in-app CTA; the download starts on demand
+ * (autoDownload = false) and the user is prompted to restart once it's ready.
  */
 export function initAutoUpdater(): void {
   if (initialized || !app.isPackaged) return
   initialized = true
 
-  autoUpdater.autoDownload = true
+  // Don't download until the user clicks "Update now" in the in-app banner. A
+  // downloaded-but-not-installed update still applies on the next quit.
+  autoUpdater.autoDownload = false
   autoUpdater.autoInstallOnAppQuit = true
 
   autoUpdater.on('update-available', (info) => broadcast('update:available', { version: info.version }))
@@ -36,18 +39,10 @@ export function initAutoUpdater(): void {
     broadcast('update:error', { message: error instanceof Error ? error.message : String(error) })
   })
 
-  autoUpdater.on('update-downloaded', async (info) => {
+  // The renderer's update banner drives the restart CTA (-> update:install),
+  // so just notify it; no native dialog.
+  autoUpdater.on('update-downloaded', (info) => {
     broadcast('update:downloaded', { version: info.version })
-    const result = await dialog.showMessageBox({
-      type: 'info',
-      buttons: ['Restart now', 'Later'],
-      defaultId: 0,
-      cancelId: 1,
-      title: 'Update ready',
-      message: `Pear ${info.version} has been downloaded.`,
-      detail: 'Restart to finish installing the update.'
-    })
-    if (result.response === 0) autoUpdater.quitAndInstall()
   })
 
   void checkForUpdates()
@@ -99,5 +94,17 @@ export async function checkForUpdatesInteractive(): Promise<void> {
 
 export function registerUpdaterIpc(): void {
   ipcMain.handle('update:check', () => checkForUpdatesInteractive())
+  ipcMain.handle('update:download', async () => {
+    try {
+      await autoUpdater.downloadUpdate()
+    } catch (error) {
+      // The 'error' event already broadcasts to the renderer; just keep this
+      // from surfacing as an unhandled rejection.
+      console.warn(
+        '[updater] Download failed:',
+        error instanceof Error ? error.message : String(error)
+      )
+    }
+  })
   ipcMain.handle('update:install', () => autoUpdater.quitAndInstall())
 }

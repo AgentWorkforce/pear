@@ -958,5 +958,13 @@ export interface PearAPI {
     resumeCommand: (entry: AiHistResumeEntry) => Promise<string | null>
     reload: () => Promise<void>
   }
+  update: {
+    download: () => Promise<void>
+    install: () => Promise<void>
+    onAvailable: (callback: (info: { version: string }) => void) => () => void
+    onProgress: (callback: (info: { percent: number }) => void) => () => void
+    onDownloaded: (callback: (info: { version: string }) => void) => () => void
+    onError: (callback: (info: { message: string }) => void) => () => void
+  }
   onMenu: (channel: string, callback: (...args: unknown[]) => void) => () => void
 }
