@@ -442,6 +442,29 @@ describe('IntegrationsManager', () => {
     )
   })
 
+  it('does not dedupe integration guidance when the first agent wait times out empty', async () => {
+    vi.useFakeTimers()
+    mock.brokerManager.listAgents.mockResolvedValue([])
+    const manager = new IntegrationsManager()
+
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(9_000)
+    expect(mock.brokerManager.sendMessage).not.toHaveBeenCalled()
+
+    mock.brokerManager.listAgents.mockResolvedValue([{ name: 'claude-1', projectId: 'project-1' }])
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(1_000)
+
+    expect(mock.brokerManager.sendMessage).toHaveBeenCalledWith(
+      'project-1',
+      expect.objectContaining({
+        to: 'claude-1',
+        from: 'system',
+        text: expect.stringContaining('<integrations-update>')
+      })
+    )
+  })
+
   it('subscribes integration events before waiting on local Relayfile mounts', async () => {
     vi.useFakeTimers()
     mock.setMountReconcilePromise(new Promise(() => undefined))

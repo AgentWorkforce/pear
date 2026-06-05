@@ -1786,10 +1786,10 @@ export class IntegrationsManager {
         if (expiresAt <= now) this.recentlyInjectedSystemMessages.delete(key)
       }
       if (this.recentlyInjectedSystemMessages.has(messageKey)) return
-      this.recentlyInjectedSystemMessages.set(messageKey, now + SYSTEM_MESSAGE_DEDUPE_MS)
 
       const bridge = brokerManager as unknown as IntegrationSystemMessageBridge
       const agents = await this.listSystemMessageAgents(bridge, projectId, options.waitForAgent === true)
+      if (agents.length === 0) return
       await Promise.all(
         agents
           .map((agent) => {
@@ -1809,6 +1809,7 @@ export class IntegrationsManager {
               : bridge.sendMessage(projectId, input)
           })
       )
+      this.recentlyInjectedSystemMessages.set(messageKey, Date.now() + SYSTEM_MESSAGE_DEDUPE_MS)
     } catch (error) {
       console.warn('[integrations] Failed to inject integration system message:', toErrorMessage(error))
     }
