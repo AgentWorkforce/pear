@@ -9,6 +9,9 @@ import { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, resolveCloudA
 import { createPearMountLauncher } from './relayfile-mount-launcher'
 
 const MOUNT_READY_TIMEOUT_MS = 60_000
+const MOUNT_REFRESH_FALLBACK_MARGIN_MS = 5 * 60_000
+const MOUNT_REFRESH_MIN_DELAY_MS = 1_000
+const MOUNT_AUTH_RESTART_THROTTLE_MS = 60_000
 
 type IntegrationMountInput = {
   provider: string
@@ -62,18 +65,23 @@ export function integrationLocalPathForRemote(workspaceId: string, remotePath: s
   return join(integrationMountRootForWorkspace(workspaceId), ...withoutRoot)
 }
 
-// Provider adapters materialize data at the workspace root (`/github/...`,
-// `/linear/...`), so each provider gets its own mount of that root. Derive
-// the root to mount from the integration's mount paths, tolerating the
-// legacy `/integrations/<provider>/...` form.
+// Tolerates the legacy `/integrations/<provider>/...` catalog form.
 export function integrationProviderRoot(mountPath: string): string | null {
   const segments = remotePathSegments(mountPath)
   const withoutRoot = segments[0] === 'integrations' ? segments.slice(1) : segments
   return withoutRoot.length > 0 ? `/${withoutRoot[0]}` : null
 }
 
-function discoveryRootForProvider(providerRoot: string): string {
-  return `/discovery/${providerRoot.slice(1)}`
+function canonicalIntegrationMountPath(mountPath: string, provider: string): string | null {
+  const providerSegment = sanitizePathSegment(provider.trim().toLowerCase())
+  const segments = remotePathSegments(mountPath)
+  const withoutLegacyRoot = segments[0] === 'integrations' ? segments.slice(2) : segments.slice(1)
+  if (segments[0] === 'integrations') {
+    const legacyProvider = segments[1] || providerSegment
+    return `/${[legacyProvider, ...withoutLegacyRoot].filter(Boolean).join('/')}`
+  }
+  if (segments.length > 0) return `/${[providerSegment, ...withoutLegacyRoot].filter(Boolean).join('/')}`
+  return providerSegment ? `/${providerSegment}` : null
 }
 
 async function ensureProtectedDirectory(path: string): Promise<void> {
@@ -82,22 +90,26 @@ async function ensureProtectedDirectory(path: string): Promise<void> {
 }
 
 export class IntegrationMountManager {
-  // One mount per provider root (e.g. '/github' → <workspace>/github),
-  // plus one shared read-only discovery mount at <workspace>/discovery.
+  // One mount per configured Relayfile path. Mounting provider roots makes
+  // large integrations mirror far more data than the project selected.
   private handles = new Map<string, MountedWorkspaceHandle>()
+  private refreshTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private authRestartedAt = new Map<string, number>()
   private workspaceId: string | null = null
   private pending: Promise<void> | null = null
+  private desiredMountPaths: string[] = []
 
   async ensureMounted(integrations: IntegrationMountInput[]): Promise<void> {
-    const providerRoots = providerRootsForIntegrations(integrations)
+    const mountPaths = mountPathsForIntegrations(integrations)
+    this.desiredMountPaths = mountPaths
 
-    if (!providerRoots.length) {
+    if (!mountPaths.length) {
       await this.stop()
       return
     }
 
     if (this.pending) return this.pending
-    const pending = this.mount(providerRoots)
+    const pending = this.mount(mountPaths, new Set())
       .catch((error) => {
         console.warn('[integration-mounts] Failed to reconcile Relayfile integration mounts:', toErrorMessage(error))
       })
@@ -109,12 +121,16 @@ export class IntegrationMountManager {
   }
 
   async stop(): Promise<void> {
+    this.desiredMountPaths = []
     const pending = this.pending
     if (pending) await pending.catch(() => undefined)
     await this.stopAll()
   }
 
   private async stopAll(): Promise<void> {
+    for (const timer of this.refreshTimers.values()) clearTimeout(timer)
+    this.refreshTimers.clear()
+    this.authRestartedAt.clear()
     const roots = Array.from(this.handles.keys())
     for (const root of roots) {
       await this.stopHandle(root)
@@ -123,6 +139,10 @@ export class IntegrationMountManager {
   }
 
   private async stopHandle(providerRoot: string): Promise<void> {
+    const timer = this.refreshTimers.get(providerRoot)
+    if (timer) clearTimeout(timer)
+    this.refreshTimers.delete(providerRoot)
+    this.authRestartedAt.delete(providerRoot)
     const handle = this.handles.get(providerRoot)
     this.handles.delete(providerRoot)
     if (handle) {
@@ -140,17 +160,55 @@ export class IntegrationMountManager {
   }
 
   localPathsFor(workspaceId: string, integration: IntegrationMountInput): string[] {
-    const providerRoots = Array.from(new Set(
+    const mountPaths = Array.from(new Set(
       integration.mountPaths
-        .map(integrationProviderRoot)
-        .filter((root): root is string => !!root)
+        .map((mountPath) => canonicalIntegrationMountPath(mountPath, integration.provider))
+        .filter((mountPath): mountPath is string => !!mountPath)
     )).sort()
 
-    return providerRoots.map((root) => integrationLocalPathForRemote(workspaceId, root))
-      .concat(providerRoots.map((root) => integrationLocalPathForRemote(workspaceId, discoveryRootForProvider(root))))
+    return mountPaths.map((mountPath) => integrationLocalPathForRemote(workspaceId, mountPath))
   }
 
-  private async mount(providerRoots: string[]): Promise<void> {
+  private queueForcedRestart(remotePath: string, reason: string): void {
+    if (!this.handles.has(remotePath)) return
+    const now = Date.now()
+    const lastRestartedAt = this.authRestartedAt.get(remotePath) ?? 0
+    if (now - lastRestartedAt < MOUNT_AUTH_RESTART_THROTTLE_MS) return
+    this.authRestartedAt.set(remotePath, now)
+
+    const previous = this.pending ?? Promise.resolve()
+    const pending = previous
+      .catch(() => undefined)
+      .then(() => this.mount(this.desiredMountPaths, new Set([remotePath])))
+      .catch((error) => {
+        console.warn(
+          `[integration-mounts] Failed to restart Relayfile mount for ${remotePath} after ${reason}:`,
+          toErrorMessage(error)
+        )
+      })
+      .finally(() => {
+        if (this.pending === pending) this.pending = null
+      })
+    this.pending = pending
+  }
+
+  private scheduleRefresh(remotePath: string, handle: MountedWorkspaceHandle): void {
+    const existing = this.refreshTimers.get(remotePath)
+    if (existing) clearTimeout(existing)
+    this.refreshTimers.delete(remotePath)
+
+    const refreshAt = refreshTimeFor(handle)
+    if (!refreshAt) return
+
+    const delayMs = Math.max(MOUNT_REFRESH_MIN_DELAY_MS, refreshAt - Date.now())
+    const timer = setTimeout(() => {
+      this.refreshTimers.delete(remotePath)
+      this.queueForcedRestart(remotePath, 'token refresh')
+    }, delayMs)
+    this.refreshTimers.set(remotePath, timer)
+  }
+
+  private async mount(mountPaths: string[], forceRemotePaths: Set<string>): Promise<void> {
     const auth = await resolveCloudAuth()
     if (!auth) {
       await this.stopAll()
@@ -184,10 +242,10 @@ export class IntegrationMountManager {
       }
     })
 
-    const mountSpecs = this.mountSpecsFor(providerRoots, mountRoot)
+    const mountSpecs = this.mountSpecsFor(mountPaths, mountRoot)
     const expectedRemotePaths = mountSpecs.map((spec) => spec.remotePath)
 
-    // Drop mounts for providers that are no longer connected.
+    // Drop mounts for paths that are no longer connected.
     for (const existingRemotePath of Array.from(this.handles.keys())) {
       if (!expectedRemotePaths.includes(existingRemotePath)) {
         await this.stopHandle(existingRemotePath)
@@ -198,7 +256,10 @@ export class IntegrationMountManager {
       const existing = this.handles.get(spec.remotePath)
       if (existing) {
         const status = await existing.status().catch(() => null)
-        if (status?.ready) continue
+        if (status?.ready && !forceRemotePaths.has(spec.remotePath)) {
+          this.scheduleRefresh(spec.remotePath, existing)
+          continue
+        }
         await this.stopHandle(spec.remotePath)
       }
 
@@ -212,10 +273,18 @@ export class IntegrationMountManager {
           background: true,
           agentName: spec.agentName,
           scopes: spec.scopes,
-          launcher: createPearMountLauncher(),
+          launcher: createPearMountLauncher({
+            onEvent: (event) => {
+              const text = typeof event.text === 'string' ? event.text : ''
+              if (isMountAuthExpiredOutput(text)) {
+                this.queueForcedRestart(spec.remotePath, 'auth failure')
+              }
+            }
+          }),
           readyTimeoutMs: MOUNT_READY_TIMEOUT_MS
         })
         this.handles.set(spec.remotePath, handle)
+        this.scheduleRefresh(spec.remotePath, handle)
       } catch (error) {
         console.warn(
           `[integration-mounts] Failed to start Relayfile mount for ${spec.remotePath}:`,
@@ -227,28 +296,20 @@ export class IntegrationMountManager {
     await this.removeLegacyIntegrationMountRoot(mountRoot)
   }
 
-  private mountSpecsFor(providerRoots: string[], mountRoot: string): IntegrationMountSpec[] {
-    const specs: IntegrationMountSpec[] = providerRoots.map((providerRoot) => {
-      const providerSegment = providerRoot.slice(1)
+  private mountSpecsFor(mountPaths: string[], mountRoot: string): IntegrationMountSpec[] {
+    const specs: IntegrationMountSpec[] = mountPaths.map((mountPath) => {
+      const providerSegment = remotePathSegments(mountPath)[0] || 'integration'
+      const agentSegment = remotePathSegments(mountPath).join('-') || providerSegment
       return {
-        remotePath: providerRoot,
-        localDir: join(mountRoot, providerSegment),
-        agentName: `pear-integrations-${providerSegment}`,
+        remotePath: mountPath,
+        localDir: join(mountRoot, ...remotePathSegments(mountPath)),
+        agentName: `pear-integrations-${agentSegment}`,
         scopes: [
-          `relayfile:fs:read:${providerRoot}/**`,
-          `relayfile:fs:write:${providerRoot}/**`
+          `relayfile:fs:read:${mountPath}/**`,
+          `relayfile:fs:write:${mountPath}/**`
         ]
       }
     })
-
-    if (providerRoots.length > 0) {
-      specs.push({
-        remotePath: '/discovery',
-        localDir: join(mountRoot, 'discovery'),
-        agentName: 'pear-integrations-discovery',
-        scopes: ['relayfile:fs:read:/discovery/**']
-      })
-    }
 
     return specs.sort((a, b) => a.remotePath.localeCompare(b.remotePath))
   }
@@ -266,10 +327,27 @@ export class IntegrationMountManager {
 
 export const integrationMountManager = new IntegrationMountManager()
 
-function providerRootsForIntegrations(integrations: IntegrationMountInput[]): string[] {
+function parseTimestamp(value: string | null | undefined): number | null {
+  if (!value) return null
+  const parsed = Date.parse(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function refreshTimeFor(handle: MountedWorkspaceHandle): number | null {
+  const suggestedRefreshAt = parseTimestamp(handle.suggestedRefreshAt)
+  if (suggestedRefreshAt) return suggestedRefreshAt
+  const expiresAt = parseTimestamp(handle.expiresAt)
+  return expiresAt ? expiresAt - MOUNT_REFRESH_FALLBACK_MARGIN_MS : null
+}
+
+function isMountAuthExpiredOutput(text: string): boolean {
+  return /(?:401|unauthorized|token has expired|invalid jwt)/iu.test(text)
+}
+
+function mountPathsForIntegrations(integrations: IntegrationMountInput[]): string[] {
   return Array.from(new Set(
     integrations
-      .flatMap((integration) => integration.mountPaths.map(integrationProviderRoot))
-      .filter((root): root is string => !!root)
+      .flatMap((integration) => integration.mountPaths.map((mountPath) => canonicalIntegrationMountPath(mountPath, integration.provider)))
+      .filter((mountPath): mountPath is string => !!mountPath)
   )).sort()
 }

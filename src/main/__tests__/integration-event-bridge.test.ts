@@ -152,12 +152,12 @@ test('channel notification targets do not fall back to all project agents', asyn
   assert.deepEqual(harness.listAgentsCalls, [])
 })
 
-test('slack channel scopes watch relayfile id slug channel directories', async () => {
+test('integration events watch selected relayfile mount paths', async () => {
   const harness = makeHarness()
   const slackIntegration = integration({
     provider: 'slack',
     integrationId: 'slack-1',
-    mountPaths: ['/integrations/slack/channels/proj-cloud'],
+    mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
     scope: {
       channels: ['C123ABC'],
       resources: [{ id: 'C123ABC', label: '#proj-cloud' }],
@@ -168,24 +168,36 @@ test('slack channel scopes watch relayfile id slug channel directories', async (
   await harness.bridge.reconcile('project-1', [slackIntegration])
 
   assert.deepEqual(harness.subscribeCalls[0].globs, [
-    '/slack/channels/C123ABC/**',
-    '/slack/channels/C123ABC__proj-cloud/**',
-    '/slack/channels/proj-cloud--C123ABC/**',
-    '/slack/channels/proj-cloud/**'
+    '/slack/channels/C123ABC__proj-cloud/**'
   ])
   assert.deepEqual(integrationSubscriptionSummaries([slackIntegration])[0].watches, [
-    '.integrations/slack/channels/C123ABC/**',
-    '.integrations/slack/channels/C123ABC__proj-cloud/**',
-    '.integrations/slack/channels/proj-cloud--C123ABC/**',
-    '.integrations/slack/channels/proj-cloud/**'
+    '.integrations/slack/channels/C123ABC__proj-cloud/**'
   ])
 
   await harness.emit(changeEvent('/slack/channels/C123ABC__proj-cloud/messages/1713220123_001100/meta.json', 'slack'))
-  await harness.emit(changeEvent('/slack/channels/C123ABC/messages/1713220123_001100/meta.json', 'slack'))
 
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
   assert.match(harness.sent[0].input.text, /Path: \.integrations\/slack\/channels\/C123ABC__proj-cloud\/messages\/1713220123_001100\/meta\.json/u)
   assert.match(harness.sent[0].input.text, /Relayfile path: \/slack\/channels\/C123ABC__proj-cloud\/messages\/1713220123_001100\/meta\.json/u)
+})
+
+test('resource alias mount paths inject the same relative event only once', async () => {
+  const harness = makeHarness()
+  const chatIntegration = integration({
+    provider: 'chat',
+    integrationId: 'chat-1',
+    mountPaths: ['/chat/channels/C123ABC', '/chat/channels/C123ABC__proj-cloud'],
+    scope: {
+      notifyAgents: ['alice']
+    }
+  })
+
+  await harness.bridge.reconcile('project-1', [chatIntegration])
+
+  await harness.emit(changeEvent('/chat/channels/C123ABC/threads/1780607825_485189/replies/1780611452_510669.json', 'chat'))
+  await harness.emit(changeEvent('/chat/channels/C123ABC__proj-cloud/threads/1780607825_485189/replies/1780611452_510669.json', 'chat'))
+
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
 })
 
 test('generic provider agent scope keys are not treated as notification targets', async () => {

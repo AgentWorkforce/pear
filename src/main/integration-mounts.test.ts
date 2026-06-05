@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 type MockCloudAuth = {
   apiUrl: string
@@ -15,10 +15,17 @@ const mock = vi.hoisted(() => {
     agentName: string
     scopes?: string[]
     readyTimeoutMs: number
+    launcher?: {
+      __options?: {
+        onEvent?: (event: { type: string; text?: string }) => void
+      }
+    }
   }
 
   const mountInputs: MountInput[] = []
   let currentAuth: MockCloudAuth | null = null
+  let mountExpiresAt: string | null = null
+  let mountSuggestedRefreshAt: string | null = null
 
   class RelayfileSetup {
     readonly cloudApiUrl: string
@@ -33,6 +40,8 @@ const mock = vi.hoisted(() => {
         scopes: input.scopes ? [...input.scopes] : undefined
       })
       return Promise.resolve({
+        expiresAt: mountExpiresAt,
+        suggestedRefreshAt: mountSuggestedRefreshAt,
         stop: vi.fn(async () => undefined),
         status: vi.fn(async () => ({ ready: true }))
       })
@@ -50,6 +59,18 @@ const mock = vi.hoisted(() => {
     },
     set currentAuth(value: MockCloudAuth | null) {
       currentAuth = value
+    },
+    get mountExpiresAt() {
+      return mountExpiresAt
+    },
+    set mountExpiresAt(value: string | null) {
+      mountExpiresAt = value
+    },
+    get mountSuggestedRefreshAt() {
+      return mountSuggestedRefreshAt
+    },
+    set mountSuggestedRefreshAt(value: string | null) {
+      mountSuggestedRefreshAt = value
     },
     resolveCloudAuth: vi.fn(async () => currentAuth),
     getAccountWorkspaceId: vi.fn(async () => 'account-workspace-id'),
@@ -78,7 +99,7 @@ vi.mock('./auth', () => ({
 }))
 
 vi.mock('./relayfile-mount-launcher', () => ({
-  createPearMountLauncher: vi.fn(() => ({ start: vi.fn() }))
+  createPearMountLauncher: vi.fn((options) => ({ start: vi.fn(), __options: options }))
 }))
 
 import { IntegrationMountManager } from './integration-mounts'
@@ -95,9 +116,15 @@ describe('IntegrationMountManager', () => {
     }
     mock.resolveCloudAuth.mockClear()
     mock.getAccountWorkspaceId.mockClear()
+    mock.mountExpiresAt = null
+    mock.mountSuggestedRefreshAt = null
   })
 
-  it('mounts each provider root plus shared discovery with scoped relayfile permissions', async () => {
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('mounts each selected relayfile path with scoped relayfile permissions', async () => {
     const manager = new IntegrationMountManager()
 
     await manager.ensureMounted([
@@ -113,25 +140,19 @@ describe('IntegrationMountManager', () => {
       }
     ])
 
-    expect(mock.mountInputs).toHaveLength(3)
+    expect(mock.mountInputs).toHaveLength(2)
     expect(mock.mountInputs[0]).toMatchObject({
       workspaceId: 'account-workspace-id',
-      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/discovery',
-      remotePath: '/discovery',
-      agentName: 'pear-integrations-discovery',
-      scopes: ['relayfile:fs:read:/discovery/**']
+      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/github/repos',
+      remotePath: '/github/repos',
+      agentName: 'pear-integrations-github-repos',
+      scopes: ['relayfile:fs:read:/github/repos/**', 'relayfile:fs:write:/github/repos/**']
     })
     expect(mock.mountInputs[1]).toMatchObject({
-      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/github',
-      remotePath: '/github',
-      agentName: 'pear-integrations-github',
-      scopes: ['relayfile:fs:read:/github/**', 'relayfile:fs:write:/github/**']
-    })
-    expect(mock.mountInputs[2]).toMatchObject({
-      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/linear',
-      remotePath: '/linear',
-      agentName: 'pear-integrations-linear',
-      scopes: ['relayfile:fs:read:/linear/**', 'relayfile:fs:write:/linear/**']
+      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/linear/issues',
+      remotePath: '/linear/issues',
+      agentName: 'pear-integrations-linear-issues',
+      scopes: ['relayfile:fs:read:/linear/issues/**', 'relayfile:fs:write:/linear/issues/**']
     })
     expect(mock.rm).toHaveBeenCalledWith(
       '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/integrations',
@@ -146,8 +167,54 @@ describe('IntegrationMountManager', () => {
       provider: 'linear',
       mountPaths: ['/integrations/linear/teams', '/linear/projects']
     })).toEqual([
-      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/linear',
-      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/discovery/linear'
+      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/linear/projects',
+      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/linear/teams'
     ])
+  })
+
+  it('restarts mounted providers when the relayfile mount token reaches its refresh time', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-05T00:00:00.000Z'))
+    mock.mountSuggestedRefreshAt = new Date(Date.now() + 1_000).toISOString()
+    const manager = new IntegrationMountManager()
+
+    await manager.ensureMounted([
+      {
+        provider: 'github',
+        mountPaths: ['/github/repos']
+      }
+    ])
+
+    expect(mock.mountInputs.map((input) => input.remotePath)).toEqual(['/github/repos'])
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mock.mountInputs.map((input) => input.remotePath)).toContain('/github/repos')
+    expect(mock.mountInputs.filter((input) => input.remotePath === '/github/repos')).toHaveLength(2)
+  })
+
+  it('restarts a mounted provider after mount output reports an expired token', async () => {
+    const manager = new IntegrationMountManager()
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/channels']
+      }
+    ])
+
+    const slackMount = mock.mountInputs.find((input) => input.remotePath === '/slack/channels')
+    expect(slackMount?.launcher?.__options?.onEvent).toBeTypeOf('function')
+
+    slackMount?.launcher?.__options?.onEvent?.({
+      type: 'stderr',
+      text: 'mount sync cycle failed: http 401 unauthorized: Token has expired'
+    })
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels')).toHaveLength(2)
   })
 })

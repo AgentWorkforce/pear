@@ -139,49 +139,6 @@ function workspaceIdFromJwt(token: string | undefined): string | null {
   return typeof claims?.workspace_id === 'string' && claims.workspace_id ? claims.workspace_id : null
 }
 
-function slackNormalizeSegment(value: string, fallback = 'unknown'): string {
-  const trimmed = value.trim()
-  if (!trimmed) return fallback
-  return trimmed.replace(/[^A-Za-z0-9._+=@-]+/g, '_').replace(/^_+|_+$/g, '') || fallback
-}
-
-function slackPathSlug(value: string): string {
-  return value
-    .replace(/[{}]/g, '')
-    .replace(/[^a-zA-Z0-9]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .toLowerCase()
-}
-
-function readScopeResourceLabel(scope: Record<string, unknown>, id: string): string | undefined {
-  const resources = scope.resources
-  if (!Array.isArray(resources)) return undefined
-  for (const resource of resources) {
-    if (!isRecord(resource)) continue
-    const resourceId = typeof resource.id === 'string' ? resource.id.trim() : ''
-    if (resourceId !== id) continue
-    for (const key of ['label', 'name', 'displayName', 'title', 'slug']) {
-      const value = resource[key]
-      if (typeof value === 'string' && value.trim()) return value.trim().replace(/^#/u, '')
-    }
-  }
-  return undefined
-}
-
-function slackScopedMountPaths(integration: ConnectedIntegration, provider: string): string[] {
-  if (provider !== 'slack') return []
-  return stringList(integration.scope.channels).flatMap((channelId) => {
-    const id = slackNormalizeSegment(channelId)
-    const label = readScopeResourceLabel(integration.scope, channelId)
-    const slug = label ? slackPathSlug(label) : ''
-    return [
-      `/${provider}/channels/${id}`,
-      `/${provider}/channels/${id}${slug ? `__${slug}` : ''}`,
-      ...(slug ? [`/${provider}/channels/${slug}--${id}`, `/${provider}/channels/${slug}`] : [])
-    ]
-  })
-}
-
 // Provider adapters materialize data at the workspace root (`/github/...`,
 // `/linear/...`), so watch globs must target the root-level provider layout.
 // Tolerates the legacy `/integrations/<provider>/...` catalog form.
@@ -194,7 +151,7 @@ function canonicalMountPaths(integration: ConnectedIntegration): string[] {
     if (rootLevel) return `/${provider}${rootLevel[1] ?? ''}`
     return path
   })
-  return dedupeStrings([...mountPaths, ...slackScopedMountPaths(integration, provider)])
+  return dedupeStrings(mountPaths)
 }
 
 function watchGlobForPath(path: string): string {
@@ -441,14 +398,24 @@ function createWorkspaceScopedEventClient(
   }
 }
 
-function localRootForIntegration(integration: ConnectedIntegration): { localRoot: string; remoteRoot: string } | null {
-  const provider = toRelayfileProvider(integration.provider)
-  const roots = integration.localMountPaths || []
-  const root = roots.find((entry) => {
-    const segments = pathSegments(entry)
-    return segments.at(-1)?.toLowerCase() === provider && !segments.includes('discovery')
-  })
-  return root ? { localRoot: root, remoteRoot: `/${provider}` } : null
+function remoteRootForLocalMountPath(workspaceId: string, localPath: string): string | null {
+  const segments = pathSegments(localPath)
+  const workspaceIndex = segments.findIndex((segment) => segment === workspaceId)
+  if (workspaceIndex < 0) return null
+  const remoteSegments = segments.slice(workspaceIndex + 1)
+  return remoteSegments.length > 0 ? `/${remoteSegments.join('/')}` : null
+}
+
+function localRootsForIntegration(
+  workspaceId: string,
+  integration: ConnectedIntegration
+): Array<{ localRoot: string; remoteRoot: string }> {
+  return (integration.localMountPaths || [])
+    .map((localRoot) => {
+      const remoteRoot = remoteRootForLocalMountPath(workspaceId, localRoot)
+      return remoteRoot ? { localRoot, remoteRoot } : null
+    })
+    .filter((entry): entry is { localRoot: string; remoteRoot: string } => entry !== null)
 }
 
 function remotePathForLocalPath(localRoot: string, remoteRoot: string, localPath: string): string | null {
@@ -485,8 +452,9 @@ function watchLocalMounts(
 ): LocalMountSubscription | null {
   const roots = new Map<string, { localRoot: string; remoteRoot: string }>()
   for (const integration of integrations) {
-    const root = localRootForIntegration(integration)
-    if (root) roots.set(resolve(root.localRoot), { localRoot: resolve(root.localRoot), remoteRoot: root.remoteRoot })
+    for (const root of localRootsForIntegration(workspaceId, integration)) {
+      roots.set(resolve(root.localRoot), { localRoot: resolve(root.localRoot), remoteRoot: root.remoteRoot })
+    }
   }
   if (roots.size === 0) return null
 
@@ -496,7 +464,8 @@ function watchLocalMounts(
 
   const schedule = (localRoot: string, remoteRoot: string, localPath: string, eventType: string): void => {
     const remotePath = remotePathForLocalPath(localRoot, remoteRoot, localPath)
-    if (!remotePath || !globs.some((glob) => globMatchesPath(glob, remotePath))) return
+    if (!remotePath || !shouldNotifyRelayfilePath(remotePath)) return
+    if (!globs.some((glob) => globMatchesPath(glob, remotePath))) return
 
     const existing = pendingByPath.get(remotePath)
     if (existing) clearTimeout(existing)
@@ -558,10 +527,30 @@ function specsForEvent(event: ChangeEvent, specs: SubscriptionSpec[]): Subscript
   return specs.filter((spec) => spec.mountPaths.some((mountPath) => pathIsInsideMount(path, mountPath)))
 }
 
-function injectionDeduplicationKey(projectId: string, event: ChangeEvent): string {
+function longestMatchingMountPath(path: string, spec: SubscriptionSpec): string | null {
+  return spec.mountPaths
+    .filter((mountPath) => pathIsInsideMount(path, mountPath))
+    .sort((a, b) => b.length - a.length)[0] || null
+}
+
+function pathTailAfterMount(path: string, mountPath: string): string {
+  const normalizedPath = path.trim().replace(/\/+$/u, '') || '/'
+  const normalizedMountPath = mountPath.trim().replace(/\/+$/u, '') || '/'
+  if (normalizedPath === normalizedMountPath) return '/'
+  return normalizedPath.slice(normalizedMountPath.length) || '/'
+}
+
+function injectionDeduplicationKey(projectId: string, event: ChangeEvent, matchedSpecs: SubscriptionSpec[]): string {
   const path = event.resource.path.startsWith('/') ? event.resource.path : `/${event.resource.path}`
-  const slackMessage = path.match(/^\/slack\/(?:channels|dms)\/[^/]+\/messages\/([^/]+)\/meta\.json$/u)
-  if (slackMessage) return `${projectId}:slack:message:${slackMessage[1]}`
+  const scopedKeys = matchedSpecs
+    .map((spec) => {
+      const mountPath = longestMatchingMountPath(path, spec)
+      return mountPath
+        ? `${spec.integrationId}:${spec.provider}:${pathTailAfterMount(path, mountPath)}`
+        : null
+    })
+    .filter((entry): entry is string => entry !== null)
+  if (scopedKeys.length > 0) return `${projectId}:${event.type}:${dedupeStrings(scopedKeys).join('|')}`
   return `${projectId}:${event.type}:${path}`
 }
 
@@ -593,8 +582,8 @@ function eventSummaryValue(value: unknown): string | undefined {
   return undefined
 }
 
-function shouldNotifyRelayfileChange(event: ChangeEvent): boolean {
-  const path = event.resource.path.trim()
+function shouldNotifyRelayfilePath(pathValue: string): boolean {
+  const path = pathValue.trim()
   if (!path || !path.startsWith('/')) return false
 
   const leaf = path.split('/').pop() || ''
@@ -617,6 +606,10 @@ function shouldNotifyRelayfileChange(event: ChangeEvent): boolean {
   if (/\/(?:draft[@-][^/]*|create)\.json$/u.test(path)) return false
 
   return true
+}
+
+function shouldNotifyRelayfileChange(event: ChangeEvent): boolean {
+  return shouldNotifyRelayfilePath(event.resource.path)
 }
 
 function formatIntegrationEventMessage(event: ChangeEvent): string {
@@ -806,7 +799,7 @@ export class IntegrationEventBridge {
       return
     }
 
-    const duplicateKey = injectionDeduplicationKey(projectId, event)
+    const duplicateKey = injectionDeduplicationKey(projectId, event, matchedSpecs)
     if (this.wasRecentlyInjected(duplicateKey)) {
       logIntegrationEvent('skipped duplicate path', {
         projectId,
