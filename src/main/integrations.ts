@@ -10,6 +10,7 @@ import { integrationEventBridge, integrationSubscriptionSummaries } from './inte
 import { integrationMountManager, integrationMountRootForWorkspace } from './integration-mounts'
 import {
   canListRemoteDirectoryForMountPaths,
+  canShowRemoteDirectoryEntryForMountPaths,
   normalizeRemoteDirectoryPath,
   remotePathName
 } from './integration-remote-paths'
@@ -705,7 +706,8 @@ export class IntegrationsManager {
     if (!this.findProject(projectId)) throw new Error(`Project not found: ${projectId}`)
     const path = normalizeRemoteDirectoryPath(remotePath)
     if (!path || path === '/') throw new Error('Integration remote directory path is required')
-    if (!this.canListRemoteDirectory(projectId, path)) {
+    const mountPaths = this.listableRemoteMountPaths(projectId)
+    if (!canListRemoteDirectoryForMountPaths(path, mountPaths)) {
       throw new Error('Integration remote directory is outside this project integration scope')
     }
 
@@ -722,6 +724,7 @@ export class IntegrationsManager {
 
         for (const entry of tree.entries) {
           if (entry.path === path) continue
+          if (!canShowRemoteDirectoryEntryForMountPaths(entry.path, mountPaths)) continue
           entries.push({
             name: remotePathName(entry.path),
             path: entry.path,
@@ -1577,9 +1580,9 @@ export class IntegrationsManager {
     return this.mountPathsForAgentWorkspace(integration)
   }
 
-  private canListRemoteDirectory(projectId: string, remotePath: string): boolean {
-    return this.visibleIntegrationsForProject(projectId).some((integration) =>
-      canListRemoteDirectoryForMountPaths(remotePath, [
+  private listableRemoteMountPaths(projectId: string): string[] {
+    return dedupeStrings(
+      this.visibleIntegrationsForProject(projectId).flatMap((integration) => [
         discoveryMountPathForProvider(integration.provider),
         ...this.canonicalMountPathsForIntegration(integration)
       ])

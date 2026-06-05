@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import {
+  canShowRemoteDirectoryEntryForMountPaths,
   canListRemoteDirectoryForMountPaths,
   normalizeRemoteDirectoryPath,
   remotePathName
@@ -23,6 +24,9 @@ test('remote directory listing is limited to configured mount roots', () => {
   ]), true)
   assert.equal(canListRemoteDirectoryForMountPaths('/slack/channels', [
     '/slack/channels/C123'
+  ]), true)
+  assert.equal(canListRemoteDirectoryForMountPaths('/slack', [
+    '/slack/channels/C123'
   ]), false)
   assert.equal(canListRemoteDirectoryForMountPaths('/slack/channels/C999', [
     '/slack/channels/C123'
@@ -37,6 +41,24 @@ test('remote directory listing permits provider discovery only for that provider
     '/discovery/slack'
   ]), false)
   assert.equal(canListRemoteDirectoryForMountPaths('/discovery/github/actions', [
+    '/discovery/slack'
+  ]), false)
+})
+
+test('remote directory entries are filtered to configured mount roots', () => {
+  assert.equal(canShowRemoteDirectoryEntryForMountPaths('/slack/channels/C123', [
+    '/slack/channels/C123'
+  ]), true)
+  assert.equal(canShowRemoteDirectoryEntryForMountPaths('/slack/channels/C123/messages', [
+    '/slack/channels/C123'
+  ]), true)
+  assert.equal(canShowRemoteDirectoryEntryForMountPaths('/slack/channels/C999', [
+    '/slack/channels/C123'
+  ]), false)
+  assert.equal(canShowRemoteDirectoryEntryForMountPaths('/discovery', [
+    '/discovery/slack'
+  ]), true)
+  assert.equal(canShowRemoteDirectoryEntryForMountPaths('/discovery/github', [
     '/discovery/slack'
   ]), false)
 })
