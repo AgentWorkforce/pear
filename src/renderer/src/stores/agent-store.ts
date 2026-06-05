@@ -417,6 +417,7 @@ interface AgentState {
   brokerError: string | null
   brokerErrors: BrokerErrorEntry[]
   brokerEvents: BrokerEventRecord[]
+  lastHumanMessageSentAt: number
 
   setActiveAgentKey: (key: string | null) => void
   markAgentActive: (projectId: string | undefined, name: string) => void
@@ -460,6 +461,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
   brokerError: null,
   brokerErrors: [],
   brokerEvents: [],
+  lastHumanMessageSentAt: 0,
 
   setActiveAgentKey: (key) => set({ activeAgentKey: key }),
 
@@ -1002,7 +1004,8 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
     set((state) => ({
       messages: isDuplicateHumanEcho(state.messages, msg)
         ? state.messages
-        : capByCount([...state.messages, msg], MAX_CHAT_MESSAGES)
+        : capByCount([...state.messages, msg], MAX_CHAT_MESSAGES),
+      lastHumanMessageSentAt: timestamp
     }))
   },
 
@@ -1147,7 +1150,8 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
       brokerStatus: 'disconnected',
       brokerError: null,
       brokerErrors: [],
-      brokerEvents: []
+      brokerEvents: [],
+      lastHumanMessageSentAt: 0
     }),
 
   getAgentBuffer: (projectId, name) => getPtyChunks(getAgentKey(projectId, name))
