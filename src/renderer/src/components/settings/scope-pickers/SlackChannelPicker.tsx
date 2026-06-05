@@ -19,6 +19,13 @@ function slackPathSlug(value: string): string {
 }
 
 function channelMountSegment(resource: Parameters<typeof resourceText>[0]): string {
+  const channelFolder = metadataText(resource, 'channelFolder')
+  if (channelFolder) return channelFolder
+
+  const path = resourceText(resource, 'path')
+  const pathMatch = path.match(/^\/?slack\/channels\/([^/]+)$/u)
+  if (pathMatch?.[1]) return pathMatch[1]
+
   const id = resourceText(resource, 'id')
   const slug = slackPathSlug(channelName(resource))
   if (!id) return slug
@@ -39,7 +46,7 @@ export function SlackChannelPicker(props: ScopePickerProps): React.ReactNode {
       }}
       getResourceDescription={(resource) => metadataText(resource, 'workspace', 'team') || resourceText(resource, 'path')}
       getResourceMountSegment={channelMountSegment}
-      getResourceScopeId={(resource) => resourceText(resource, 'id', 'slug', 'name')}
+      getResourceScopeId={(resource) => metadataText(resource, 'channelId') || resourceText(resource, 'id', 'slug', 'name')}
     />
   )
 }

@@ -181,6 +181,7 @@ type IntegrationSystemMessageBridge = {
 const POLL_INTERVAL_MS = 2_000
 const POLL_TIMEOUT_MS = 5 * 60_000
 const CATALOG_CACHE_MS = 5 * 60_000
+const SYSTEM_MESSAGE_DEBOUNCE_MS = 1_000
 const CATALOG_PATH = '/api/v1/integrations/catalog'
 const MAX_REMOTE_DIRECTORY_ENTRIES = 5_000
 
@@ -623,6 +624,7 @@ export class IntegrationsManager {
   private sessions = new Map<string, IntegrationConnectSession>()
   private sessionMetadata = new Map<string, SessionMetadata>()
   private pollTimers = new Map<string, NodeJS.Timeout>()
+  private systemMessageTimers = new Map<string, NodeJS.Timeout>()
   private catalogCache: IntegrationAdapter[] | null = null
   private catalogFetchedAt = 0
 
@@ -781,6 +783,9 @@ export class IntegrationsManager {
   }
 
   async shutdownLocalMounts(): Promise<void> {
+    for (const timer of this.systemMessageTimers.values()) clearTimeout(timer)
+    this.systemMessageTimers.clear()
+
     // Unlink the per-project `.integrations` symlinks before stopping the
     // mounts so a closed app leaves no dangling links in project trees.
     await Promise.all(
@@ -1462,7 +1467,7 @@ export class IntegrationsManager {
     const subscriptionsReady = await this.syncEventSubscriptions(projectId)
 
     if (notifyAgent) {
-      await this.safeInjectSystemMessage(projectId, this.buildSystemMessageSnippet(integrations, subscriptionsReady))
+      this.scheduleSystemMessage(projectId, this.buildSystemMessageSnippet(integrations, subscriptionsReady))
     }
   }
 
@@ -1575,6 +1580,17 @@ export class IntegrationsManager {
     } catch (error) {
       console.warn('[integrations] Failed to inject integration system message:', toErrorMessage(error))
     }
+  }
+
+  private scheduleSystemMessage(projectId: string, message: string): void {
+    const existing = this.systemMessageTimers.get(projectId)
+    if (existing) clearTimeout(existing)
+
+    const timer = setTimeout(() => {
+      this.systemMessageTimers.delete(projectId)
+      void this.safeInjectSystemMessage(projectId, message)
+    }, SYSTEM_MESSAGE_DEBOUNCE_MS)
+    this.systemMessageTimers.set(projectId, timer)
   }
 
   private async safeUpdateMountPaths(projectId: string, paths: string[]): Promise<void> {

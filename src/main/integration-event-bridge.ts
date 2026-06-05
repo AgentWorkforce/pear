@@ -153,7 +153,16 @@ function canonicalMountPaths(integration: ConnectedIntegration): string[] {
     if (rootLevel) return `/${provider}${rootLevel[1] ?? ''}`
     return path
   })
-  return dedupeStrings(mountPaths)
+  return dedupeStrings([
+    ...mountPaths,
+    ...mountPaths.map((path) => slackChannelIdFallbackMountPath(provider, path)).filter((path): path is string => path !== null)
+  ])
+}
+
+function slackChannelIdFallbackMountPath(provider: string, path: string): string | null {
+  if (provider !== 'slack') return null
+  const match = path.match(/^\/slack\/channels\/([^/_][^/]*)__[^/]+$/u)
+  return match?.[1] ? `/slack/channels/${match[1]}` : null
 }
 
 function watchGlobForPath(path: string): string {

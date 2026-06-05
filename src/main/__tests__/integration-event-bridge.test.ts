@@ -168,9 +168,11 @@ test('integration events watch selected relayfile mount paths', async () => {
   await harness.bridge.reconcile('project-1', [slackIntegration])
 
   assert.deepEqual(harness.subscribeCalls[0].globs, [
+    '/slack/channels/C123ABC/**',
     '/slack/channels/C123ABC__proj-cloud/**'
   ])
   assert.deepEqual(integrationSubscriptionSummaries([slackIntegration])[0].watches, [
+    '.integrations/slack/channels/C123ABC/**',
     '.integrations/slack/channels/C123ABC__proj-cloud/**'
   ])
 
@@ -179,6 +181,10 @@ test('integration events watch selected relayfile mount paths', async () => {
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
   assert.match(harness.sent[0].input.text, /Path: \.integrations\/slack\/channels\/C123ABC__proj-cloud\/messages\/1713220123_001100\/meta\.json/u)
   assert.match(harness.sent[0].input.text, /Relayfile path: \/slack\/channels\/C123ABC__proj-cloud\/messages\/1713220123_001100\/meta\.json/u)
+
+  harness.sent.splice(0)
+  await harness.emit(changeEvent('/slack/channels/C123ABC/messages/1713220124_001100/meta.json', 'slack'))
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
 })
 
 test('integration events preserve discovery mount paths', async () => {
