@@ -357,6 +357,36 @@ test('integration events watch selected relayfile mount paths', async () => {
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
 })
 
+test('stale subscription callbacks after close or resubscribe are ignored', async () => {
+  const harness = makeHarness(['alice'])
+  const githubIntegration = integration({
+    provider: 'github',
+    integrationId: 'github-1',
+    mountPaths: ['/github/repos'],
+    scope: { notifyAgents: ['alice'] }
+  })
+
+  await harness.bridge.reconcile('project-1', [githubIntegration])
+  const staleOnChange = harness.subscribeCalls[0].onChange
+
+  await harness.bridge.close('project-1')
+  staleOnChange(changeEvent('/github/repos/acme/stale-after-close.json', 'github'))
+  await waitForDispatcherTick()
+
+  assert.deepEqual(harness.sent, [])
+  assert.equal(getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsReceived, 0)
+
+  await harness.bridge.reconcile('project-1', [githubIntegration])
+  assert.equal(harness.subscribeCalls.length, 2)
+
+  staleOnChange(changeEvent('/github/repos/acme/stale-after-resubscribe.json', 'github'))
+  harness.subscribeCalls[1].onChange(changeEvent('/github/repos/acme/current.json', 'github'))
+  await waitUntil(() => harness.sent.length === 1)
+
+  assert.match(harness.sent[0].input.text, /Relayfile path: \/github\/repos\/acme\/current\.json/u)
+  assert.equal(getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsReceived, 1)
+})
+
 test('remote replayed events older than the subscription session are dropped by default', async () => {
   const harness = makeHarness()
 

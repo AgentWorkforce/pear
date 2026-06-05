@@ -155,6 +155,7 @@ type EventInjectionOptions = {
   source: EventDeliverySource
   subscriptionStartedAtMs: number
   localMountWorkspaceId: string
+  generation: number
 }
 
 type EventWorkspaceHandleCache = {
@@ -1533,6 +1534,7 @@ class ProjectEventDispatcher {
 export class IntegrationEventBridge {
   private subscriptions = new Map<string, ProjectSubscription>()
   private dispatchers = new Map<string, ProjectEventDispatcher>()
+  private subscriptionGenerations = new Map<string, number>()
   private recentInjections = new Map<string, number>()
   private readonly deps: IntegrationEventBridgeDeps
 
@@ -1574,6 +1576,7 @@ export class IntegrationEventBridge {
     if (this.subscriptions.get(projectId)?.signature === signature) return
 
     await this.close(projectId)
+    const generation = this.nextSubscriptionGeneration(projectId)
     const subscriptions: Subscription[] = []
     try {
       const remoteSubscriptionStartedAtMs = Date.now()
@@ -1598,6 +1601,7 @@ export class IntegrationEventBridge {
         handle.client().subscribe(
           watches.map((watch) => watch.glob),
           (event) => {
+            if (!this.isCurrentSubscriptionGeneration(projectId, generation)) return
             incrementIntegrationEventCounter(projectId, 'eventsReceived')
             logIntegrationEvent('received', {
               projectId,
@@ -1608,7 +1612,8 @@ export class IntegrationEventBridge {
             void this.enqueueEvent(projectId, event, specs, {
               source: 'remote',
               subscriptionStartedAtMs: remoteSubscriptionStartedAtMs,
-              localMountWorkspaceId: handle.localMountWorkspaceId
+              localMountWorkspaceId: handle.localMountWorkspaceId,
+              generation
             }).catch((error) => {
               const errorMessage = toErrorMessage(error)
               warnIntegrationEventAggregated(
@@ -1637,6 +1642,7 @@ export class IntegrationEventBridge {
         subscribed,
         watches.map((watch) => watch.glob),
         (event) => {
+          if (!this.isCurrentSubscriptionGeneration(projectId, generation)) return
           incrementIntegrationEventCounter(projectId, 'eventsReceived')
           logIntegrationEvent('received', {
             projectId,
@@ -1648,7 +1654,8 @@ export class IntegrationEventBridge {
           void this.enqueueEvent(projectId, event, specs, {
             source: 'local-mount',
             subscriptionStartedAtMs: remoteSubscriptionStartedAtMs,
-            localMountWorkspaceId: handle.localMountWorkspaceId
+            localMountWorkspaceId: handle.localMountWorkspaceId,
+            generation
           }).catch((error) => {
             const errorMessage = toErrorMessage(error)
             warnIntegrationEventAggregated(
@@ -1688,6 +1695,7 @@ export class IntegrationEventBridge {
   async close(projectId: string): Promise<void> {
     const subscription = this.subscriptions.get(projectId)
     this.subscriptions.delete(projectId)
+    this.nextSubscriptionGeneration(projectId)
     this.dispatchers.get(projectId)?.dispose()
     this.dispatchers.delete(projectId)
     setIntegrationEventGauge(projectId, 'queueDepth', 0)
@@ -1731,6 +1739,8 @@ export class IntegrationEventBridge {
     specs: SubscriptionSpec[],
     options: EventInjectionOptions
   ): Promise<void> {
+    if (!this.isCurrentSubscriptionGeneration(projectId, options.generation)) return
+
     if (!shouldNotifyRelayfileChange(event)) {
       logIntegrationEvent('skipped filtered path', {
         projectId,
@@ -1766,6 +1776,7 @@ export class IntegrationEventBridge {
     }
 
     let dispatcher = this.dispatchers.get(projectId)
+    if (!this.isCurrentSubscriptionGeneration(projectId, options.generation)) return
     if (!dispatcher) {
       dispatcher = new ProjectEventDispatcher(projectId, (queuedEvent, queuedSpecs) =>
         this.injectEvent(projectId, queuedEvent, queuedSpecs)
@@ -1773,6 +1784,16 @@ export class IntegrationEventBridge {
       this.dispatchers.set(projectId, dispatcher)
     }
     dispatcher.enqueue(event, matchedSpecs)
+  }
+
+  private nextSubscriptionGeneration(projectId: string): number {
+    const generation = (this.subscriptionGenerations.get(projectId) || 0) + 1
+    this.subscriptionGenerations.set(projectId, generation)
+    return generation
+  }
+
+  private isCurrentSubscriptionGeneration(projectId: string, generation: number): boolean {
+    return this.subscriptionGenerations.get(projectId) === generation
   }
 
   private async injectEvent(
