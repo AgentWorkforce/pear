@@ -1,6 +1,7 @@
 import { watch, type FSWatcher } from 'node:fs'
-import { stat } from 'node:fs/promises'
-import { join, relative, resolve, sep } from 'node:path'
+import { appendFile, mkdir, stat } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { dirname, join, relative, resolve, sep } from 'node:path'
 import {
   RelayFileClient,
   RelayFileSync,
@@ -15,6 +16,7 @@ const INTEGRATION_EVENT_AGENT_NAME = 'pear-integration-events'
 const INTEGRATION_EVENT_SCOPES = ['relayfile:fs:read:/**']
 const PROJECT_INTEGRATIONS_LINK_NAME = '.integrations'
 const RECENT_INJECTION_TTL_MS = 10_000
+const INTEGRATION_EVENT_LOG_PATH = join(homedir(), '.agentworkforce', 'pear', 'integration-events.log')
 
 type WatchRegistration = {
   glob: string
@@ -346,7 +348,12 @@ function createWorkspaceScopedEventClient(
         if (!active) return
         const changeEvent = filesystemEventToChangeEvent(client, workspaceId, event)
         Promise.resolve(onChange(changeEvent)).catch((error) => {
-          console.warn('[integration-events] Change handler failed:', toErrorMessage(error))
+          logIntegrationEvent('change handler failed', {
+            workspaceId,
+            eventId: event.eventId,
+            path: event.path,
+            error: toErrorMessage(error)
+          })
         })
       }
 
@@ -379,22 +386,35 @@ function createWorkspaceScopedEventClient(
             })
             return
           }
+          logIntegrationEvent('remote stream starting', {
+            workspaceId,
+            globs
+          })
           sync = new RelayFileSync({
             client,
             workspaceId,
             token,
             onPollingFallback: (info) => {
-              console.warn('[integration-events] Relayfile event stream using polling fallback:', info.reason)
+              logIntegrationEvent('remote stream polling fallback', {
+                workspaceId,
+                reason: info.reason
+              })
             }
           })
           sync.on('event', handleEvent)
           sync.on('error', (error) => {
-            console.warn('[integration-events] Relayfile event stream error:', toErrorMessage(error))
+            logIntegrationEvent('remote stream error', {
+              workspaceId,
+              error: toErrorMessage(error)
+            })
           })
           sync.start()
         })
         .catch((error) => {
-          console.warn('[integration-events] Relayfile event stream token check failed:', toErrorMessage(error))
+          logIntegrationEvent('remote stream token check failed', {
+            workspaceId,
+            error: toErrorMessage(error)
+          })
         })
 
       return {
@@ -567,6 +587,28 @@ function injectionDeduplicationKey(projectId: string, event: ChangeEvent, matche
 
 function logIntegrationEvent(message: string, metadata: Record<string, unknown>): void {
   console.info(`[integration-events] ${message}`, metadata)
+  if (isTestProcess()) return
+  void appendIntegrationEventLog(message, metadata)
+}
+
+function isTestProcess(): boolean {
+  return process.env.NODE_ENV === 'test' ||
+    process.env.VITEST === 'true' ||
+    process.argv.some((arg) => arg === '--test' || arg.includes('/vitest/'))
+}
+
+async function appendIntegrationEventLog(message: string, metadata: Record<string, unknown>): Promise<void> {
+  const entry = {
+    timestamp: new Date().toISOString(),
+    message,
+    metadata
+  }
+  try {
+    await mkdir(dirname(INTEGRATION_EVENT_LOG_PATH), { recursive: true })
+    await appendFile(INTEGRATION_EVENT_LOG_PATH, `${JSON.stringify(entry)}\n`, 'utf8')
+  } catch {
+    // Diagnostics must never affect event delivery.
+  }
 }
 
 export function integrationSubscriptionSummaries(
@@ -730,7 +772,7 @@ export class IntegrationEventBridge {
               path: event.resource.path
             })
             void this.injectEvent(projectId, event, specs).catch((error) => {
-              console.warn('[integration-events] Event delivery failed:', {
+              logIntegrationEvent('event delivery failed', {
                 projectId,
                 eventId: event.id,
                 error: toErrorMessage(error)
@@ -756,7 +798,7 @@ export class IntegrationEventBridge {
             source: 'local-mount'
           })
           void this.injectEvent(projectId, event, specs).catch((error) => {
-            console.warn('[integration-events] Local event delivery failed:', {
+            logIntegrationEvent('local event delivery failed', {
               projectId,
               eventId: event.id,
               error: toErrorMessage(error)

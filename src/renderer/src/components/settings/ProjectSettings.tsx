@@ -234,9 +234,7 @@ function providerLocalMountPath(integration: ConnectedIntegration, provider: str
   const providerSegment = provider.trim().toLowerCase()
   const providerRoots = (integration.localMountPaths || [])
     .filter((root) => localPathSegments(root).at(-1)?.toLowerCase() === providerSegment)
-  return providerRoots.find((root) => !localPathSegments(root).includes('discovery'))
-    || providerRoots[0]
-    || null
+  return providerRoots.find((root) => !localPathSegments(root).includes('discovery')) || null
 }
 
 function joinLocalPath(root: string, ...segments: string[]): string {
@@ -268,6 +266,27 @@ function slackChannelResourceFromEntry(entry: { name: string; path: string }): I
       channelFolder: entry.name,
       channelId,
       remotePath
+    }
+  }
+}
+
+function isConcreteSlackChannelEntry(entry: { name: string; path: string }): boolean {
+  if (!entry.name || entry.name.startsWith('_') || entry.name === 'by-name') return false
+  if (entry.name.includes('{') || entry.name.includes('}')) return false
+  if (localPathSegments(entry.path).includes('discovery')) return false
+  return true
+}
+
+function slackChannelResourceFromOption(option: { value: string; label: string; hint?: string }): IntegrationAccessibleResource {
+  const id = option.value.trim()
+  const name = option.label.replace(/^#/u, '').trim() || id
+  return {
+    id,
+    displayName: option.label,
+    name,
+    metadata: {
+      channelId: id,
+      ...(option.hint ? { hint: option.hint } : {})
     }
   }
 }
@@ -484,7 +503,6 @@ function IntegrationVisibilitySection({
   const listSlackChannelResources = useCallback(async (integration: ConnectedIntegration): Promise<IntegrationAccessibleResource[]> => {
     const cacheKey = `slack-channels:${projectId}:${integration.integrationId}`
     return cachedResources(cacheKey, async () => {
-      const hasLocalSlackMount = (): boolean => providerLocalMountPath(integration, 'slack') !== null
       const listRemoteSlackChannels = async (): Promise<IntegrationAccessibleResource[]> => {
         const listRemoteDir = (pear.integrations as typeof pear.integrations & {
           listRemoteDir?: typeof pear.integrations.listRemoteDir
@@ -493,7 +511,7 @@ function IntegrationVisibilitySection({
 
         const entries = await listRemoteDir(projectId, '/slack/channels')
         return entries
-          .filter((entry) => entry.type === 'directory' && !entry.name.startsWith('_') && entry.name !== 'by-name')
+          .filter((entry) => entry.type === 'directory' && isConcreteSlackChannelEntry(entry))
           .map(slackChannelResourceFromEntry)
       }
 
@@ -503,7 +521,7 @@ function IntegrationVisibilitySection({
         const channelsPath = joinLocalPath(slackRoot, 'channels')
         const entries = await pear.integrations.listMountDir(projectId, integration.integrationId, channelsPath)
         return entries
-          .filter((entry) => entry.type === 'directory' && !entry.name.startsWith('_') && entry.name !== 'by-name')
+          .filter((entry) => entry.type === 'directory' && isConcreteSlackChannelEntry(entry))
           .map((entry) => slackChannelResourceFromEntry({
             name: entry.name,
             path: joinLocalPath(channelsPath, entry.name)
@@ -512,34 +530,28 @@ function IntegrationVisibilitySection({
       const listOptions = (pear.integrations as typeof pear.integrations & {
         listOptions?: typeof pear.integrations.listOptions
       }).listOptions
-      try {
-        const remoteChannels = await listRemoteSlackChannels()
-        if (remoteChannels.length > 0) return remoteChannels
-      } catch (err) {
+
+      if (typeof listOptions === 'function') {
+        try {
+          const options = await listOptions(projectId, integration.provider, 'channels')
+          const optionChannels = options.map(slackChannelResourceFromOption)
+          if (optionChannels.length > 0) return optionChannels
+        } catch (err) {
+          console.warn('[integrations] Failed to list Slack channel options:', err)
+          const mountedChannels = await listMountedSlackChannels().catch(() => [])
+          if (mountedChannels.length > 0) return mountedChannels
+          const message = err instanceof Error ? err.message : String(err)
+          throw new Error(`Slack channel options are unavailable: ${message}`)
+        }
+      }
+
+      const remoteChannels = await listRemoteSlackChannels().catch((err) => {
         console.warn('[integrations] Failed to list remote Slack channels:', err)
-        // Fall through to live Nango options, then local mount fallback.
-      }
+        return []
+      })
+      if (remoteChannels.length > 0) return remoteChannels
 
-      if (typeof listOptions !== 'function') {
-        return hasLocalSlackMount() ? listMountedSlackChannels() : []
-      }
-
-      try {
-        const options = await listOptions(projectId, integration.provider, 'channels')
-        const optionChannels = options.map((option) => ({
-          id: option.value,
-          displayName: option.label,
-          name: option.label.replace(/^#/u, ''),
-          metadata: option.hint ? { hint: option.hint } : undefined
-        }))
-        if (optionChannels.length > 0) return optionChannels
-        return hasLocalSlackMount() ? listMountedSlackChannels() : []
-      } catch (err) {
-        console.warn('[integrations] Failed to list Slack channel options:', err)
-        if (hasLocalSlackMount()) return listMountedSlackChannels()
-        const message = err instanceof Error ? err.message : String(err)
-        throw new Error(`Slack channel options are unavailable: ${message}`)
-      }
+      return listMountedSlackChannels().catch(() => [])
     })
   }, [cachedResources, projectId])
 
