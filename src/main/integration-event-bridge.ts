@@ -669,6 +669,17 @@ function localPathForRemoteRoot(workspaceId: string, remoteRoot: string): string
   return join(homedir(), '.agentworkforce', 'pear', 'relayfile', 'workspaces', workspaceId, ...pathSegments(remoteRoot))
 }
 
+function localPathForRemoteRecord(workspaceId: string, remotePath: string): string | null {
+  const segments = pathSegments(remotePath)
+  if (segments.some((segment) => segment === '.' || segment === '..')) return null
+
+  const workspaceRoot = resolve(homedir(), '.agentworkforce', 'pear', 'relayfile', 'workspaces', workspaceId)
+  const localPath = resolve(workspaceRoot, ...segments)
+  const relativePath = relative(workspaceRoot, localPath)
+  if (relativePath === '' || relativePath.startsWith('..') || isAbsolute(relativePath)) return null
+  return localPath
+}
+
 export function localWatchRootsFor(
   workspaceId: string,
   integrations: ConnectedIntegration[],
@@ -1061,7 +1072,8 @@ function repeatedSlackRoot(path: string): boolean {
 }
 
 async function readLocalEventRecord(event: ChangeEvent, localMountWorkspaceId: string): Promise<unknown | null> {
-  const localPath = localPathForRemoteRoot(localMountWorkspaceId, event.resource.path)
+  const localPath = localPathForRemoteRecord(localMountWorkspaceId, event.resource.path)
+  if (!localPath) return null
   const raw = await readFile(localPath, 'utf8').catch(() => null)
   if (!raw) return null
   try {
@@ -1133,8 +1145,6 @@ function slackRecordContextLines(record: unknown): string[] {
 }
 
 async function localEventContextLines(event: ChangeEvent, localMountWorkspaceId: string): Promise<string[]> {
-  const path = event.resource.path
-  if (pathSegments(path).some((segment) => segment === '.' || segment === '..')) return []
   return slackRecordContextLines(await readLocalEventRecord(event, localMountWorkspaceId))
 }
 

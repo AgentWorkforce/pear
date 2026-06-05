@@ -456,7 +456,10 @@ test('slack local event context rejects traversal paths', async () => {
     await mkdir(join(escapedPath, '..'), { recursive: true })
     await writeFile(escapedPath, JSON.stringify({
       payload: {
-        text: 'escaped local file should not be injected'
+        text: 'escaped local file should not be injected',
+        _webhook: {
+          receivedAt: '2026-06-04T00:00:00.000Z'
+        }
       }
     }))
 
@@ -469,7 +472,11 @@ test('slack local event context rejects traversal paths', async () => {
       })
     ])
 
-    await harness.emit(changeEvent('/slack/channels/C123ABC__proj-cloud/threads/../../../../../leak.json', 'slack'))
+    await harness.emit(changeEvent(
+      '/slack/channels/C123ABC__proj-cloud/threads/../../../../../leak.json',
+      'slack',
+      { occurredAt: '2026-06-05T00:00:00.000Z' }
+    ))
     await waitForSent(harness, 1)
 
     assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
