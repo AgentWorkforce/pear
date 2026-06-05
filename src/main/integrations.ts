@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { BrowserWindow, shell } from 'electron'
-import type { WorkspaceHandle } from '@relayfile/sdk'
+import type { TreeResponse, WorkspaceHandle } from '@relayfile/sdk'
 import { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, getApiUrl, resolveCloudAuth } from './auth'
 import { brokerManager } from './broker'
 import { cloudAgentManager } from './cloud-agent'
@@ -182,6 +182,7 @@ const POLL_INTERVAL_MS = 2_000
 const POLL_TIMEOUT_MS = 5 * 60_000
 const CATALOG_CACHE_MS = 5 * 60_000
 const CATALOG_PATH = '/api/v1/integrations/catalog'
+const MAX_REMOTE_DIRECTORY_ENTRIES = 5_000
 
 // Only providers currently active in ../cloud are surfaced. This mirrors the
 // non-deprecated relayfile providers in
@@ -277,6 +278,15 @@ function projectIntegrationPathForRelayfilePath(mountPath: string): string {
   const trimmed = mountPath.trim()
   const normalized = trimmed.startsWith('/') ? trimmed : `/${trimmed}`
   return `${PROJECT_INTEGRATIONS_LINK_NAME}${normalized}`
+}
+
+function normalizeRemoteDirectoryPath(remotePath: string): string {
+  const segments = remotePath.split('/').map((segment) => segment.trim()).filter(Boolean)
+  return `/${segments.join('/')}`
+}
+
+function remotePathName(remotePath: string): string {
+  return remotePath.split('/').filter(Boolean).at(-1) || remotePath
 }
 
 function discoveryMountPathForProvider(provider: string): string {
@@ -681,6 +691,40 @@ export class IntegrationsManager {
   async readMountPreview(projectId: string, integrationId: string, filePath: string): Promise<filesystem.FilePreview> {
     const resolvedPath = await this.resolveIntegrationMountPath(projectId, integrationId, filePath)
     return filesystem.readTextPreview(resolvedPath)
+  }
+
+  async listRemoteDirectory(projectId: string, remotePath: string): Promise<filesystem.ExplorerEntry[]> {
+    if (!this.findProject(projectId)) throw new Error(`Project not found: ${projectId}`)
+    const path = normalizeRemoteDirectoryPath(remotePath)
+    if (path === '/') throw new Error('Integration remote directory path is required')
+
+    return this.withWorkspaceHandle(async (handle) => {
+      const entries: filesystem.ExplorerEntry[] = []
+      let cursor: string | undefined
+
+      do {
+        const tree = await handle.client().listTree(handle.workspaceId, {
+          path,
+          depth: 1,
+          ...(cursor ? { cursor } : {})
+        }) as TreeResponse
+
+        for (const entry of tree.entries) {
+          entries.push({
+            name: remotePathName(entry.path),
+            path: entry.path,
+            type: entry.type === 'dir' ? 'directory' : 'file'
+          })
+        }
+
+        cursor = tree.nextCursor ?? undefined
+      } while (cursor && entries.length < MAX_REMOTE_DIRECTORY_ENTRIES)
+
+      return entries.sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'directory' ? -1 : 1
+        return a.name.localeCompare(b.name)
+      })
+    })
   }
 
   async listOptions(projectId: string, provider: string, resource: string): Promise<IntegrationOption[]> {

@@ -247,6 +247,25 @@ function joinLocalPath(root: string, ...segments: string[]): string {
   return suffix ? `${root.replace(/[/\\]+$/u, '')}/${suffix}` : root
 }
 
+function slackChannelResourceFromEntry(entry: { name: string; path: string }): IntegrationAccessibleResource {
+  const id = entry.name.includes('__')
+    ? entry.name.split('__')[0]
+    : entry.name.includes('--')
+      ? entry.name.split('--').at(-1) || entry.name
+      : entry.name
+  const name = entry.name.includes('__')
+    ? entry.name.split('__').slice(1).join('__')
+    : entry.name.includes('--')
+      ? entry.name.split('--').slice(0, -1).join('--')
+      : entry.name
+  return {
+    id,
+    displayName: name || id,
+    name: name || id,
+    path: entry.path
+  }
+}
+
 function notificationTargetValue(scope: Record<string, unknown>): string {
   const agent = firstScopeString(scope, NOTIFICATION_AGENT_SCOPE_KEYS)
   if (agent) return `agent:${agent.replace(/^@/u, '')}`
@@ -408,6 +427,18 @@ function IntegrationVisibilitySection({
   }, [projectId])
 
   const listSlackChannelResources = useCallback(async (integration: ConnectedIntegration): Promise<IntegrationAccessibleResource[]> => {
+    const listRemoteSlackChannels = async (): Promise<IntegrationAccessibleResource[]> => {
+      const listRemoteDir = (pear.integrations as typeof pear.integrations & {
+        listRemoteDir?: typeof pear.integrations.listRemoteDir
+      }).listRemoteDir
+      if (typeof listRemoteDir !== 'function') throw new Error('Slack Relayfile remote directory listing is not available yet.')
+
+      const entries = await listRemoteDir(projectId, '/slack/channels')
+      return entries
+        .filter((entry) => entry.type === 'directory' && !entry.name.startsWith('_') && entry.name !== 'by-name')
+        .map(slackChannelResourceFromEntry)
+    }
+
     const listMountedSlackChannels = async (): Promise<IntegrationAccessibleResource[]> => {
       const slackRoot = providerLocalMountPath(integration, 'slack')
       if (!slackRoot) throw new Error('Slack Relayfile mount is not available yet.')
@@ -415,30 +446,20 @@ function IntegrationVisibilitySection({
       const entries = await pear.integrations.listMountDir(projectId, integration.integrationId, channelsPath)
       return entries
         .filter((entry) => entry.type === 'directory' && !entry.name.startsWith('_') && entry.name !== 'by-name')
-        .map((entry) => {
-          const id = entry.name.includes('__')
-            ? entry.name.split('__')[0]
-            : entry.name.includes('--')
-              ? entry.name.split('--').at(-1) || entry.name
-              : entry.name
-          const name = entry.name.includes('__')
-            ? entry.name.split('__').slice(1).join('__')
-            : entry.name.includes('--')
-              ? entry.name.split('--').slice(0, -1).join('--')
-              : entry.name
-          return {
-            id,
-            displayName: name || id,
-            name: name || id,
-            path: joinLocalPath(channelsPath, entry.name)
-          }
-        })
+        .map((entry) => slackChannelResourceFromEntry({
+          name: entry.name,
+          path: joinLocalPath(channelsPath, entry.name)
+        }))
     }
     const listOptions = (pear.integrations as typeof pear.integrations & {
       listOptions?: typeof pear.integrations.listOptions
     }).listOptions
     if (typeof listOptions !== 'function') {
-      return listMountedSlackChannels()
+      try {
+        return await listRemoteSlackChannels()
+      } catch {
+        return listMountedSlackChannels()
+      }
     }
 
     try {
@@ -450,11 +471,14 @@ function IntegrationVisibilitySection({
         metadata: option.hint ? { hint: option.hint } : undefined
       }))
     } catch (err) {
-      if (!providerLocalMountPath(integration, 'slack')) {
+      try {
+        return await listRemoteSlackChannels()
+      } catch (remoteErr) {
+        if (providerLocalMountPath(integration, 'slack')) return listMountedSlackChannels()
         const message = err instanceof Error ? err.message : String(err)
-        throw new Error(`Slack channel options are unavailable: ${message}`)
+        const remoteMessage = remoteErr instanceof Error ? remoteErr.message : String(remoteErr)
+        throw new Error(`Slack channel options are unavailable: ${message}; remote Relayfile listing failed: ${remoteMessage}`)
       }
-      return listMountedSlackChannels()
     }
   }, [projectId])
 

@@ -560,6 +560,10 @@ export function registerIpcHandlers(): void {
     return integrationsManager.listMountDirectory(projectId, integrationId, dirPath)
   })
 
+  ipcMain.handle('integrations:list-remote-dir', async (_, projectId: string, remotePath: string) => {
+    return integrationsManager.listRemoteDirectory(projectId, remotePath)
+  })
+
   ipcMain.handle('integrations:read-mount-preview', async (_, projectId: string, integrationId: string, filePath: string) => {
     return integrationsManager.readMountPreview(projectId, integrationId, filePath)
   })
