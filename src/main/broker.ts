@@ -142,18 +142,6 @@ function resolvePackageBin(packageName: string, binName: string): string | undef
   }
 }
 
-function resolvePackageVersion(packageName: string): string | undefined {
-  try {
-    const packageJsonPath = require.resolve(`${packageName}/package.json`)
-    const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as {
-      version?: string
-    }
-    return packageJson.version?.trim() || undefined
-  } catch {
-    return undefined
-  }
-}
-
 function resolveAgentWorkforceCommand(cwd: string): { cli: string; args: string[] } {
   const binaryName = process.platform === 'win32' ? 'agentworkforce.cmd' : 'agentworkforce'
   const localCandidates = [
@@ -190,6 +178,47 @@ function resolveNodeCommandForMcp(): string | undefined {
   return resolveCommandOnPath('node')
 }
 
+const PACKAGED_AGENT_RELAY_MCP_SCRIPT = [
+  'agent-relay-mcp',
+  'node_modules',
+  'agent-relay',
+  'dist',
+  'cli',
+  'agent-relay-mcp.js'
+]
+
+function hasAsarPathSegment(value: string): boolean {
+  return /(^|[\\/])app\.asar([\\/]|$)/.test(value)
+}
+
+function assertNoAsarMcpCommand(command: string): string {
+  if (hasAsarPathSegment(command)) {
+    throw new Error(`Agent Relay MCP command must not reference app.asar in packaged mode: ${command}`)
+  }
+  return command
+}
+
+function getPackagedResourcesPath(): string | undefined {
+  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath
+  return typeof resourcesPath === 'string' && resourcesPath.trim() ? resourcesPath : undefined
+}
+
+function resolvePackagedAgentRelayMcpScript(): string {
+  const resourcesPath = getPackagedResourcesPath()
+  if (!resourcesPath) {
+    throw new Error('Unable to resolve packaged Agent Relay MCP resources path')
+  }
+
+  const candidate = join(resourcesPath, ...PACKAGED_AGENT_RELAY_MCP_SCRIPT)
+  if (hasAsarPathSegment(candidate)) {
+    throw new Error(`Packaged Agent Relay MCP script resolved inside app.asar: ${candidate}`)
+  }
+  if (!existsSync(candidate)) {
+    throw new Error(`Packaged Agent Relay MCP script is missing: ${candidate}`)
+  }
+  return candidate
+}
+
 function resolveBundledAgentRelayMcpScript(): string | undefined {
   const packageCommand = resolvePackageBin('agent-relay', 'agent-relay')
   if (packageCommand) {
@@ -206,9 +235,19 @@ function resolveBundledAgentRelayMcpScript(): string | undefined {
   }
 }
 
-function resolveAgentRelayMcpCommand(): string | undefined {
+export function resolveAgentRelayMcpCommand(): string | undefined {
   const configured = process.env.AGENT_RELAY_MCP_COMMAND?.trim()
-  if (configured) return configured
+  if (configured) {
+    return app.isPackaged ? assertNoAsarMcpCommand(configured) : configured
+  }
+
+  if (app.isPackaged) {
+    const nodeCommand = resolveNodeCommandForMcp()
+    if (!nodeCommand) {
+      throw new Error('Node.js was not found on PATH; unable to start packaged Agent Relay MCP server')
+    }
+    return assertNoAsarMcpCommand(`${nodeCommand} ${resolvePackagedAgentRelayMcpScript()}`)
+  }
 
   const bundledMcpScript = resolveBundledAgentRelayMcpScript()
   const nodeCommand = bundledMcpScript ? resolveNodeCommandForMcp() : undefined
@@ -218,11 +257,6 @@ function resolveAgentRelayMcpCommand(): string | undefined {
 
   const packageCommand = resolvePackageBin('agent-relay', 'agent-relay') || resolveCommandOnPath('agent-relay')
   if (packageCommand) return `${packageCommand} mcp`
-
-  const npxCommand = resolveCommandOnPath('npx')
-  if (npxCommand) {
-    return `${npxCommand} -y agent-relay@${resolvePackageVersion('agent-relay') || AGENT_RELAY_CLI_VERSION} mcp`
-  }
 
   return undefined
 }
@@ -442,7 +476,6 @@ const BROKER_REVIVE_TERM_GRACE_MS = 1_500
 const PERSONA_REGISTRATION_TIMEOUT_MS = 5_000
 const PERSONA_REGISTRATION_STABILITY_MS = 1_000
 const AGENTWORKFORCE_CLI_VERSION = '3.0.35'
-const AGENT_RELAY_CLI_VERSION = '8.1.2'
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))

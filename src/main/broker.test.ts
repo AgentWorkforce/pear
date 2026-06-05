@@ -1,6 +1,6 @@
 import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 // Covers the multi-session BrokerManager: a project's local broker and cloud
@@ -86,12 +86,16 @@ const mock = vi.hoisted(() => {
   return { state, createMockClient, HarnessDriverClient }
 })
 
-vi.mock('electron', () => ({
+const electronMock = vi.hoisted(() => ({
   app: {
     getAppPath: () => '/tmp/pear-app',
     isPackaged: false,
     getPath: () => '/tmp/pear-user-data'
-  },
+  }
+}))
+
+vi.mock('electron', () => ({
+  app: electronMock.app,
   BrowserWindow: class {}
 }))
 
@@ -118,9 +122,26 @@ vi.mock('./burn', () => ({
   getPearBurnAgentKey: vi.fn((projectId: string, name: string) => `${projectId}:${name}`)
 }))
 
-import { BrokerManager } from './broker'
+import { BrokerManager, resolveAgentRelayMcpCommand } from './broker'
 
 const PROJECT_ID = 'project-1'
+const originalMcpCommand = process.env.AGENT_RELAY_MCP_COMMAND
+const originalResourcesPathDescriptor = Object.getOwnPropertyDescriptor(process, 'resourcesPath')
+
+function setProcessResourcesPath(resourcesPath: string): void {
+  Object.defineProperty(process, 'resourcesPath', {
+    configurable: true,
+    value: resourcesPath
+  })
+}
+
+function restoreProcessResourcesPath(): void {
+  if (originalResourcesPathDescriptor) {
+    Object.defineProperty(process, 'resourcesPath', originalResourcesPathDescriptor)
+  } else {
+    delete (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath
+  }
+}
 
 function lastSpawned(): MockClient {
   const client = mock.state.spawnedClients[mock.state.spawnedClients.length - 1]
@@ -148,6 +169,53 @@ async function attachCloud(manager: BrokerManager, agents: string[] = []): Promi
   } as never)
   return lastConstructed()
 }
+
+describe('resolveAgentRelayMcpCommand', () => {
+  let tempDir: string | null = null
+
+  afterEach(async () => {
+    electronMock.app.isPackaged = false
+    if (originalMcpCommand === undefined) {
+      delete process.env.AGENT_RELAY_MCP_COMMAND
+    } else {
+      process.env.AGENT_RELAY_MCP_COMMAND = originalMcpCommand
+    }
+    restoreProcessResourcesPath()
+    if (tempDir) await rm(tempDir, { recursive: true, force: true })
+    tempDir = null
+  })
+
+  it('rejects asar-internal MCP command overrides in packaged mode', () => {
+    electronMock.app.isPackaged = true
+    process.env.AGENT_RELAY_MCP_COMMAND =
+      '/Applications/Pear by Agent Relay.app/Contents/Resources/app.asar/node_modules/agent-relay/dist/cli/index.js mcp'
+
+    expect(() => resolveAgentRelayMcpCommand()).toThrow(/must not reference app\.asar/)
+  })
+
+  it('resolves the packaged MCP script from external resources', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'pear-mcp-resources-'))
+    const scriptPath = join(
+      tempDir,
+      'agent-relay-mcp',
+      'node_modules',
+      'agent-relay',
+      'dist',
+      'cli',
+      'agent-relay-mcp.js'
+    )
+    await mkdir(dirname(scriptPath), { recursive: true })
+    await writeFile(scriptPath, '#!/usr/bin/env node\n')
+    electronMock.app.isPackaged = true
+    delete process.env.AGENT_RELAY_MCP_COMMAND
+    setProcessResourcesPath(tempDir)
+
+    const command = resolveAgentRelayMcpCommand()
+
+    expect(command).toBe(`${process.execPath} ${scriptPath}`)
+    expect(command).not.toContain('app.asar')
+  })
+})
 
 describe('BrokerManager local + cloud coexistence', () => {
   beforeEach(() => {

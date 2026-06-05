@@ -15,6 +15,7 @@
     "build": "node scripts/install-relayfile-mount.mjs --optional && electron-vite build",
     "preview": "electron-vite preview",
     "dist:mac": "npm run relayfile-mount:install && npm run build && electron-builder --mac --publish never",
+    "verify:mcp-spawn": "node scripts/verify-mcp-spawn.mjs",
     "release:mac": "npm run relayfile-mount:install && npm run build && electron-builder --mac --publish always",
     "test": "node --experimental-strip-types --no-warnings --test 'src/main/__tests__/*.test.ts'",
     "personas:refresh": "npx --yes agentworkforce install @agentworkforce/persona-autonomous-actor --overwrite"
