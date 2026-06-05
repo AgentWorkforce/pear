@@ -130,6 +130,16 @@ import { BrokerManager, resolveAgentRelayMcpCommand } from './broker'
 const PROJECT_ID = 'project-1'
 const originalMcpCommand = process.env.AGENT_RELAY_MCP_COMMAND
 const originalResourcesPathDescriptor = Object.getOwnPropertyDescriptor(process, 'resourcesPath')
+const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
+const originalPublicEnv = process.env.PUBLIC
+const originalProgramDataEnv = process.env.ProgramData
+
+function setProcessPlatform(platform: NodeJS.Platform): void {
+  Object.defineProperty(process, 'platform', {
+    configurable: true,
+    value: platform
+  })
+}
 
 function setProcessResourcesPath(resourcesPath: string): void {
   Object.defineProperty(process, 'resourcesPath', {
@@ -195,6 +205,7 @@ async function attachCloud(manager: BrokerManager, agents: string[] = []): Promi
 
 describe('resolveAgentRelayMcpCommand', () => {
   let tempDir: string | null = null
+  let extraTempDir: string | null = null
 
   afterEach(async () => {
     electronMock.app.isPackaged = false
@@ -204,8 +215,23 @@ describe('resolveAgentRelayMcpCommand', () => {
       process.env.AGENT_RELAY_MCP_COMMAND = originalMcpCommand
     }
     restoreProcessResourcesPath()
+    if (originalPlatformDescriptor) {
+      Object.defineProperty(process, 'platform', originalPlatformDescriptor)
+    }
+    if (originalPublicEnv === undefined) {
+      delete process.env.PUBLIC
+    } else {
+      process.env.PUBLIC = originalPublicEnv
+    }
+    if (originalProgramDataEnv === undefined) {
+      delete process.env.ProgramData
+    } else {
+      process.env.ProgramData = originalProgramDataEnv
+    }
     if (tempDir) await rm(tempDir, { recursive: true, force: true })
     tempDir = null
+    if (extraTempDir) await rm(extraTempDir, { recursive: true, force: true })
+    extraTempDir = null
   })
 
   it('rejects asar-internal MCP command overrides in packaged mode', () => {
@@ -248,6 +274,30 @@ describe('resolveAgentRelayMcpCommand', () => {
     expect(command).not.toContain('app.asar')
     expect(command).not.toMatch(/\s/)
     expect(await readFile(command!, 'utf8')).toContain(launcherPath)
+  })
+
+  it('escapes percent signs in packaged Windows MCP shims', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'pear mcp %USER% resources-'))
+    extraTempDir = await mkdtemp(join(tmpdir(), 'pear-public-'))
+    const publicDir = extraTempDir
+    const launcherPath = join(tempDir, 'agent-relay-mcp', 'launch.cmd')
+    await mkdir(dirname(launcherPath), { recursive: true })
+    await mkdir(publicDir, { recursive: true })
+    await writeFile(launcherPath, '@echo off\r\n')
+    setProcessPlatform('win32')
+    process.env.PUBLIC = publicDir
+    process.env.ProgramData = ''
+    electronMock.app.isPackaged = true
+    delete process.env.AGENT_RELAY_MCP_COMMAND
+    setProcessResourcesPath(tempDir)
+
+    const command = resolveAgentRelayMcpCommand()
+
+    expect(command).toContain('pear-agent-relay-mcp')
+    expect(command).not.toMatch(/\s/)
+    const content = await readFile(command!, 'utf8')
+    expect(content).toContain('%USER%'.replace(/%/g, '%%'))
+    expect(content).not.toContain('%USER% resources')
   })
 
   it('fails packaged MCP resolution when the external launcher is missing', async () => {

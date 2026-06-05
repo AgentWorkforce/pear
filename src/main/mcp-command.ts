@@ -15,14 +15,16 @@ export interface AgentRelayMcpCommandOptions {
   resourcesPath?: string
 }
 
-const PACKAGED_AGENT_RELAY_MCP_LAUNCHER = [
-  'agent-relay-mcp',
-  process.platform === 'win32' ? 'launch.cmd' : 'launch.sh'
-]
+function packagedAgentRelayMcpLauncherParts(): string[] {
+  return [
+    'agent-relay-mcp',
+    process.platform === 'win32' ? 'launch.cmd' : 'launch.sh'
+  ]
+}
 
 export function canExecute(filePath: string): boolean {
   try {
-    accessSync(filePath, constants.X_OK)
+    accessSync(filePath, process.platform === 'win32' ? constants.F_OK : constants.X_OK)
     return true
   } catch {
     return false
@@ -99,7 +101,7 @@ function resolvePackagedAgentRelayMcpLauncher(resourcesPath?: string): string {
     throw new Error('Unable to resolve packaged Agent Relay MCP resources path')
   }
 
-  const candidate = join(resourcesPath, ...PACKAGED_AGENT_RELAY_MCP_LAUNCHER)
+  const candidate = join(resourcesPath, ...packagedAgentRelayMcpLauncherParts())
   if (hasAsarPathSegment(candidate)) {
     throw new Error(`Packaged Agent Relay MCP launcher resolved inside app.asar: ${candidate}`)
   }
@@ -114,39 +116,51 @@ function shellQuote(value: string): string {
 }
 
 function windowsCmdQuote(value: string): string {
-  return `"${value.replace(/"/g, '""')}"`
+  return `"${value.replace(/"/g, '""').replace(/%/g, '%%')}"`
 }
 
-function packagedMcpShimRoot(): string {
+function packagedMcpShimRoots(): string[] {
   // Use /tmp on POSIX so the MCP command handed to Codex has no spaces even
   // when the app is installed as "Pear by Agent Relay.app".
-  return process.platform === 'win32' ? tmpdir() : '/tmp'
+  if (process.platform !== 'win32') return ['/tmp']
+
+  return [
+    tmpdir(),
+    process.env.PUBLIC || 'C:\\Users\\Public',
+    process.env.ProgramData || 'C:\\ProgramData'
+  ].filter((candidate, index, candidates) => candidate && !/\s/.test(candidate) && candidates.indexOf(candidate) === index)
 }
 
 function materializePackagedAgentRelayMcpShim(launcherPath: string): string {
   if (!/\s/.test(launcherPath)) return launcherPath
 
   const hash = createHash('sha256').update(launcherPath).digest('hex').slice(0, 16)
-  const shimDir = join(packagedMcpShimRoot(), 'pear-agent-relay-mcp', hash)
-  const shimPath = join(shimDir, process.platform === 'win32' ? 'launch.cmd' : 'launch.sh')
   const content = process.platform === 'win32'
     ? `@echo off\r\n${windowsCmdQuote(launcherPath)} %*\r\n`
     : `#!/bin/sh\nexec ${shellQuote(launcherPath)} "$@"\n`
+  const errors: string[] = []
 
-  try {
-    mkdirSync(shimDir, { recursive: true })
-    if (!existsSync(shimPath) || readFileSync(shimPath, 'utf8') !== content) {
-      writeFileSync(shimPath, content, 'utf8')
+  for (const root of packagedMcpShimRoots()) {
+    const shimDir = join(root, 'pear-agent-relay-mcp', hash)
+    const shimPath = join(shimDir, process.platform === 'win32' ? 'launch.cmd' : 'launch.sh')
+    if (/\s/.test(shimPath)) continue
+
+    try {
+      mkdirSync(shimDir, { recursive: true })
+      if (!existsSync(shimPath) || readFileSync(shimPath, 'utf8') !== content) {
+        writeFileSync(shimPath, content, 'utf8')
+      }
+      if (process.platform !== 'win32') chmodSync(shimPath, 0o755)
+      if (!canExecute(shimPath)) {
+        throw new Error(`shim is missing or not executable`)
+      }
+      return shimPath
+    } catch (err) {
+      errors.push(`${shimPath}: ${err instanceof Error ? err.message : String(err)}`)
     }
-    if (process.platform !== 'win32') chmodSync(shimPath, 0o755)
-  } catch (err) {
-    throw new Error(`Unable to create packaged Agent Relay MCP launcher shim for ${launcherPath}: ${err instanceof Error ? err.message : String(err)}`)
   }
 
-  if (!canExecute(shimPath)) {
-    throw new Error(`Packaged Agent Relay MCP launcher shim is missing or not executable: ${shimPath}`)
-  }
-  return shimPath
+  throw new Error(`Unable to create whitespace-free packaged Agent Relay MCP launcher shim for ${launcherPath}${errors.length ? `: ${errors.join('; ')}` : ''}`)
 }
 
 function resolveBundledAgentRelayMcpScript(): string | undefined {
