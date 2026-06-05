@@ -1195,6 +1195,7 @@ export class BrokerManager {
   // Consecutive broker read timeouts per project/operation; after MAX we
   // respawn the wedged broker. Reset whenever that operation succeeds.
   private brokerTimeoutCounts = new Map<string, number>()
+  private eventStreamGenerationCounter = 0
   private eventObservers = new Set<BrokerEventObserver>()
   private eventHistory: BrokerEventRecord[] = []
   private recentPtyChunks = new Map<string, number>()
@@ -1267,7 +1268,7 @@ export class BrokerManager {
     const startBroker = async (): Promise<boolean> => {
       const existingClient = await this.connectExistingBroker(normalizedProjectId, cwd)
       if (existingClient) {
-        const eventStreamGeneration = 1
+        const eventStreamGeneration = this.nextEventStreamGeneration()
         const unsubEvent = this.attachClient(normalizedProjectId, existingClient, win, eventStreamGeneration)
         this.sessions.set(normalizedProjectId, {
           projectId: normalizedProjectId,
@@ -1321,7 +1322,7 @@ export class BrokerManager {
       console.log('[broker] Starting with opts:', JSON.stringify({ ...opts, projectId: normalizedProjectId }))
       const client = await AgentRelayClient.spawn(opts)
       console.log('[broker] Started successfully for project:', normalizedProjectId)
-      const eventStreamGeneration = 1
+      const eventStreamGeneration = this.nextEventStreamGeneration()
       const unsubEvent = this.attachClient(normalizedProjectId, client, win, eventStreamGeneration)
       this.sessions.set(normalizedProjectId, {
         projectId: normalizedProjectId,
@@ -1516,7 +1517,7 @@ export class BrokerManager {
       })
       await client.getSession()
 
-      const eventStreamGeneration = 1
+      const eventStreamGeneration = this.nextEventStreamGeneration()
       const unsubEvent = this.attachClient(sessionKey, client, win, eventStreamGeneration)
       // The remote broker shuts itself down after 120s without an owner-lease
       // renewal. HarnessDriverClient.spawn handles this automatically, but the
@@ -1895,7 +1896,7 @@ export class BrokerManager {
 
     try {
       session.client.disconnectEvents()
-      const nextEventStreamGeneration = previousEventStreamGeneration + 1
+      const nextEventStreamGeneration = this.nextEventStreamGeneration()
       session.eventStreamGeneration = nextEventStreamGeneration
       nextUnsubEvent = this.attachClient(sessionKey, session.client, session.window, nextEventStreamGeneration)
       session.unsubEvent = nextUnsubEvent
@@ -2069,6 +2070,11 @@ export class BrokerManager {
       unsubBurn()
       unsubEvent()
     }
+  }
+
+  private nextEventStreamGeneration(): number {
+    this.eventStreamGenerationCounter += 1
+    return this.eventStreamGenerationCounter
   }
 
   private isDuplicatePtyChunk(sessionKey: string, name: string, event: BrokerEvent): boolean {

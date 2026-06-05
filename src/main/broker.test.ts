@@ -816,6 +816,41 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('ignores stale PTY callbacks from a previous broker session', async () => {
+    const manager = new BrokerManager()
+    const firstWindow = createMockWindow()
+    const firstClient = await startLocalWithWindow(manager, firstWindow)
+    const staleListener = firstClient.onEvent.mock.calls.at(-1)?.[0]
+    expect(staleListener).toBeTypeOf('function')
+
+    await manager.shutdown(PROJECT_ID)
+
+    const secondWindow = createMockWindow()
+    const secondClient = await startLocalWithWindow(manager, secondWindow)
+    const currentListener = secondClient.onEvent.mock.calls.at(-1)?.[0]
+    expect(currentListener).toBeTypeOf('function')
+
+    staleListener?.({
+      kind: 'worker_stream',
+      name: 'claude-1',
+      chunk: 'old session output\n'
+    })
+    currentListener?.({
+      kind: 'worker_stream',
+      name: 'claude-1',
+      chunk: 'new session output\n'
+    })
+
+    const firstPtyCalls = (firstWindow.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([channel]) => channel === 'broker:pty-chunk')
+    const secondPtyCalls = (secondWindow.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([channel]) => channel === 'broker:pty-chunk')
+    expect(firstPtyCalls).toEqual([])
+    expect(secondPtyCalls).toEqual([['broker:pty-chunk', PROJECT_ID, 'claude-1', 'new session output\n']])
+
+    await manager.shutdown()
+  })
+
   it('keeps a replacement event listener when reconnect throws during refreshEventStream', async () => {
     const manager = new BrokerManager()
     const win = createMockWindow()
