@@ -393,6 +393,12 @@ describe('BrokerManager local + cloud coexistence', () => {
       expect(mock.HarnessDriverClient.connect).toHaveBeenCalledWith({ cwd: tempDir, connectionPath })
       expect(mock.HarnessDriverClient.spawn).not.toHaveBeenCalled()
       expect(mock.state.connectedClients).toHaveLength(1)
+      mock.state.connectedClients[0].baseUrl = 'http://127.0.0.1:43210'
+
+      const [details] = await manager.listBrokerDetails()
+      expect(details.connectionPath).toBe(connectionPath)
+      expect(details.connectionFileStatus).toBe('matches')
+      expect(details.apiKey).toBe('test-key')
 
       await manager.shutdown()
     } finally {

@@ -65,13 +65,14 @@ export const BrokerConnectionFileSchema = z
   .object({
     url: z.string().optional(),
     pid: z.number().int().optional(),
+    apiKey: z.string().optional(),
     api_key: z.string().optional()
   })
   .passthrough()
   .transform((value) => ({
     url: value.url?.trim() || undefined,
     pid: value.pid,
-    apiKey: value.api_key?.trim() || undefined
+    apiKey: value.apiKey?.trim() || value.api_key?.trim() || undefined
   }))
 
 /* ------------------ Generated commit draft JSON ----------------- */
