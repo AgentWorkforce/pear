@@ -565,6 +565,10 @@ function normalizeRelayfilePath(path: string): string {
   return segments.length > 0 ? `/${segments.join('/')}` : '/'
 }
 
+function hasTraversalSegment(path: string): boolean {
+  return pathSegments(path).some((segment) => segment === '.' || segment === '..')
+}
+
 function localPathForRemotePathInsideRoot(localRoot: string, remoteRoot: string, remotePath: string): string {
   const tail = pathTailAfterMount(remotePath, remoteRoot)
   return tail === '/' ? resolve(localRoot) : join(resolve(localRoot), ...pathSegments(tail))
@@ -579,7 +583,7 @@ export function localWatchEventPathsForFilename(
   if (!trimmed) return null
 
   const asRemotePath = normalizeRelayfilePath(trimmed)
-  if (pathIsInsideMount(asRemotePath, remoteRoot)) {
+  if (!hasTraversalSegment(asRemotePath) && pathIsInsideMount(asRemotePath, remoteRoot)) {
     return {
       localPath: localPathForRemotePathInsideRoot(localRoot, remoteRoot, asRemotePath),
       remotePath: asRemotePath
@@ -722,9 +726,10 @@ function injectionDeduplicationKey(projectId: string, event: ChangeEvent, matche
 }
 
 function eventRecordValue(event: ChangeEvent, key: string): unknown {
-  const resource = isRecord(event.resource) ? event.resource : {}
-  const summary = isRecord(event.summary) ? event.summary : {}
-  return (event as Record<string, unknown>)[key] ?? resource[key] ?? summary[key]
+  const eventRecord = event as unknown as Record<string, unknown>
+  const resource = isRecord(event.resource) ? event.resource : ({} as Record<string, unknown>)
+  const summary = isRecord(event.summary) ? event.summary : ({} as Record<string, unknown>)
+  return eventRecord[key] ?? resource[key] ?? summary[key]
 }
 
 function eventOrigin(event: ChangeEvent): string | null {

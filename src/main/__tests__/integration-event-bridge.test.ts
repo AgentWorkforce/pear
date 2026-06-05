@@ -348,6 +348,15 @@ test('local watcher path construction does not duplicate remote path segments', 
       remotePath: '/slack/channels/C0AD7UU0J1G/messages/1779632411_869369/meta.json'
     }
   )
+
+  assert.equal(
+    localWatchEventPathsForFilename(
+      messagesLocalRoot,
+      messagesRemoteRoot,
+      '/slack/channels/C0AD7UU0J1G/messages/../C999/messages/1780019742_971719/meta.json'
+    ),
+    null
+  )
 })
 
 test('integration events preserve discovery mount paths', async () => {
