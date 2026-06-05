@@ -1271,11 +1271,12 @@ function shouldNotifyRelayfilePath(pathValue: string): boolean {
 function isLikelyLocalWritebackCommandPath(path: string): boolean {
   const segments = pathSegments(path)
   const leaf = segments.at(-1) || ''
+  const parent = segments.at(-2)
   const stem = leaf.replace(/\.json$/u, '')
   const provider = segments[0]
   if (provider !== 'slack' && provider !== 'chat') return false
   if (!leaf.endsWith('.json') || leaf === 'meta.json') return false
-  if (!segments.some((segment) => segment === 'messages' || segment === 'replies')) return false
+  if (parent !== 'messages' && parent !== 'replies') return false
   return !/^\d+(?:[._-]\d+)*$/u.test(stem)
 }
 
