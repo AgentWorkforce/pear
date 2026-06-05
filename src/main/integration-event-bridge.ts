@@ -379,8 +379,8 @@ function createWorkspaceScopedEventClient(
         .then((token) => {
           if (!active) return
           const tokenWorkspaceId = workspaceIdFromJwt(token)
-          if (tokenWorkspaceId !== workspaceId) {
-            logIntegrationEvent('skipping remote stream without workspace JWT', {
+          if (tokenWorkspaceId && tokenWorkspaceId !== workspaceId) {
+            logIntegrationEvent('skipping remote stream with mismatched workspace JWT', {
               workspaceId,
               tokenWorkspaceId
             })

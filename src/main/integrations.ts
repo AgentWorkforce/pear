@@ -81,6 +81,11 @@ export type IntegrationOption = {
   hint?: string
 }
 
+type SlackChannelOptionResponse = {
+  channels?: unknown
+  nextCursor?: unknown
+}
+
 export type IntegrationsEvent =
   | { type: 'session-update'; sessionId: string; session: IntegrationConnectSession }
   | { type: 'integration-added'; projectId: string; integration: ConnectedIntegration }
@@ -265,13 +270,6 @@ function isHttpStatus(error: unknown, status: number): boolean {
     || record.statusCode === status
     || record.httpStatus === status
     || record.response?.status === status
-}
-
-function isIntegrationNotFoundError(error: unknown): boolean {
-  if (!isHttpStatus(error, 404) || !isRecord(error)) return false
-  const httpBody = error.httpBody
-  if (isRecord(httpBody) && httpBody.code === 'integration_not_found') return true
-  return /\bintegration_not_found\b|No .+ integration is connected for this workspace/iu.test(toErrorMessage(error))
 }
 
 // Provider adapters materialize data at the workspace ROOT — `/github/...`,
@@ -747,17 +745,20 @@ export class IntegrationsManager {
     const normalizedResource = resource.trim().toLowerCase()
     if (!normalizedResource) throw new Error('Integration option resource is required')
 
-    let payload: unknown
-    try {
-      payload = await this.withWorkspaceHandle(async (handle) => await handle.requestJson({
-        operation: 'listIntegrationOptions',
-        method: 'GET',
-        path: `api/v1/workspaces/${handle.workspaceId}/integrations/${encodeURIComponent(normalizedProvider)}/options/${encodeURIComponent(normalizedResource)}`
-      }) as unknown)
-    } catch (error) {
-      if (isIntegrationNotFoundError(error)) return []
-      throw error
-    }
+    const payload = await this.withWorkspaceHandle(async (handle) => {
+      try {
+        return await handle.requestJson({
+          operation: 'listIntegrationOptions',
+          method: 'GET',
+          path: `api/v1/workspaces/${handle.workspaceId}/integrations/${encodeURIComponent(normalizedProvider)}/options/${encodeURIComponent(normalizedResource)}`
+        }) as unknown
+      } catch (error) {
+        if (normalizedProvider === 'slack' && normalizedResource === 'channels') {
+          return this.listLegacySlackChannelOptions(handle, normalizedProvider, error)
+        }
+        throw error
+      }
+    })
 
     const rawOptions = isRecord(payload) && Array.isArray(payload.options) ? payload.options : []
     return rawOptions
@@ -769,6 +770,45 @@ export class IntegrationsManager {
         return value && label ? { value, label, ...(hint ? { hint } : {}) } : null
       })
       .filter((entry): entry is IntegrationOption => entry !== null)
+  }
+
+  private async listLegacySlackChannelOptions(
+    handle: WorkspaceHandle,
+    provider: string,
+    originalError: unknown
+  ): Promise<{ options: IntegrationOption[] }> {
+    const options: IntegrationOption[] = []
+    let cursor: string | undefined
+
+    try {
+      do {
+        const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
+        const payload = await handle.requestJson({
+          operation: 'listSlackAvailableChannels',
+          method: 'GET',
+          path: `api/v1/workspaces/${handle.workspaceId}/integrations/${encodeURIComponent(provider)}/channels/available${query}`
+        }) as SlackChannelOptionResponse
+        const channels = Array.isArray(payload.channels) ? payload.channels : []
+        for (const channel of channels) {
+          if (!isRecord(channel)) continue
+          const value = readString(channel.id)
+          if (!value) continue
+          const name = readString(channel.name) || value
+          const isPrivate = channel.isPrivate === true || channel.is_private === true
+          options.push({
+            value,
+            label: `#${name}`,
+            ...(isPrivate ? { hint: 'private' } : {})
+          })
+        }
+        cursor = readString(payload.nextCursor)
+      } while (cursor)
+      return { options }
+    } catch (fallbackError) {
+      throw new Error(
+        `Slack channel options are unavailable: ${toErrorMessage(originalError)}; fallback failed: ${toErrorMessage(fallbackError)}`
+      )
+    }
   }
 
   async startLocalMountDaemon(): Promise<void> {
