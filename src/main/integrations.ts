@@ -261,6 +261,13 @@ function isHttpStatus(error: unknown, status: number): boolean {
     || record.response?.status === status
 }
 
+function isIntegrationNotFoundError(error: unknown): boolean {
+  if (!isHttpStatus(error, 404) || !isRecord(error)) return false
+  const httpBody = error.httpBody
+  if (isRecord(httpBody) && httpBody.code === 'integration_not_found') return true
+  return /\bintegration_not_found\b|No .+ integration is connected for this workspace/iu.test(toErrorMessage(error))
+}
+
 // Provider adapters materialize data at the workspace ROOT — `/github/...`,
 // `/linear/...` (see each adapter's LAYOUT.md in the relayfile workspace).
 // The catalog historically assumed `/integrations/<provider>/...`, which does
@@ -733,11 +740,17 @@ export class IntegrationsManager {
     const normalizedResource = resource.trim().toLowerCase()
     if (!normalizedResource) throw new Error('Integration option resource is required')
 
-    const payload = await this.withWorkspaceHandle(async (handle) => await handle.requestJson({
-      operation: 'listIntegrationOptions',
-      method: 'GET',
-      path: `api/v1/workspaces/${handle.workspaceId}/integrations/${encodeURIComponent(normalizedProvider)}/options/${encodeURIComponent(normalizedResource)}`
-    }) as unknown)
+    let payload: unknown
+    try {
+      payload = await this.withWorkspaceHandle(async (handle) => await handle.requestJson({
+        operation: 'listIntegrationOptions',
+        method: 'GET',
+        path: `api/v1/workspaces/${handle.workspaceId}/integrations/${encodeURIComponent(normalizedProvider)}/options/${encodeURIComponent(normalizedResource)}`
+      }) as unknown)
+    } catch (error) {
+      if (isIntegrationNotFoundError(error)) return []
+      throw error
+    }
 
     const rawOptions = isRecord(payload) && Array.isArray(payload.options) ? payload.options : []
     return rawOptions

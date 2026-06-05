@@ -454,31 +454,29 @@ function IntegrationVisibilitySection({
     const listOptions = (pear.integrations as typeof pear.integrations & {
       listOptions?: typeof pear.integrations.listOptions
     }).listOptions
-    if (typeof listOptions !== 'function') {
-      try {
-        return await listRemoteSlackChannels()
-      } catch {
-        return listMountedSlackChannels()
-      }
+    try {
+      const remoteChannels = await listRemoteSlackChannels()
+      if (remoteChannels.length > 0) return remoteChannels
+    } catch {
+      // Fall through to live Nango options, then local mount fallback.
     }
+
+    if (typeof listOptions !== 'function') return listMountedSlackChannels()
 
     try {
       const options = await listOptions(projectId, integration.provider, 'channels')
-      return options.map((option) => ({
+      const optionChannels = options.map((option) => ({
         id: option.value,
         displayName: option.label,
         name: option.label.replace(/^#/u, ''),
         metadata: option.hint ? { hint: option.hint } : undefined
       }))
+      if (optionChannels.length > 0) return optionChannels
+      return listMountedSlackChannels()
     } catch (err) {
-      try {
-        return await listRemoteSlackChannels()
-      } catch (remoteErr) {
-        if (providerLocalMountPath(integration, 'slack')) return listMountedSlackChannels()
-        const message = err instanceof Error ? err.message : String(err)
-        const remoteMessage = remoteErr instanceof Error ? remoteErr.message : String(remoteErr)
-        throw new Error(`Slack channel options are unavailable: ${message}; remote Relayfile listing failed: ${remoteMessage}`)
-      }
+      if (providerLocalMountPath(integration, 'slack')) return listMountedSlackChannels()
+      const message = err instanceof Error ? err.message : String(err)
+      throw new Error(`Slack channel options are unavailable: ${message}`)
     }
   }, [projectId])
 
