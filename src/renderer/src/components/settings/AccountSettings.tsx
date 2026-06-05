@@ -626,10 +626,15 @@ export function AccountSettings(): React.ReactNode {
         <section className="border-t border-[var(--pear-border-subtle)] pt-6">
           <div className="mb-3 flex items-center justify-between gap-3">
             <h2 className="text-xs font-semibold uppercase tracking-wider text-[var(--pear-text-faint)]">Connected</h2>
-            <span className="text-xs text-[var(--pear-text-faint)]">{connected.length}</span>
+            <span className="text-xs text-[var(--pear-text-faint)]">{loading ? 'Loading' : connected.length}</span>
           </div>
           <div className="space-y-2">
-            {connected.length === 0 ? (
+            {loading && connected.length === 0 ? (
+              <div className="flex items-center gap-2 rounded-lg border border-dashed border-[var(--pear-border)] px-4 py-3 text-sm text-[var(--pear-text-faint)]">
+                <Loader2 size={13} className="animate-spin" />
+                Loading integrations
+              </div>
+            ) : connected.length === 0 ? (
               <div className="rounded-lg border border-dashed border-[var(--pear-border)] px-4 py-3 text-sm text-[var(--pear-text-faint)]">
                 No integrations connected
               </div>

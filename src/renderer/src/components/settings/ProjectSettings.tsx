@@ -599,7 +599,12 @@ function IntegrationVisibilitySection({
         </div>
       )}
       <div className="space-y-2">
-        {integrations.length === 0 ? (
+        {loading && integrations.length === 0 ? (
+          <div className="flex items-center gap-2 rounded-lg border border-dashed border-[var(--pear-border)] px-4 py-3 text-sm text-[var(--pear-text-faint)]">
+            <Loader2 size={13} className="animate-spin" />
+            Loading integrations
+          </div>
+        ) : integrations.length === 0 ? (
           <div className="rounded-lg border border-dashed border-[var(--pear-border)] px-4 py-3 text-sm text-[var(--pear-text-faint)]">
             No account integrations connected
           </div>
