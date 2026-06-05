@@ -718,7 +718,25 @@ function getBrokerConnectionFileInfo(
     return { hasApiKey: false }
   }
 
-  const connectionPath = resolveBrokerConnectionPath(cwd)
+  const candidates = brokerConnectionPathCandidates(cwd)
+  let firstExisting: BrokerConnectionFileInfo | undefined
+
+  for (const connectionPath of candidates) {
+    if (!existsSync(connectionPath)) continue
+
+    const info = readBrokerConnectionFileInfo(connectionPath, baseUrl, brokerPid)
+    if (info.status === 'matches') return info
+    firstExisting ??= info
+  }
+
+  return firstExisting ?? { path: candidates[0], status: 'missing', hasApiKey: false }
+}
+
+function readBrokerConnectionFileInfo(
+  connectionPath: string,
+  baseUrl: string | undefined,
+  brokerPid: number | undefined
+): BrokerConnectionFileInfo {
   if (!existsSync(connectionPath)) {
     return { path: connectionPath, status: 'missing', hasApiKey: false }
   }
@@ -753,8 +771,8 @@ function brokerConnectionPathCandidates(cwd: string): string[] {
 }
 
 function resolveBrokerConnectionPath(cwd: string): string {
-  return brokerConnectionPathCandidates(cwd).find((candidate) => existsSync(candidate)) ??
-    brokerConnectionPathCandidates(cwd)[0]
+  const candidates = brokerConnectionPathCandidates(cwd)
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]
 }
 
 function toInboundDeliveryMode(mode?: TerminalAttachMode): InboundDeliveryMode {
@@ -1291,12 +1309,14 @@ export class BrokerManager {
     }
 
     for (const connectionPath of connectionPaths) {
+      let client: AgentRelayClient | undefined
       try {
-        const client = AgentRelayClient.connect({ cwd, connectionPath })
+        client = AgentRelayClient.connect({ cwd, connectionPath })
         await client.getSession()
         console.log(`[broker] Reusing existing broker for project ${projectId}: ${connectionPath}`)
         return client
       } catch (err) {
+        client?.disconnect()
         console.warn(`[broker] Existing broker connection is not reusable for project ${projectId}:`, err)
       }
     }
