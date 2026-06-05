@@ -193,27 +193,29 @@ describe('resolveAgentRelayMcpCommand', () => {
     expect(() => resolveAgentRelayMcpCommand()).toThrow(/must not reference app\.asar/)
   })
 
-  it('resolves the packaged MCP script from external resources', async () => {
+  it('resolves the packaged MCP launcher from external resources', async () => {
     tempDir = await mkdtemp(join(tmpdir(), 'pear-mcp-resources-'))
-    const scriptPath = join(
-      tempDir,
-      'agent-relay-mcp',
-      'node_modules',
-      'agent-relay',
-      'dist',
-      'cli',
-      'agent-relay-mcp.js'
-    )
-    await mkdir(dirname(scriptPath), { recursive: true })
-    await writeFile(scriptPath, '#!/usr/bin/env node\n')
+    const launcherPath = join(tempDir, 'agent-relay-mcp', process.platform === 'win32' ? 'launch.cmd' : 'launch.sh')
+    await mkdir(dirname(launcherPath), { recursive: true })
+    await writeFile(launcherPath, process.platform === 'win32' ? '@echo off\r\n' : '#!/bin/sh\n')
+    await chmod(launcherPath, 0o755)
     electronMock.app.isPackaged = true
     delete process.env.AGENT_RELAY_MCP_COMMAND
     setProcessResourcesPath(tempDir)
 
     const command = resolveAgentRelayMcpCommand()
 
-    expect(command).toBe(`${process.execPath} ${scriptPath}`)
+    expect(command).toBe(launcherPath)
     expect(command).not.toContain('app.asar')
+  })
+
+  it('fails packaged MCP resolution when the external launcher is missing', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'pear-mcp-resources-'))
+    electronMock.app.isPackaged = true
+    delete process.env.AGENT_RELAY_MCP_COMMAND
+    setProcessResourcesPath(tempDir)
+
+    expect(() => resolveAgentRelayMcpCommand()).toThrow(/launcher is missing or not executable/)
   })
 })
 

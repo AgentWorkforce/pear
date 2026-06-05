@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 import { spawn } from 'node:child_process'
-import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, statSync } from 'node:fs'
 import { join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { installedDependencyClosure, packagePath } from './lib/dependency-closure.mjs'
 
 const APP_NAME = 'Pear by Agent Relay.app'
 const MCP_RESOURCE_ROOT = join('agent-relay-mcp', 'node_modules')
 const MCP_SCRIPT_RELATIVE = join(MCP_RESOURCE_ROOT, 'agent-relay', 'dist', 'cli', 'agent-relay-mcp.js')
+const MCP_LAUNCHER_RELATIVE = join('agent-relay-mcp', process.platform === 'win32' ? 'launch.cmd' : 'launch.sh')
 const TIMEOUT_MS = 10_000
 
 function fail(message) {
@@ -55,39 +57,35 @@ function appResourcesPath(appPath) {
   return join(appPath, 'resources')
 }
 
-function packagePath(nodeModulesPath, packageName) {
-  return join(nodeModulesPath, ...packageName.split('/'), 'package.json')
-}
-
-function installedDependencyClosure(rootDir) {
-  const lockPath = join(rootDir, 'package-lock.json')
-  const lock = JSON.parse(readFileSync(lockPath, 'utf8'))
-  const packages = lock.packages ?? {}
-  const seen = new Set()
-
-  function visit(packageName) {
-    if (seen.has(packageName)) return
-    const lockPackage = packages[`node_modules/${packageName}`]
-    if (!lockPackage) fail(`package-lock entry missing for ${packageName}`)
-
-    const localPackageJson = packagePath(join(rootDir, 'node_modules'), packageName)
-    if (!existsSync(localPackageJson)) return
-
-    seen.add(packageName)
-    for (const dependency of Object.keys(lockPackage.dependencies ?? {})) visit(dependency)
-    for (const dependency of Object.keys(lockPackage.optionalDependencies ?? {})) visit(dependency)
+function appExecutablePath(appPath) {
+  if (process.platform === 'darwin' || appPath.endsWith('.app')) {
+    const macosDir = join(appPath, 'Contents', 'MacOS')
+    const executable = readdirSync(macosDir)
+      .map((entry) => join(macosDir, entry))
+      .find((entryPath) => {
+        const stat = statSync(entryPath)
+        return stat.isFile() && (stat.mode & 0o111) !== 0
+      })
+    if (!executable) fail(`could not find app executable in ${macosDir}`)
+    return executable
   }
-
-  visit('agent-relay')
-  return [...seen].sort()
+  return appPath
 }
 
 function assertExternalPayload(rootDir, resourcesPath) {
   const scriptPath = join(resourcesPath, MCP_SCRIPT_RELATIVE)
+  const launcherPath = join(resourcesPath, MCP_LAUNCHER_RELATIVE)
   const asarSegment = `${sep}app.asar${sep}`
-  if (scriptPath.includes(asarSegment)) fail(`MCP script path points inside app.asar: ${scriptPath}`)
+  for (const candidate of [scriptPath, launcherPath]) {
+    if (candidate.includes(asarSegment)) fail(`MCP path points inside app.asar: ${candidate}`)
+  }
   if (!existsSync(scriptPath)) fail(`MCP script missing from packaged resources: ${scriptPath}`)
   if (!statSync(scriptPath).isFile()) fail(`MCP script path is not a file: ${scriptPath}`)
+  if (!existsSync(launcherPath)) fail(`MCP launcher missing from packaged resources: ${launcherPath}`)
+  if (!statSync(launcherPath).isFile()) fail(`MCP launcher path is not a file: ${launcherPath}`)
+  if (process.platform !== 'win32' && (statSync(launcherPath).mode & 0o111) === 0) {
+    fail(`MCP launcher is not executable: ${launcherPath}`)
+  }
 
   const payloadNodeModules = join(resourcesPath, MCP_RESOURCE_ROOT)
   for (const packageName of installedDependencyClosure(rootDir)) {
@@ -97,7 +95,7 @@ function assertExternalPayload(rootDir, resourcesPath) {
     }
   }
 
-  return scriptPath
+  return { launcherPath, scriptPath }
 }
 
 function encodeMessage(payload) {
@@ -108,11 +106,19 @@ function parseMessages(buffer) {
   const text = buffer.toString('utf8')
   const lines = text.split(/\r?\n/)
   const completeLines = text.endsWith('\n') || text.endsWith('\r\n') ? lines : lines.slice(0, -1)
-  return completeLines.filter(Boolean).map((line) => JSON.parse(line))
+  const messages = []
+  for (const line of completeLines.filter(Boolean)) {
+    try {
+      messages.push(JSON.parse(line))
+    } catch {
+      // Ignore stdout noise; MCP JSON-RPC responses are still required below.
+    }
+  }
+  return messages
 }
 
-async function verifyInitialize(scriptPath) {
-  const child = spawn(process.execPath, [scriptPath], {
+async function verifyInitialize(commandPath) {
+  const child = spawn(commandPath, [], {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: smokeEnv()
   })
@@ -175,6 +181,40 @@ async function verifyInitialize(scriptPath) {
   })
 }
 
+async function resolvePackagedMcpCommand(rootDir, resourcesPath, executablePath) {
+  const harnessPath = join(rootDir, 'scripts', 'resolve-packaged-mcp-command.mjs')
+  const child = spawn(process.execPath, [
+    '--experimental-strip-types',
+    '--no-warnings',
+    harnessPath,
+    resourcesPath,
+    executablePath
+  ], {
+    cwd: rootDir,
+    env: smokeEnv(),
+    stdio: ['ignore', 'pipe', 'pipe']
+  })
+
+  let stdout = ''
+  let stderr = ''
+  return await new Promise((resolvePromise, rejectPromise) => {
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString('utf8')
+    })
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString('utf8')
+    })
+    child.on('error', rejectPromise)
+    child.on('exit', (code, signal) => {
+      if (code !== 0) {
+        rejectPromise(new Error(`resolver harness failed: code=${code} signal=${signal}\nstderr:\n${stderr}`))
+        return
+      }
+      resolvePromise(stdout.trim())
+    })
+  })
+}
+
 function smokeEnv() {
   const allowedKeys = [
     'HOME',
@@ -182,7 +222,6 @@ function smokeEnv() {
     'LC_ALL',
     'LC_CTYPE',
     'NODE_EXTRA_CA_CERTS',
-    'PATH',
     'SSL_CERT_FILE',
     'TMPDIR',
     'TMP',
@@ -193,6 +232,7 @@ function smokeEnv() {
   for (const key of allowedKeys) {
     if (process.env[key]) env[key] = process.env[key]
   }
+  env.PATH = process.platform === 'win32' ? 'C:\\Windows\\System32;C:\\Windows' : '/usr/bin:/bin'
   env.RELAY_SKIP_BOOTSTRAP = '1'
   return env
 }
@@ -200,8 +240,13 @@ function smokeEnv() {
 const rootDir = resolve(fileURLToPath(new URL('..', import.meta.url)))
 const appPath = findBuiltApp(rootDir)
 const resourcesPath = appResourcesPath(appPath)
-const scriptPath = assertExternalPayload(rootDir, resourcesPath)
+const { launcherPath } = assertExternalPayload(rootDir, resourcesPath)
+const commandPath = await resolvePackagedMcpCommand(rootDir, resourcesPath, appExecutablePath(appPath))
 
-await verifyInitialize(scriptPath).catch((error) => fail(error.message))
+if (commandPath !== launcherPath) {
+  fail(`resolver emitted ${commandPath}, expected packaged launcher ${launcherPath}`)
+}
 
-console.log(`verify-mcp-spawn: ok (${scriptPath})`)
+await verifyInitialize(commandPath).catch((error) => fail(error.message))
+
+console.log(`verify-mcp-spawn: ok (${commandPath})`)

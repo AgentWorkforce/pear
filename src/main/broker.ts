@@ -1,8 +1,8 @@
-import { accessSync, constants, existsSync, readFileSync } from 'fs'
+import { existsSync, readFileSync } from 'fs'
 import { rm } from 'fs/promises'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
-import { delimiter, basename, dirname, isAbsolute, join } from 'path'
+import { delimiter, basename, isAbsolute, join } from 'path'
 import { execFileSync } from 'child_process'
 import { app, BrowserWindow } from 'electron'
 import {
@@ -28,6 +28,12 @@ import {
 } from './schemas'
 import { compactBrokerEvent, normalizeEventTimestamp } from '../shared/lib/broker-events'
 import type { WorkforcePersona } from '../shared/types/ipc'
+import {
+  canExecute,
+  resolveAgentRelayMcpCommand as resolveAgentRelayMcpCommandForOptions,
+  resolveCommandOnPath,
+  resolvePackageBin
+} from './mcp-command'
 
 function isShellLikeCommand(cli: string): boolean {
   const normalized = basename(cli).toLowerCase()
@@ -49,40 +55,6 @@ function resolveShellCommand(): string {
   }
 
   return '/bin/zsh'
-}
-
-function canExecute(filePath: string): boolean {
-  try {
-    accessSync(filePath, constants.X_OK)
-    return true
-  } catch {
-    return false
-  }
-}
-
-function resolveCommandOnPath(command: string): string | undefined {
-  const pathValue = process.env.PATH || ''
-  const extensions = process.platform === 'win32'
-    ? ['', '.cmd', '.exe', '.bat']
-    : ['']
-
-  for (const dir of pathValue.split(delimiter)) {
-    if (!dir) continue
-    for (const extension of extensions) {
-      const candidate = join(dir, `${command}${extension}`)
-      if (canExecute(candidate)) return candidate
-    }
-  }
-
-  try {
-    const resolved = execFileSync(process.platform === 'win32' ? 'where' : 'which', [command], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore']
-    }).split(/\r?\n/)[0]?.trim()
-    return resolved || undefined
-  } catch {
-    return undefined
-  }
 }
 
 function commonUserBinDirs(): string[] {
@@ -124,24 +96,6 @@ function executableCliPath(input: SpawnPtyInput): string {
     : join(input.cwd || process.cwd(), input.cli)
 }
 
-function resolvePackageBin(packageName: string, binName: string): string | undefined {
-  try {
-    const packageJsonPath = require.resolve(`${packageName}/package.json`)
-    const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8')) as {
-      bin?: string | Record<string, string>
-    }
-    const binPath = typeof packageJson.bin === 'string'
-      ? packageJson.bin
-      : packageJson.bin?.[binName]
-    if (!binPath) return undefined
-
-    const candidate = join(dirname(packageJsonPath), binPath)
-    return canExecute(candidate) ? candidate : undefined
-  } catch {
-    return undefined
-  }
-}
-
 function resolveAgentWorkforceCommand(cwd: string): { cli: string; args: string[] } {
   const binaryName = process.platform === 'win32' ? 'agentworkforce.cmd' : 'agentworkforce'
   const localCandidates = [
@@ -169,96 +123,14 @@ function resolveAgentWorkforceCommand(cwd: string): { cli: string; args: string[
   throw new Error('AgentWorkforce CLI not found — install it to launch personas')
 }
 
-function resolveNodeCommandForMcp(): string | undefined {
-  const execBasename = basename(process.execPath).toLowerCase()
-  if (execBasename === 'node' || execBasename === 'node.exe') {
-    return process.execPath
-  }
-
-  return resolveCommandOnPath('node')
-}
-
-const PACKAGED_AGENT_RELAY_MCP_SCRIPT = [
-  'agent-relay-mcp',
-  'node_modules',
-  'agent-relay',
-  'dist',
-  'cli',
-  'agent-relay-mcp.js'
-]
-
-function hasAsarPathSegment(value: string): boolean {
-  return /(^|[\\/])app\.asar([\\/]|$)/.test(value)
-}
-
-function assertNoAsarMcpCommand(command: string): string {
-  if (hasAsarPathSegment(command)) {
-    throw new Error(`Agent Relay MCP command must not reference app.asar in packaged mode: ${command}`)
-  }
-  return command
-}
-
-function getPackagedResourcesPath(): string | undefined {
-  const resourcesPath = (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath
-  return typeof resourcesPath === 'string' && resourcesPath.trim() ? resourcesPath : undefined
-}
-
-function resolvePackagedAgentRelayMcpScript(): string {
-  const resourcesPath = getPackagedResourcesPath()
-  if (!resourcesPath) {
-    throw new Error('Unable to resolve packaged Agent Relay MCP resources path')
-  }
-
-  const candidate = join(resourcesPath, ...PACKAGED_AGENT_RELAY_MCP_SCRIPT)
-  if (hasAsarPathSegment(candidate)) {
-    throw new Error(`Packaged Agent Relay MCP script resolved inside app.asar: ${candidate}`)
-  }
-  if (!existsSync(candidate)) {
-    throw new Error(`Packaged Agent Relay MCP script is missing: ${candidate}`)
-  }
-  return candidate
-}
-
-function resolveBundledAgentRelayMcpScript(): string | undefined {
-  const packageCommand = resolvePackageBin('agent-relay', 'agent-relay')
-  if (packageCommand) {
-    const sibling = join(dirname(packageCommand), 'agent-relay-mcp.js')
-    if (existsSync(sibling)) return sibling
-  }
-
-  try {
-    const packageJsonPath = require.resolve('agent-relay/package.json')
-    const candidate = join(dirname(packageJsonPath), 'dist', 'cli', 'agent-relay-mcp.js')
-    return existsSync(candidate) ? candidate : undefined
-  } catch {
-    return undefined
-  }
-}
-
 export function resolveAgentRelayMcpCommand(): string | undefined {
-  const configured = process.env.AGENT_RELAY_MCP_COMMAND?.trim()
-  if (configured) {
-    return app.isPackaged ? assertNoAsarMcpCommand(configured) : configured
-  }
-
-  if (app.isPackaged) {
-    const nodeCommand = resolveNodeCommandForMcp()
-    if (!nodeCommand) {
-      throw new Error('Node.js was not found on PATH; unable to start packaged Agent Relay MCP server')
-    }
-    return assertNoAsarMcpCommand(`${nodeCommand} ${resolvePackagedAgentRelayMcpScript()}`)
-  }
-
-  const bundledMcpScript = resolveBundledAgentRelayMcpScript()
-  const nodeCommand = bundledMcpScript ? resolveNodeCommandForMcp() : undefined
-  if (bundledMcpScript && nodeCommand) {
-    return `${nodeCommand} ${bundledMcpScript}`
-  }
-
-  const packageCommand = resolvePackageBin('agent-relay', 'agent-relay') || resolveCommandOnPath('agent-relay')
-  if (packageCommand) return `${packageCommand} mcp`
-
-  return undefined
+  return resolveAgentRelayMcpCommandForOptions({
+    configuredCommand: process.env.AGENT_RELAY_MCP_COMMAND,
+    env: process.env,
+    execPath: process.execPath,
+    isPackaged: app.isPackaged,
+    resourcesPath: (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath
+  })
 }
 
 function parseAgentWorkforceJson<T>(output: string, label: string): T {
@@ -1075,8 +947,8 @@ interface BrokerClientInternals {
 // Local sessions are keyed by the bare projectId (keeping input-stream and
 // timeout keys back-compatible); the cloud session lives under a suffixed key
 // so the two coexist instead of clobbering each other in the sessions map.
-// ' ' cannot appear in a project id, so the keys can't collide.
-const CLOUD_SESSION_KEY_SUFFIX = ' cloud'
+// '\0' cannot appear in a project id, so the keys can't collide.
+const CLOUD_SESSION_KEY_SUFFIX = '\0cloud'
 
 function cloudSessionKey(projectId: string): string {
   return `${projectId}${CLOUD_SESSION_KEY_SUFFIX}`
