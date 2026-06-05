@@ -1957,7 +1957,7 @@ export class BrokerManager {
   private isDuplicatePtyChunk(sessionKey: string, name: string, event: BrokerEvent): boolean {
     const now = Date.now()
     for (const [key, seenAt] of this.recentPtyChunks) {
-      const ttl = key.includes(':chunk:')
+      const ttl = key.startsWith('chunk:')
         ? PTY_CHUNK_CONTENT_DEDUPE_TTL_MS
         : PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS
       if (
@@ -1981,9 +1981,10 @@ export class BrokerManager {
     const chunk = typeof eventRecord.chunk === 'string' ? eventRecord.chunk : ''
     if (!identity && !chunk) return false
 
+    const contentKeyPrefix = `chunk:${sessionKey}:${name}:`
     const key = identity
-      ? `${sessionKey}:${name}:${identity}`
-      : `${sessionKey}:${name}:chunk:${chunk}`
+      ? `identity:${sessionKey}:${name}:${identity}`
+      : `${contentKeyPrefix}${chunk}`
     const ttl = identity
       ? PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS
       : PTY_CHUNK_CONTENT_DEDUPE_TTL_MS
@@ -1992,6 +1993,13 @@ export class BrokerManager {
       return true
     }
 
+    if (!identity) {
+      for (const previousKey of this.recentPtyChunks.keys()) {
+        if (previousKey.startsWith(contentKeyPrefix)) {
+          this.recentPtyChunks.delete(previousKey)
+        }
+      }
+    }
     this.recentPtyChunks.set(key, now)
     return false
   }

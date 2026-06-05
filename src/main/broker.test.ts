@@ -653,6 +653,40 @@ describe('BrokerManager local + cloud coexistence', () => {
 
     await manager.shutdown()
   })
+
+  it('keeps repeated no-identity PTY chunks after intervening output', async () => {
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    const local = await startLocalWithWindow(manager, win)
+    const listener = local.onEvent.mock.calls.at(-1)?.[0]
+    expect(listener).toBeTypeOf('function')
+
+    listener?.({
+      kind: 'worker_stream',
+      name: 'claude-1',
+      chunk: '>'
+    })
+    listener?.({
+      kind: 'worker_stream',
+      name: 'claude-1',
+      chunk: ' '
+    })
+    listener?.({
+      kind: 'worker_stream',
+      name: 'claude-1',
+      chunk: '>'
+    })
+
+    const ptyCalls = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([channel]) => channel === 'broker:pty-chunk')
+    expect(ptyCalls).toEqual([
+      ['broker:pty-chunk', PROJECT_ID, 'claude-1', '>'],
+      ['broker:pty-chunk', PROJECT_ID, 'claude-1', ' '],
+      ['broker:pty-chunk', PROJECT_ID, 'claude-1', '>']
+    ])
+
+    await manager.shutdown()
+  })
 })
 
 describe('BrokerManager spawnAgent CLI preflight', () => {
