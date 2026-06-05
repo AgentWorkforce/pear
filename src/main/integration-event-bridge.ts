@@ -18,6 +18,18 @@ const PROJECT_INTEGRATIONS_LINK_NAME = '.integrations'
 const RECENT_INJECTION_TTL_MS = 10_000
 const RECENT_LOGICAL_CHANGE_TTL_MS = 10 * 60_000
 const INTEGRATION_EVENT_LOG_PATH = join(homedir(), '.agentworkforce', 'pear', 'integration-events.log')
+const AGGREGATED_WARNING_REPEAT_EVERY = 25
+
+type IntegrationEventCounterName = 'eventsReceived' | 'eventsInjected' | 'eventsCoalesced' | 'eventsDropped'
+type IntegrationEventGaugeName = 'queueDepth' | 'mountCount'
+
+export type IntegrationEventTelemetryCounters = Record<IntegrationEventCounterName, number> &
+  Record<IntegrationEventGaugeName, number>
+
+export type IntegrationEventTelemetrySnapshot = {
+  totals: IntegrationEventTelemetryCounters
+  projects: Record<string, IntegrationEventTelemetryCounters>
+}
 
 type WatchRegistration = {
   glob: string
@@ -77,7 +89,12 @@ type RelayfileEventClient = {
   subscribe(
     globs: string[],
     onChange: (event: ChangeEvent) => void,
-    options?: { coalesce?: 'none' | 'fire-once'; coalesceMs?: number }
+    options?: {
+      coalesce?: 'none' | 'fire-once'
+      coalesceMs?: number
+      onCoalesced?: () => void
+      onQueueDepth?: (depth: number) => void
+    }
   ): Subscription
 }
 
@@ -109,6 +126,54 @@ export type IntegrationSubscriptionSummary = {
 
 let accountIntegrationEventHandle: EventWorkspaceHandleCache | null = null
 let localEventSequence = 0
+const integrationEventTelemetry = new Map<string, IntegrationEventTelemetryCounters>()
+const aggregatedWarnings = new Map<string, { count: number; lastLoggedCount: number }>()
+
+function emptyIntegrationEventCounters(): IntegrationEventTelemetryCounters {
+  return {
+    eventsReceived: 0,
+    eventsInjected: 0,
+    eventsCoalesced: 0,
+    eventsDropped: 0,
+    queueDepth: 0,
+    mountCount: 0
+  }
+}
+
+function countersForProject(projectId: string): IntegrationEventTelemetryCounters {
+  let counters = integrationEventTelemetry.get(projectId)
+  if (!counters) {
+    counters = emptyIntegrationEventCounters()
+    integrationEventTelemetry.set(projectId, counters)
+  }
+  return counters
+}
+
+function incrementIntegrationEventCounter(projectId: string, counter: IntegrationEventCounterName, amount = 1): void {
+  countersForProject(projectId)[counter] += amount
+}
+
+function setIntegrationEventGauge(projectId: string, gauge: IntegrationEventGaugeName, value: number): void {
+  countersForProject(projectId)[gauge] = Math.max(0, Math.floor(value))
+}
+
+export function getIntegrationEventTelemetrySnapshot(): IntegrationEventTelemetrySnapshot {
+  const totals = emptyIntegrationEventCounters()
+  const projects: Record<string, IntegrationEventTelemetryCounters> = {}
+  for (const [projectId, counters] of Array.from(integrationEventTelemetry.entries())) {
+    const copy = { ...counters }
+    projects[projectId] = copy
+    for (const counter of Object.keys(totals) as Array<keyof IntegrationEventTelemetryCounters>) {
+      totals[counter] += copy[counter]
+    }
+  }
+  return { totals, projects }
+}
+
+export function resetIntegrationEventTelemetryForTests(): void {
+  integrationEventTelemetry.clear()
+  aggregatedWarnings.clear()
+}
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -394,11 +459,16 @@ function createWorkspaceScopedEventClient(
         }
 
         const existing = pendingByPath.get(path)
-        if (existing) clearTimeout(existing)
+        if (existing) {
+          clearTimeout(existing)
+          options?.onCoalesced?.()
+        }
         pendingByPath.set(path, setTimeout(() => {
           pendingByPath.delete(path)
+          options?.onQueueDepth?.(pendingByPath.size)
           dispatch({ ...event, path })
         }, coalesceMs))
+        options?.onQueueDepth?.(pendingByPath.size)
       }
 
       void tokenProvider()
@@ -421,18 +491,27 @@ function createWorkspaceScopedEventClient(
             workspaceId,
             token,
             onPollingFallback: (info) => {
-              logIntegrationEvent('remote stream polling fallback', {
-                workspaceId,
-                reason: info.reason
-              })
+              warnIntegrationEventAggregated(
+                `remote stream polling fallback:${workspaceId}:${info.reason}`,
+                'remote stream polling fallback',
+                {
+                  workspaceId,
+                  reason: info.reason
+                }
+              )
             }
           })
           sync.on('event', handleEvent)
           sync.on('error', (error) => {
-            logIntegrationEvent('remote stream error', {
-              workspaceId,
-              error: toErrorMessage(error)
-            })
+            const errorMessage = toErrorMessage(error)
+            warnIntegrationEventAggregated(
+              `remote stream error:${workspaceId}:${errorMessage}`,
+              'remote stream error',
+              {
+                workspaceId,
+                error: errorMessage
+              }
+            )
           })
           sync.start()
         })
@@ -615,7 +694,11 @@ function watchLocalMounts(
   integrations: ConnectedIntegration[],
   globs: string[],
   onChange: (event: ChangeEvent) => void,
-  coalesceMs: number
+  coalesceMs: number,
+  telemetry?: {
+    onCoalesced?: () => void
+    onQueueDepth?: (depth: number) => void
+  }
 ): LocalMountSubscription | null {
   const roots = new Map<string, { localRoot: string; remoteRoot: string }>()
   for (const root of localWatchRootsFor(workspaceId, integrations, globs)) {
@@ -634,9 +717,13 @@ function watchLocalMounts(
     if (!globs.some((glob) => globMatchesPath(glob, remotePath))) return
 
     const existing = pendingByPath.get(remotePath)
-    if (existing) clearTimeout(existing)
+    if (existing) {
+      clearTimeout(existing)
+      telemetry?.onCoalesced?.()
+    }
     pendingByPath.set(remotePath, setTimeout(() => {
       pendingByPath.delete(remotePath)
+      telemetry?.onQueueDepth?.(pendingByPath.size)
       if (!active) return
       void fileEventForLocalPath(workspaceId, localPath, remotePath, eventType)
         .then((event) => {
@@ -650,9 +737,19 @@ function watchLocalMounts(
           onChange(filesystemEventToChangeEvent(null, workspaceId, event))
         })
         .catch((error) => {
-          console.warn('[integration-events] Local mount event failed:', toErrorMessage(error))
+          const errorMessage = toErrorMessage(error)
+          warnIntegrationEventAggregated(
+            `local mount event failed:${workspaceId}:${remotePath}:${errorMessage}`,
+            'local mount event failed',
+            {
+              workspaceId,
+              remotePath,
+              error: errorMessage
+            }
+          )
         })
     }, coalesceMs))
+    telemetry?.onQueueDepth?.(pendingByPath.size)
   }
 
   for (const { localRoot, remoteRoot } of roots.values()) {
@@ -663,14 +760,29 @@ function watchLocalMounts(
         schedule(localRoot, remoteRoot, String(filename), eventType)
       })
       watcher.on('error', (error) => {
-        console.warn('[integration-events] Local mount watcher error:', toErrorMessage(error))
+        const errorMessage = toErrorMessage(error)
+        warnIntegrationEventAggregated(
+          `local mount watcher error:${workspaceId}:${localRoot}:${errorMessage}`,
+          'local mount watcher error',
+          {
+            workspaceId,
+            localRoot,
+            error: errorMessage
+          }
+        )
       })
       watchers.push(watcher)
     } catch (error) {
-      console.warn('[integration-events] Failed to watch local integration mount:', {
-        localRoot,
-        error: toErrorMessage(error)
-      })
+      const errorMessage = toErrorMessage(error)
+      warnIntegrationEventAggregated(
+        `failed to watch local integration mount:${workspaceId}:${localRoot}:${errorMessage}`,
+        'failed to watch local integration mount',
+        {
+          workspaceId,
+          localRoot,
+          error: errorMessage
+        }
+      )
     }
   }
 
@@ -742,9 +854,35 @@ function eventChangeFingerprint(event: ChangeEvent): string | null {
 }
 
 function logIntegrationEvent(message: string, metadata: Record<string, unknown>): void {
-  console.info(`[integration-events] ${message}`, metadata)
+  if (!isIntegrationEventDebugEnabled()) return
+  console.debug(`[integration-events] ${message}`, metadata)
   if (isTestProcess()) return
   void appendIntegrationEventLog(message, metadata)
+}
+
+function warnIntegrationEventAggregated(key: string, message: string, metadata: Record<string, unknown>): void {
+  const entry = aggregatedWarnings.get(key) || { count: 0, lastLoggedCount: 0 }
+  entry.count += 1
+  const shouldLog = entry.count === 1 || entry.count - entry.lastLoggedCount >= AGGREGATED_WARNING_REPEAT_EVERY
+  if (shouldLog) {
+    const suppressedSinceLastLog = Math.max(0, entry.count - entry.lastLoggedCount - 1)
+    console.warn(`[integration-events] ${message}`, {
+      ...metadata,
+      occurrences: entry.count,
+      suppressedSinceLastLog
+    })
+    entry.lastLoggedCount = entry.count
+  }
+  aggregatedWarnings.set(key, entry)
+  logIntegrationEvent(message, {
+    ...metadata,
+    occurrences: entry.count
+  })
+}
+
+function isIntegrationEventDebugEnabled(): boolean {
+  return process.env.PEAR_INTEGRATION_EVENTS_DEBUG === '1' ||
+    process.env.PEAR_INTEGRATION_EVENTS_DEBUG === 'true'
 }
 
 function isTestProcess(): boolean {
@@ -938,6 +1076,7 @@ export class IntegrationEventBridge {
         handle.client().subscribe(
           watches.map((watch) => watch.glob),
           (event) => {
+            incrementIntegrationEventCounter(projectId, 'eventsReceived')
             logIntegrationEvent('received', {
               projectId,
               eventId: event.id,
@@ -954,7 +1093,9 @@ export class IntegrationEventBridge {
           },
           {
             coalesce: 'fire-once',
-            coalesceMs: Math.max(...watches.map((watch) => watch.coalesceMs), 750)
+            coalesceMs: Math.max(...watches.map((watch) => watch.coalesceMs), 750),
+            onCoalesced: () => incrementIntegrationEventCounter(projectId, 'eventsCoalesced'),
+            onQueueDepth: (depth) => setIntegrationEventGauge(projectId, 'queueDepth', depth)
           }
         )
       )
@@ -963,6 +1104,7 @@ export class IntegrationEventBridge {
         subscribed,
         watches.map((watch) => watch.glob),
         (event) => {
+          incrementIntegrationEventCounter(projectId, 'eventsReceived')
           logIntegrationEvent('received', {
             projectId,
             eventId: event.id,
@@ -978,8 +1120,13 @@ export class IntegrationEventBridge {
             })
           })
         },
-        Math.max(...watches.map((watch) => watch.coalesceMs), 750)
+        Math.max(...watches.map((watch) => watch.coalesceMs), 750),
+        {
+          onCoalesced: () => incrementIntegrationEventCounter(projectId, 'eventsCoalesced'),
+          onQueueDepth: (depth) => setIntegrationEventGauge(projectId, 'queueDepth', depth)
+        }
       )
+      setIntegrationEventGauge(projectId, 'mountCount', localSubscription?.localRoots.length ?? 0)
       if (localSubscription) {
         logIntegrationEvent('watching local mounts', {
           projectId,
@@ -999,6 +1146,8 @@ export class IntegrationEventBridge {
   async close(projectId: string): Promise<void> {
     const subscription = this.subscriptions.get(projectId)
     this.subscriptions.delete(projectId)
+    setIntegrationEventGauge(projectId, 'queueDepth', 0)
+    setIntegrationEventGauge(projectId, 'mountCount', 0)
     if (!subscription) return
     await Promise.all(subscription.subscriptions.map((entry) => entry.unsubscribe().catch(() => undefined)))
   }
@@ -1009,6 +1158,7 @@ export class IntegrationEventBridge {
 
   private async injectEvent(projectId: string, event: ChangeEvent, specs: SubscriptionSpec[]): Promise<void> {
     if (!shouldNotifyRelayfileChange(event)) {
+      incrementIntegrationEventCounter(projectId, 'eventsDropped')
       logIntegrationEvent('skipped filtered path', {
         projectId,
         eventId: event.id,
@@ -1019,6 +1169,7 @@ export class IntegrationEventBridge {
 
     const matchedSpecs = specsForEvent(event, specs)
     if (matchedSpecs.length === 0) {
+      incrementIntegrationEventCounter(projectId, 'eventsDropped')
       logIntegrationEvent('skipped unmatched path', {
         projectId,
         eventId: event.id,
@@ -1032,6 +1183,7 @@ export class IntegrationEventBridge {
     const fingerprint = eventChangeFingerprint(event)
     const recentKey = fingerprint ? `${duplicateKey}:change:${fingerprint}` : duplicateKey
     if (this.wasRecentlyInjected(recentKey, fingerprint ? RECENT_LOGICAL_CHANGE_TTL_MS : RECENT_INJECTION_TTL_MS)) {
+      incrementIntegrationEventCounter(projectId, 'eventsDropped')
       logIntegrationEvent('skipped duplicate path', {
         projectId,
         eventId: event.id,
@@ -1067,6 +1219,15 @@ export class IntegrationEventBridge {
     }
 
     const uniqueRecipients = dedupeStrings(recipients)
+    if (uniqueRecipients.length === 0) {
+      incrementIntegrationEventCounter(projectId, 'eventsDropped')
+      logIntegrationEvent('skipped no recipients', {
+        projectId,
+        eventId: event.id,
+        path: event.resource.path
+      })
+      return
+    }
     logIntegrationEvent('injecting', {
       projectId,
       eventId: event.id,
@@ -1096,6 +1257,7 @@ export class IntegrationEventBridge {
           : bridge.sendMessage(projectId, input)
       })
     )
+    incrementIntegrationEventCounter(projectId, 'eventsInjected')
   }
 
   private wasRecentlyInjected(key: string, ttlMs = RECENT_INJECTION_TTL_MS): boolean {
