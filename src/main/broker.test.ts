@@ -63,8 +63,10 @@ const mock = vi.hoisted(() => {
   const state = {
     spawnedClients: [] as MockClient[],
     constructedClients: [] as MockClient[],
+    connectedClients: [] as MockClient[],
     nextLocalAgents: [] as string[],
-    nextCloudAgents: [] as string[]
+    nextCloudAgents: [] as string[],
+    nextConnectedAgents: [] as string[]
   }
 
   class HarnessDriverClient {
@@ -75,7 +77,9 @@ const mock = vi.hoisted(() => {
     })
 
     static connect = vi.fn(() => {
-      throw new Error('not used in tests')
+      const client = createMockClient(state.nextConnectedAgents.splice(0))
+      state.connectedClients.push(client)
+      return client
     })
 
     constructor() {
@@ -314,9 +318,12 @@ describe('BrokerManager local + cloud coexistence', () => {
   beforeEach(() => {
     mock.state.spawnedClients.length = 0
     mock.state.constructedClients.length = 0
+    mock.state.connectedClients.length = 0
     mock.state.nextLocalAgents = []
     mock.state.nextCloudAgents = []
+    mock.state.nextConnectedAgents = []
     mock.HarnessDriverClient.spawn.mockClear()
+    mock.HarnessDriverClient.connect.mockClear()
   })
 
   it('keeps the local session alive when a cloud sandbox attaches', async () => {
@@ -352,6 +359,33 @@ describe('BrokerManager local + cloud coexistence', () => {
     expect(local.shutdown).not.toHaveBeenCalled()
 
     await manager.shutdown()
+  })
+
+  it('reuses current harness-driver connection files instead of spawning another broker', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'pear-current-connection-'))
+    const connectionPath = join(tempDir, '.agentworkforce', 'relay', 'connection.json')
+    await mkdir(dirname(connectionPath), { recursive: true })
+    await writeFile(connectionPath, JSON.stringify({
+      url: 'http://127.0.0.1:43210',
+      apiKey: 'test-key',
+      pid: 4242
+    }))
+
+    try {
+      const manager = new BrokerManager()
+      mock.state.nextConnectedAgents = ['codex-1']
+
+      const started = await manager.start(PROJECT_ID, tempDir, 'pear-project-1', undefined as never, [])
+
+      expect(started).toBe(true)
+      expect(mock.HarnessDriverClient.connect).toHaveBeenCalledWith({ cwd: tempDir, connectionPath })
+      expect(mock.HarnessDriverClient.spawn).not.toHaveBeenCalled()
+      expect(mock.state.connectedClients).toHaveLength(1)
+
+      await manager.shutdown()
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
   })
 
   it('keeps the cloud session alive when a local broker starts afterwards', async () => {

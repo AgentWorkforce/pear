@@ -718,7 +718,7 @@ function getBrokerConnectionFileInfo(
     return { hasApiKey: false }
   }
 
-  const connectionPath = join(cwd, '.agent-relay', 'connection.json')
+  const connectionPath = resolveBrokerConnectionPath(cwd)
   if (!existsSync(connectionPath)) {
     return { path: connectionPath, status: 'missing', hasApiKey: false }
   }
@@ -743,6 +743,18 @@ function getBrokerConnectionFileInfo(
   } catch {
     return { path: connectionPath, status: 'invalid', hasApiKey: false }
   }
+}
+
+function brokerConnectionPathCandidates(cwd: string): string[] {
+  return [
+    join(cwd, '.agentworkforce', 'relay', 'connection.json'),
+    join(cwd, '.agent-relay', 'connection.json')
+  ]
+}
+
+function resolveBrokerConnectionPath(cwd: string): string {
+  return brokerConnectionPathCandidates(cwd).find((candidate) => existsSync(candidate)) ??
+    brokerConnectionPathCandidates(cwd)[0]
 }
 
 function toInboundDeliveryMode(mode?: TerminalAttachMode): InboundDeliveryMode {
@@ -845,14 +857,19 @@ function getBrokerRuntimeSafeName(name: string): string {
 }
 
 function getBrokerRuntimeCleanupPaths(cwd: string, brokerName: string): string[] {
-  const root = join(cwd, '.agent-relay')
+  const legacyRoot = join(cwd, '.agent-relay')
+  const currentRoot = join(cwd, '.agentworkforce', 'relay')
   const safeName = getBrokerRuntimeSafeName(brokerName)
 
   return [
-    join(root, 'connection.json'),
-    join(root, `broker-${safeName}.lock`),
-    join(root, `state-${safeName}.json`),
-    join(root, `pending-${safeName}.json`)
+    join(currentRoot, 'connection.json'),
+    join(currentRoot, `broker-${safeName}.lock`),
+    join(currentRoot, `state-${safeName}.json`),
+    join(currentRoot, `pending-${safeName}.json`),
+    join(legacyRoot, 'connection.json'),
+    join(legacyRoot, `broker-${safeName}.lock`),
+    join(legacyRoot, `state-${safeName}.json`),
+    join(legacyRoot, `pending-${safeName}.json`)
   ]
 }
 
@@ -1268,20 +1285,23 @@ export class BrokerManager {
   }
 
   private async connectExistingBroker(projectId: string, cwd: string): Promise<AgentRelayClient | null> {
-    const connectionPath = join(cwd, '.agent-relay', 'connection.json')
-    if (!existsSync(connectionPath)) {
+    const connectionPaths = brokerConnectionPathCandidates(cwd).filter((candidate) => existsSync(candidate))
+    if (connectionPaths.length === 0) {
       return null
     }
 
-    try {
-      const client = AgentRelayClient.connect({ cwd })
-      await client.getSession()
-      console.log(`[broker] Reusing existing broker for project ${projectId}: ${connectionPath}`)
-      return client
-    } catch (err) {
-      console.warn(`[broker] Existing broker connection is not reusable for project ${projectId}:`, err)
-      return null
+    for (const connectionPath of connectionPaths) {
+      try {
+        const client = AgentRelayClient.connect({ cwd, connectionPath })
+        await client.getSession()
+        console.log(`[broker] Reusing existing broker for project ${projectId}: ${connectionPath}`)
+        return client
+      } catch (err) {
+        console.warn(`[broker] Existing broker connection is not reusable for project ${projectId}:`, err)
+      }
     }
+
+    return null
   }
 
   // Re-establish a local broker whose process has died or wedged. When this
