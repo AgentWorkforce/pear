@@ -33,6 +33,8 @@ type SubscribeCall = {
   options?: {
     coalesce?: 'none' | 'fire-once'
     coalesceMs?: number
+    pathScope?: string[]
+    from?: 'now' | 'legacy'
     onCoalesced?: () => void
     onQueueDepth?: (depth: number) => void
   }
@@ -55,12 +57,15 @@ function integration(overrides: Partial<ConnectedIntegration> & {
 function changeEvent(
   path: string,
   provider = path.split('/')[1] || 'github',
-  overrides: { digest?: string; occurredAt?: string; origin?: string; revision?: string } = {}
+  options: string | { digest?: string; occurredAt?: string; origin?: string; revision?: string } = {}
 ): ChangeEvent {
-  const slackTs = path.match(/\/(?:messages|replies)\/(\d{10})_(\d+)(?:\/|\.json$)/u)
+  const overrides = typeof options === 'string' ? { occurredAt: options } : options
+  const slackTs = provider === 'slack'
+    ? path.match(/\/(?:messages|replies)\/(\d{10})_(\d+)(?:\/|\.json$)/u)
+    : null
   const occurredAt = overrides.occurredAt ?? (slackTs?.[1]
     ? new Date(Number(`${slackTs[1]}.${slackTs[2] || '0'}`) * 1000).toISOString()
-    : '2026-06-04T00:00:00.000Z')
+    : new Date(Date.now() + 1000).toISOString())
   return {
     id: `evt:${path}`,
     workspace: 'workspace-id',
@@ -110,6 +115,16 @@ function changeEventWithFullData(
           }
         }
   } as ChangeEvent
+}
+
+async function withMockedNow<T>(isoTimestamp: string, fn: () => Promise<T>): Promise<T> {
+  const originalDateNow = Date.now
+  Date.now = () => Date.parse(isoTimestamp)
+  try {
+    return await fn()
+  } finally {
+    Date.now = originalDateNow
+  }
 }
 
 function makeHarness(agents = ['alice', 'bob'], options: { failSend?: boolean } = {}): {
@@ -171,6 +186,13 @@ async function waitForSent(harness: { sent: SentMessage[] }, count: number): Pro
   }
 }
 
+async function waitForDropped(projectId: string, count: number): Promise<void> {
+  const deadline = Date.now() + 1_000
+  while ((getIntegrationEventTelemetrySnapshot().projects[projectId]?.eventsDropped || 0) < count && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+}
+
 test('integration events route only to the targets for the matching integration path', async () => {
   const harness = makeHarness()
 
@@ -189,6 +211,8 @@ test('integration events route only to the targets for the matching integration 
   ])
 
   assert.deepEqual(harness.subscribeCalls[0].globs, ['/github/repos/**', '/linear/issues/**'])
+  assert.deepEqual(harness.subscribeCalls[0].options?.pathScope, ['/github/repos/**', '/linear/issues/**'])
+  assert.equal(harness.subscribeCalls[0].options?.from, 'now')
 
   await harness.emit(changeEvent('/github/repos/acme/widgets.json', 'github'))
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
@@ -249,41 +273,146 @@ test('integration events watch selected relayfile mount paths', async () => {
     }
   })
 
-  await harness.bridge.reconcile('project-1', [slackIntegration])
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [slackIntegration])
+  })
 
   assert.deepEqual(harness.subscribeCalls[0].globs, [
-    '/slack/channels/C123ABC/**',
     '/slack/channels/C123ABC__proj-cloud/**',
     '/slack/channels/D*/**',
     '/slack/dms/*/**',
     '/slack/users/*/messages/**'
   ])
+  assert.deepEqual(harness.subscribeCalls[0].options?.pathScope, [
+    '/slack/channels/C123ABC__proj-cloud/**',
+    '/slack/channels/D*/**',
+    '/slack/dms/*/**',
+    '/slack/users/*/messages/**'
+  ])
+  assert.equal(harness.subscribeCalls[0].options?.from, 'now')
   assert.deepEqual(integrationSubscriptionSummaries([slackIntegration])[0].watches, [
-    '.integrations/slack/channels/C123ABC/**',
     '.integrations/slack/channels/C123ABC__proj-cloud/**',
     '.integrations/slack/channels/D*/**',
     '.integrations/slack/dms/*/**',
     '.integrations/slack/users/*/messages/**'
   ])
 
-  await harness.emit(changeEvent('/slack/channels/C123ABC__proj-cloud/messages/1713220123_001100/meta.json', 'slack'))
+  await harness.emit(changeEvent('/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json', 'slack'))
   await waitForSent(harness, 1)
 
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
-  assert.match(harness.sent[0].input.text, /Path: \.integrations\/slack\/channels\/C123ABC__proj-cloud\/messages\/1713220123_001100\/meta\.json/u)
-  assert.match(harness.sent[0].input.text, /Relayfile path: \/slack\/channels\/C123ABC__proj-cloud\/messages\/1713220123_001100\/meta\.json/u)
+  assert.match(harness.sent[0].input.text, /Path: \.integrations\/slack\/channels\/C123ABC__proj-cloud\/messages\/1780668000_000000\/meta\.json/u)
+  assert.match(harness.sent[0].input.text, /Relayfile path: \/slack\/channels\/C123ABC__proj-cloud\/messages\/1780668000_000000\/meta\.json/u)
 
   harness.sent.splice(0)
-  await harness.emit(changeEvent('/slack/channels/C123ABC/messages/1713220124_001100/meta.json', 'slack'))
-  await waitForSent(harness, 1)
-  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
-
-  harness.sent.splice(0)
-  await harness.emit(changeEvent('/slack/channels/C999XYZ/messages/1713220125_001100/meta.json', 'slack'))
+  await harness.emit(changeEvent('/slack/channels/C123ABC/messages/1780668060_000000/meta.json', 'slack'))
   assert.deepEqual(harness.sent, [])
 
-  await harness.emit(changeEvent('/slack/channels/D123ABC/messages/1713220126_001100/meta.json', 'slack'))
+  harness.sent.splice(0)
+  await harness.emit(changeEvent('/slack/channels/C999XYZ/messages/1780668120_000000/meta.json', 'slack'))
+  assert.deepEqual(harness.sent, [])
+
+  await harness.emit(changeEvent('/slack/channels/D123ABC/messages/1780668180_000000/meta.json', 'slack'))
   await waitForSent(harness, 1)
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
+})
+
+test('remote replayed events older than the subscription session are dropped by default', async () => {
+  const harness = makeHarness()
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+  })
+
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC__proj-cloud/messages/1780315200_000000/meta.json',
+    'slack',
+    '2026-06-01T12:00:00.000Z'
+  ))
+
+  assert.deepEqual(harness.sent, [])
+  assert.deepEqual(harness.listAgentsCalls, [])
+  await waitForDropped('project-1', 1)
+  assert.equal(getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsDropped, 1)
+})
+
+test('remote events at or after the subscription session are still injected', async () => {
+  const harness = makeHarness()
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+  })
+
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json',
+    'slack',
+    '2026-06-05T14:00:00.000Z'
+  ))
+  await waitForSent(harness, 1)
+
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
+})
+
+test('remote events within replay skew before the subscription session are still injected', async () => {
+  const harness = makeHarness()
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+  })
+
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC__proj-cloud/messages/1780667400_000000/meta.json',
+    'slack',
+    '2026-06-05T13:50:00.000Z'
+  ))
+  await waitForSent(harness, 1)
+
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
+})
+
+test('historical download subscriptions can receive older remote events', async () => {
+  const harness = makeHarness()
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        downloadHistoricalData: true,
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+  })
+
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC__proj-cloud/messages/1780315200_000000/meta.json',
+    'slack',
+    '2026-06-01T12:00:00.000Z'
+  ))
+  await waitForSent(harness, 1)
+
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
 })
 
@@ -303,7 +432,6 @@ test('slack direct message event scope can be disabled', async () => {
   await harness.bridge.reconcile('project-1', [slackIntegration])
 
   assert.deepEqual(harness.subscribeCalls[0].globs, [
-    '/slack/channels/C123ABC/**',
     '/slack/channels/C123ABC__proj-cloud/**'
   ])
 
@@ -333,26 +461,32 @@ test('slack backfill and malformed nested message paths are not injected', async
       }
     }))
 
-    await harness.bridge.reconcile('project-1', [
-      integration({
-        provider: 'slack',
-        integrationId: 'slack-1',
-        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
-        scope: { notifyAgents: ['alice'] }
-      })
-    ])
+    await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+      await harness.bridge.reconcile('project-1', [
+        integration({
+          provider: 'slack',
+          integrationId: 'slack-1',
+          mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+          scope: { notifyAgents: ['alice'] }
+        })
+      ])
+    })
 
     await harness.emit({
       ...changeEvent(stalePath, 'slack'),
       occurredAt: '2026-06-05T14:14:57.314Z'
     })
     assert.deepEqual(harness.sent, [])
+    await waitForDropped('project-1', 1)
+    assert.equal(getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsDropped, 1)
 
     await harness.emit(changeEvent(
       '/slack/channels/C123ABC__proj-cloud/messages/1780668181_544139/slack/channels/C123ABC__proj-cloud/messages/1780668181_544139/meta.json',
       'slack'
     ))
     assert.deepEqual(harness.sent, [])
+    await waitForDropped('project-1', 2)
+    assert.equal(getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsDropped, 2)
   } finally {
     await harness.bridge.close('project-1')
     if (originalHome === undefined) {
@@ -387,14 +521,16 @@ test('slack thread reply events include local message text in the injected syste
       }
     }))
 
-    await harness.bridge.reconcile('project-1', [
-      integration({
-        provider: 'slack',
-        integrationId: 'slack-1',
-        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
-        scope: { notifyAgents: ['alice'] }
-      })
-    ])
+    await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+      await harness.bridge.reconcile('project-1', [
+        integration({
+          provider: 'slack',
+          integrationId: 'slack-1',
+          mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+          scope: { notifyAgents: ['alice'] }
+        })
+      ])
+    })
 
     await harness.emit(changeEvent(replyPath, 'slack'))
     await waitForSent(harness, 1)
@@ -417,14 +553,16 @@ test('remote slack events include expanded message text before local mount sync 
   const harness = makeHarness(['alice'])
   const replyPath = '/slack/channels/C123ABC__proj-cloud/threads/1780667635_192799/replies/1780668181_544139.json'
 
-  await harness.bridge.reconcile('project-1', [
-    integration({
-      provider: 'slack',
-      integrationId: 'slack-1',
-      mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
-      scope: { notifyAgents: ['alice'] }
-    })
-  ])
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+  })
 
   await harness.emit(changeEventWithFullData(replyPath, 'slack', {
     provider: 'slack',
@@ -483,6 +621,37 @@ test('slack local event context rejects traversal paths', async () => {
     }
     await rm(tempHome, { recursive: true, force: true })
   }
+})
+
+test('historical replay allowance is scoped to the matching integration', async () => {
+  const harness = makeHarness()
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-history',
+        mountPaths: ['/slack/channels'],
+        downloadHistoricalData: true,
+        scope: { notifyAgents: ['alice'] }
+      }),
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-live',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        scope: { notifyAgents: ['bob'] }
+      })
+    ])
+  })
+
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC__proj-cloud/messages/1780315200_000000/meta.json',
+    'slack',
+    '2026-06-01T12:00:00.000Z'
+  ))
+  await waitForSent(harness, 1)
+
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
 })
 
 test('local fallback watchers are disabled when historical download is off', () => {
@@ -699,7 +868,9 @@ test('resource alias mount paths inject the same relative event only once', asyn
     }
   })
 
-  await harness.bridge.reconcile('project-1', [chatIntegration])
+  await withMockedNow('2026-06-04T21:10:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [chatIntegration])
+  })
 
   await harness.emit(changeEvent('/chat/channels/C123ABC/threads/1780607825_485189/replies/1780611452_510669.json', 'chat'))
   await harness.emit(changeEvent('/chat/channels/C123ABC__proj-cloud/threads/1780607825_485189/replies/1780611452_510669.json', 'chat'))
@@ -718,7 +889,9 @@ test('resource alias mount paths with the same revision inject one logical chang
     }
   })
 
-  await harness.bridge.reconcile('project-1', [slackIntegration])
+  await withMockedNow('2026-06-04T21:10:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [slackIntegration])
+  })
 
   await harness.emit(changeEvent(
     '/slack/channels/C123ABC/messages/1780607825_485189/meta.json',

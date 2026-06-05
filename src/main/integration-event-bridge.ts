@@ -21,6 +21,7 @@ const INTEGRATION_EVENT_SCOPES = ['relayfile:fs:read:/**']
 const PROJECT_INTEGRATIONS_LINK_NAME = '.integrations'
 const RECENT_INJECTION_TTL_MS = 10_000
 const RECENT_LOGICAL_CHANGE_TTL_MS = 10 * 60_000
+const REPLAY_SKEW_TOLERANCE_MS = 15 * 60_000
 const INTEGRATION_EVENT_LOG_PATH = join(homedir(), '.agentworkforce', 'pear', 'integration-events.log')
 const AGGREGATED_WARNING_REPEAT_EVERY = 25
 const MAX_AGGREGATED_WARNING_KEYS = 256
@@ -52,6 +53,7 @@ type SubscriptionSpec = {
   eventPathGlobs: string[]
   watches: WatchRegistration[]
   targets: DeliveryTargets
+  allowHistoricalReplay: boolean
 }
 
 type ProjectSubscription = {
@@ -97,6 +99,8 @@ type RelayfileEventClient = {
     options?: {
       coalesce?: 'none' | 'fire-once'
       coalesceMs?: number
+      pathScope?: string[]
+      from?: 'now' | 'legacy'
       onCoalesced?: () => void
       onQueueDepth?: (depth: number) => void
     }
@@ -114,6 +118,14 @@ type TokenProvider = () => Promise<string | undefined>
 type IntegrationEventBridgeDeps = {
   broker?: BrokerEventBridge
   getWorkspaceHandle?: () => Promise<RelayfileWorkspaceHandle>
+}
+
+type EventDeliverySource = 'remote' | 'local-mount'
+
+type EventInjectionOptions = {
+  source: EventDeliverySource
+  subscriptionStartedAtMs: number
+  localMountWorkspaceId: string
 }
 
 type EventWorkspaceHandleCache = {
@@ -211,6 +223,10 @@ function dedupeStrings(values: string[]): string[] {
   return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean))).sort()
 }
 
+function sameStringList(left: string[], right: string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index])
+}
+
 function toRelayfileProvider(provider: string): string {
   const normalized = provider.trim().toLowerCase()
   return normalized === 'gmail' ? 'google-mail' : normalized
@@ -271,16 +287,7 @@ function canonicalMountPaths(integration: ConnectedIntegration): string[] {
     if (rootLevel) return `/${provider}${rootLevel[1] ?? ''}`
     return path
   })
-  return dedupeStrings([
-    ...mountPaths,
-    ...mountPaths.map((path) => slackChannelIdFallbackMountPath(provider, path)).filter((path): path is string => path !== null)
-  ])
-}
-
-function slackChannelIdFallbackMountPath(provider: string, path: string): string | null {
-  if (provider !== 'slack') return null
-  const match = path.match(/^\/slack\/channels\/([^/_][^/]*)__[^/]+$/u)
-  return match?.[1] ? `/slack/channels/${match[1]}` : null
+  return dedupeStrings(mountPaths)
 }
 
 function watchGlobForPath(path: string): string {
@@ -361,7 +368,8 @@ function subscriptionSpecsFor(integrations: ConnectedIntegration[]): Subscriptio
         glob,
         coalesceMs: 750
       })),
-      targets: deliveryTargetsFor([integration])
+      targets: deliveryTargetsFor([integration]),
+      allowHistoricalReplay: integration.downloadHistoricalData === true
     }
   }).filter((spec) => spec.watches.length > 0)
 }
@@ -482,6 +490,9 @@ function createWorkspaceScopedEventClient(
       const pendingByPath = new Map<string, ReturnType<typeof setTimeout>>()
       const coalesceMs = Math.max(0, Math.floor(options?.coalesceMs ?? 750))
       const shouldCoalesce = (options?.coalesce ?? 'fire-once') !== 'none'
+      const pathScope = options?.pathScope?.length && !sameStringList(options.pathScope, globs)
+        ? options.pathScope
+        : null
 
       const dispatch = (event: FilesystemEvent): void => {
         if (!active) return
@@ -505,6 +516,7 @@ function createWorkspaceScopedEventClient(
         if (!active || !shouldPublishFilesystemEvent(event)) return
         const path = event.path.startsWith('/') ? event.path : `/${event.path}`
         if (!globs.some((glob) => globMatchesPath(glob, path))) return
+        if (pathScope && !pathScope.some((glob) => globMatchesPath(glob, path))) return
 
         if (!shouldCoalesce) {
           dispatch({ ...event, path })
@@ -541,12 +553,16 @@ function createWorkspaceScopedEventClient(
           }
           logIntegrationEvent('remote stream starting', {
             workspaceId,
-            globs
+            globs,
+            pathScope: options?.pathScope,
+            from: options?.from ?? 'now'
           })
           sync = new RelayFileSync({
             client,
             workspaceId,
             token,
+            from: options?.from ?? 'now',
+            paths: options?.pathScope?.length ? options.pathScope : globs,
             onPollingFallback: (info) => {
               warnIntegrationEventAggregated(
                 `remote stream polling fallback:${workspaceId}`,
@@ -878,6 +894,23 @@ function specsForEvent(event: ChangeEvent, specs: SubscriptionSpec[]): Subscript
     spec.mountPaths.some((mountPath) => pathIsInsideMount(path, mountPath)) ||
     spec.eventPathGlobs.some((glob) => globMatchesPath(glob, path))
   )
+}
+
+function eventOccurredAtMs(event: ChangeEvent): number | null {
+  const value = Date.parse(event.occurredAt)
+  return Number.isFinite(value) ? value : null
+}
+
+function historicalRemoteReplayAllowedSpecs(
+  event: ChangeEvent,
+  matchedSpecs: SubscriptionSpec[],
+  options: EventInjectionOptions
+): SubscriptionSpec[] {
+  if (options.source !== 'remote') return matchedSpecs
+  const occurredAtMs = eventOccurredAtMs(event)
+  if (occurredAtMs === null) return matchedSpecs
+  if (occurredAtMs >= options.subscriptionStartedAtMs - REPLAY_SKEW_TOLERANCE_MS) return matchedSpecs
+  return matchedSpecs.filter((spec) => spec.allowHistoricalReplay)
 }
 
 function longestMatchingMountPath(path: string, spec: SubscriptionSpec): string | null {
@@ -1236,6 +1269,7 @@ export class IntegrationEventBridge {
         provider: spec.provider,
         mountPaths: spec.mountPaths,
         eventPathGlobs: spec.eventPathGlobs,
+        allowHistoricalReplay: spec.allowHistoricalReplay,
         targets: spec.targets
       }))
     })
@@ -1244,16 +1278,21 @@ export class IntegrationEventBridge {
     await this.close(projectId)
     const subscriptions: Subscription[] = []
     try {
+      const remoteSubscriptionStartedAtMs = Date.now()
       logIntegrationEvent('subscribing', {
         projectId,
         workspaceId: handle.workspaceId,
         localMountWorkspaceId: handle.localMountWorkspaceId,
+        // temporary-pending-SDK-contract: Relayfile WS currently replays
+        // recent catch-up events without a from=now/path-scope contract.
+        remoteSubscriptionStartedAt: new Date(remoteSubscriptionStartedAtMs).toISOString(),
         globs: watches.map((watch) => watch.glob),
         specs: specs.map((spec) => ({
           integrationId: spec.integrationId,
           provider: spec.provider,
           mountPaths: spec.mountPaths,
           eventPathGlobs: spec.eventPathGlobs,
+          allowHistoricalReplay: spec.allowHistoricalReplay,
           targets: targetLabels(spec.targets)
         }))
       })
@@ -1268,7 +1307,11 @@ export class IntegrationEventBridge {
               type: event.type,
               path: event.resource.path
             })
-            void this.injectEvent(projectId, event, specs, handle.localMountWorkspaceId).catch((error) => {
+            void this.injectEvent(projectId, event, specs, {
+              source: 'remote',
+              subscriptionStartedAtMs: remoteSubscriptionStartedAtMs,
+              localMountWorkspaceId: handle.localMountWorkspaceId
+            }).catch((error) => {
               const errorMessage = toErrorMessage(error)
               warnIntegrationEventAggregated(
                 `event delivery failed:${projectId}`,
@@ -1284,6 +1327,8 @@ export class IntegrationEventBridge {
           {
             coalesce: 'fire-once',
             coalesceMs: Math.max(...watches.map((watch) => watch.coalesceMs), 750),
+            pathScope: watches.map((watch) => watch.glob),
+            from: 'now',
             onCoalesced: () => incrementIntegrationEventCounter(projectId, 'eventsCoalesced'),
             onQueueDepth: (depth) => setIntegrationEventGauge(projectId, 'queueDepth', depth)
           }
@@ -1302,7 +1347,11 @@ export class IntegrationEventBridge {
             path: event.resource.path,
             source: 'local-mount'
           })
-          void this.injectEvent(projectId, event, specs, handle.localMountWorkspaceId).catch((error) => {
+          void this.injectEvent(projectId, event, specs, {
+            source: 'local-mount',
+            subscriptionStartedAtMs: remoteSubscriptionStartedAtMs,
+            localMountWorkspaceId: handle.localMountWorkspaceId
+          }).catch((error) => {
             const errorMessage = toErrorMessage(error)
             warnIntegrationEventAggregated(
               `local event delivery failed:${projectId}`,
@@ -1355,9 +1404,9 @@ export class IntegrationEventBridge {
     projectId: string,
     event: ChangeEvent,
     specs: SubscriptionSpec[],
-    localMountWorkspaceId: string
+    options: EventInjectionOptions
   ): Promise<void> {
-    if (!await shouldNotifyRelayfileChange(event, localMountWorkspaceId)) {
+    if (!await shouldNotifyRelayfileChange(event, options.localMountWorkspaceId)) {
       incrementIntegrationEventCounter(projectId, 'eventsDropped')
       logIntegrationEvent('skipped filtered path', {
         projectId,
@@ -1367,15 +1416,28 @@ export class IntegrationEventBridge {
       return
     }
 
-    const matchedSpecs = specsForEvent(event, specs)
+    const eventMatchedSpecs = specsForEvent(event, specs)
+    const matchedSpecs = historicalRemoteReplayAllowedSpecs(event, eventMatchedSpecs, options)
     if (matchedSpecs.length === 0) {
       incrementIntegrationEventCounter(projectId, 'eventsDropped')
-      logIntegrationEvent('skipped unmatched path', {
-        projectId,
-        eventId: event.id,
-        path: event.resource.path,
-        mountPaths: specs.flatMap((spec) => spec.mountPaths)
-      })
+      if (eventMatchedSpecs.length > 0) {
+        logIntegrationEvent('skipped historical remote replay', {
+          projectId,
+          eventId: event.id,
+          path: event.resource.path,
+          occurredAt: event.occurredAt,
+          subscriptionStartedAt: new Date(options.subscriptionStartedAtMs).toISOString(),
+          replaySkewToleranceMs: REPLAY_SKEW_TOLERANCE_MS,
+          temporaryPendingSdkContract: true
+        })
+      } else {
+        logIntegrationEvent('skipped unmatched path', {
+          projectId,
+          eventId: event.id,
+          path: event.resource.path,
+          mountPaths: specs.flatMap((spec) => spec.mountPaths)
+        })
+      }
       return
     }
 
@@ -1428,7 +1490,7 @@ export class IntegrationEventBridge {
       })
       return
     }
-    const contextLines = await eventContextLines(event, localMountWorkspaceId)
+    const contextLines = await eventContextLines(event, options.localMountWorkspaceId)
     logIntegrationEvent('injecting', {
       projectId,
       eventId: event.id,
