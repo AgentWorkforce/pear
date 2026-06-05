@@ -11,8 +11,8 @@
 //                                     installed @relayfile/sdk version
 //
 // Release mode (`--release` or RELAYFILE_MOUNT_INSTALL_SOURCE=release) ignores
-// local binaries and always installs from the matching GitHub release unless
-// the optional build-time check sees that the release binary is already present.
+// local binaries and installs from the matching GitHub release unless that
+// release binary is already present.
 import { access, chmod, copyFile, mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises'
 import { constants, createWriteStream } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
@@ -22,7 +22,6 @@ import { createRequire } from 'node:module'
 
 const optional = process.argv.includes('--optional')
 const releaseMode = process.argv.includes('--release') || process.env.RELAYFILE_MOUNT_INSTALL_SOURCE === 'release'
-const forceReleaseDownload = releaseMode && !optional
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 const pearRoot = resolve(scriptDir, '..')
 const require = createRequire(join(pearRoot, 'package.json'))
@@ -127,7 +126,7 @@ function requireSdkVersion() {
 if (releaseMode) {
   const version = requireSdkVersion()
   const installedVersion = await installedMarker()
-  if (!forceReleaseDownload && installedVersion === version) {
+  if (installedVersion === version) {
     console.log(`[relayfile-mount] v${version} already installed at ${target}`)
     process.exit(0)
   }

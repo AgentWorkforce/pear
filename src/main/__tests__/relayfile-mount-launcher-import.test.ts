@@ -40,6 +40,8 @@ test('mac release scripts install relayfile-mount from release assets only', asy
     assert.match(script, /RELAYFILE_MOUNT_INSTALL_SOURCE=release npm run build/)
   }
   assert.match(installScript, /const releaseMode = /)
-  assert.match(installScript, /if \(releaseMode\) \{/)
-  assert.match(installScript, /await downloadRelease\(version\)/)
+  assert.match(
+    installScript,
+    /if \(releaseMode\) \{[\s\S]*?await downloadRelease\(version\)[\s\S]*?process\.exit\(0\)/
+  )
 })
