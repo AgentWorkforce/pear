@@ -579,6 +579,14 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('treats project-scoped refreshEventStream as a no-op before a broker session starts', async () => {
+    const manager = new BrokerManager()
+
+    await expect(manager.refreshEventStream(PROJECT_ID, 'startup-refresh')).resolves.toBeUndefined()
+
+    await manager.shutdown()
+  })
+
   it('does not let a global event-stream refresh overwrite session windows', async () => {
     const manager = new BrokerManager()
     const firstWindow = createMockWindow()

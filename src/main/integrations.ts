@@ -747,21 +747,21 @@ export class IntegrationsManager {
     const normalizedProvider = toRelayfileProvider(provider)
     const normalizedResource = resource.trim().toLowerCase()
     if (!normalizedResource) throw new Error('Integration option resource is required')
+    const workspaceId = await getAccountWorkspaceId(accountWorkspaceReadyRetryOptions())
 
-    const payload = await this.withWorkspaceHandle(async (handle) => {
-      try {
-        return await handle.requestJson({
-          operation: 'listIntegrationOptions',
-          method: 'GET',
-          path: `api/v1/workspaces/${handle.workspaceId}/integrations/${encodeURIComponent(normalizedProvider)}/options/${encodeURIComponent(normalizedResource)}`
-        }) as unknown
-      } catch (error) {
-        if (normalizedProvider === 'slack' && normalizedResource === 'channels') {
-          return this.listLegacySlackChannelOptions(handle, normalizedProvider, error)
-        }
+    let payload: unknown
+    try {
+      payload = await this.fetchJson<unknown>(
+        'GET',
+        `api/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(normalizedProvider)}/options/${encodeURIComponent(normalizedResource)}`
+      )
+    } catch (error) {
+      if (normalizedProvider === 'slack' && normalizedResource === 'channels') {
+        payload = await this.listLegacySlackChannelOptions(workspaceId, normalizedProvider, error)
+      } else {
         throw error
       }
-    })
+    }
 
     const rawOptions = isRecord(payload) && Array.isArray(payload.options) ? payload.options : []
     return rawOptions
@@ -776,7 +776,7 @@ export class IntegrationsManager {
   }
 
   private async listLegacySlackChannelOptions(
-    handle: WorkspaceHandle,
+    workspaceId: string,
     provider: string,
     originalError: unknown
   ): Promise<{ options: IntegrationOption[] }> {
@@ -786,11 +786,10 @@ export class IntegrationsManager {
     try {
       do {
         const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
-        const payload = await handle.requestJson({
-          operation: 'listSlackAvailableChannels',
-          method: 'GET',
-          path: `api/v1/workspaces/${handle.workspaceId}/integrations/${encodeURIComponent(provider)}/channels/available${query}`
-        }) as SlackChannelOptionResponse
+        const payload = await this.fetchJson<SlackChannelOptionResponse>(
+          'GET',
+          `api/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(provider)}/channels/available${query}`
+        )
         const channels = Array.isArray(payload.channels) ? payload.channels : []
         for (const channel of channels) {
           if (!isRecord(channel)) continue
@@ -971,8 +970,8 @@ export class IntegrationsManager {
     }
 
     await this.persistIntegration(projectId, integration)
-    await this.syncAgentState(projectId, integration.notifyAgent)
     this.emit({ type: 'integration-added', projectId, integration })
+    this.syncAgentStateEventually(projectId, integration.notifyAgent)
     return integration
   }
 
@@ -1498,6 +1497,12 @@ export class IntegrationsManager {
   private isVisibleInProject(projectId: string, integrationId: string): boolean {
     const integration = this.listConnected(projectId).find((entry) => entry.integrationId === integrationId)
     return integration?.visibleInProject !== false
+  }
+
+  private syncAgentStateEventually(projectId: string, notifyAgent: boolean): void {
+    void this.syncAgentState(projectId, notifyAgent).catch((error) => {
+      console.warn('[integrations] Failed to sync integration state:', toErrorMessage(error))
+    })
   }
 
   private async syncAgentState(projectId: string, notifyAgent: boolean): Promise<void> {

@@ -1723,9 +1723,19 @@ export class BrokerManager {
 
   async refreshEventStream(projectId?: string, reason = 'manual', win?: BrowserWindow): Promise<void> {
     const normalizedProjectId = projectId?.trim()
-    const sessions = normalizedProjectId
-      ? await this.getOrAwaitSessionsForProject(normalizedProjectId)
-      : Array.from(this.sessions.values())
+    let sessions: BrokerSession[]
+    if (normalizedProjectId) {
+      try {
+        sessions = await this.getOrAwaitSessionsForProject(normalizedProjectId)
+      } catch (err) {
+        if (err instanceof Error && err.message === 'Relay workspace not started — select the project first') {
+          return
+        }
+        throw err
+      }
+    } else {
+      sessions = Array.from(this.sessions.values())
+    }
     const rebindWindow = normalizedProjectId ? win : undefined
 
     for (const session of sessions) {
