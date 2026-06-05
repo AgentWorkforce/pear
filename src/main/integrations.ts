@@ -193,6 +193,7 @@ const POLL_INTERVAL_MS = 2_000
 const POLL_TIMEOUT_MS = 5 * 60_000
 const CATALOG_CACHE_MS = 5 * 60_000
 const SYSTEM_MESSAGE_DEBOUNCE_MS = 1_000
+const LOCAL_MOUNT_CLOUD_HYDRATION_THROTTLE_MS = 30_000
 const CATALOG_PATH = '/api/v1/integrations/catalog'
 const MAX_REMOTE_DIRECTORY_ENTRIES = 5_000
 
@@ -620,6 +621,8 @@ export class IntegrationsManager {
   private systemMessageTimers = new Map<string, NodeJS.Timeout>()
   private catalogCache: IntegrationAdapter[] | null = null
   private catalogFetchedAt = 0
+  private localMountCloudHydrationStartedAt = 0
+  private localMountCloudHydrationPromise: Promise<void> | null = null
 
   onEvent(handler: (event: IntegrationsEvent) => void): () => void {
     this.listeners.add(handler)
@@ -1663,7 +1666,41 @@ export class IntegrationsManager {
     await Promise.all(loadStore().projects.map((project) => this.syncEventSubscriptions(project.id)))
   }
 
-  private async syncLocalMounts(): Promise<void> {
+  private async hydrateCloudIntegrationsForLocalMounts(): Promise<void> {
+    const now = Date.now()
+    if (this.localMountCloudHydrationPromise) return this.localMountCloudHydrationPromise
+    if (now - this.localMountCloudHydrationStartedAt < LOCAL_MOUNT_CLOUD_HYDRATION_THROTTLE_MS) return
+
+    this.localMountCloudHydrationStartedAt = now
+    const pending = (async () => {
+      const projects = loadStore().projects
+      if (projects.length === 0) return
+
+      const cloud = await this.listCloudWorkspaceIntegrations()
+      if (cloud.length === 0) return
+
+      for (const project of projects) {
+        await this.mergeCloudIntegrationsIntoProject(project.id, cloud)
+      }
+    })()
+      .catch((error) => {
+        console.warn('[integrations] Failed to hydrate cloud integrations for local mounts:', toErrorMessage(error))
+      })
+      .finally(() => {
+        if (this.localMountCloudHydrationPromise === pending) {
+          this.localMountCloudHydrationPromise = null
+        }
+      })
+
+    this.localMountCloudHydrationPromise = pending
+    return pending
+  }
+
+  private async syncLocalMounts(options: { hydrateCloud?: boolean } = {}): Promise<void> {
+    if (options.hydrateCloud !== false) {
+      await this.hydrateCloudIntegrationsForLocalMounts()
+    }
+
     const localEntries = loadStore().projects.flatMap((project) =>
       this.listConnected(project.id).map((integration) => ({
         projectId: project.id,
@@ -1718,7 +1755,7 @@ export class IntegrationsManager {
   }
 
   private async withLocalMountPaths(integrations: ConnectedIntegration[]): Promise<ConnectedIntegration[]> {
-    await this.syncLocalMounts()
+    await this.syncLocalMounts({ hydrateCloud: false })
     const workspaceId = integrationMountManager.currentWorkspaceId()
     if (!workspaceId) return integrations
     return integrations.map((integration) => {
