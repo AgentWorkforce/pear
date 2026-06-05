@@ -1564,7 +1564,7 @@ export class IntegrationsManager {
     lines.push('')
     if (!subscriptionsReady && subscriptions.length > 0) {
       lines.push('Integration event subscriptions are requested for this project, but Pear could not register them with Relayfile yet.')
-      lines.push('Do not assume notifications will arrive until a later integrations update confirms active subscriptions. If historical provider records are mounted for an integration, read them when the user asks for current state; otherwise rely on incoming events and explicit user-provided context.')
+      lines.push('Do not assume notifications will arrive until a later integrations update confirms active subscriptions. If historical provider records are mounted for an integration, read them when the user asks for current state; otherwise rely on incoming event notifications, inline event context, and the event file path when present.')
     } else if (subscriptions.length === 0) {
       lines.push('No integration event subscriptions are active for this project.')
     } else {

@@ -79,7 +79,8 @@ function capabilityLabel(adapter: IntegrationAdapter): string {
 function defaultScope(adapter: IntegrationAdapter): Record<string, unknown> {
   return {
     provider: adapter.provider,
-    scopes: adapter.requiredScopes || []
+    scopes: adapter.requiredScopes || [],
+    ...(canonicalProviderKey(adapter.provider) === 'slack' ? { listenDms: true } : {})
   }
 }
 

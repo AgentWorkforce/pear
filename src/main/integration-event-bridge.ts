@@ -1,5 +1,5 @@
 import { existsSync, watch, type FSWatcher } from 'node:fs'
-import { appendFile, mkdir, stat } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import {
@@ -24,6 +24,13 @@ const RECENT_LOGICAL_CHANGE_TTL_MS = 10 * 60_000
 const INTEGRATION_EVENT_LOG_PATH = join(homedir(), '.agentworkforce', 'pear', 'integration-events.log')
 const AGGREGATED_WARNING_REPEAT_EVERY = 25
 const MAX_AGGREGATED_WARNING_KEYS = 256
+const MAX_INLINE_EVENT_TEXT_CHARS = 4_000
+const SLACK_LIVE_EVENT_WINDOW_MS = 30 * 60 * 1_000
+const SLACK_DM_EVENT_GLOBS = [
+  '/slack/channels/D*/**',
+  '/slack/dms/*/**',
+  '/slack/users/*/messages/**'
+]
 
 type IntegrationEventCounterName = 'eventsReceived' | 'eventsInjected' | 'eventsCoalesced' | 'eventsDropped'
 type IntegrationEventGaugeName = 'queueDepth' | 'mountCount'
@@ -42,6 +49,7 @@ type SubscriptionSpec = {
   integrationId: string
   provider: string
   mountPaths: string[]
+  eventPathGlobs: string[]
   watches: WatchRegistration[]
   targets: DeliveryTargets
 }
@@ -176,6 +184,11 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function truncateForSystemMessage(text: string, maxChars = MAX_INLINE_EVENT_TEXT_CHARS): string {
+  const normalized = text.trim()
+  return normalized.length > maxChars ? `${normalized.slice(0, maxChars)}...` : normalized
+}
+
 function isUnauthorizedError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false
   const status = (error as { httpStatus?: unknown; status?: unknown }).httpStatus ??
@@ -201,6 +214,24 @@ function dedupeStrings(values: string[]): string[] {
 function toRelayfileProvider(provider: string): string {
   const normalized = provider.trim().toLowerCase()
   return normalized === 'gmail' ? 'google-mail' : normalized
+}
+
+function isSlackProvider(provider: string): boolean {
+  const normalized = toRelayfileProvider(provider)
+  return normalized === 'slack' || normalized.startsWith('slack-')
+}
+
+function scopeBooleanDefault(scope: Record<string, unknown>, keys: string[], defaultValue: boolean): boolean {
+  for (const key of keys) {
+    const value = scope[key]
+    if (typeof value === 'boolean') return value
+  }
+  return defaultValue
+}
+
+function slackListenDms(integration: ConnectedIntegration): boolean {
+  if (!isSlackProvider(integration.provider)) return false
+  return scopeBooleanDefault(integration.scope, ['listenDms', 'listenDirectMessages', 'directMessages'], true)
 }
 
 function pathSegments(path: string): string[] {
@@ -257,8 +288,15 @@ function watchGlobForPath(path: string): string {
   return root.endsWith('/**') ? root : `${root || '/'}/**`
 }
 
+function eventPathGlobsForIntegration(integration: ConnectedIntegration): string[] {
+  return dedupeStrings([
+    ...canonicalMountPaths(integration).map(watchGlobForPath),
+    ...(slackListenDms(integration) ? SLACK_DM_EVENT_GLOBS : [])
+  ])
+}
+
 function watchRegistrationsFor(integrations: ConnectedIntegration[]): WatchRegistration[] {
-  return dedupeStrings(integrations.flatMap((integration) => canonicalMountPaths(integration).map(watchGlobForPath)))
+  return dedupeStrings(integrations.flatMap(eventPathGlobsForIntegration))
     .map((glob) => ({
       glob,
       coalesceMs: 750
@@ -313,11 +351,13 @@ function targetLabels(targets: DeliveryTargets): string[] {
 function subscriptionSpecsFor(integrations: ConnectedIntegration[]): SubscriptionSpec[] {
   return integrations.map((integration) => {
     const mountPaths = canonicalMountPaths(integration)
+    const eventPathGlobs = eventPathGlobsForIntegration(integration)
     return {
       integrationId: integration.integrationId,
       provider: integration.provider,
       mountPaths,
-      watches: mountPaths.map(watchGlobForPath).map((glob) => ({
+      eventPathGlobs,
+      watches: eventPathGlobs.map((glob) => ({
         glob,
         coalesceMs: 750
       })),
@@ -343,16 +383,27 @@ function normalizeChangePath(path: string): string[] {
   return trimmed === '' ? [] : trimmed.split('/').filter(Boolean)
 }
 
+function globSegmentMatches(pattern: string, segment: string | undefined): boolean {
+  if (segment === undefined) return false
+  if (pattern === '*') return true
+  if (!pattern.includes('*')) return pattern === segment
+  const escaped = pattern
+    .split('*')
+    .map((part) => part.replace(/[|\\{}()[\]^$+?.]/g, '\\$&'))
+    .join('.*')
+  return new RegExp(`^${escaped}$`, 'u').test(segment)
+}
+
 function globMatchesPath(glob: string, path: string): boolean {
   const pattern = normalizeChangePath(glob)
   const target = normalizeChangePath(path)
   if (pattern.at(-1) === '**') {
     const prefix = pattern.slice(0, -1)
     return target.length >= prefix.length &&
-      prefix.every((segment, index) => segment === '*' || segment === target[index])
+      prefix.every((segment, index) => globSegmentMatches(segment, target[index]))
   }
   return pattern.length === target.length &&
-    pattern.every((segment, index) => segment === '*' || segment === target[index])
+    pattern.every((segment, index) => globSegmentMatches(segment, target[index]))
 }
 
 function shouldPublishFilesystemEvent(event: FilesystemEvent): boolean {
@@ -607,6 +658,13 @@ function parentRemoteRootForDynamicChildren(remoteRoot: string): string | null {
   return `/${segments.slice(0, -1).join('/')}`
 }
 
+function staticRemoteRootBeforeWildcard(remoteRoot: string): string | null {
+  const segments = pathSegments(remoteRoot)
+  const wildcardIndex = segments.findIndex((segment) => segment.includes('*'))
+  if (wildcardIndex <= 0) return null
+  return `/${segments.slice(0, wildcardIndex).join('/')}`
+}
+
 function localPathForRemoteRoot(workspaceId: string, remoteRoot: string): string {
   return join(homedir(), '.agentworkforce', 'pear', 'relayfile', 'workspaces', workspaceId, ...pathSegments(remoteRoot))
 }
@@ -629,10 +687,12 @@ export function localWatchRootsFor(
   for (const glob of globs) {
     const remoteRoot = remoteRootForWatchGlob(glob)
     if (!remoteRoot) continue
-    for (const candidate of dedupeStrings([
-      remoteRoot,
-      parentRemoteRootForDynamicChildren(remoteRoot)
-    ].filter((entry): entry is string => entry !== null))) {
+    const candidates = [
+      ...(remoteRoot.includes('*') ? [] : [remoteRoot]),
+      parentRemoteRootForDynamicChildren(remoteRoot),
+      staticRemoteRootBeforeWildcard(remoteRoot)
+    ].filter((entry): entry is string => entry !== null && !entry.includes('*'))
+    for (const candidate of dedupeStrings(candidates)) {
       if (!isBoundedLocalCommandRoot(candidate)) continue
       if (!hasWatchableLocalIntegrationFor(watchableIntegrations, candidate)) continue
       const localRoot = resolve(localPathForRemoteRoot(workspaceId, candidate))
@@ -814,7 +874,10 @@ function watchLocalMounts(
 
 function specsForEvent(event: ChangeEvent, specs: SubscriptionSpec[]): SubscriptionSpec[] {
   const path = event.resource.path
-  return specs.filter((spec) => spec.mountPaths.some((mountPath) => pathIsInsideMount(path, mountPath)))
+  return specs.filter((spec) =>
+    spec.mountPaths.some((mountPath) => pathIsInsideMount(path, mountPath)) ||
+    spec.eventPathGlobs.some((glob) => globMatchesPath(glob, path))
+  )
 }
 
 function longestMatchingMountPath(path: string, spec: SubscriptionSpec): string | null {
@@ -835,9 +898,9 @@ function injectionDeduplicationKey(projectId: string, event: ChangeEvent, matche
   const scopedKeys = matchedSpecs
     .map((spec) => {
       const mountPath = longestMatchingMountPath(path, spec)
-      return mountPath
-        ? `${spec.integrationId}:${spec.provider}:${pathTailAfterMount(path, mountPath)}`
-        : null
+      if (mountPath) return `${spec.integrationId}:${spec.provider}:${pathTailAfterMount(path, mountPath)}`
+      const eventGlob = spec.eventPathGlobs.find((glob) => globMatchesPath(glob, path))
+      return eventGlob ? `${spec.integrationId}:${spec.provider}:${eventGlob}:${path}` : null
     })
     .filter((entry): entry is string => entry !== null)
   if (scopedKeys.length > 0) return `${projectId}:${event.type}:${dedupeStrings(scopedKeys).join('|')}`
@@ -986,12 +1049,116 @@ function isLikelyLocalWritebackCommandPath(path: string): boolean {
   return !/^\d+(?:[._-]\d+)*$/u.test(stem)
 }
 
-function shouldNotifyRelayfileChange(event: ChangeEvent): boolean {
-  if (eventOrigin(event) === 'agent_write') return false
-  return shouldNotifyRelayfilePath(event.resource.path)
+function slackEventTimestampMs(path: string): number | null {
+  const match = path.match(/\/(?:messages|replies)\/(\d{10})_(\d+)(?:\/|\.json$)/u)
+  if (!match?.[1]) return null
+  return Number(`${match[1]}.${match[2] || '0'}`) * 1000
 }
 
-function formatIntegrationEventMessage(event: ChangeEvent): string {
+function repeatedSlackRoot(path: string): boolean {
+  const matches = path.match(/\/slack\/(?:channels|dms|users)\//gu)
+  return (matches?.length || 0) > 1
+}
+
+async function readLocalEventRecord(event: ChangeEvent, localMountWorkspaceId: string): Promise<unknown | null> {
+  const localPath = localPathForRemoteRoot(localMountWorkspaceId, event.resource.path)
+  const raw = await readFile(localPath, 'utf8').catch(() => null)
+  if (!raw) return null
+  try {
+    return JSON.parse(raw)
+  } catch {
+    return null
+  }
+}
+
+function recordWebhookReceivedAtMs(record: unknown): number | null {
+  if (!isRecord(record)) return null
+  const payload = isRecord(record.payload) ? record.payload : record
+  const webhook = isRecord(payload._webhook) ? payload._webhook : undefined
+  const receivedAt = webhook?.receivedAt
+  if (typeof receivedAt !== 'string') return null
+  const parsed = Date.parse(receivedAt)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+async function shouldNotifySlackMessageChange(event: ChangeEvent, localMountWorkspaceId: string): Promise<boolean> {
+  const path = event.resource.path
+  if (repeatedSlackRoot(path)) return false
+
+  const record = await readLocalEventRecord(event, localMountWorkspaceId)
+  const occurredAtMs = Date.parse(event.occurredAt)
+  const webhookReceivedAtMs = recordWebhookReceivedAtMs(record)
+  if (webhookReceivedAtMs !== null && Number.isFinite(occurredAtMs)) {
+    return Math.abs(occurredAtMs - webhookReceivedAtMs) <= SLACK_LIVE_EVENT_WINDOW_MS
+  }
+
+  const slackTsMs = slackEventTimestampMs(path)
+  if (slackTsMs !== null && Number.isFinite(occurredAtMs)) {
+    return Math.abs(occurredAtMs - slackTsMs) <= SLACK_LIVE_EVENT_WINDOW_MS
+  }
+
+  return true
+}
+
+async function shouldNotifyRelayfileChange(event: ChangeEvent, localMountWorkspaceId: string): Promise<boolean> {
+  if (eventOrigin(event) === 'agent_write') return false
+  if (!shouldNotifyRelayfilePath(event.resource.path)) return false
+  if (event.resource.provider === 'slack' && slackEventContextPath(event.resource.path)) {
+    return shouldNotifySlackMessageChange(event, localMountWorkspaceId)
+  }
+  return true
+}
+
+function slackEventContextPath(path: string): boolean {
+  return /^\/slack\/(?:channels|dms|users)\/[^/]+\/(?:messages|threads)\/.+\.json$/u.test(path)
+}
+
+function slackRecordContextLines(record: unknown): string[] {
+  if (!isRecord(record)) return []
+  const payload = isRecord(record.payload) ? record.payload : record
+  const rawEvent = isRecord(payload.raw_event) ? payload.raw_event : undefined
+  const text = eventSummaryValue(payload.text) || eventSummaryValue(rawEvent?.text)
+  const user = eventSummaryValue(payload.user) || eventSummaryValue(rawEvent?.user)
+  const channel = eventSummaryValue(payload.channel) || eventSummaryValue(payload.channelId) || eventSummaryValue(rawEvent?.channel)
+  const threadTs = eventSummaryValue(payload.thread_ts) || eventSummaryValue(payload.threadTs) || eventSummaryValue(rawEvent?.thread_ts)
+  const ts = eventSummaryValue(payload.ts) || eventSummaryValue(payload.replyTs) || eventSummaryValue(rawEvent?.ts)
+
+  const lines: string[] = []
+  if (text) lines.push(`Slack text: ${truncateForSystemMessage(text)}`)
+  if (channel) lines.push(`Slack channel: ${channel}`)
+  if (threadTs) lines.push(`Slack thread ts: ${threadTs}`)
+  if (ts) lines.push(`Slack message ts: ${ts}`)
+  if (user) lines.push(`Slack user: ${user}`)
+  return lines
+}
+
+async function localEventContextLines(event: ChangeEvent, localMountWorkspaceId: string): Promise<string[]> {
+  const path = event.resource.path
+  if (pathSegments(path).some((segment) => segment === '.' || segment === '..')) return []
+  return slackRecordContextLines(await readLocalEventRecord(event, localMountWorkspaceId))
+}
+
+async function expandedEventContextLines(event: ChangeEvent): Promise<string[]> {
+  try {
+    const expanded = await event.expand('full')
+    if (!isRecord(expanded)) return []
+    const data = isRecord(expanded.data) ? expanded.data : expanded
+    return slackRecordContextLines(data)
+  } catch {
+    return []
+  }
+}
+
+async function eventContextLines(event: ChangeEvent, localMountWorkspaceId: string): Promise<string[]> {
+  const provider = eventSummaryValue(event.resource.provider)
+  const path = event.resource.path
+  if (provider !== 'slack' || !slackEventContextPath(path)) return []
+
+  const expandedLines = await expandedEventContextLines(event)
+  return expandedLines.length > 0 ? expandedLines : localEventContextLines(event, localMountWorkspaceId)
+}
+
+function formatIntegrationEventMessage(event: ChangeEvent, contextLines: string[] = []): string {
   const summary = isRecord(event.summary) ? event.summary : {}
   const resource = isRecord(event.resource) ? event.resource : {}
   const provider = eventSummaryValue(resource.provider) || 'integration'
@@ -1024,9 +1191,10 @@ function formatIntegrationEventMessage(event: ChangeEvent): string {
   if (actor) lines.push(`Actor: ${actor}`)
   if (fieldsChanged) lines.push(`Fields changed: ${fieldsChanged}`)
   if (labels) lines.push(`Labels: ${labels}`)
+  lines.push(...contextLines)
 
   lines.push(
-    'Handle this like an incoming user-relevant integration update. The Relayfile path above identifies the changed record; use the matching .integrations path for extra context only when historical download is enabled. Use the existing writeback or messaging path when a response is needed.',
+    'Handle this like an incoming user-relevant integration update. The Relayfile path above identifies the changed record; use any inline event context first, then read the matching .integrations path for more detail when available. Use the existing writeback or messaging path when a response is needed.',
     '</integration-event>'
   )
   return lines.join('\n')
@@ -1067,6 +1235,7 @@ export class IntegrationEventBridge {
         integrationId: spec.integrationId,
         provider: spec.provider,
         mountPaths: spec.mountPaths,
+        eventPathGlobs: spec.eventPathGlobs,
         targets: spec.targets
       }))
     })
@@ -1084,6 +1253,7 @@ export class IntegrationEventBridge {
           integrationId: spec.integrationId,
           provider: spec.provider,
           mountPaths: spec.mountPaths,
+          eventPathGlobs: spec.eventPathGlobs,
           targets: targetLabels(spec.targets)
         }))
       })
@@ -1098,7 +1268,7 @@ export class IntegrationEventBridge {
               type: event.type,
               path: event.resource.path
             })
-            void this.injectEvent(projectId, event, specs).catch((error) => {
+            void this.injectEvent(projectId, event, specs, handle.localMountWorkspaceId).catch((error) => {
               const errorMessage = toErrorMessage(error)
               warnIntegrationEventAggregated(
                 `event delivery failed:${projectId}`,
@@ -1132,7 +1302,7 @@ export class IntegrationEventBridge {
             path: event.resource.path,
             source: 'local-mount'
           })
-          void this.injectEvent(projectId, event, specs).catch((error) => {
+          void this.injectEvent(projectId, event, specs, handle.localMountWorkspaceId).catch((error) => {
             const errorMessage = toErrorMessage(error)
             warnIntegrationEventAggregated(
               `local event delivery failed:${projectId}`,
@@ -1181,8 +1351,13 @@ export class IntegrationEventBridge {
     await Promise.all(Array.from(this.subscriptions.keys()).map((projectId) => this.close(projectId)))
   }
 
-  private async injectEvent(projectId: string, event: ChangeEvent, specs: SubscriptionSpec[]): Promise<void> {
-    if (!shouldNotifyRelayfileChange(event)) {
+  private async injectEvent(
+    projectId: string,
+    event: ChangeEvent,
+    specs: SubscriptionSpec[],
+    localMountWorkspaceId: string
+  ): Promise<void> {
+    if (!await shouldNotifyRelayfileChange(event, localMountWorkspaceId)) {
       incrementIntegrationEventCounter(projectId, 'eventsDropped')
       logIntegrationEvent('skipped filtered path', {
         projectId,
@@ -1253,6 +1428,7 @@ export class IntegrationEventBridge {
       })
       return
     }
+    const contextLines = await eventContextLines(event, localMountWorkspaceId)
     logIntegrationEvent('injecting', {
       projectId,
       eventId: event.id,
@@ -1264,7 +1440,7 @@ export class IntegrationEventBridge {
         const input = {
           to: recipient,
           from: 'integration',
-          text: formatIntegrationEventMessage(event),
+          text: formatIntegrationEventMessage(event, contextLines),
           priority: 0,
           mode: 'steer',
           data: {

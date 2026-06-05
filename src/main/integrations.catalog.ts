@@ -320,7 +320,7 @@ export const INTEGRATIONS_CATALOG: IntegrationAdapter[] = [
     version: '0.2.12',
     capabilities: { webhook: true, poll: true, writeback: true },
     authMethod: 'oauth',
-    defaultMountPaths: ['/slack/channels', '/slack/dms'],
+    defaultMountPaths: ['/slack/channels'],
     description: 'Slack adapter scaffolding for Relayfile'
   },
   {
