@@ -403,6 +403,7 @@ export function TerminalPane(): React.ReactNode {
   const setTerminalLayout = useUIStore((s) => s.setTerminalLayout)
   const [spawningCli, setSpawningCli] = useState<SpawnAgentCli | null>(null)
   const [spawnError, setSpawnError] = useState<string | null>(null)
+  const spawnRequestRef = useRef(false)
   const [burnSummariesByAgentKey, setBurnSummariesByAgentKey] = useState<Record<string, BurnAgentSummary>>({})
   const [splitPage, setSplitPage] = useState(0)
   const [firstPromptText, setFirstPromptText] = useState('')
@@ -431,11 +432,13 @@ export function TerminalPane(): React.ReactNode {
   const preparingProgressPercent = progressPercent(cloudAttachProgress, preparingElapsedMs)
 
   const handleSpawn = async (cli: SpawnAgentCli): Promise<void> => {
+    if (spawnRequestRef.current) return
     if (!activeProject) {
       openDialog('add-project')
       return
     }
 
+    spawnRequestRef.current = true
     setSpawnError(null)
     setSpawningCli(cli)
     try {
@@ -444,6 +447,7 @@ export function TerminalPane(): React.ReactNode {
       setSpawnError(err instanceof Error ? err.message : String(err))
     } finally {
       setSpawningCli(null)
+      spawnRequestRef.current = false
     }
   }
 

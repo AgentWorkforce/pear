@@ -27,6 +27,7 @@ type MockClient = {
   subscribeChannels: ReturnType<typeof vi.fn>
   unsubscribeChannels: ReturnType<typeof vi.fn>
   getStatus: ReturnType<typeof vi.fn>
+  sendMessage: ReturnType<typeof vi.fn>
   brokerPid?: number
   baseUrl?: string
   agentNames: string[]
@@ -61,6 +62,7 @@ const mock = vi.hoisted(() => {
       release: vi.fn(async () => undefined),
       subscribeChannels: vi.fn(async () => undefined),
       unsubscribeChannels: vi.fn(async () => undefined),
+      sendMessage: vi.fn(async () => ({ event_id: 'evt-message', targets: [] })),
       brokerPid: 4242
     }
     return client
@@ -515,6 +517,34 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('coalesces concurrent duplicate spawn requests', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, [])
+    let releaseSpawn!: () => void
+    local.spawnPty.mockImplementationOnce(async (input: { name: string }) => {
+      await new Promise<void>((resolve) => {
+        releaseSpawn = resolve
+      })
+      local.agentNames.push(input.name)
+      return { name: input.name, runtime: 'pty' }
+    })
+
+    const first = manager.spawnAgent(PROJECT_ID, { name: 'worker', cli: 'fake-cli', cwd: '/tmp/project' })
+    const second = manager.spawnAgent(PROJECT_ID, { name: 'worker', cli: 'fake-cli', cwd: '/tmp/project' })
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(local.spawnPty).toHaveBeenCalledTimes(1)
+    releaseSpawn()
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      { name: 'worker', runtime: 'pty' },
+      { name: 'worker', runtime: 'pty' }
+    ])
+    expect(local.agentNames).toEqual(['worker'])
+
+    await manager.shutdown()
+  })
+
   it('spawning with broker: cloud fails clearly when no sandbox is attached', async () => {
     const manager = new BrokerManager()
     await startLocal(manager)
@@ -838,6 +868,32 @@ describe('BrokerManager local + cloud coexistence', () => {
         projectId: 'project-2'
       })
     )
+
+    await manager.shutdown()
+  })
+
+  it('waits for delivery using the addressed agent when broker send result omits targets', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, ['claude-1'])
+    local.sendMessage.mockResolvedValueOnce({ event_id: 'evt-integration' })
+    local.onEvent.mockImplementationOnce((listener) => {
+      setImmediate(() => {
+        listener({
+          kind: 'delivery_ack',
+          event_id: 'evt-integration',
+          name: 'claude-1'
+        })
+      })
+      return () => undefined
+    })
+
+    await expect(manager.sendMessageAndWaitForDelivery(PROJECT_ID, {
+      to: 'claude-1',
+      text: '<integration-event>ping</integration-event>'
+    })).resolves.toEqual({
+      eventId: 'evt-integration',
+      targets: ['claude-1']
+    })
 
     await manager.shutdown()
   })

@@ -100,6 +100,14 @@ type CloudBrokerSystemMessageAdapter = {
     data?: Record<string, unknown>
     mode?: 'wait' | 'steer'
   }) => Promise<void>
+  sendMessageAndWaitForDelivery?: (projectId: string | undefined, input: {
+    to: string
+    text: string
+    from?: string
+    priority?: number
+    data?: Record<string, unknown>
+    mode?: 'wait' | 'steer'
+  }, options?: { timeoutMs?: number }) => Promise<unknown>
 }
 
 type CloudAgentInjectedMessageOptions = {
@@ -747,17 +755,22 @@ export class CloudAgentManager {
     await Promise.all(
       agents
         .filter((agent) => agent.projectId === undefined || agent.projectId === normalizedProjectId)
-        .map((agent) => broker.sendMessage(normalizedProjectId, {
-          to: agent.name,
-          from: options.from || 'system',
-          text: message,
-          priority: 0,
-          mode: 'steer',
-          data: options.data || {
-            kind: 'integrations-update',
-            system: true
-          }
-        }))
+        .map((agent) => {
+          const input = {
+            to: agent.name,
+            from: options.from || 'system',
+            text: message,
+            priority: 0,
+            mode: 'steer',
+            data: options.data || {
+              kind: 'integrations-update',
+              system: true
+            }
+          } as const
+          return broker.sendMessageAndWaitForDelivery
+            ? broker.sendMessageAndWaitForDelivery(normalizedProjectId, input)
+            : broker.sendMessage(normalizedProjectId, input)
+        })
     )
   }
 

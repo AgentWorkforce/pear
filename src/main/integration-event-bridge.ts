@@ -1,4 +1,4 @@
-import { watch, type FSWatcher } from 'node:fs'
+import { existsSync, watch, type FSWatcher } from 'node:fs'
 import { appendFile, mkdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, relative, resolve, sep } from 'node:path'
@@ -58,6 +58,18 @@ type BrokerEventBridge = {
       mode?: 'wait' | 'steer'
     }
   ) => Promise<void> | void
+  sendMessageAndWaitForDelivery?: (
+    projectId: string,
+    input: {
+      to: string
+      text: string
+      from?: string
+      data?: Record<string, unknown>
+      priority?: number
+      mode?: 'wait' | 'steer'
+    },
+    options?: { timeoutMs?: number }
+  ) => Promise<unknown>
 }
 
 type RelayfileEventClient = {
@@ -459,6 +471,50 @@ function localRootsForIntegration(
     .filter((entry): entry is { localRoot: string; remoteRoot: string } => entry !== null)
 }
 
+function remoteRootForWatchGlob(glob: string): string | null {
+  const trimmed = glob.trim()
+  if (!trimmed.startsWith('/')) return null
+  const withoutWildcard = trimmed.replace(/\/\*\*$/u, '').replace(/\/+$/u, '')
+  return withoutWildcard || '/'
+}
+
+function parentRemoteRootForDynamicChildren(remoteRoot: string): string | null {
+  const segments = pathSegments(remoteRoot)
+  if (segments.length < 3) return null
+  return `/${segments.slice(0, -1).join('/')}`
+}
+
+function localPathForRemoteRoot(workspaceId: string, remoteRoot: string): string {
+  return join(homedir(), '.agentworkforce', 'pear', 'relayfile', 'workspaces', workspaceId, ...pathSegments(remoteRoot))
+}
+
+export function localWatchRootsFor(
+  workspaceId: string,
+  integrations: ConnectedIntegration[],
+  globs: string[]
+): Array<{ localRoot: string; remoteRoot: string }> {
+  const roots = new Map<string, { localRoot: string; remoteRoot: string }>()
+  for (const integration of integrations) {
+    for (const root of localRootsForIntegration(workspaceId, integration)) {
+      roots.set(resolve(root.localRoot), { localRoot: resolve(root.localRoot), remoteRoot: root.remoteRoot })
+    }
+  }
+
+  for (const glob of globs) {
+    const remoteRoot = remoteRootForWatchGlob(glob)
+    if (!remoteRoot) continue
+    for (const candidate of dedupeStrings([
+      remoteRoot,
+      parentRemoteRootForDynamicChildren(remoteRoot)
+    ].filter((entry): entry is string => entry !== null))) {
+      const localRoot = resolve(localPathForRemoteRoot(workspaceId, candidate))
+      if (!roots.has(localRoot)) roots.set(localRoot, { localRoot, remoteRoot: candidate })
+    }
+  }
+
+  return Array.from(roots.values())
+}
+
 function remotePathForLocalPath(localRoot: string, remoteRoot: string, localPath: string): string | null {
   const relativePath = relative(localRoot, localPath)
   if (!relativePath || relativePath.startsWith('..') || relativePath === '..') return null
@@ -492,10 +548,8 @@ function watchLocalMounts(
   coalesceMs: number
 ): LocalMountSubscription | null {
   const roots = new Map<string, { localRoot: string; remoteRoot: string }>()
-  for (const integration of integrations) {
-    for (const root of localRootsForIntegration(workspaceId, integration)) {
-      roots.set(resolve(root.localRoot), { localRoot: resolve(root.localRoot), remoteRoot: root.remoteRoot })
-    }
+  for (const root of localWatchRootsFor(workspaceId, integrations, globs)) {
+    roots.set(resolve(root.localRoot), { localRoot: resolve(root.localRoot), remoteRoot: root.remoteRoot })
   }
   if (roots.size === 0) return null
 
@@ -531,6 +585,7 @@ function watchLocalMounts(
   }
 
   for (const { localRoot, remoteRoot } of roots.values()) {
+    if (!existsSync(localRoot)) continue
     try {
       const watcher = watch(localRoot, { recursive: true }, (eventType, filename) => {
         if (!active || !filename) return
@@ -911,22 +966,27 @@ export class IntegrationEventBridge {
       recipients: uniqueRecipients
     })
     await Promise.all(
-      uniqueRecipients.map((recipient) => bridge.sendMessage(projectId, {
-        to: recipient,
-        from: 'integration',
-        text: formatIntegrationEventMessage(event),
-        priority: 0,
-        mode: 'steer',
-        data: {
-          kind: 'integration-event',
-          system: true,
-          eventId: event.id,
-          eventType: event.type,
-          occurredAt: event.occurredAt,
-          resource: isRecord(event.resource) ? { ...event.resource } : undefined,
-          path: event.resource.path
-        }
-      }))
+      uniqueRecipients.map((recipient) => {
+        const input = {
+          to: recipient,
+          from: 'integration',
+          text: formatIntegrationEventMessage(event),
+          priority: 0,
+          mode: 'steer',
+          data: {
+            kind: 'integration-event',
+            system: true,
+            eventId: event.id,
+            eventType: event.type,
+            occurredAt: event.occurredAt,
+            resource: isRecord(event.resource) ? { ...event.resource } : undefined,
+            path: event.resource.path
+          }
+        } as const
+        return bridge.sendMessageAndWaitForDelivery
+          ? bridge.sendMessageAndWaitForDelivery(projectId, input)
+          : bridge.sendMessage(projectId, input)
+      })
     )
   }
 

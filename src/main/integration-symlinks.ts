@@ -18,6 +18,12 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function isFileAlreadyExistsError(error: unknown): boolean {
+  return !!error &&
+    typeof error === 'object' &&
+    (error as { code?: unknown }).code === 'EEXIST'
+}
+
 async function resolveGitDir(projectRoot: string): Promise<string | null> {
   try {
     const { stdout } = await execFileAsync(
@@ -74,6 +80,12 @@ async function currentLinkTarget(linkPath: string): Promise<string | null | 'not
   }
 }
 
+async function pointsAtTarget(linkPath: string, target: string): Promise<boolean> {
+  const existing = await currentLinkTarget(linkPath)
+  if (!existing || existing === 'not-a-symlink') return false
+  return resolve(dirname(linkPath), existing) === resolve(target)
+}
+
 /**
  * Symlink `<projectRoot>/.integrations` → the workspace's local integration
  * mirror, and git-ignore it via info/exclude. Existing non-symlink entries
@@ -101,13 +113,16 @@ export async function ensureProjectIntegrationsLink(
     )
   })
 
-  if (existing === resolve(target)) return
+  if (existing !== null && existing !== 'not-a-symlink' && await pointsAtTarget(linkPath, target)) return
   if (existing !== null) {
     await rm(linkPath, { force: true })
   }
   try {
     await symlink(target, linkPath, 'dir')
   } catch (error) {
+    if (isFileAlreadyExistsError(error) && await pointsAtTarget(linkPath, target)) {
+      return
+    }
     console.warn(
       `[integration-symlinks] Failed to link ${linkPath} -> ${target}:`,
       toErrorMessage(error)

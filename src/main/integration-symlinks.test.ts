@@ -64,6 +64,15 @@ describe('integration symlinks', () => {
     expect(excludeAfter.match(new RegExp(`/${PROJECT_INTEGRATIONS_LINK_NAME}`, 'g'))).toHaveLength(1)
   })
 
+  it('treats concurrent creation of the desired link as success', async () => {
+    await Promise.all(Array.from({ length: 5 }, () =>
+      ensureProjectIntegrationsLink(projectRoot, 'ws-1')
+    ))
+
+    const linkPath = join(projectRoot, PROJECT_INTEGRATIONS_LINK_NAME)
+    expect(await readlink(linkPath)).toBe(mountRoot)
+  })
+
   it('works without a git repo and removes the link on shutdown', async () => {
     await ensureProjectIntegrationsLink(projectRoot, 'ws-1')
     const linkPath = join(projectRoot, PROJECT_INTEGRATIONS_LINK_NAME)

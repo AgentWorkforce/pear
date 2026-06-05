@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict'
+import { join } from 'node:path'
 import { test } from 'node:test'
 
 import type { ChangeEvent, Subscription } from '@relayfile/sdk'
-import { IntegrationEventBridge, integrationSubscriptionSummaries } from '../integration-event-bridge.ts'
+import { IntegrationEventBridge, integrationSubscriptionSummaries, localWatchRootsFor } from '../integration-event-bridge.ts'
 import type { ConnectedIntegration } from '../integrations.ts'
 
 type SentMessage = {
@@ -204,6 +205,47 @@ test('integration events watch selected relayfile mount paths', async () => {
   harness.sent.splice(0)
   await harness.emit(changeEvent('/slack/channels/C123ABC/messages/1713220124_001100/meta.json', 'slack'))
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
+})
+
+test('local fallback watchers include glob-implied roots and dynamic parents', () => {
+  const roots = localWatchRootsFor(
+    'workspace-id',
+    [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        localMountPaths: [
+          join('/tmp', 'relayfile', 'workspaces', 'workspace-id', 'discovery', 'slack'),
+          join('/tmp', 'relayfile', 'workspaces', 'workspace-id', 'slack', 'channels', 'C123ABC__proj-cloud')
+        ]
+      })
+    ],
+    [
+      '/slack/channels/C123ABC/**',
+      '/slack/channels/C123ABC__proj-cloud/**',
+      '/slack/dms/D123ABC/**'
+    ]
+  )
+
+  const byRemoteRoot = new Map(roots.map((root) => [root.remoteRoot, root.localRoot]))
+
+  assert.equal(
+    byRemoteRoot.get('/slack/channels/C123ABC')?.endsWith(join('workspace-id', 'slack', 'channels', 'C123ABC')),
+    true
+  )
+  assert.equal(
+    byRemoteRoot.get('/slack/channels')?.endsWith(join('workspace-id', 'slack', 'channels')),
+    true
+  )
+  assert.equal(
+    byRemoteRoot.get('/slack/dms')?.endsWith(join('workspace-id', 'slack', 'dms')),
+    true
+  )
+  assert.equal(
+    byRemoteRoot.get('/slack/dms/D123ABC')?.endsWith(join('workspace-id', 'slack', 'dms', 'D123ABC')),
+    true
+  )
 })
 
 test('integration events preserve discovery mount paths', async () => {

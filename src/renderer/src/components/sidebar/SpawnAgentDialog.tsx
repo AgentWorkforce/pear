@@ -25,6 +25,7 @@ export function SpawnAgentDialog(): React.ReactNode {
   const closeDialog = useUIStore((s) => s.closeDialog)
   const openDialog = useUIStore((s) => s.openDialog)
   const dialogRef = useRef<HTMLDivElement>(null)
+  const spawnRequestRef = useRef(false)
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent): void => {
@@ -92,12 +93,14 @@ export function SpawnAgentDialog(): React.ReactNode {
   }, [])
 
   const handleSpawn = async (cli: SpawnAgentCli): Promise<void> => {
+    if (spawnRequestRef.current) return
     if (!project) {
       closeDialog()
       openDialog('add-project')
       return
     }
 
+    spawnRequestRef.current = true
     setError(null)
     setSpawningCli(cli)
     try {
@@ -107,10 +110,12 @@ export function SpawnAgentDialog(): React.ReactNode {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setSpawningCli(null)
+      spawnRequestRef.current = false
     }
   }
 
   const handleSpawnPersona = async (): Promise<void> => {
+    if (spawnRequestRef.current) return
     if (!project) {
       closeDialog()
       openDialog('add-project')
@@ -118,6 +123,7 @@ export function SpawnAgentDialog(): React.ReactNode {
     }
     if (!selectedPersonaId) return
 
+    spawnRequestRef.current = true
     setError(null)
     setSpawningPersona(true)
     try {
@@ -127,6 +133,7 @@ export function SpawnAgentDialog(): React.ReactNode {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setSpawningPersona(false)
+      spawnRequestRef.current = false
     }
   }
 
