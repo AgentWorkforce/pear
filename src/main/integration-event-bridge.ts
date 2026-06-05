@@ -463,12 +463,41 @@ function localRootsForIntegration(
   workspaceId: string,
   integration: ConnectedIntegration
 ): Array<{ localRoot: string; remoteRoot: string }> {
+  if (!allowsLocalMountWatching(integration)) return []
+
   return (integration.localMountPaths || [])
     .map((localRoot) => {
       const remoteRoot = remoteRootForLocalMountPath(workspaceId, localRoot)
       return remoteRoot ? { localRoot, remoteRoot } : null
     })
-    .filter((entry): entry is { localRoot: string; remoteRoot: string } => entry !== null)
+    .filter((entry): entry is { localRoot: string; remoteRoot: string } =>
+      entry !== null && isBoundedLocalCommandRoot(entry.remoteRoot)
+    )
+}
+
+function allowsLocalMountWatching(integration: ConnectedIntegration): boolean {
+  // Local filesystem fallback must never recursively watch provider history roots.
+  return integration.downloadHistoricalData === true &&
+    integration.mountPaths.some((mountPath) => isBoundedLocalCommandRoot(mountPath))
+}
+
+function isBoundedLocalCommandRoot(remoteRoot: string): boolean {
+  const segments = pathSegments(remoteRoot)
+  if (segments.length === 0) return false
+  return segments.some((segment) => segment === '.outbox' || segment === 'outbox')
+}
+
+function watchableLocalIntegrations(integrations: ConnectedIntegration[]): ConnectedIntegration[] {
+  return integrations.filter(allowsLocalMountWatching)
+}
+
+function hasWatchableLocalIntegrationFor(
+  integrations: ConnectedIntegration[],
+  remoteRoot: string
+): boolean {
+  return integrations.some((integration) =>
+    canonicalMountPaths(integration).some((mountPath) => pathIsInsideMount(remoteRoot, mountPath))
+  )
 }
 
 function remoteRootForWatchGlob(glob: string): string | null {
@@ -493,8 +522,11 @@ export function localWatchRootsFor(
   integrations: ConnectedIntegration[],
   globs: string[]
 ): Array<{ localRoot: string; remoteRoot: string }> {
+  const watchableIntegrations = watchableLocalIntegrations(integrations)
+  if (watchableIntegrations.length === 0) return []
+
   const roots = new Map<string, { localRoot: string; remoteRoot: string }>()
-  for (const integration of integrations) {
+  for (const integration of watchableIntegrations) {
     for (const root of localRootsForIntegration(workspaceId, integration)) {
       roots.set(resolve(root.localRoot), { localRoot: resolve(root.localRoot), remoteRoot: root.remoteRoot })
     }
@@ -507,6 +539,8 @@ export function localWatchRootsFor(
       remoteRoot,
       parentRemoteRootForDynamicChildren(remoteRoot)
     ].filter((entry): entry is string => entry !== null))) {
+      if (!isBoundedLocalCommandRoot(candidate)) continue
+      if (!hasWatchableLocalIntegrationFor(watchableIntegrations, candidate)) continue
       const localRoot = resolve(localPathForRemoteRoot(workspaceId, candidate))
       if (!roots.has(localRoot)) roots.set(localRoot, { localRoot, remoteRoot: candidate })
     }
