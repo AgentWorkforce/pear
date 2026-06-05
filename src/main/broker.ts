@@ -615,14 +615,20 @@ function someInCauseChain(err: unknown, predicate: (node: Record<string, unknown
 }
 
 // A dead local broker (process exited, nothing listening on the cached port)
-// fails the connection outright with `ECONNREFUSED`/`ECONNRESET`. This is a
-// definitive "broker is gone" signal — safe to respawn on the spot.
+// fails the connection outright with `ECONNREFUSED`/`ECONNRESET`. Undici can
+// also report a broker that accepted then closed the socket as `UND_ERR_SOCKET`
+// with an "other side closed" message. These are definitive "broker is gone"
+// signals — safe to respawn on the spot.
 function isBrokerUnreachableError(err: unknown): boolean {
   return someInCauseChain(err, (node) => {
     const code = node.code
     if (code === 'ECONNREFUSED' || code === 'ECONNRESET') return true
+    if (code === 'UND_ERR_SOCKET') {
+      const message = node.message
+      return typeof message === 'string' && /other side closed|socket closed/i.test(message)
+    }
     const message = node.message
-    return typeof message === 'string' && /ECONNREFUSED|ECONNRESET/.test(message)
+    return typeof message === 'string' && /ECONNREFUSED|ECONNRESET|UND_ERR_SOCKET/.test(message)
   })
 }
 
@@ -2661,6 +2667,7 @@ export class BrokerManager {
       if (isMissingAgentError(err)) return
       const message = toErrorMessage(err)
       if (/internal channel closed|internal reply dropped/i.test(message)) return
+      if (isBrokerUnreachableError(err)) return
       console.warn(`[broker] sendInputFireAndForget failed for ${trimmedName}:`, err)
     })
   }
