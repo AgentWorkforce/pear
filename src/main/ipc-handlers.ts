@@ -179,6 +179,9 @@ export function registerIpcHandlers(): void {
       return false
     }
     await brokerManager.start(projectId, cwd, name, win, channels)
+    void integrationsManager.notifyAgentState(projectId).catch((error) => {
+      console.warn('[integrations] Failed to notify agents after broker start:', error instanceof Error ? error.message : String(error))
+    })
     return true
   })
 

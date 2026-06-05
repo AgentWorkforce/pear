@@ -787,6 +787,10 @@ export class IntegrationsManager {
     await this.syncAllEventSubscriptions()
   }
 
+  async notifyAgentState(projectId: string): Promise<void> {
+    await this.syncAgentState(projectId, true)
+  }
+
   async shutdownLocalMounts(): Promise<void> {
     for (const timer of this.systemMessageTimers.values()) clearTimeout(timer)
     this.systemMessageTimers.clear()
