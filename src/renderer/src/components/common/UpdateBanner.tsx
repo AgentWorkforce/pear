@@ -1,5 +1,5 @@
 import type React from 'react'
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { AlertTriangle, Download, RefreshCw, X } from 'lucide-react'
 import { pear } from '@/lib/ipc'
 import { useUpdateStore } from '@/stores/update-store'
@@ -16,14 +16,20 @@ export function UpdateBanner(): React.ReactNode {
   const dismissed = useUpdateStore((s) => s.dismissed)
   const dismiss = useUpdateStore((s) => s.dismiss)
   const [starting, setStarting] = useState(false)
+  // Synchronous guard: `starting` is applied async, so two fast clicks would
+  // otherwise both fire `update:download` before the button disables.
+  const startingRef = useRef(false)
 
   if (dismissed || status === 'idle') return null
 
   const startDownload = async (): Promise<void> => {
+    if (startingRef.current) return
+    startingRef.current = true
     setStarting(true)
     try {
       await pear.update.download()
     } finally {
+      startingRef.current = false
       setStarting(false)
     }
   }

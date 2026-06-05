@@ -67,6 +67,7 @@ import type {
   ProactiveAgentTranscript,
   ProjectListResult,
   TerminalAttachMode,
+  UpdaterState,
   WorkforcePersona
 } from '../shared/types/ipc'
 
@@ -453,6 +454,7 @@ const api = {
     reload: () => invoke<void>('ai-hist:reload')
   },
   update: {
+    getState: () => invoke<UpdaterState | null>('update:get-state'),
     download: () => invoke<void>('update:download'),
     install: () => invoke<void>('update:install'),
     onAvailable: (callback) => subscribe<{ version: string }>('update:available', callback),

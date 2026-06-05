@@ -774,6 +774,16 @@ export interface ProjectListResult {
   activeId: string | null
 }
 
+/**
+ * Snapshot of the main process's auto-update state, replayed to renderers that
+ * subscribe after the originating event fired. `null` means idle / up to date.
+ */
+export type UpdaterState =
+  | { kind: 'available'; version: string }
+  | { kind: 'downloading'; percent: number }
+  | { kind: 'downloaded'; version: string }
+  | { kind: 'error'; message: string }
+
 export interface PearAPI {
   app: {
     confirmQuit: () => Promise<boolean>
@@ -959,6 +969,7 @@ export interface PearAPI {
     reload: () => Promise<void>
   }
   update: {
+    getState: () => Promise<UpdaterState | null>
     download: () => Promise<void>
     install: () => Promise<void>
     onAvailable: (callback: (info: { version: string }) => void) => () => void
