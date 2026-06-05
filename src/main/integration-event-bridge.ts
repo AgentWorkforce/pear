@@ -19,6 +19,7 @@ const RECENT_INJECTION_TTL_MS = 10_000
 const RECENT_LOGICAL_CHANGE_TTL_MS = 10 * 60_000
 const INTEGRATION_EVENT_LOG_PATH = join(homedir(), '.agentworkforce', 'pear', 'integration-events.log')
 const AGGREGATED_WARNING_REPEAT_EVERY = 25
+const MAX_AGGREGATED_WARNING_KEYS = 256
 
 type IntegrationEventCounterName = 'eventsReceived' | 'eventsInjected' | 'eventsCoalesced' | 'eventsDropped'
 type IntegrationEventGaugeName = 'queueDepth' | 'mountCount'
@@ -439,12 +440,17 @@ function createWorkspaceScopedEventClient(
         if (!active) return
         const changeEvent = filesystemEventToChangeEvent(client, workspaceId, event)
         Promise.resolve(onChange(changeEvent)).catch((error) => {
-          logIntegrationEvent('change handler failed', {
-            workspaceId,
-            eventId: event.eventId,
-            path: event.path,
-            error: toErrorMessage(error)
-          })
+          const errorMessage = toErrorMessage(error)
+          warnIntegrationEventAggregated(
+            `change handler failed:${workspaceId}`,
+            'change handler failed',
+            {
+              workspaceId,
+              eventId: event.eventId,
+              path: event.path,
+              error: errorMessage
+            }
+          )
         })
       }
 
@@ -492,7 +498,7 @@ function createWorkspaceScopedEventClient(
             token,
             onPollingFallback: (info) => {
               warnIntegrationEventAggregated(
-                `remote stream polling fallback:${workspaceId}:${info.reason}`,
+                `remote stream polling fallback:${workspaceId}`,
                 'remote stream polling fallback',
                 {
                   workspaceId,
@@ -505,7 +511,7 @@ function createWorkspaceScopedEventClient(
           sync.on('error', (error) => {
             const errorMessage = toErrorMessage(error)
             warnIntegrationEventAggregated(
-              `remote stream error:${workspaceId}:${errorMessage}`,
+              `remote stream error:${workspaceId}`,
               'remote stream error',
               {
                 workspaceId,
@@ -516,10 +522,15 @@ function createWorkspaceScopedEventClient(
           sync.start()
         })
         .catch((error) => {
-          logIntegrationEvent('remote stream token check failed', {
-            workspaceId,
-            error: toErrorMessage(error)
-          })
+          const errorMessage = toErrorMessage(error)
+          warnIntegrationEventAggregated(
+            `remote stream token check failed:${workspaceId}`,
+            'remote stream token check failed',
+            {
+              workspaceId,
+              error: errorMessage
+            }
+          )
         })
 
       return {
@@ -739,7 +750,7 @@ function watchLocalMounts(
         .catch((error) => {
           const errorMessage = toErrorMessage(error)
           warnIntegrationEventAggregated(
-            `local mount event failed:${workspaceId}:${remotePath}:${errorMessage}`,
+            `local mount event failed:${workspaceId}`,
             'local mount event failed',
             {
               workspaceId,
@@ -762,7 +773,7 @@ function watchLocalMounts(
       watcher.on('error', (error) => {
         const errorMessage = toErrorMessage(error)
         warnIntegrationEventAggregated(
-          `local mount watcher error:${workspaceId}:${localRoot}:${errorMessage}`,
+          `local mount watcher error:${workspaceId}`,
           'local mount watcher error',
           {
             workspaceId,
@@ -775,7 +786,7 @@ function watchLocalMounts(
     } catch (error) {
       const errorMessage = toErrorMessage(error)
       warnIntegrationEventAggregated(
-        `failed to watch local integration mount:${workspaceId}:${localRoot}:${errorMessage}`,
+        `failed to watch local integration mount:${workspaceId}`,
         'failed to watch local integration mount',
         {
           workspaceId,
@@ -861,6 +872,10 @@ function logIntegrationEvent(message: string, metadata: Record<string, unknown>)
 }
 
 function warnIntegrationEventAggregated(key: string, message: string, metadata: Record<string, unknown>): void {
+  if (!aggregatedWarnings.has(key) && aggregatedWarnings.size >= MAX_AGGREGATED_WARNING_KEYS) {
+    const oldestKey = aggregatedWarnings.keys().next().value
+    if (typeof oldestKey === 'string') aggregatedWarnings.delete(oldestKey)
+  }
   const entry = aggregatedWarnings.get(key) || { count: 0, lastLoggedCount: 0 }
   entry.count += 1
   const shouldLog = entry.count === 1 || entry.count - entry.lastLoggedCount >= AGGREGATED_WARNING_REPEAT_EVERY
@@ -1084,11 +1099,16 @@ export class IntegrationEventBridge {
               path: event.resource.path
             })
             void this.injectEvent(projectId, event, specs).catch((error) => {
-              logIntegrationEvent('event delivery failed', {
-                projectId,
-                eventId: event.id,
-                error: toErrorMessage(error)
-              })
+              const errorMessage = toErrorMessage(error)
+              warnIntegrationEventAggregated(
+                `event delivery failed:${projectId}`,
+                'event delivery failed',
+                {
+                  projectId,
+                  eventId: event.id,
+                  error: errorMessage
+                }
+              )
             })
           },
           {
@@ -1113,11 +1133,16 @@ export class IntegrationEventBridge {
             source: 'local-mount'
           })
           void this.injectEvent(projectId, event, specs).catch((error) => {
-            logIntegrationEvent('local event delivery failed', {
-              projectId,
-              eventId: event.id,
-              error: toErrorMessage(error)
-            })
+            const errorMessage = toErrorMessage(error)
+            warnIntegrationEventAggregated(
+              `local event delivery failed:${projectId}`,
+              'local event delivery failed',
+              {
+                projectId,
+                eventId: event.id,
+                error: errorMessage
+              }
+            )
           })
         },
         Math.max(...watches.map((watch) => watch.coalesceMs), 750),

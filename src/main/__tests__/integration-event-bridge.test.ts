@@ -83,7 +83,7 @@ function changeEvent(
   } as ChangeEvent
 }
 
-function makeHarness(agents = ['alice', 'bob']): {
+function makeHarness(agents = ['alice', 'bob'], options: { failSend?: boolean } = {}): {
   bridge: IntegrationEventBridge
   subscribeCalls: SubscribeCall[]
   sent: SentMessage[]
@@ -114,6 +114,7 @@ function makeHarness(agents = ['alice', 'bob']): {
         return agents.map((name) => ({ name, projectId }))
       },
       sendMessage: async (projectId, input) => {
+        if (options.failSend) throw new Error('broker unavailable')
         sent.push({ projectId, input })
       }
     }
@@ -572,6 +573,49 @@ test('integration event debug flag enables verbose delivery logs', async () => {
 
   assert.ok(debugCalls.some((call) => call[0] === '[integration-events] received'))
   assert.ok(debugCalls.some((call) => call[0] === '[integration-events] injecting'))
+})
+
+test('integration event delivery failures warn once by default without verbose logs', async () => {
+  const harness = makeHarness(['alice'], { failSend: true })
+  const debugCalls: unknown[][] = []
+  const warnCalls: unknown[][] = []
+  const originalDebug = console.debug
+  const originalWarn = console.warn
+  console.debug = (...args: unknown[]) => {
+    debugCalls.push(args)
+  }
+  console.warn = (...args: unknown[]) => {
+    warnCalls.push(args)
+  }
+
+  try {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'github',
+        integrationId: 'github-1',
+        mountPaths: ['/github/repos'],
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+
+    await harness.emit(changeEvent('/github/repos/acme/widgets-1.json', 'github'))
+    await harness.emit(changeEvent('/github/repos/acme/widgets-2.json', 'github'))
+  } finally {
+    console.debug = originalDebug
+    console.warn = originalWarn
+  }
+
+  assert.equal(debugCalls.length, 0)
+  assert.equal(warnCalls.length, 1)
+  assert.equal(warnCalls[0][0], '[integration-events] event delivery failed')
+  assert.deepEqual(getIntegrationEventTelemetrySnapshot().projects['project-1'], {
+    eventsReceived: 2,
+    eventsInjected: 0,
+    eventsCoalesced: 0,
+    eventsDropped: 0,
+    queueDepth: 0,
+    mountCount: 0
+  })
 })
 
 test('integration event telemetry records coalescing and queue depth callbacks', async () => {
