@@ -179,10 +179,12 @@ export function registerIpcHandlers(): void {
       console.warn(`[broker] Project path no longer exists; skipping broker start: ${cwd}`)
       return false
     }
-    await brokerManager.start(projectId, cwd, name, win, channels)
-    void integrationsManager.notifyAgentState(projectId).catch((error) => {
-      console.warn('[integrations] Failed to notify agents after broker start:', error instanceof Error ? error.message : String(error))
-    })
+    const started = await brokerManager.start(projectId, cwd, name, win, channels)
+    if (started) {
+      void integrationsManager.notifyAgentState(projectId).catch((error) => {
+        console.warn('[integrations] Failed to notify agents after broker start:', error instanceof Error ? error.message : String(error))
+      })
+    }
     return true
   })
 

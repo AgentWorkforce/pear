@@ -270,6 +270,22 @@ describe('BrokerManager local + cloud coexistence', () => {
     expect(cloud.shutdown).toHaveBeenCalled()
   })
 
+  it('reports an existing local broker start as reused', async () => {
+    const manager = new BrokerManager()
+    mock.state.nextLocalAgents = []
+
+    const firstStart = await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', undefined as never, [])
+    const local = lastSpawned()
+    const secondStart = await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', undefined as never, [])
+
+    expect(firstStart).toBe(true)
+    expect(secondStart).toBe(false)
+    expect(mock.HarnessDriverClient.spawn).toHaveBeenCalledTimes(1)
+    expect(local.shutdown).not.toHaveBeenCalled()
+
+    await manager.shutdown()
+  })
+
   it('keeps the cloud session alive when a local broker starts afterwards', async () => {
     const manager = new BrokerManager()
     const cloud = await attachCloud(manager, ['cloud-agent'])
@@ -422,6 +438,81 @@ describe('BrokerManager local + cloud coexistence', () => {
         body: 'destroyed window proof'
       })
     )
+
+    await manager.shutdown()
+  })
+
+  it('dedupes repeated PTY chunks from overlapping event streams', async () => {
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    const local = await startLocalWithWindow(manager, win)
+    const listener = local.onEvent.mock.calls.at(-1)?.[0]
+    expect(listener).toBeTypeOf('function')
+
+    const chunkEvent = {
+      kind: 'worker_stream',
+      name: 'claude-1',
+      chunk: 'pong\n',
+      seq: 22
+    }
+    listener?.(chunkEvent)
+    listener?.(chunkEvent)
+
+    const ptyCalls = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([channel]) => channel === 'broker:pty-chunk')
+    expect(ptyCalls).toEqual([['broker:pty-chunk', PROJECT_ID, 'claude-1', 'pong\n']])
+
+    await manager.shutdown()
+  })
+
+  it('keeps legitimate repeated PTY chunks with different broker sequences', async () => {
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    const local = await startLocalWithWindow(manager, win)
+    const listener = local.onEvent.mock.calls.at(-1)?.[0]
+    expect(listener).toBeTypeOf('function')
+
+    listener?.({
+      kind: 'worker_stream',
+      name: 'claude-1',
+      chunk: 'pong\n',
+      seq: 23
+    })
+    listener?.({
+      kind: 'worker_stream',
+      name: 'claude-1',
+      chunk: 'pong\n',
+      seq: 24
+    })
+
+    const ptyCalls = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([channel]) => channel === 'broker:pty-chunk')
+    expect(ptyCalls).toHaveLength(2)
+
+    await manager.shutdown()
+  })
+
+  it('keeps repeated PTY chunks when broker events have no identity', async () => {
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    const local = await startLocalWithWindow(manager, win)
+    const listener = local.onEvent.mock.calls.at(-1)?.[0]
+    expect(listener).toBeTypeOf('function')
+
+    listener?.({
+      kind: 'worker_stream',
+      name: 'claude-1',
+      chunk: 'pong\n'
+    })
+    listener?.({
+      kind: 'worker_stream',
+      name: 'claude-1',
+      chunk: 'pong\n'
+    })
+
+    const ptyCalls = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([channel]) => channel === 'broker:pty-chunk')
+    expect(ptyCalls).toHaveLength(2)
 
     await manager.shutdown()
   })

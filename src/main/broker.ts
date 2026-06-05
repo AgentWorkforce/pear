@@ -343,6 +343,8 @@ const BROKER_EVENT_HISTORY_TTL_MS = 12 * 60 * 60 * 1_000
 const DEFAULT_RECONCILE_MESSAGE_LIMIT = 50
 const MAX_RECONCILE_MESSAGE_LIMIT = 100
 const EVENT_STREAM_REBIND_COOLDOWN_MS = 5_000
+const PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS = 60_000
+const MAX_PTY_CHUNK_DEDUPE_ENTRIES = 2_000
 // After this many consecutive failures to open a PTY input stream, give up on
 // the WS fast path for that agent briefly and send over HTTP while it cools down.
 const MAX_INPUT_STREAM_OPEN_FAILURES = 3
@@ -1075,7 +1077,7 @@ function sessionKeyFor(session: BrokerSession): string {
 
 export class BrokerManager {
   private sessions = new Map<string, BrokerSession>()
-  private startPromises = new Map<string, Promise<void>>()
+  private startPromises = new Map<string, Promise<boolean | void>>()
   private revivePromises = new Map<string, Promise<boolean>>()
   // Which broker sessions (by session key) an agent name is registered on.
   // Both a project's local and cloud brokers join the same relay workspace,
@@ -1097,6 +1099,7 @@ export class BrokerManager {
   private brokerTimeoutCounts = new Map<string, number>()
   private eventObservers = new Set<BrokerEventObserver>()
   private eventHistory: BrokerEventRecord[] = []
+  private recentPtyChunks = new Map<string, number>()
   private eventSerial = 0
 
   get cwd(): string | null {
@@ -1124,7 +1127,7 @@ export class BrokerManager {
     name: string,
     win: BrowserWindow,
     channels: string[] = []
-  ): Promise<void> {
+  ): Promise<boolean> {
     const normalizedProjectId = projectId.trim()
     if (!normalizedProjectId) {
       throw new Error('Project id is required')
@@ -1140,7 +1143,7 @@ export class BrokerManager {
       await this.syncChannels(normalizedProjectId, nextChannels)
       await this.refreshEventStream(normalizedProjectId, 'existing-session-start', win)
       this.sendStatus(normalizedProjectId, 'connected')
-      return
+      return false
     }
 
     const inFlight = this.startPromises.get(normalizedProjectId)
@@ -1156,14 +1159,14 @@ export class BrokerManager {
         started.name = name
         await this.syncChannels(normalizedProjectId, nextChannels)
         this.sendStatus(normalizedProjectId, 'connected')
-        return
+        return false
       } catch (err) {
         this.sendStatusToWindow(win, normalizedProjectId, 'error', String(err))
         throw err
       }
     }
 
-    const startBroker = async (): Promise<void> => {
+    const startBroker = async (): Promise<boolean> => {
       const existingClient = await this.connectExistingBroker(normalizedProjectId, cwd)
       if (existingClient) {
         const unsubEvent = this.attachClient(normalizedProjectId, existingClient, win)
@@ -1190,7 +1193,7 @@ export class BrokerManager {
           source: 'local'
         })
         this.sendStatus(normalizedProjectId, 'connected')
-        return
+        return true
       }
 
       const agentRelayMcpCommand = resolveAgentRelayMcpCommand()
@@ -1241,12 +1244,13 @@ export class BrokerManager {
         source: 'local'
       })
       this.sendStatus(normalizedProjectId, 'connected')
+      return true
     }
 
     const startPromise = startBroker()
     this.startPromises.set(normalizedProjectId, startPromise)
     try {
-      await startPromise
+      return await startPromise
     } catch (err) {
       console.error(`[broker] Failed to start for project ${normalizedProjectId}:`, err)
       this.sendStatusToWindow(win, normalizedProjectId, 'error', String(err))
@@ -1880,6 +1884,9 @@ export class BrokerManager {
         'name' in event && typeof event.name === 'string' &&
         'chunk' in event && typeof event.chunk === 'string'
       ) {
+        if (this.isDuplicatePtyChunk(sessionKey, event.name, event)) {
+          return
+        }
         const targetWindow = this.windowForSession(sessionKey, win)
         if (targetWindow && !targetWindow.isDestroyed()) {
           targetWindow.webContents.send('broker:pty-chunk', projectId, event.name, event.chunk)
@@ -1930,6 +1937,39 @@ export class BrokerManager {
       unsubBurn()
       unsubEvent()
     }
+  }
+
+  private isDuplicatePtyChunk(sessionKey: string, name: string, event: BrokerEvent): boolean {
+    const now = Date.now()
+    for (const [key, seenAt] of this.recentPtyChunks) {
+      if (
+        now - seenAt > PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS ||
+        this.recentPtyChunks.size > MAX_PTY_CHUNK_DEDUPE_ENTRIES
+      ) {
+        this.recentPtyChunks.delete(key)
+      }
+    }
+
+    const eventRecord = event as Record<string, unknown>
+    const seq = typeof eventRecord.seq === 'number' || typeof eventRecord.seq === 'string'
+      ? String(eventRecord.seq)
+      : ''
+    const eventId = typeof eventRecord.event_id === 'string'
+      ? eventRecord.event_id
+      : typeof eventRecord.id === 'string'
+        ? eventRecord.id
+        : ''
+    const identity = eventId || (seq ? `seq:${seq}` : '')
+    if (!identity) return false
+
+    const key = `${sessionKey}:${name}:${identity}`
+    const previous = this.recentPtyChunks.get(key)
+    if (previous !== undefined && now - previous <= PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS) {
+      return true
+    }
+
+    this.recentPtyChunks.set(key, now)
+    return false
   }
 
   private publishBrokerEvent(
