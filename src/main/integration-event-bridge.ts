@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { existsSync, watch, type FSWatcher } from 'node:fs'
 import { appendFile, mkdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -22,7 +23,14 @@ const INTEGRATION_EVENT_SCOPES = ['relayfile:fs:read:/**']
 const PROJECT_INTEGRATIONS_LINK_NAME = '.integrations'
 const RECENT_INJECTION_TTL_MS = 10_000
 const RECENT_LOGICAL_CHANGE_TTL_MS = 10 * 60_000
+// Bounded persistent window for Slack record identities: must outlast the
+// upstream queue's retry storm (max 5 retries of a batch that can stall for
+// ~13 minutes each) so time-separated replays of one logical message are
+// still suppressed. Slack dedupe is content-aware when preview data is
+// available, so an edit to the same Slack message can still inject.
+const SLACK_RECORD_REPLAY_TTL_MS = 60 * 60_000
 const REPLAY_SKEW_TOLERANCE_MS = 15 * 60_000
+const REMOTE_SUBSCRIPTION_FROM: 'legacy' = 'legacy'
 const INTEGRATION_EVENT_LOG_PATH = join(homedir(), '.agentworkforce', 'pear', 'integration-events.log')
 const AGGREGATED_WARNING_REPEAT_EVERY = 25
 const MAX_AGGREGATED_WARNING_KEYS = 256
@@ -331,16 +339,30 @@ function workspaceIdFromJwt(token: string | undefined): string | null {
 // Tolerates the legacy `/integrations/<provider>/...` catalog form.
 function canonicalMountPaths(integration: ConnectedIntegration): string[] {
   const provider = toRelayfileProvider(integration.provider)
-  const mountPaths = integration.mountPaths.map((path) => {
+  const mountPaths = integration.mountPaths.flatMap((path) => {
     const discovery = path.match(/^\/discovery(?:\/.*)?$/)
-    if (discovery) return path
+    if (discovery) return [path]
     const prefixed = path.match(/^\/integrations\/[^/]+(\/.*)?$/)
-    if (prefixed) return `/${provider}${prefixed[1] ?? ''}`
+    if (prefixed) {
+      const normalized = `/${provider}${prefixed[1] ?? ''}`
+      return [normalized, ...slackCanonicalChannelAliases(provider, normalized)]
+    }
     const rootLevel = path.match(/^\/[^/]+(\/.*)?$/)
-    if (rootLevel) return `/${provider}${rootLevel[1] ?? ''}`
-    return path
+    if (rootLevel) {
+      const normalized = `/${provider}${rootLevel[1] ?? ''}`
+      return [normalized, ...slackCanonicalChannelAliases(provider, normalized)]
+    }
+    return [path, ...slackCanonicalChannelAliases(provider, path)]
   })
   return dedupeStrings(mountPaths)
+}
+
+function slackCanonicalChannelAliases(provider: string, path: string): string[] {
+  if (!isSlackProvider(provider)) return []
+  const match = path.match(/^\/slack\/channels\/([^/]+)__(?:[^/]+)(\/.*)?$/u)
+  const channelId = match?.[1]?.trim()
+  if (!channelId) return []
+  return [`/slack/channels/${channelId}${match?.[2] ?? ''}`]
 }
 
 function watchGlobForPath(path: string): string {
@@ -467,6 +489,19 @@ function globMatchesPath(glob: string, path: string): boolean {
     pattern.every((segment, index) => globSegmentMatches(segment, target[index]))
 }
 
+export function relayfileSdkPathFiltersFor(globs: string[]): string[] {
+  return dedupeStrings(globs.map((glob) => {
+    const segments = normalizeChangePath(glob)
+    if (segments.length === 0) return '/'
+    const sdkSegments = segments.map((segment, index) => {
+      if (segment === '*') return segment
+      if (segment === '**') return index === segments.length - 1 ? segment : '*'
+      return segment.includes('*') ? '*' : segment
+    })
+    return `/${sdkSegments.join('/')}`
+  }))
+}
+
 function shouldPublishFilesystemEvent(event: FilesystemEvent): boolean {
   return event.type === 'file.created' || event.type === 'file.updated' || event.type === 'file.deleted'
 }
@@ -534,7 +569,8 @@ function filesystemEventToChangeEvent(
 function createWorkspaceScopedEventClient(
   client: RelayFileClient,
   workspaceId: string,
-  tokenProvider: TokenProvider
+  tokenProvider: TokenProvider,
+  baseUrl?: string
 ): RelayfileEventClient {
   return {
     subscribe(globs, onChange, options) {
@@ -546,6 +582,9 @@ function createWorkspaceScopedEventClient(
       const pathScope = options?.pathScope?.length && !sameStringList(options.pathScope, globs)
         ? options.pathScope
         : null
+      const relayfilePathFilters = relayfileSdkPathFiltersFor(
+        options?.pathScope?.length ? options.pathScope : globs
+      )
 
       const dispatch = (event: FilesystemEvent): void => {
         if (!active) return
@@ -608,14 +647,17 @@ function createWorkspaceScopedEventClient(
             workspaceId,
             globs,
             pathScope: options?.pathScope,
-            from: options?.from ?? 'now'
+            relayfilePathFilters,
+            from: options?.from ?? 'now',
+            transport: baseUrl ? 'websocket' : 'polling'
           })
           sync = new RelayFileSync({
             client,
             workspaceId,
+            baseUrl,
             token,
             from: options?.from ?? 'now',
-            paths: options?.pathScope?.length ? options.pathScope : globs,
+            paths: relayfilePathFilters,
             onPollingFallback: (info) => {
               warnIntegrationEventAggregated(
                 `remote stream polling fallback:${workspaceId}`,
@@ -628,6 +670,12 @@ function createWorkspaceScopedEventClient(
             }
           })
           sync.on('event', handleEvent)
+          sync.on('state', (state) => {
+            logIntegrationEvent('remote stream state', {
+              workspaceId,
+              state
+            })
+          })
           sync.on('error', (error) => {
             const errorMessage = toErrorMessage(error)
             warnIntegrationEventAggregated(
@@ -1005,6 +1053,14 @@ function eventOrigin(event: ChangeEvent): string | null {
 }
 
 function eventChangeFingerprint(event: ChangeEvent): string | null {
+  // Slack channel records reach us as raw-id and `<id>__<name>` slug copies,
+  // and queue retries rewrite the same record with a fresh revision each time
+  // (probe #1: evt_143356/143358/143393/143401 all carried distinct
+  // revisions for one logical message). Logical path identity must therefore
+  // take precedence over per-file revisions, which can never match across
+  // copies or replays.
+  const slackFingerprint = slackLogicalChangeFingerprint(event)
+  if (slackFingerprint) return slackFingerprint
   const digest = eventRecordValue(event, 'digest')
   const revision = eventRecordValue(event, 'revision')
   const contentHash = eventRecordValue(event, 'contentHash')
@@ -1024,6 +1080,10 @@ function slackChannelLabel(channelSegment: string): string {
   return label ? `#${label}` : channelSegment
 }
 
+function canonicalSlackChannelSegment(channelSegment: string): string {
+  return channelSegment.split('__', 1)[0] || channelSegment
+}
+
 function dispatchCoalescingKey(event: ChangeEvent): string {
   const provider = eventProvider(event)
   const segments = pathSegments(event.resource.path)
@@ -1033,7 +1093,7 @@ function dispatchCoalescingKey(event: ChangeEvent): string {
     const threadIndex = segments.indexOf('threads')
     const replyIndex = segments.indexOf('replies')
     if (channelIndex >= 0 && segments[channelIndex + 1]) {
-      const channel = segments[channelIndex + 1]
+      const channel = canonicalSlackChannelSegment(segments[channelIndex + 1])
       if (messageIndex >= 0 && segments[messageIndex + 1]) {
         return `${provider}:channel:${channel}:message:${segments[messageIndex + 1]}`
       }
@@ -1048,6 +1108,74 @@ function dispatchCoalescingKey(event: ChangeEvent): string {
     }
   }
   return `${provider}:${normalizeRelayfilePath(event.resource.path)}`
+}
+
+function slackLogicalChangeFingerprint(event: ChangeEvent): string | null {
+  if (eventProvider(event) !== 'slack') return null
+  const segments = pathSegments(event.resource.path)
+  const channelIndex = segments.indexOf('channels')
+  const dmIndex = segments.indexOf('dms')
+  const userIndex = segments.indexOf('users')
+  const messageIndex = segments.indexOf('messages')
+  const threadIndex = segments.indexOf('threads')
+  const replyIndex = segments.indexOf('replies')
+
+  const scopeIndex = channelIndex >= 0 ? channelIndex : dmIndex >= 0 ? dmIndex : userIndex
+  if (scopeIndex < 0 || !segments[scopeIndex + 1]) return null
+
+  const scopeKind = segments[scopeIndex]
+  const scopeValue = scopeKind === 'channels'
+    ? canonicalSlackChannelSegment(segments[scopeIndex + 1])
+    : segments[scopeIndex + 1]
+
+  if (messageIndex >= 0 && segments[messageIndex + 1]) {
+    const suffix = segments.slice(messageIndex + 2).join('/')
+    return `slack:${scopeKind}:${scopeValue}:message:${segments[messageIndex + 1]}:${suffix}`
+  }
+
+  if (threadIndex >= 0 && segments[threadIndex + 1]) {
+    const thread = segments[threadIndex + 1]
+    if (replyIndex >= 0 && segments[replyIndex + 1]) {
+      const suffix = segments.slice(replyIndex + 2).join('/')
+      return `slack:${scopeKind}:${scopeValue}:thread:${thread}:reply:${segments[replyIndex + 1]}:${suffix}`
+    }
+    const suffix = segments.slice(threadIndex + 2).join('/')
+    return `slack:${scopeKind}:${scopeValue}:thread:${thread}:${suffix}`
+  }
+
+  return null
+}
+
+function stableContentFingerprint(content: string): string {
+  return createHash('sha256').update(content).digest('hex').slice(0, 16)
+}
+
+function eventDedupeKeyWithFingerprint(
+  duplicateKey: string,
+  fingerprint: string | null,
+  contextPreview?: EventContextPreview
+): { key: string; ttlMs: number } {
+  if (!fingerprint) {
+    return {
+      key: duplicateKey,
+      ttlMs: RECENT_INJECTION_TTL_MS
+    }
+  }
+
+  if (fingerprint.startsWith('slack:')) {
+    const contentAwareFingerprint = contextPreview?.kind === 'text'
+      ? `${fingerprint}:content:${stableContentFingerprint(contextPreview.content)}`
+      : fingerprint
+    return {
+      key: `${duplicateKey}:change:${contentAwareFingerprint}`,
+      ttlMs: SLACK_RECORD_REPLAY_TTL_MS
+    }
+  }
+
+  return {
+    key: `${duplicateKey}:change:${fingerprint}`,
+    ttlMs: RECENT_LOGICAL_CHANGE_TTL_MS
+  }
 }
 
 function dispatchSummaryForEvent(event: ChangeEvent, specs: SubscriptionSpec[]): DispatchSummary {
@@ -1171,6 +1299,10 @@ function isIntegrationEventDebugEnabled(): boolean {
 function isTestProcess(): boolean {
   return process.env.NODE_ENV === 'test' ||
     process.env.VITEST === 'true' ||
+    // node:test children carry NODE_TEST_CONTEXT; `--test` itself is consumed
+    // by the node CLI and never reaches argv/execArgv in the test process.
+    process.env.NODE_TEST_CONTEXT !== undefined ||
+    process.execArgv.includes('--test') ||
     process.argv.some((arg) => arg === '--test' || arg.includes('/vitest/'))
 }
 
@@ -1233,37 +1365,47 @@ function eventContextPreviewFromFile(file: FileReadResponse): EventContextPrevie
   const buffer = file.encoding === 'base64'
     ? Buffer.from(rawContent, 'base64')
     : Buffer.from(rawContent, 'utf8')
+  return eventContextPreviewFromBuffer(file.path, buffer, file.contentType)
+}
+
+function eventContextPreviewFromBuffer(path: string, buffer: Buffer, contentType?: string): EventContextPreview {
   const size = buffer.byteLength
 
   // The current Relayfile SDK readFile call returns the full file; this cap only
   // bounds what Pear injects into agent context after the targeted read.
   if (size > MAX_EVENT_CONTEXT_PREVIEW_BYTES) {
     return {
-      path: file.path,
+      path,
       kind: 'too-large',
       content: '',
       size,
-      contentType: file.contentType
+      contentType
     }
   }
 
   if (buffer.includes(0)) {
     return {
-      path: file.path,
+      path,
       kind: 'binary',
       content: '',
       size,
-      contentType: file.contentType
+      contentType
     }
   }
 
   return {
-    path: file.path,
+    path,
     kind: 'text',
     content: buffer.toString('utf8'),
     size,
-    contentType: file.contentType
+    contentType
   }
+}
+
+function eventContextPreviewFromData(path: string, data: unknown): EventContextPreview | undefined {
+  if (data === undefined || data === null) return undefined
+  const content = typeof data === 'string' ? data : JSON.stringify(data, null, 2)
+  return eventContextPreviewFromBuffer(path, Buffer.from(content, 'utf8'), 'application/json')
 }
 
 function eventContextPreviewMetadata(preview: EventContextPreview): EventContextPreviewMetadata {
@@ -1273,6 +1415,34 @@ function eventContextPreviewMetadata(preview: EventContextPreview): EventContext
     size: preview.size,
     contentType: preview.contentType
   }
+}
+
+function previewRecord(preview: EventContextPreview | undefined): Record<string, unknown> | undefined {
+  if (!preview || preview.kind !== 'text') return undefined
+  try {
+    const parsed = JSON.parse(preview.content)
+    return isRecord(parsed) ? parsed : undefined
+  } catch {
+    return undefined
+  }
+}
+
+function slackPreviewText(preview: EventContextPreview | undefined): string | undefined {
+  if (!preview || preview.kind !== 'text') return undefined
+  const record = previewRecord(preview)
+  const payload = isRecord(record?.payload) ? record.payload : record
+  const rawEvent = isRecord(payload?.raw_event) ? payload.raw_event : undefined
+  return eventSummaryValue(payload?.text) || eventSummaryValue(rawEvent?.text) || preview.content
+}
+
+function slackPreviewAuthor(preview: EventContextPreview | undefined): string | undefined {
+  const record = previewRecord(preview)
+  const payload = isRecord(record?.payload) ? record.payload : record
+  const rawEvent = isRecord(payload?.raw_event) ? payload.raw_event : undefined
+  return eventSummaryValue(payload?.userName) ||
+    eventSummaryValue(payload?.user_name) ||
+    eventSummaryValue(payload?.user) ||
+    eventSummaryValue(rawEvent?.user)
 }
 
 function shouldNotifyRelayfilePath(pathValue: string): boolean {
@@ -1355,10 +1525,62 @@ function slackEventContextPath(path: string): boolean {
   return /^\/slack\/(?:channels|dms|users)\/[^/]+\/(?:messages|threads)\/.+\.json$/u.test(path)
 }
 
+function slackScopeLabel(path: string): string | undefined {
+  const segments = pathSegments(path)
+  const channelIndex = segments.indexOf('channels')
+  if (channelIndex >= 0 && segments[channelIndex + 1]) {
+    return slackChannelLabel(segments[channelIndex + 1])
+  }
+  const dmIndex = segments.indexOf('dms')
+  if (dmIndex >= 0 && segments[dmIndex + 1]) return `DM ${segments[dmIndex + 1]}`
+  const userIndex = segments.indexOf('users')
+  if (userIndex >= 0 && segments[userIndex + 1]) return `User ${segments[userIndex + 1]}`
+  return undefined
+}
+
+function formatSlackIntegrationEventMessage(
+  event: ChangeEvent,
+  contextPreview?: EventContextPreview
+): string | null {
+  const resource = isRecord(event.resource) ? event.resource : {}
+  const provider = eventSummaryValue(resource.provider) || eventProvider(event)
+  const relayfilePath = eventSummaryValue(resource.path)
+  if (provider !== 'slack' || !relayfilePath || !slackEventContextPath(relayfilePath)) return null
+
+  const projectPath = projectIntegrationPathForRelayfilePath(relayfilePath)
+  const scopeLabel = slackScopeLabel(relayfilePath)
+  const messageText = slackPreviewText(contextPreview)
+  const author = slackPreviewAuthor(contextPreview)
+  const lines = [
+    '<integration-event>',
+    'Slack message event',
+    `Event id: ${event.id}`,
+    `Occurred at: ${event.occurredAt}`
+  ]
+
+  if (scopeLabel) lines.push(`Location: ${scopeLabel}`)
+  if (author) lines.push(`Author: ${author}`)
+  lines.push(`Path: ${projectPath}`)
+  if (messageText) {
+    lines.push('Message:', messageText)
+  } else if (contextPreview?.kind === 'too-large') {
+    lines.push(`Message: skipped; context preview is ${contextPreview.size} bytes.`)
+  } else if (contextPreview?.kind === 'binary') {
+    lines.push(`Message: skipped; context preview is binary (${contextPreview.size} bytes).`)
+  } else {
+    lines.push('Message: unavailable; targeted context read did not return content.')
+  }
+  lines.push('</integration-event>')
+  return lines.join('\n')
+}
+
 function formatIntegrationEventMessage(
   event: ChangeEvent,
   contextPreview?: EventContextPreview
 ): string {
+  const slackMessage = formatSlackIntegrationEventMessage(event, contextPreview)
+  if (slackMessage) return slackMessage
+
   const summary = isRecord(event.summary) ? event.summary : {}
   const resource = isRecord(event.resource) ? event.resource : {}
   const provider = eventSummaryValue(resource.provider) || 'integration'
@@ -1733,8 +1955,9 @@ export class IntegrationEventBridge {
         projectId,
         workspaceId: handle.workspaceId,
         localMountWorkspaceId: handle.localMountWorkspaceId,
-        // temporary-pending-SDK-contract: Relayfile WS currently replays
-        // recent catch-up events without a from=now/path-scope contract.
+        // Use the SDK catch-up stream and let Pear's replay filter below
+        // decide what is live enough to inject. This avoids losing a Slack
+        // webhook that lands while Pear is still attaching the stream.
         remoteSubscriptionStartedAt: new Date(remoteSubscriptionStartedAtMs).toISOString(),
         globs: watches.map((watch) => watch.glob),
         specs: specs.map((spec) => ({
@@ -1778,7 +2001,7 @@ export class IntegrationEventBridge {
             coalesce: 'fire-once',
             coalesceMs: Math.max(...watches.map((watch) => watch.coalesceMs), 750),
             pathScope: watches.map((watch) => watch.glob),
-            from: 'now',
+            from: REMOTE_SUBSCRIPTION_FROM,
             onCoalesced: () => incrementIntegrationEventCounter(projectId, 'eventsCoalesced'),
             onQueueDepth: (depth) => setIntegrationEventGauge(projectId, 'queueDepth', depth)
           }
@@ -1870,12 +2093,25 @@ export class IntegrationEventBridge {
     const path = eventSummaryValue(event.resource.path)
     if (!path) return undefined
 
+    let readFileError: unknown
     try {
       const handle = await this.getWorkspaceHandle()
       const client = handle.client()
-      if (typeof client.readFile !== 'function') return undefined
-      return eventContextPreviewFromFile(await client.readFile(handle.workspaceId, path))
+      if (typeof client.readFile === 'function') {
+        return eventContextPreviewFromFile(await client.readFile(handle.workspaceId, path))
+      }
     } catch (error) {
+      readFileError = error
+    }
+
+    try {
+      const expanded = await event.expand('full')
+      const expandedRecord = isRecord(expanded) ? expanded : {}
+      return eventContextPreviewFromData(
+        typeof expandedRecord.path === 'string' ? expandedRecord.path : path,
+        expandedRecord.data
+      )
+    } catch (expandError) {
       warnIntegrationEventAggregated(
         `event context read failed:${projectId}`,
         'event context read failed',
@@ -1883,7 +2119,8 @@ export class IntegrationEventBridge {
           projectId,
           eventId: event.id,
           path,
-          error: toErrorMessage(error)
+          error: readFileError ? toErrorMessage(readFileError) : toErrorMessage(expandError),
+          expandError: readFileError ? toErrorMessage(expandError) : undefined
         }
       )
       return undefined
@@ -1947,32 +2184,60 @@ export class IntegrationEventBridge {
   ): Promise<void> {
     const duplicateKey = injectionDeduplicationKey(projectId, event, matchedSpecs)
     const fingerprint = eventChangeFingerprint(event)
-    const recentKey = fingerprint ? `${duplicateKey}:change:${fingerprint}` : duplicateKey
-    if (this.wasRecentlyInjected(recentKey, fingerprint ? RECENT_LOGICAL_CHANGE_TTL_MS : RECENT_INJECTION_TTL_MS)) {
-      incrementIntegrationEventCounter(projectId, 'eventsDropped')
-      logIntegrationEvent('skipped duplicate path', {
-        projectId,
-        eventId: event.id,
-        path: event.resource.path,
-        duplicateKey: recentKey
-      })
-      return
+    const needsSlackContentAwareDedupe = fingerprint?.startsWith('slack:') === true
+    let dedupe = eventDedupeKeyWithFingerprint(duplicateKey, fingerprint)
+    let dedupeClaimed = false
+
+    if (!needsSlackContentAwareDedupe) {
+      if (this.wasRecentlyInjected(dedupe.key, dedupe.ttlMs)) {
+        incrementIntegrationEventCounter(projectId, 'eventsDropped')
+        logIntegrationEvent('skipped duplicate path', {
+          projectId,
+          eventId: event.id,
+          path: event.resource.path,
+          duplicateKey: dedupe.key
+        })
+        return
+      }
+      dedupeClaimed = true
     }
 
     const bridge = await this.bridge()
     const uniqueRecipients = await this.recipientsForMatchedSpecs(projectId, matchedSpecs, bridge)
     if (uniqueRecipients.length === 0) {
+      // Release the dedupe key: a duplicate of this event (remote copy of a
+      // local change, coalesced update) must be allowed to retry once a
+      // recipient registers; otherwise the event is suppressed for the TTL.
+      if (dedupeClaimed) this.recentInjections.delete(dedupe.key)
       incrementIntegrationEventCounter(projectId, 'eventsDropped')
-      logIntegrationEvent('skipped no recipients', {
-        projectId,
-        eventId: event.id,
-        path: event.resource.path
-      })
+      warnIntegrationEventAggregated(
+        `skipped no recipients:${projectId}`,
+        'skipped no recipients',
+        {
+          projectId,
+          eventId: event.id,
+          path: event.resource.path
+        }
+      )
       return
     }
 
     const eventMetadata = integrationEventMetadata(event)
     const contextPreview = await this.readEventContextPreview(projectId, event)
+    if (needsSlackContentAwareDedupe) {
+      dedupe = eventDedupeKeyWithFingerprint(duplicateKey, fingerprint, contextPreview)
+      if (this.wasRecentlyInjected(dedupe.key, dedupe.ttlMs)) {
+        incrementIntegrationEventCounter(projectId, 'eventsDropped')
+        logIntegrationEvent('skipped duplicate path', {
+          projectId,
+          eventId: event.id,
+          path: event.resource.path,
+          duplicateKey: dedupe.key
+        })
+        return
+      }
+      dedupeClaimed = true
+    }
     const contextPreviewData = contextPreview ? eventContextPreviewMetadata(contextPreview) : undefined
     logIntegrationEvent('injecting', {
       projectId,
@@ -1980,6 +2245,8 @@ export class IntegrationEventBridge {
       path: event.resource.path,
       recipients: uniqueRecipients
     })
+    let deliveredCount = 0
+    const sendErrors: Array<{ recipient: string; error: unknown }> = []
     for (const recipient of uniqueRecipients) {
       const input = {
         to: recipient,
@@ -1999,7 +2266,32 @@ export class IntegrationEventBridge {
           ...eventMetadata
         }
       } as const
-      await this.sendBrokerMessage(projectId, input, bridge)
+      try {
+        await this.sendBrokerMessage(projectId, input, bridge)
+        deliveredCount += 1
+      } catch (error) {
+        sendErrors.push({ recipient, error })
+      }
+    }
+    if (deliveredCount === 0 && sendErrors.length > 0) {
+      // No recipient got the event. Release the dedupe key so a duplicate of
+      // this event (remote copy of a local change, coalesced update) retries
+      // delivery instead of being dropped as a recent injection.
+      if (dedupeClaimed) this.recentInjections.delete(dedupe.key)
+      throw sendErrors[0].error
+    }
+    if (sendErrors.length > 0) {
+      warnIntegrationEventAggregated(
+        `event recipient send failed:${projectId}`,
+        'event recipient send failed',
+        {
+          projectId,
+          eventId: event.id,
+          path: event.resource.path,
+          recipients: sendErrors.map((entry) => entry.recipient),
+          error: toErrorMessage(sendErrors[0].error)
+        }
+      )
     }
     incrementIntegrationEventCounter(projectId, 'eventsInjected')
   }
@@ -2019,7 +2311,10 @@ export class IntegrationEventBridge {
       const onlineExplicitAgents = projectAgents
         ? targets.agents.filter((agent) => projectAgents.includes(agent))
         : []
-      const explicitTargets = dedupeStrings([...onlineExplicitAgents, ...targets.channels])
+      const explicitAgents = projectAgents && projectAgents.length === 0 && targets.agents.length > 0
+        ? targets.agents
+        : onlineExplicitAgents
+      const explicitTargets = dedupeStrings([...explicitAgents, ...targets.channels])
       if (explicitTargets.length === 0) {
         recipients.push(...(projectAgents ?? await this.listProjectAgentsCached(projectId, bridge)))
       } else {
@@ -2164,7 +2459,7 @@ export class IntegrationEventBridge {
     const handle: RelayfileWorkspaceHandle = {
       workspaceId: relayWorkspaceId,
       localMountWorkspaceId: accountWorkspaceId,
-      client: () => createWorkspaceScopedEventClient(client, relayWorkspaceId, workspaceTokenProvider)
+      client: () => createWorkspaceScopedEventClient(client, relayWorkspaceId, workspaceTokenProvider, joined.info.relayfileUrl)
     }
     accountIntegrationEventHandle = {
       apiUrl: auth.apiUrl,

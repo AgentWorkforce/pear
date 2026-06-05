@@ -767,9 +767,7 @@ export class CloudAgentManager {
               system: true
             }
           } as const
-          return broker.sendMessageAndWaitForDelivery
-            ? broker.sendMessageAndWaitForDelivery(normalizedProjectId, input)
-            : broker.sendMessage(normalizedProjectId, input)
+          return broker.sendMessage(normalizedProjectId, input)
         })
     )
   }

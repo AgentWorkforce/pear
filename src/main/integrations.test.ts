@@ -181,7 +181,8 @@ const mock = vi.hoisted(() => {
     relayWorkspaceManager,
     brokerManager: {
       listAgents: vi.fn(async () => []),
-      sendMessage: vi.fn(async () => undefined)
+      sendMessage: vi.fn(async () => undefined),
+      sendMessageAndWaitForDelivery: vi.fn(async () => undefined)
     },
     ensureProjectIntegrationsLink: vi.fn(async () => undefined),
     removeProjectIntegrationsLink: vi.fn(async () => undefined),
@@ -275,6 +276,7 @@ describe('IntegrationsManager', () => {
     mock.relayWorkspaceManager.getWorkspaceHandle.mockClear()
     mock.brokerManager.listAgents.mockClear()
     mock.brokerManager.sendMessage.mockClear()
+    mock.brokerManager.sendMessageAndWaitForDelivery.mockClear()
     mock.ensureProjectIntegrationsLink.mockClear()
     mock.removeProjectIntegrationsLink.mockClear()
     mock.resetStore()
@@ -442,6 +444,83 @@ describe('IntegrationsManager', () => {
     )
   })
 
+  it('does not wait for delivery confirmation when injecting integration guidance', async () => {
+    vi.useFakeTimers()
+    mock.brokerManager.listAgents.mockResolvedValue([{ name: 'claude-1', projectId: 'project-1' }])
+    mock.brokerManager.sendMessageAndWaitForDelivery.mockRejectedValue(new Error('delivery timeout'))
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const manager = new IntegrationsManager()
+
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(1_000)
+
+    expect(mock.brokerManager.sendMessage).toHaveBeenCalledWith(
+      'project-1',
+      expect.objectContaining({
+        to: 'claude-1',
+        from: 'system',
+        text: expect.stringContaining('<integrations-update>')
+      })
+    )
+    expect(mock.brokerManager.sendMessageAndWaitForDelivery).not.toHaveBeenCalled()
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      '[integrations] Failed to inject integration system message:',
+      expect.any(String)
+    )
+    warnSpy.mockRestore()
+  })
+
+  it('does not re-send an unchanged integrations update after the dedupe window lapses', async () => {
+    vi.useFakeTimers()
+    mock.brokerManager.listAgents.mockResolvedValue([{ name: 'claude-1', projectId: 'project-1' }])
+    const manager = new IntegrationsManager()
+    const integrationsUpdateSends = (): number =>
+      mock.brokerManager.sendMessage.mock.calls.filter(
+        ([, input]) => (input as { data?: { kind?: string } }).data?.kind === 'integrations-update'
+      ).length
+
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(integrationsUpdateSends()).toBe(1)
+    await vi.waitFor(() => expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalled())
+    mock.brokerManager.sendMessage.mockClear()
+
+    // A later reconcile with identical integration state must not re-broadcast
+    // regardless of elapsed time — duplicate <integrations-update> messages
+    // were observed minutes apart with the old 30s text-TTL dedupe.
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(integrationsUpdateSends()).toBe(1)
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(integrationsUpdateSends()).toBe(1)
+  })
+
+  it('re-broadcasts the integrations update after a failed send', async () => {
+    vi.useFakeTimers()
+    mock.brokerManager.listAgents.mockResolvedValue([{ name: 'claude-1', projectId: 'project-1' }])
+    mock.brokerManager.sendMessage.mockRejectedValueOnce(new Error('broker unavailable'))
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const manager = new IntegrationsManager()
+    const integrationsUpdateSends = (): number =>
+      mock.brokerManager.sendMessage.mock.calls.filter(
+        ([, input]) => (input as { data?: { kind?: string } }).data?.kind === 'integrations-update'
+      ).length
+
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(integrationsUpdateSends()).toBe(1)
+
+    // The failed broadcast must not record a last-sent signature; the next
+    // reconcile retries the identical message.
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(integrationsUpdateSends()).toBe(2)
+    warnSpy.mockRestore()
+  })
+
   it('does not dedupe integration guidance when the first agent wait times out empty', async () => {
     vi.useFakeTimers()
     mock.brokerManager.listAgents.mockResolvedValue([])
@@ -492,6 +571,27 @@ describe('IntegrationsManager', () => {
         from: 'system',
         text: expect.stringContaining('<integrations-update>')
       })
+    )
+  })
+
+  it('retries active integration event subscriptions after startup mount hydration', async () => {
+    mock.store.projects[0].integrations[0].subscribeAgent = true
+    const manager = new IntegrationsManager()
+
+    await manager.startLocalMountDaemon()
+    await vi.waitFor(() => expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalled())
+
+    expect(mock.integrationEventBridge.closeAllExcept).toHaveBeenCalledTimes(2)
+    expect(mock.integrationEventBridge.reconcile).toHaveBeenCalledTimes(2)
+    expect(mock.integrationEventBridge.reconcile).toHaveBeenLastCalledWith(
+      'project-1',
+      expect.arrayContaining([
+        expect.objectContaining({
+          provider: 'slack',
+          integrationId: 'slack-integration-1',
+          subscribeAgent: true
+        })
+      ])
     )
   })
 
