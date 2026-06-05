@@ -545,6 +545,54 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('coalesces concurrent duplicate persona spawn requests', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'pear-persona-spawn-'))
+    const workforceCli = join(tempDir, 'node_modules', '.bin', 'agentworkforce')
+    await mkdir(dirname(workforceCli), { recursive: true })
+    await writeFile(workforceCli, [
+      '#!/bin/sh',
+      'if [ "$1" = "show" ]; then',
+      '  printf \'{"spec":{"id":"reviewer","harness":"fake-cli"}}\'',
+      '  exit 0',
+      'fi',
+      'exit 1',
+      ''
+    ].join('\n'))
+    await chmod(workforceCli, 0o755)
+
+    try {
+      const manager = new BrokerManager()
+      mock.state.nextLocalAgents = []
+      await manager.start(PROJECT_ID, tempDir, 'pear-project-1', undefined as never, [])
+      const local = lastSpawned()
+      let releaseSpawn!: () => void
+      local.spawnPty.mockImplementationOnce(async (input: { name: string }) => {
+        await new Promise<void>((resolve) => {
+          releaseSpawn = resolve
+        })
+        local.agentNames.push(input.name)
+        return { name: input.name, runtime: 'pty' }
+      })
+
+      const first = manager.spawnPersona(PROJECT_ID, 'reviewer')
+      const second = manager.spawnPersona(PROJECT_ID, 'reviewer')
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(local.spawnPty).toHaveBeenCalledTimes(1)
+      releaseSpawn()
+      await expect(Promise.all([first, second])).resolves.toEqual([
+        { name: 'reviewer', runtime: 'pty', cli: 'fake-cli' },
+        { name: 'reviewer', runtime: 'pty', cli: 'fake-cli' }
+      ])
+      expect(local.agentNames).toEqual(['reviewer'])
+
+      await manager.shutdown()
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it('spawning with broker: cloud fails clearly when no sandbox is attached', async () => {
     const manager = new BrokerManager()
     await startLocal(manager)

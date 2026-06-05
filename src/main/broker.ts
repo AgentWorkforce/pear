@@ -389,6 +389,13 @@ function spawnRequestKey(
   })
 }
 
+function personaSpawnRequestKey(projectId: string, personaId: string): string {
+  return JSON.stringify({
+    projectId,
+    personaId: personaId.trim()
+  })
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
@@ -1182,6 +1189,7 @@ export class BrokerManager {
   private startPromises = new Map<string, Promise<boolean | void>>()
   private revivePromises = new Map<string, Promise<boolean>>()
   private inFlightSpawnRequests = new Map<string, Promise<{ name: string; runtime: string }>>()
+  private inFlightPersonaSpawnRequests = new Map<string, Promise<{ name: string; runtime: string; cli?: string }>>()
   // Which broker sessions (by session key) an agent name is registered on.
   // Both a project's local and cloud brokers join the same relay workspace,
   // so agent names are project-unique in practice — the set tracks which
@@ -2401,6 +2409,21 @@ export class BrokerManager {
   }
 
   async spawnPersona(projectId: string, personaId: string): Promise<{ name: string; runtime: string; cli?: string }> {
+    const requestKey = personaSpawnRequestKey(projectId, personaId)
+    const inFlight = this.inFlightPersonaSpawnRequests.get(requestKey)
+    if (inFlight) return inFlight
+
+    let promise!: Promise<{ name: string; runtime: string; cli?: string }>
+    promise = this.spawnPersonaOnce(projectId, personaId).finally(() => {
+      if (this.inFlightPersonaSpawnRequests.get(requestKey) === promise) {
+        this.inFlightPersonaSpawnRequests.delete(requestKey)
+      }
+    })
+    this.inFlightPersonaSpawnRequests.set(requestKey, promise)
+    return promise
+  }
+
+  private async spawnPersonaOnce(projectId: string, personaId: string): Promise<{ name: string; runtime: string; cli?: string }> {
     const session = this.getSessionForProject(projectId)
     const trimmedPersonaId = personaId.trim()
     if (!trimmedPersonaId) {
