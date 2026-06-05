@@ -604,6 +604,13 @@ export function registerIpcHandlers(): void {
     }
   )
 
+  ipcMain.handle(
+    'integrations:update-historical-sync',
+    async (_, projectId: string, integrationId: string, syncHistoricalData: boolean) => {
+      return integrationsManager.updateHistoricalSync(projectId, integrationId, syncHistoricalData)
+    }
+  )
+
   ipcMain.handle('integrations:disconnect', async (_, projectId: string, integrationId: string) => {
     return integrationsManager.disconnect(projectId, integrationId)
   })

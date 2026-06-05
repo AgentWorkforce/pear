@@ -406,6 +406,13 @@ const api = {
         integrationId,
         subscribeAgent
       ),
+    updateHistoricalSync: (projectId: string, integrationId: string, syncHistoricalData: boolean) =>
+      invoke<ConnectedIntegration>(
+        'integrations:update-historical-sync',
+        projectId,
+        integrationId,
+        syncHistoricalData
+      ),
     disconnect: (projectId: string, integrationId: string) =>
       invoke<void>('integrations:disconnect', projectId, integrationId),
     onEvent: (callback: (event: IntegrationsEvent) => void) =>

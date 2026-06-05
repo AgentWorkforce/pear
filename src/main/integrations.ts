@@ -45,6 +45,7 @@ export type ConnectedIntegration = {
   connectedAt: string
   notifyAgent: boolean
   subscribeAgent?: boolean
+  syncHistoricalData?: boolean
   visibleInProject?: boolean
   localMountPaths?: string[]
   lastSyncAt?: string
@@ -512,6 +513,7 @@ function normalizeConnectedIntegration(value: unknown): ConnectedIntegration | n
       : new Date(0).toISOString(),
     notifyAgent: typeof value.notifyAgent === 'boolean' ? value.notifyAgent : true,
     subscribeAgent: typeof value.subscribeAgent === 'boolean' ? value.subscribeAgent : false,
+    syncHistoricalData: typeof value.syncHistoricalData === 'boolean' ? value.syncHistoricalData : false,
     visibleInProject: typeof value.visibleInProject === 'boolean'
       ? value.visibleInProject
       : visibleFromScope(normalizeScope(value.scope)),
@@ -539,6 +541,7 @@ function toStoredIntegration(integration: ConnectedIntegration, displayName?: st
     connectedAt: integration.connectedAt,
     notifyAgent: integration.notifyAgent,
     subscribeAgent: integration.subscribeAgent === true,
+    syncHistoricalData: integration.syncHistoricalData === true,
     visibleInProject: integration.visibleInProject !== false,
     ...(integration.lastSyncAt ? { lastSyncAt: integration.lastSyncAt } : {}),
     ...(integration.lastError ? { lastError: integration.lastError } : {})
@@ -824,7 +827,8 @@ export class IntegrationsManager {
       mountPaths,
       connectedAt: new Date().toISOString(),
       notifyAgent,
-      subscribeAgent: false
+      subscribeAgent: false,
+      syncHistoricalData: false
     }
 
     await this.persistIntegration(projectId, integration)
@@ -846,6 +850,7 @@ export class IntegrationsManager {
       mountPaths,
       notifyAgent: existing.notifyAgent,
       subscribeAgent: existing.subscribeAgent === true,
+      syncHistoricalData: existing.syncHistoricalData === true,
       visibleInProject: visibleFromScope(scope)
     }
 
@@ -864,6 +869,23 @@ export class IntegrationsManager {
     const integration: ConnectedIntegration = {
       ...existing,
       subscribeAgent
+    }
+
+    await this.persistIntegration(projectId, integration)
+    await this.syncAgentState(projectId, true)
+    this.emit({ type: 'integration-added', projectId, integration })
+    return integration
+  }
+
+  async updateHistoricalSync(
+    projectId: string,
+    integrationId: string,
+    syncHistoricalData: boolean
+  ): Promise<ConnectedIntegration> {
+    const existing = this.requireConnectedIntegration(projectId, integrationId)
+    const integration: ConnectedIntegration = {
+      ...existing,
+      syncHistoricalData
     }
 
     await this.persistIntegration(projectId, integration)
@@ -1193,6 +1215,7 @@ export class IntegrationsManager {
               : existingIntegration.mountPaths,
             notifyAgent: existingIntegration.notifyAgent,
             subscribeAgent: existingIntegration.subscribeAgent === true,
+            syncHistoricalData: existingIntegration.syncHistoricalData === true,
             visibleInProject: existingVisible,
             connectedAt: existingIntegration.connectedAt || cloudIntegration.connectedAt,
             ...(cloudIntegration.lastError ? { lastError: cloudIntegration.lastError } : {})
@@ -1352,6 +1375,7 @@ export class IntegrationsManager {
     return dedupeStrings(
       this.listConnected(projectId)
         .filter((integration) => this.isVisibleInProject(projectId, integration.integrationId))
+        .filter((integration) => integration.syncHistoricalData === true)
         .flatMap((integration) => this.canonicalMountPathsForIntegration(integration))
     )
   }
@@ -1387,10 +1411,13 @@ export class IntegrationsManager {
         const scopeSummary = scopeLabels.length > 0 ? scopeLabels.join(', ') : 'all configured scope'
         const mountPaths = this.canonicalMountPathsForIntegration(integration)
           .map(projectIntegrationPathForRelayfilePath)
-        const mountClause = mountPaths.length > 0
-          ? ` (mounted at ${mountPaths.join(', ')})`
-          : ' (no mount paths configured)'
-        lines.push(`- ${integration.provider}: ${scopeSummary}${mountClause}.`)
+        const scopeClause = mountPaths.length > 0
+          ? ` (event scope ${mountPaths.join(', ')})`
+          : ' (no event scope configured)'
+        const historyClause = integration.syncHistoricalData === true
+          ? ' Historical file sync is enabled.'
+          : ' Historical file sync is off.'
+        lines.push(`- ${integration.provider}: ${scopeSummary}${scopeClause}.${historyClause}`)
       }
     }
 
@@ -1416,7 +1443,7 @@ export class IntegrationsManager {
     }
 
     lines.push(
-      `When relevant to the user's request, read these mounts through ${PROJECT_INTEGRATIONS_LINK_NAME}/ from the project root. Edits to JSON files in writeback-enabled paths will push back to the SaaS API.`,
+      `Historical mounted files are available through ${PROJECT_INTEGRATIONS_LINK_NAME}/ only for integrations where historical file sync is enabled. Incoming webhook events do not require historical sync.`,
       '</integrations-update>'
     )
     return lines.join('\n')
@@ -1487,17 +1514,10 @@ export class IntegrationsManager {
         integration
       }))
     )
-    const cloudIntegrations = await this.listCloudWorkspaceIntegrations().catch(() => [])
     const byProvider = new Map<string, ConnectedIntegration>()
-    const configuredKeys = new Set(localEntries.map(({ integration }) =>
-      `${toRelayfileProvider(integration.provider)}:${integration.integrationId}`
-    ))
-    for (const integration of cloudIntegrations) {
-      const key = `${toRelayfileProvider(integration.provider)}:${integration.integrationId}`
-      if (!configuredKeys.has(key)) byProvider.set(key, integration)
-    }
     for (const { projectId, integration } of localEntries) {
       if (!this.isVisibleInProject(projectId, integration.integrationId)) continue
+      if (integration.syncHistoricalData !== true) continue
       byProvider.set(`${toRelayfileProvider(integration.provider)}:${integration.integrationId}`, integration)
     }
     const integrations = Array.from(byProvider.values())
@@ -1538,13 +1558,21 @@ export class IntegrationsManager {
     await this.syncLocalMounts()
     const workspaceId = integrationMountManager.currentWorkspaceId()
     if (!workspaceId) return integrations
-    return integrations.map((integration) => ({
-      ...integration,
-      localMountPaths: integrationMountManager.localPathsFor(workspaceId, {
-        provider: integration.provider,
-        mountPaths: this.canonicalMountPathsForIntegration(integration)
-      })
-    }))
+    return integrations.map((integration) => {
+      if (integration.syncHistoricalData !== true) {
+        return {
+          ...integration,
+          localMountPaths: []
+        }
+      }
+      return {
+        ...integration,
+        localMountPaths: integrationMountManager.localPathsFor(workspaceId, {
+          provider: integration.provider,
+          mountPaths: this.canonicalMountPathsForIntegration(integration)
+        })
+      }
+    })
   }
 
   private async resolveIntegrationMountPath(projectId: string, integrationId: string, targetPath: string): Promise<string> {

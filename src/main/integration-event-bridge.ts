@@ -647,7 +647,7 @@ function formatIntegrationEventMessage(event: ChangeEvent): string {
   if (labels) lines.push(`Labels: ${labels}`)
 
   lines.push(
-    'Handle this like an incoming user-relevant integration update. Use the .integrations project paths for context and the existing writeback/messaging path when a response is needed.',
+    'Handle this like an incoming user-relevant integration update. The Relayfile path above identifies the changed record; use the matching .integrations path for extra context only when historical file sync is enabled. Use the existing writeback or messaging path when a response is needed.',
     '</integration-event>'
   )
   return lines.join('\n')
@@ -894,13 +894,17 @@ export class IntegrationEventBridge {
       agentName: INTEGRATION_EVENT_AGENT_NAME,
       scopes: INTEGRATION_EVENT_SCOPES
     })
+    const workspaceTokenProvider = async (): Promise<string> => {
+      await joined.refreshToken()
+      return joined.getToken()
+    }
     const client = new RelayFileClient({
       baseUrl: joined.info.relayfileUrl,
-      token: tokenProvider
+      token: workspaceTokenProvider
     })
     const handle: RelayfileWorkspaceHandle = {
       workspaceId,
-      client: () => createWorkspaceScopedEventClient(client, workspaceId, tokenProvider)
+      client: () => createWorkspaceScopedEventClient(client, workspaceId, workspaceTokenProvider)
     }
     accountIntegrationEventHandle = {
       apiUrl: auth.apiUrl,

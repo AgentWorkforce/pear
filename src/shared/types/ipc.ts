@@ -626,6 +626,7 @@ export type ConnectedIntegration = {
   connectedAt: string
   notifyAgent: boolean
   subscribeAgent?: boolean
+  syncHistoricalData?: boolean
   visibleInProject?: boolean
   localMountPaths?: string[]
   lastSyncAt?: string
@@ -871,6 +872,11 @@ export interface PearAPI {
       projectId: string,
       integrationId: string,
       subscribeAgent: boolean
+    ) => Promise<ConnectedIntegration>
+    updateHistoricalSync: (
+      projectId: string,
+      integrationId: string,
+      syncHistoricalData: boolean
     ) => Promise<ConnectedIntegration>
     disconnect: (projectId: string, integrationId: string) => Promise<void>
     onEvent: (callback: (event: IntegrationsEvent) => void) => () => void

@@ -6,6 +6,7 @@ import {
   BellOff,
   Bot,
   Check,
+  Database,
   Eye,
   EyeOff,
   Folder,
@@ -354,6 +355,27 @@ function IntegrationVisibilitySection({
     }
   }, [projectId])
 
+  const setHistoricalSync = useCallback(async (integration: ConnectedIntegration, syncHistoricalData: boolean) => {
+    setBusyIntegrationId(integration.integrationId)
+    setError(null)
+    try {
+      const nextIntegration = await pear.integrations.updateHistoricalSync(
+        projectId,
+        integration.integrationId,
+        syncHistoricalData
+      )
+      setIntegrations((current) =>
+        current.map((entry) =>
+          entry.integrationId === nextIntegration.integrationId ? nextIntegration : entry
+        )
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusyIntegrationId(null)
+    }
+  }, [projectId])
+
   const setNotificationTarget = useCallback(async (integration: ConnectedIntegration, value: string) => {
     const nextScope = clearNotificationTargetScope(integration.scope)
     if (value.startsWith('agent:')) {
@@ -486,6 +508,7 @@ function IntegrationVisibilitySection({
             const visibility = projectVisibilityFromScope(integration.scope)
             const visible = integration.visibleInProject !== false
             const subscribed = integration.subscribeAgent === true
+            const historySync = integration.syncHistoricalData === true
             const busy = busyIntegrationId === integration.integrationId
             const notificationTarget = notificationTargetValue(integration.scope)
             const slack = isSlackProvider(integration.provider)
@@ -547,6 +570,21 @@ function IntegrationVisibilitySection({
                     aria-label={subscribed ? 'Stop sending events to agents' : 'Send events to agents'}
                   >
                     {subscribed ? <Bell size={13} /> : <BellOff size={13} />}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void setHistoricalSync(integration, !historySync)}
+                    className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md border transition-colors disabled:opacity-40 ${
+                      historySync
+                        ? 'border-[var(--pear-accent-dim)] text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)]'
+                        : 'border-[var(--pear-border)] text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]'
+                    }`}
+                    aria-pressed={historySync}
+                    title={historySync ? 'Stop syncing historical files' : 'Sync historical files'}
+                    aria-label={historySync ? 'Stop syncing historical files' : 'Sync historical files'}
+                  >
+                    <Database size={13} />
                   </button>
                   {subscribed && (
                     <select
