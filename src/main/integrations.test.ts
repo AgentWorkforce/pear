@@ -195,7 +195,7 @@ vi.mock('./relay-workspace', () => ({
   }))
 }))
 
-import { IntegrationsManager } from './integrations'
+import { IntegrationsManager, type IntegrationsEvent } from './integrations'
 
 describe('IntegrationsManager', () => {
   beforeEach(() => {
@@ -259,7 +259,7 @@ describe('IntegrationsManager', () => {
   it('does not block updateScope on integration state sync', async () => {
     let finishMountReconcile!: () => void
     mock.setMountReconcilePromise(new Promise((resolve) => {
-      finishMountReconcile = resolve
+      finishMountReconcile = () => resolve()
     }))
     const manager = new IntegrationsManager()
 
@@ -278,5 +278,38 @@ describe('IntegrationsManager', () => {
     expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalled()
 
     finishMountReconcile()
+  })
+
+  it('emits integration-error when background updateScope sync fails', async () => {
+    let finishMountReconcile!: () => void
+    mock.setMountReconcilePromise(new Promise((resolve) => {
+      finishMountReconcile = () => resolve()
+    }))
+    mock.integrationMountManager.currentWorkspaceId.mockImplementationOnce(() => {
+      throw new Error('workspace lookup failed')
+    })
+    const manager = new IntegrationsManager()
+    const errorEvent = new Promise<IntegrationsEvent>((resolve) => {
+      manager.onEvent((event) => {
+        if (event.type === 'integration-error') resolve(event)
+      })
+    })
+
+    await expect(manager.updateScope(
+      'project-1',
+      'slack-integration-1',
+      { channels: ['C123'] },
+      ['/slack/channels/C123']
+    )).resolves.toMatchObject({
+      integrationId: 'slack-integration-1'
+    })
+
+    finishMountReconcile()
+    await expect(errorEvent).resolves.toEqual({
+      type: 'integration-error',
+      projectId: 'project-1',
+      integrationId: 'slack-integration-1',
+      message: 'workspace lookup failed'
+    })
   })
 })

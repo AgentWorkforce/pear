@@ -1728,7 +1728,7 @@ export class BrokerManager {
       try {
         sessions = await this.getOrAwaitSessionsForProject(normalizedProjectId)
       } catch (err) {
-        if (err instanceof Error && err.message === 'Relay workspace not started — select the project first') {
+        if (isWorkspaceNotStartedError(err)) {
           return
         }
         throw err

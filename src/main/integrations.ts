@@ -971,7 +971,7 @@ export class IntegrationsManager {
 
     await this.persistIntegration(projectId, integration)
     this.emit({ type: 'integration-added', projectId, integration })
-    this.syncAgentStateEventually(projectId, integration.notifyAgent)
+    this.syncAgentStateEventually(projectId, integration.notifyAgent, integration.integrationId)
     return integration
   }
 
@@ -1499,9 +1499,13 @@ export class IntegrationsManager {
     return integration?.visibleInProject !== false
   }
 
-  private syncAgentStateEventually(projectId: string, notifyAgent: boolean): void {
+  private syncAgentStateEventually(projectId: string, notifyAgent: boolean, integrationId?: string): void {
     void this.syncAgentState(projectId, notifyAgent).catch((error) => {
-      console.warn('[integrations] Failed to sync integration state:', toErrorMessage(error))
+      const message = toErrorMessage(error)
+      console.warn('[integrations] Failed to sync integration state:', message)
+      if (integrationId) {
+        this.emit({ type: 'integration-error', projectId, integrationId, message })
+      }
     })
   }
 

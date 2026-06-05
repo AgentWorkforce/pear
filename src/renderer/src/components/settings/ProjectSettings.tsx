@@ -365,7 +365,11 @@ function IntegrationVisibilitySection({
 
   useEffect(() => {
     return pear.integrations.onEvent((event) => {
-      if ('projectId' in event && event.projectId === projectId) void load()
+      if ('projectId' in event && event.projectId === projectId) {
+        void load().then(() => {
+          if (event.type === 'integration-error') setError(event.message)
+        })
+      }
     })
   }, [load, projectId])
 
