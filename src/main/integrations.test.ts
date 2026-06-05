@@ -391,6 +391,39 @@ describe('IntegrationsManager', () => {
     finishMountReconcile()
   })
 
+  it('waits for a newly spawned agent before injecting integration guidance', async () => {
+    vi.useFakeTimers()
+    let listAttempts = 0
+    mock.brokerManager.listAgents.mockImplementation(async () => {
+      listAttempts += 1
+      return listAttempts === 1
+        ? []
+        : [{ name: 'claude-1', projectId: 'project-1' }]
+    })
+    const manager = new IntegrationsManager()
+
+    await manager.notifyAgentState('project-1')
+    expect(mock.brokerManager.sendMessage).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(mock.brokerManager.listAgents).toHaveBeenCalledTimes(1)
+    expect(mock.brokerManager.sendMessage).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(500)
+    expect(mock.brokerManager.sendMessage).toHaveBeenCalledWith(
+      'project-1',
+      expect.objectContaining({
+        to: 'claude-1',
+        from: 'system',
+        text: expect.stringContaining('<integrations-update>'),
+        data: {
+          kind: 'integrations-update',
+          system: true
+        }
+      })
+    )
+  })
+
   it('reads a targeted remote Slack event record without reconciling local mounts', async () => {
     const manager = new IntegrationsManager()
 

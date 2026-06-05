@@ -139,6 +139,7 @@ function makeHarness(
   sent: SentMessage[]
   listAgentsCalls: string[]
   deliveryConfirmationCalls: SentMessage[]
+  unsubscribedCount: () => number
   emit(event: ChangeEvent): Promise<void>
 } {
   const subscribeCalls: SubscribeCall[] = []
@@ -147,6 +148,7 @@ function makeHarness(
   const listAgentsCalls: string[] = []
   const deliveryConfirmationCalls: SentMessage[] = []
   const subscriptions: Subscription[] = []
+  let unsubscribedCount = 0
   let activeSends = 0
 
   const bridge = new IntegrationEventBridge({
@@ -156,7 +158,7 @@ function makeHarness(
       client: () => ({
         subscribe(globs, onChange, options) {
           subscribeCalls.push({ globs: [...globs], onChange, options })
-          const subscription = { unsubscribe: async () => undefined }
+          const subscription = { unsubscribe: async () => { unsubscribedCount += 1 } }
           subscriptions.push(subscription)
           return subscription
         },
@@ -205,7 +207,16 @@ function makeHarness(
     await waitForDispatcherTick()
   }
 
-  return { bridge, subscribeCalls, readFileCalls, sent, listAgentsCalls, deliveryConfirmationCalls, emit }
+  return {
+    bridge,
+    subscribeCalls,
+    readFileCalls,
+    sent,
+    listAgentsCalls,
+    deliveryConfirmationCalls,
+    unsubscribedCount: () => unsubscribedCount,
+    emit
+  }
 }
 
 beforeEach(() => {
@@ -256,6 +267,35 @@ test('integration events route only to the targets for the matching integration 
   await harness.emit(changeEvent('/linear/issues/AR-1.json', 'linear'))
   await waitForSent(harness, 2)
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'bob'])
+})
+
+test('can close stale project subscriptions while keeping the active project stream', async () => {
+  const harness = makeHarness()
+
+  await harness.bridge.reconcile('stale-project', [
+    integration({
+      provider: 'slack',
+      integrationId: 'slack-1',
+      mountPaths: ['/slack/channels/C123'],
+      scope: { notifyAgents: ['alice'] }
+    })
+  ])
+  await harness.bridge.reconcile('active-project', [
+    integration({
+      provider: 'slack',
+      integrationId: 'slack-1',
+      mountPaths: ['/slack/channels/C123'],
+      scope: { notifyAgents: ['alice'] }
+    })
+  ])
+
+  assert.equal(harness.subscribeCalls.length, 2)
+
+  await harness.bridge.closeAllExcept('active-project')
+  assert.equal(harness.unsubscribedCount(), 1)
+
+  await harness.bridge.close('active-project')
+  assert.equal(harness.unsubscribedCount(), 2)
 })
 
 test('channel notification targets do not fall back to all project agents', async () => {

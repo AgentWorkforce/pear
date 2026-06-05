@@ -125,8 +125,9 @@ export function registerIpcHandlers(): void {
     removeProject(id)
   })
 
-  ipcMain.handle('project:set-active', (_, id: string | null) => {
+  ipcMain.handle('project:set-active', async (_, id: string | null) => {
     setActiveProject(id)
+    await integrationsManager.hydrateActiveProject(id)
   })
 
   ipcMain.handle('project:update', (_, id: string, update: Record<string, unknown>) => {

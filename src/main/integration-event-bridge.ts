@@ -1857,6 +1857,14 @@ export class IntegrationEventBridge {
     await Promise.all(Array.from(this.subscriptions.keys()).map((projectId) => this.close(projectId)))
   }
 
+  async closeAllExcept(projectIdToKeep: string): Promise<void> {
+    await Promise.all(
+      Array.from(this.subscriptions.keys())
+        .filter((projectId) => projectId !== projectIdToKeep)
+        .map((projectId) => this.close(projectId))
+    )
+  }
+
   private async readEventContextPreview(projectId: string, event: ChangeEvent): Promise<EventContextPreview | undefined> {
     if (event.type === 'file.deleted' || event.type === 'relayfile.changed.summary') return undefined
     const path = eventSummaryValue(event.resource.path)
