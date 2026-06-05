@@ -1060,6 +1060,7 @@ interface BrokerSession {
   lastEventSeq?: number
   lastEventAt?: number
   lastEventId?: string
+  eventStreamGeneration: number
   lastEventStreamRebindAt?: number
   eventStreamRebinds?: number
   // For attach-to-remote-broker sessions (cloud sandboxes), the SDK doesn't
@@ -1266,7 +1267,8 @@ export class BrokerManager {
     const startBroker = async (): Promise<boolean> => {
       const existingClient = await this.connectExistingBroker(normalizedProjectId, cwd)
       if (existingClient) {
-        const unsubEvent = this.attachClient(normalizedProjectId, existingClient, win)
+        const eventStreamGeneration = 1
+        const unsubEvent = this.attachClient(normalizedProjectId, existingClient, win, eventStreamGeneration)
         this.sessions.set(normalizedProjectId, {
           projectId: normalizedProjectId,
           client: existingClient,
@@ -1276,7 +1278,8 @@ export class BrokerManager {
           name,
           channels: [],
           cloudSandboxId: null,
-          pearLineage: new Map()
+          pearLineage: new Map(),
+          eventStreamGeneration
         })
         existingClient.connectEvents()
 
@@ -1318,7 +1321,8 @@ export class BrokerManager {
       console.log('[broker] Starting with opts:', JSON.stringify({ ...opts, projectId: normalizedProjectId }))
       const client = await AgentRelayClient.spawn(opts)
       console.log('[broker] Started successfully for project:', normalizedProjectId)
-      const unsubEvent = this.attachClient(normalizedProjectId, client, win)
+      const eventStreamGeneration = 1
+      const unsubEvent = this.attachClient(normalizedProjectId, client, win, eventStreamGeneration)
       this.sessions.set(normalizedProjectId, {
         projectId: normalizedProjectId,
         client,
@@ -1328,7 +1332,8 @@ export class BrokerManager {
         name,
         channels: nextChannels,
         cloudSandboxId: null,
-        pearLineage: new Map()
+        pearLineage: new Map(),
+        eventStreamGeneration
       })
 
       this.publishBrokerEvent(normalizedProjectId, normalizedProjectId, win, {
@@ -1511,7 +1516,8 @@ export class BrokerManager {
       })
       await client.getSession()
 
-      const unsubEvent = this.attachClient(sessionKey, client, win)
+      const eventStreamGeneration = 1
+      const unsubEvent = this.attachClient(sessionKey, client, win, eventStreamGeneration)
       // The remote broker shuts itself down after 120s without an owner-lease
       // renewal. HarnessDriverClient.spawn handles this automatically, but the
       // attach-to-existing path (used here for cloud sandboxes) doesn't —
@@ -1532,6 +1538,7 @@ export class BrokerManager {
         channels: [],
         cloudSandboxId: sandboxId,
         pearLineage: new Map(),
+        eventStreamGeneration,
         leaseTimer
       })
       client.connectEvents()
@@ -1883,11 +1890,14 @@ export class BrokerManager {
     })
 
     const previousUnsubEvent = session.unsubEvent
+    const previousEventStreamGeneration = session.eventStreamGeneration
     let nextUnsubEvent: (() => void) | undefined
 
     try {
       session.client.disconnectEvents()
-      nextUnsubEvent = this.attachClient(sessionKey, session.client, session.window)
+      const nextEventStreamGeneration = previousEventStreamGeneration + 1
+      session.eventStreamGeneration = nextEventStreamGeneration
+      nextUnsubEvent = this.attachClient(sessionKey, session.client, session.window, nextEventStreamGeneration)
       session.unsubEvent = nextUnsubEvent
       previousUnsubEvent()
       session.client.connectEvents(session.lastEventSeq)
@@ -1913,6 +1923,7 @@ export class BrokerManager {
         reconnects: session.eventStreamRebinds || 0
       })
       if (!nextUnsubEvent) {
+        session.eventStreamGeneration = previousEventStreamGeneration
         session.unsubEvent = previousUnsubEvent
       }
     }
@@ -1965,7 +1976,12 @@ export class BrokerManager {
     return normalized
   }
 
-  private attachClient(sessionKey: string, client: AgentRelayClient, win?: BrowserWindow): () => void {
+  private attachClient(
+    sessionKey: string,
+    client: AgentRelayClient,
+    win: BrowserWindow | undefined,
+    eventStreamGeneration: number
+  ): () => void {
     const projectId = projectIdFromSessionKey(sessionKey)
     // Stamp every spawn this session does so burn can attribute Pear sessions
     // via `burn summary --tags spawner=pear`. The listener returns a SpawnPatch
@@ -1985,6 +2001,10 @@ export class BrokerManager {
     const unsubBurn = client.addListener('beforeAgentSpawn', burnHandler)
 
     const unsubEvent = client.onEvent((event: BrokerEvent) => {
+      const session = this.sessions.get(sessionKey)
+      if (!session || session.eventStreamGeneration !== eventStreamGeneration) {
+        return
+      }
       this.noteBrokerEventReceipt(sessionKey, event)
       // Fast path for PTY chunks: ship just (projectId, name, chunk) over a
       // dedicated channel so typing latency doesn't pay for compactBrokerEvent,

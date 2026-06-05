@@ -787,6 +787,35 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('ignores stale PTY callbacks from superseded event streams', async () => {
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    const local = await startLocalWithWindow(manager, win)
+    const staleListener = local.onEvent.mock.calls.at(-1)?.[0]
+    expect(staleListener).toBeTypeOf('function')
+
+    await manager.refreshEventStream(PROJECT_ID, 'test-stale-listener')
+
+    const currentListener = local.onEvent.mock.calls.at(-1)?.[0]
+    expect(currentListener).toBeTypeOf('function')
+    staleListener?.({
+      kind: 'worker_stream',
+      name: 'claude-1',
+      chunk: 'Background command "Poll hn-monitor logs waiting for new run after 21:00Z" completed (exit code 0)\n'
+    })
+    currentListener?.({
+      kind: 'worker_stream',
+      name: 'claude-1',
+      chunk: 'fresh output\n'
+    })
+
+    const ptyCalls = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([channel]) => channel === 'broker:pty-chunk')
+    expect(ptyCalls).toEqual([['broker:pty-chunk', PROJECT_ID, 'claude-1', 'fresh output\n']])
+
+    await manager.shutdown()
+  })
+
   it('keeps a replacement event listener when reconnect throws during refreshEventStream', async () => {
     const manager = new BrokerManager()
     const win = createMockWindow()
