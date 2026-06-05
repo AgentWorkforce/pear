@@ -46,9 +46,10 @@ mac:
 
 dmg:
   # Stable (un-versioned) filename so the public download link can rely on
-  # GitHub's `releases/latest/download/pear-arm64.dmg` URL. The version is still
-  # recorded by the release tag; only the asset filename is fixed.
-  artifactName: ${name}-${arch}.${ext}
+  # GitHub's `releases/latest/download/pear-arm64.dmg` URL. Literal `pear` prefix
+  # (not ${name}, which is `pear-by-agent-relay`) to match that contract exactly.
+  # The version is still recorded by the release tag; only the filename is fixed.
+  artifactName: pear-${arch}.${ext}
 
 # No native modules — skip the rebuild step.
 npmRebuild: false
