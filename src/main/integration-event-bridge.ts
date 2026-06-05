@@ -647,7 +647,7 @@ function formatIntegrationEventMessage(event: ChangeEvent): string {
   if (labels) lines.push(`Labels: ${labels}`)
 
   lines.push(
-    'Handle this like an incoming user-relevant integration update. The Relayfile path above identifies the changed record; use the matching .integrations path for extra context only when historical file sync is enabled. Use the existing writeback or messaging path when a response is needed.',
+    'Handle this like an incoming user-relevant integration update. The Relayfile path above identifies the changed record; use the matching .integrations path for extra context only when historical download is enabled. Use the existing writeback or messaging path when a response is needed.',
     '</integration-event>'
   )
   return lines.join('\n')

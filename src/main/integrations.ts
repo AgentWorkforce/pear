@@ -45,7 +45,7 @@ export type ConnectedIntegration = {
   connectedAt: string
   notifyAgent: boolean
   subscribeAgent?: boolean
-  syncHistoricalData?: boolean
+  downloadHistoricalData?: boolean
   visibleInProject?: boolean
   localMountPaths?: string[]
   lastSyncAt?: string
@@ -513,7 +513,11 @@ function normalizeConnectedIntegration(value: unknown): ConnectedIntegration | n
       : new Date(0).toISOString(),
     notifyAgent: typeof value.notifyAgent === 'boolean' ? value.notifyAgent : true,
     subscribeAgent: typeof value.subscribeAgent === 'boolean' ? value.subscribeAgent : false,
-    syncHistoricalData: typeof value.syncHistoricalData === 'boolean' ? value.syncHistoricalData : false,
+    downloadHistoricalData: typeof value.downloadHistoricalData === 'boolean'
+      ? value.downloadHistoricalData
+      : typeof value.syncHistoricalData === 'boolean'
+        ? value.syncHistoricalData
+        : false,
     visibleInProject: typeof value.visibleInProject === 'boolean'
       ? value.visibleInProject
       : visibleFromScope(normalizeScope(value.scope)),
@@ -541,7 +545,7 @@ function toStoredIntegration(integration: ConnectedIntegration, displayName?: st
     connectedAt: integration.connectedAt,
     notifyAgent: integration.notifyAgent,
     subscribeAgent: integration.subscribeAgent === true,
-    syncHistoricalData: integration.syncHistoricalData === true,
+    downloadHistoricalData: integration.downloadHistoricalData === true,
     visibleInProject: integration.visibleInProject !== false,
     ...(integration.lastSyncAt ? { lastSyncAt: integration.lastSyncAt } : {}),
     ...(integration.lastError ? { lastError: integration.lastError } : {})
@@ -828,7 +832,7 @@ export class IntegrationsManager {
       connectedAt: new Date().toISOString(),
       notifyAgent,
       subscribeAgent: false,
-      syncHistoricalData: false
+      downloadHistoricalData: false
     }
 
     await this.persistIntegration(projectId, integration)
@@ -850,7 +854,7 @@ export class IntegrationsManager {
       mountPaths,
       notifyAgent: existing.notifyAgent,
       subscribeAgent: existing.subscribeAgent === true,
-      syncHistoricalData: existing.syncHistoricalData === true,
+      downloadHistoricalData: existing.downloadHistoricalData === true,
       visibleInProject: visibleFromScope(scope)
     }
 
@@ -877,15 +881,15 @@ export class IntegrationsManager {
     return integration
   }
 
-  async updateHistoricalSync(
+  async updateHistoricalDownload(
     projectId: string,
     integrationId: string,
-    syncHistoricalData: boolean
+    downloadHistoricalData: boolean
   ): Promise<ConnectedIntegration> {
     const existing = this.requireConnectedIntegration(projectId, integrationId)
     const integration: ConnectedIntegration = {
       ...existing,
-      syncHistoricalData
+      downloadHistoricalData
     }
 
     await this.persistIntegration(projectId, integration)
@@ -1215,7 +1219,7 @@ export class IntegrationsManager {
               : existingIntegration.mountPaths,
             notifyAgent: existingIntegration.notifyAgent,
             subscribeAgent: existingIntegration.subscribeAgent === true,
-            syncHistoricalData: existingIntegration.syncHistoricalData === true,
+            downloadHistoricalData: existingIntegration.downloadHistoricalData === true,
             visibleInProject: existingVisible,
             connectedAt: existingIntegration.connectedAt || cloudIntegration.connectedAt,
             ...(cloudIntegration.lastError ? { lastError: cloudIntegration.lastError } : {})
@@ -1375,7 +1379,7 @@ export class IntegrationsManager {
     return dedupeStrings(
       this.listConnected(projectId)
         .filter((integration) => this.isVisibleInProject(projectId, integration.integrationId))
-        .filter((integration) => integration.syncHistoricalData === true)
+        .filter((integration) => integration.downloadHistoricalData === true)
         .flatMap((integration) => this.canonicalMountPathsForIntegration(integration))
     )
   }
@@ -1414,9 +1418,9 @@ export class IntegrationsManager {
         const scopeClause = mountPaths.length > 0
           ? ` (event scope ${mountPaths.join(', ')})`
           : ' (no event scope configured)'
-        const historyClause = integration.syncHistoricalData === true
-          ? ' Historical file sync is enabled.'
-          : ' Historical file sync is off.'
+        const historyClause = integration.downloadHistoricalData === true
+          ? ' Historical file download is enabled.'
+          : ' Historical file download is off.'
         lines.push(`- ${integration.provider}: ${scopeSummary}${scopeClause}.${historyClause}`)
       }
     }
@@ -1443,7 +1447,7 @@ export class IntegrationsManager {
     }
 
     lines.push(
-      `Historical mounted files are available through ${PROJECT_INTEGRATIONS_LINK_NAME}/ only for integrations where historical file sync is enabled. Incoming webhook events do not require historical sync.`,
+      `Historical files are downloaded and mounted through ${PROJECT_INTEGRATIONS_LINK_NAME}/ only for integrations where historical download is enabled. Incoming webhook events do not require downloading history.`,
       '</integrations-update>'
     )
     return lines.join('\n')
@@ -1517,7 +1521,7 @@ export class IntegrationsManager {
     const byProvider = new Map<string, ConnectedIntegration>()
     for (const { projectId, integration } of localEntries) {
       if (!this.isVisibleInProject(projectId, integration.integrationId)) continue
-      if (integration.syncHistoricalData !== true) continue
+      if (integration.downloadHistoricalData !== true) continue
       byProvider.set(`${toRelayfileProvider(integration.provider)}:${integration.integrationId}`, integration)
     }
     const integrations = Array.from(byProvider.values())
@@ -1559,7 +1563,7 @@ export class IntegrationsManager {
     const workspaceId = integrationMountManager.currentWorkspaceId()
     if (!workspaceId) return integrations
     return integrations.map((integration) => {
-      if (integration.syncHistoricalData !== true) {
+      if (integration.downloadHistoricalData !== true) {
         return {
           ...integration,
           localMountPaths: []

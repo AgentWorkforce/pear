@@ -605,9 +605,9 @@ export function registerIpcHandlers(): void {
   )
 
   ipcMain.handle(
-    'integrations:update-historical-sync',
-    async (_, projectId: string, integrationId: string, syncHistoricalData: boolean) => {
-      return integrationsManager.updateHistoricalSync(projectId, integrationId, syncHistoricalData)
+    'integrations:update-historical-download',
+    async (_, projectId: string, integrationId: string, downloadHistoricalData: boolean) => {
+      return integrationsManager.updateHistoricalDownload(projectId, integrationId, downloadHistoricalData)
     }
   )
 

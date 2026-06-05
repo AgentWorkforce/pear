@@ -355,14 +355,14 @@ function IntegrationVisibilitySection({
     }
   }, [projectId])
 
-  const setHistoricalSync = useCallback(async (integration: ConnectedIntegration, syncHistoricalData: boolean) => {
+  const setHistoricalDownload = useCallback(async (integration: ConnectedIntegration, downloadHistoricalData: boolean) => {
     setBusyIntegrationId(integration.integrationId)
     setError(null)
     try {
-      const nextIntegration = await pear.integrations.updateHistoricalSync(
+      const nextIntegration = await pear.integrations.updateHistoricalDownload(
         projectId,
         integration.integrationId,
-        syncHistoricalData
+        downloadHistoricalData
       )
       setIntegrations((current) =>
         current.map((entry) =>
@@ -508,7 +508,7 @@ function IntegrationVisibilitySection({
             const visibility = projectVisibilityFromScope(integration.scope)
             const visible = integration.visibleInProject !== false
             const subscribed = integration.subscribeAgent === true
-            const historySync = integration.syncHistoricalData === true
+            const historyDownload = integration.downloadHistoricalData === true
             const busy = busyIntegrationId === integration.integrationId
             const notificationTarget = notificationTargetValue(integration.scope)
             const slack = isSlackProvider(integration.provider)
@@ -574,15 +574,15 @@ function IntegrationVisibilitySection({
                   <button
                     type="button"
                     disabled={busy}
-                    onClick={() => void setHistoricalSync(integration, !historySync)}
+                    onClick={() => void setHistoricalDownload(integration, !historyDownload)}
                     className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md border transition-colors disabled:opacity-40 ${
-                      historySync
+                      historyDownload
                         ? 'border-[var(--pear-accent-dim)] text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)]'
                         : 'border-[var(--pear-border)] text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]'
                     }`}
-                    aria-pressed={historySync}
-                    title={historySync ? 'Stop syncing historical files' : 'Sync historical files'}
-                    aria-label={historySync ? 'Stop syncing historical files' : 'Sync historical files'}
+                    aria-pressed={historyDownload}
+                    title={historyDownload ? 'Stop downloading historical files' : 'Download historical files'}
+                    aria-label={historyDownload ? 'Stop downloading historical files' : 'Download historical files'}
                   >
                     <Database size={13} />
                   </button>
