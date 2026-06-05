@@ -1,7 +1,8 @@
 import { accessSync, constants, existsSync, readFileSync } from 'fs'
 import { rm } from 'fs/promises'
 import { randomUUID } from 'node:crypto'
-import { delimiter, basename, dirname, join } from 'path'
+import { homedir } from 'node:os'
+import { delimiter, basename, dirname, isAbsolute, join } from 'path'
 import { execFileSync } from 'child_process'
 import { app, BrowserWindow } from 'electron'
 import {
@@ -31,6 +32,10 @@ import type { WorkforcePersona } from '../shared/types/ipc'
 function isShellLikeCommand(cli: string): boolean {
   const normalized = basename(cli).toLowerCase()
   return ['shell', 'sh', 'bash', 'zsh', 'fish', 'nu', 'nushell', 'pwsh', 'powershell'].includes(normalized)
+}
+
+function spawnCliLabel(cli: string): string {
+  return basename(cli).toLowerCase()
 }
 
 function resolveShellCommand(): string {
@@ -78,6 +83,45 @@ function resolveCommandOnPath(command: string): string | undefined {
   } catch {
     return undefined
   }
+}
+
+function commonUserBinDirs(): string[] {
+  const home = homedir()
+  return [
+    join(home, '.local', 'bin'),
+    join(home, '.local', 'share', 'mise', 'shims'),
+    join(home, '.asdf', 'shims'),
+    '/opt/homebrew/bin',
+    '/usr/local/bin'
+  ]
+}
+
+function augmentedPath(): string {
+  const current = process.env.PATH || ''
+  const entries = new Set(current.split(delimiter).filter(Boolean))
+  for (const dir of commonUserBinDirs()) entries.add(dir)
+  return Array.from(entries).join(delimiter)
+}
+
+function resolveCommandWithAugmentedPath(command: string): string | undefined {
+  const resolved = resolveCommandOnPath(command)
+  if (resolved) return resolved
+
+  for (const dir of commonUserBinDirs()) {
+    const candidate = join(dir, command)
+    if (canExecute(candidate)) {
+      process.env.PATH = augmentedPath()
+      return candidate
+    }
+  }
+
+  return undefined
+}
+
+function executableCliPath(input: SpawnPtyInput): string {
+  return isAbsolute(input.cli)
+    ? input.cli
+    : join(input.cwd || process.cwd(), input.cli)
 }
 
 function resolvePackageBin(packageName: string, binName: string): string | undefined {
@@ -385,8 +429,9 @@ const COMMIT_DRAFT_TIMEOUT_MS = 180_000
 const MAX_BROKER_EVENT_HISTORY = 3_000
 const BROKER_EVENT_HISTORY_TTL_MS = 12 * 60 * 60 * 1_000
 // After this many consecutive failures to open a PTY input stream, give up on
-// the WS fast path for that agent and send over HTTP until it re-attaches.
+// the WS fast path for that agent briefly and send over HTTP while it cools down.
 const MAX_INPUT_STREAM_OPEN_FAILURES = 3
+const INPUT_STREAM_FALLBACK_RETRY_MS = 15_000
 // A single broker read timeout can be a one-off slow response; a run of them
 // means that endpoint is wedged (alive, accepting TCP, never answering).
 // After this many consecutive timeouts for one project/operation we respawn it
@@ -536,6 +581,10 @@ function isUnsupportedInputStreamError(err: unknown): boolean {
 
 function isMissingAgentError(err: unknown): boolean {
   return getErrorStatus(err) === 404 || /agent_not_found|no worker named|not found/i.test(toErrorMessage(err))
+}
+
+function isWorkspaceNotStartedError(err: unknown): boolean {
+  return /relay workspace not started|no relay workspace found/i.test(toErrorMessage(err))
 }
 
 // Walk an error's `cause` chain looking for any node that satisfies `predicate`.
@@ -840,6 +889,57 @@ function isAgentNameConflict(err: unknown): boolean {
   return /agent ['"].+['"] already exists/i.test(message) || message.includes('already exists')
 }
 
+function brokerErrorData(err: unknown): Record<string, unknown> | undefined {
+  if (typeof err !== 'object' || err === null || !('data' in err)) return undefined
+  const data = (err as { data?: unknown }).data
+  return data && typeof data === 'object' && !Array.isArray(data)
+    ? data as Record<string, unknown>
+    : undefined
+}
+
+function formatBrokerErrorData(data: Record<string, unknown> | undefined): string {
+  if (!data) return ''
+  const entries = Object.entries(data)
+    .filter(([, value]) => value !== undefined && value !== null && typeof value !== 'object')
+    .map(([key, value]) => `${key}=${String(value)}`)
+  return entries.length > 0 ? ` (${entries.join(', ')})` : ''
+}
+
+function buildSpawnFailureError(err: unknown, input: SpawnPtyInput, kind: 'local' | 'cloud' = 'local'): Error {
+  const data = brokerErrorData(err)
+  const detail = formatBrokerErrorData(data)
+  return new Error(
+    `Failed to spawn ${kind} agent "${input.name}" with ${input.cli} in ${input.cwd || process.cwd()}: ${toErrorMessage(err)}${detail}`
+  )
+}
+
+function normalizeCloudSpawnInput(input: SpawnPtyInput): SpawnPtyInput {
+  if (input.cwd && existsSync(input.cwd)) {
+    return { ...input, cwd: '/workspace' }
+  }
+  return input
+}
+
+function preflightSpawnCli(input: SpawnPtyInput): SpawnPtyInput {
+  if (isShellLikeCommand(input.cli)) return input
+  if (input.cli.includes('/') || input.cli.includes('\\')) {
+    if (!canExecute(executableCliPath(input))) {
+      throw new Error(`Agent CLI is not executable: ${input.cli}`)
+    }
+    return input
+  }
+
+  const label = spawnCliLabel(input.cli)
+  if (!['claude', 'codex', 'opencode'].includes(label)) return input
+  const resolved = resolveCommandWithAugmentedPath(input.cli)
+  if (!resolved) {
+    throw new Error(
+      `Agent CLI "${input.cli}" was not found on Pear's PATH. Launch Pear from a shell with ${input.cli} available, or install ${input.cli} globally.`
+    )
+  }
+  return { ...input, cli: resolved }
+}
+
 interface BrokerSession {
   projectId: string
   client: AgentRelayClient
@@ -938,19 +1038,45 @@ interface BrokerClientInternals {
   }
 }
 
+// A project can run a local broker and a cloud-sandbox broker side by side.
+// Local sessions are keyed by the bare projectId (keeping input-stream and
+// timeout keys back-compatible); the cloud session lives under a suffixed key
+// so the two coexist instead of clobbering each other in the sessions map.
+// ' ' cannot appear in a project id, so the keys can't collide.
+const CLOUD_SESSION_KEY_SUFFIX = ' cloud'
+
+function cloudSessionKey(projectId: string): string {
+  return `${projectId}${CLOUD_SESSION_KEY_SUFFIX}`
+}
+
+function projectIdFromSessionKey(sessionKey: string): string {
+  return sessionKey.endsWith(CLOUD_SESSION_KEY_SUFFIX)
+    ? sessionKey.slice(0, -CLOUD_SESSION_KEY_SUFFIX.length)
+    : sessionKey
+}
+
+function sessionKeyFor(session: BrokerSession): string {
+  return session.cloudSandboxId ? cloudSessionKey(session.projectId) : session.projectId
+}
+
 export class BrokerManager {
   private sessions = new Map<string, BrokerSession>()
   private startPromises = new Map<string, Promise<void>>()
   private revivePromises = new Map<string, Promise<boolean>>()
-  private agentProjects = new Map<string, Set<string>>()
+  // Which broker sessions (by session key) an agent name is registered on.
+  // Both a project's local and cloud brokers join the same relay workspace,
+  // so agent names are project-unique in practice — the set tracks which
+  // session actually owns the worker so agent-scoped calls route correctly.
+  private agentSessions = new Map<string, Set<string>>()
   private inputStreams = new Map<string, PtyInputStream>()
   private inputStreamFallbacks = new Set<string>()
+  private inputStreamFallbackRetryAt = new Map<string, number>()
   // Keys whose WS input stream has completed the broker's pty_input_ready
   // handshake — only these are safe to send on without blocking. Everything
   // else routes over HTTP until the stream is confirmed open.
   private inputStreamReady = new Set<string>()
-  // Consecutive background open failures per key; after MAX we stop retrying the
-  // WS for this agent (HTTP-only) until the terminal is re-attached.
+  // Consecutive background open failures per key; after MAX we pause WS retries
+  // for this agent briefly and keep HTTP input flowing.
   private inputStreamOpenFailures = new Map<string, number>()
   // Consecutive broker read timeouts per project/operation; after MAX we
   // respawn the wedged broker. Reset whenever that operation succeeds.
@@ -1065,7 +1191,10 @@ export class BrokerManager {
         channels: nextChannels,
         binaryArgs: { persist: true },
         binaryPath: resolveBundledBrokerBinary(),
-        ...(agentRelayMcpCommand ? { env: { AGENT_RELAY_MCP_COMMAND: agentRelayMcpCommand } } : {}),
+        env: {
+          PATH: augmentedPath(),
+          ...(agentRelayMcpCommand ? { AGENT_RELAY_MCP_COMMAND: agentRelayMcpCommand } : {})
+        },
         onStderr: (line: string) => {
           console.error(`[broker stderr:${normalizedProjectId}]`, line)
         }
@@ -1228,9 +1357,32 @@ export class BrokerManager {
       throw new Error('Cloud sandbox exec URL is required')
     }
 
-    await this.shutdown(normalizedProjectId)
+    // The cloud session lives under its own key, so it coexists with the
+    // project's local broker instead of replacing it. The gate (registered in
+    // startPromises under the cloud key) serializes concurrent attaches and
+    // lets getOrAwaitSessionsForProject await an in-flight attach.
+    const sessionKey = cloudSessionKey(normalizedProjectId)
+    const inFlightAttach = this.startPromises.get(sessionKey)
+    if (inFlightAttach) await inFlightAttach.catch(() => undefined)
+    let releaseAttachGate!: () => void
+    const attachGate = new Promise<void>((resolve) => {
+      releaseAttachGate = resolve
+    })
+    this.startPromises.set(sessionKey, attachGate)
 
     try {
+      // Replace only a previous cloud session — a running local broker for the
+      // same project keeps serving its agents.
+      const previous = this.sessions.get(sessionKey)
+      if (previous) {
+        try {
+          await previous.client.shutdown()
+        } catch {
+          // Ignore shutdown errors.
+        }
+        this.dropSession(sessionKey, { disconnectOnly: false })
+      }
+
       console.log('[broker] Connecting to cloud broker via SDK:', execUrl)
       const client = new AgentRelayClient({
         baseUrl: execUrl,
@@ -1238,7 +1390,7 @@ export class BrokerManager {
       })
       await client.getSession()
 
-      const unsubEvent = this.attachClient(normalizedProjectId, client, win)
+      const unsubEvent = this.attachClient(sessionKey, client, win)
       // The remote broker shuts itself down after 120s without an owner-lease
       // renewal. HarnessDriverClient.spawn handles this automatically, but the
       // attach-to-existing path (used here for cloud sandboxes) doesn't —
@@ -1249,7 +1401,7 @@ export class BrokerManager {
           console.warn(`[broker] Cloud lease renewal failed for project ${normalizedProjectId}:`, toErrorMessage(err))
         })
       }, 60_000)
-      this.sessions.set(normalizedProjectId, {
+      this.sessions.set(sessionKey, {
         projectId: normalizedProjectId,
         client,
         window: win,
@@ -1276,6 +1428,11 @@ export class BrokerManager {
       console.error(`[broker] Failed to connect cloud broker for project ${normalizedProjectId}:`, err)
       this.sendStatusToWindow(win, normalizedProjectId, 'error', String(err))
       throw err
+    } finally {
+      releaseAttachGate()
+      if (this.startPromises.get(sessionKey) === attachGate) {
+        this.startPromises.delete(sessionKey)
+      }
     }
   }
 
@@ -1335,16 +1492,24 @@ export class BrokerManager {
     return this.attachCloudSandbox(normalizedProjectId, { sandboxId, execUrl: httpUrl, apiKey }, win)
   }
 
-  private getSessionForProject(projectId: string): BrokerSession {
+  // Local session first, then the cloud session — local stays the default
+  // target for project-scoped operations when both brokers are running.
+  private sessionsForProject(projectId: string): BrokerSession[] {
     const normalizedProjectId = projectId.trim()
-    const session = this.sessions.get(normalizedProjectId)
+    const local = this.sessions.get(normalizedProjectId)
+    const cloud = this.sessions.get(cloudSessionKey(normalizedProjectId))
+    return [local, cloud].filter((session): session is BrokerSession => !!session)
+  }
+
+  private getSessionForProject(projectId: string): BrokerSession {
+    const [session] = this.sessionsForProject(projectId)
     if (!session) {
       throw new Error('Relay workspace not started — select the project first')
     }
     return session
   }
 
-  private async getOrAwaitSession(projectId: string): Promise<BrokerSession> {
+  private async getOrAwaitSessionsForProject(projectId: string): Promise<BrokerSession[]> {
     const normalizedProjectId = projectId.trim()
     const revivePromise = this.revivePromises.get(normalizedProjectId)
     if (revivePromise) {
@@ -1354,24 +1519,57 @@ export class BrokerManager {
     if (startPromise) {
       await startPromise.catch(() => undefined)
     }
-    const session = this.sessions.get(normalizedProjectId)
-    if (!session) {
+    const attachPromise = this.startPromises.get(cloudSessionKey(normalizedProjectId))
+    if (attachPromise) {
+      await attachPromise.catch(() => undefined)
+    }
+    const sessions = this.sessionsForProject(normalizedProjectId)
+    if (!sessions.length) {
       throw new Error('Relay workspace not started — select the project first')
+    }
+    return sessions
+  }
+
+  private getSessionForBroker(projectId: string, broker: 'local' | 'cloud'): BrokerSession {
+    const normalizedProjectId = projectId.trim()
+    const session = broker === 'cloud'
+      ? this.sessions.get(cloudSessionKey(normalizedProjectId))
+      : this.sessions.get(normalizedProjectId)
+    if (!session) {
+      throw new Error(
+        broker === 'cloud'
+          ? 'Cloud sandbox is not attached for this project'
+          : 'Relay workspace not started — select the project first'
+      )
     }
     return session
   }
 
   private getSessionForAgent(name: string, projectId?: string): BrokerSession {
+    const sessionKeys = this.agentSessions.get(name)
+
     if (projectId?.trim()) {
-      return this.getSessionForProject(projectId)
+      const candidates = this.sessionsForProject(projectId)
+      if (!candidates.length) {
+        throw new Error('Relay workspace not started — select the project first')
+      }
+      // Route to the session that actually owns the worker; default to the
+      // local session for agents we haven't observed yet.
+      const owned = candidates.find((session) => sessionKeys?.has(sessionKeyFor(session)))
+      return owned ?? candidates[0]
     }
 
-    const mappedProjectIds = this.agentProjects.get(name)
-    if (mappedProjectIds?.size === 1) {
-      return this.getSessionForProject(Array.from(mappedProjectIds)[0])
-    }
-    if (mappedProjectIds && mappedProjectIds.size > 1) {
-      throw new Error(`Agent name exists in multiple projects; project id is required: ${name}`)
+    if (sessionKeys && sessionKeys.size > 0) {
+      const sessions = Array.from(sessionKeys)
+        .map((key) => this.sessions.get(key))
+        .filter((session): session is BrokerSession => !!session)
+      const projectIds = new Set(sessions.map((session) => session.projectId))
+      if (projectIds.size > 1) {
+        throw new Error(`Agent name exists in multiple projects; project id is required: ${name}`)
+      }
+      if (sessions.length > 0) {
+        return sessions.find((session) => !session.cloudSandboxId) ?? sessions[0]
+      }
     }
 
     if (this.sessions.size === 1) {
@@ -1428,16 +1626,16 @@ export class BrokerManager {
   }
 
   private async handleSpawnedChildLineage(
-    projectId: string,
+    sessionKey: string,
     event: Extract<BrokerEvent, { kind: 'agent_spawned' }>
   ): Promise<void> {
-    const session = this.sessions.get(projectId)
+    const session = this.sessions.get(sessionKey)
     if (!session || !event.parent) return
     const entry = this.recordLineageChild(session, event.name, event.parent, undefined, event.cli)
     if (!entry) return
 
     const enrichment = getPearBurnSpawnEnrichment(
-      projectId,
+      session.projectId,
       {
         name: event.name,
         ...(entry.cwd ? { cwd: entry.cwd } : {}),
@@ -1461,7 +1659,8 @@ export class BrokerManager {
     }
   }
 
-  private attachClient(projectId: string, client: AgentRelayClient, win?: BrowserWindow): () => void {
+  private attachClient(sessionKey: string, client: AgentRelayClient, win?: BrowserWindow): () => void {
+    const projectId = projectIdFromSessionKey(sessionKey)
     // Stamp every spawn this session does so burn can attribute Pear sessions
     // via `burn summary --tags spawner=pear`. The listener returns a SpawnPatch
     // for Claude (injects --session-id so burn can stamp by exact id), and
@@ -1472,7 +1671,7 @@ export class BrokerManager {
     const burnHandler = createPearBurnSpawnListener({
       ledgerHome: getBurnLedgerHome(),
       enrich: (ctx) => {
-        const session = this.sessions.get(projectId)
+        const session = this.sessions.get(sessionKey)
         const lineage = session ? this.resolveLineageEntry(session, ctx.input) : undefined
         return getPearBurnSpawnEnrichment(projectId, ctx.input, lineage)
       }
@@ -1483,7 +1682,7 @@ export class BrokerManager {
       // Fast path for PTY chunks: ship just (projectId, name, chunk) over a
       // dedicated channel so typing latency doesn't pay for compactBrokerEvent,
       // the broker:event metadata spread, or pushing into eventHistory per
-      // character. Activity bookkeeping (rememberAgentProject + cloud sandbox
+      // character. Activity bookkeeping (rememberAgentSession + cloud sandbox
       // observers) still runs.
       if (
         event.kind === 'worker_stream' &&
@@ -1493,8 +1692,8 @@ export class BrokerManager {
         if (win && !win.isDestroyed()) {
           win.webContents.send('broker:pty-chunk', projectId, event.name, event.chunk)
         }
-        this.rememberAgentProject(event.name, projectId)
-        if (this.sessions.get(projectId)?.cloudSandboxId) {
+        this.rememberAgentSession(event.name, sessionKey)
+        if (this.sessions.get(sessionKey)?.cloudSandboxId) {
           for (const observer of Array.from(this.eventObservers)) {
             observer(projectId, event)
           }
@@ -1505,30 +1704,30 @@ export class BrokerManager {
       this.publishBrokerEvent(projectId, win, event as unknown as BrokerEventRecordPayload)
 
       if (event.kind === 'agent_spawned' && event.name) {
-        this.rememberAgentProject(event.name, projectId)
+        this.rememberAgentSession(event.name, sessionKey)
         if (event.parent) {
-          void this.handleSpawnedChildLineage(projectId, event)
+          void this.handleSpawnedChildLineage(sessionKey, event)
         }
       } else if (event.kind === 'agent_exit' && event.name) {
-        this.closeInputStream(this.getInputStreamKey(projectId, event.name), 1000, 'agent closed')
-        this.forgetAgentProject(event.name, projectId)
+        this.closeInputStream(this.getInputStreamKey(sessionKey, event.name), 1000, 'agent closed')
+        this.forgetAgentSession(event.name, sessionKey)
         void client.release(event.name, 'agent exit').catch((err) => {
           if (!isMissingAgentError(err)) {
             console.warn(`[broker] Failed to release exited agent ${event.name}:`, err)
           }
         })
       } else if ((event.kind === 'agent_exited' || event.kind === 'agent_released') && event.name) {
-        this.closeInputStream(this.getInputStreamKey(projectId, event.name), 1000, 'agent closed')
-        this.forgetAgentProject(event.name, projectId)
+        this.closeInputStream(this.getInputStreamKey(sessionKey, event.name), 1000, 'agent closed')
+        this.forgetAgentSession(event.name, sessionKey)
       } else if ('name' in event && typeof event.name === 'string') {
-        this.rememberAgentProject(event.name, projectId)
+        this.rememberAgentSession(event.name, sessionKey)
       } else if ('from' in event && typeof event.from === 'string') {
-        this.rememberAgentProject(event.from, projectId)
+        this.rememberAgentSession(event.from, sessionKey)
       }
 
       // Fan out cloud-sandbox events to CloudAgentManager (which observes them
       // to track sandbox/agent activity for its mount + restart logic).
-      if (this.sessions.get(projectId)?.cloudSandboxId) {
+      if (this.sessions.get(sessionKey)?.cloudSandboxId) {
         for (const observer of Array.from(this.eventObservers)) {
           observer(projectId, event)
         }
@@ -1590,23 +1789,23 @@ export class BrokerManager {
       .slice(-MAX_BROKER_EVENT_HISTORY)
   }
 
-  private rememberAgentProject(name: string, projectId: string): void {
-    const projects = this.agentProjects.get(name) || new Set<string>()
-    projects.add(projectId)
-    this.agentProjects.set(name, projects)
+  private rememberAgentSession(name: string, sessionKey: string): void {
+    const sessionKeys = this.agentSessions.get(name) || new Set<string>()
+    sessionKeys.add(sessionKey)
+    this.agentSessions.set(name, sessionKeys)
   }
 
-  private forgetAgentProject(name: string, projectId: string): void {
-    const projects = this.agentProjects.get(name)
-    if (!projects) return
-    projects.delete(projectId)
-    if (projects.size === 0) {
-      this.agentProjects.delete(name)
+  private forgetAgentSession(name: string, sessionKey: string): void {
+    const sessionKeys = this.agentSessions.get(name)
+    if (!sessionKeys) return
+    sessionKeys.delete(sessionKey)
+    if (sessionKeys.size === 0) {
+      this.agentSessions.delete(name)
     }
   }
 
-  private getInputStreamKey(projectId: string, name: string): string {
-    return `${projectId}:${name}`
+  private getInputStreamKey(sessionKey: string, name: string): string {
+    return `${sessionKey}:${name}`
   }
 
   // Returns the input stream for an agent plus whether it is *ready* to send on
@@ -1617,7 +1816,7 @@ export class BrokerManager {
     session: BrokerSession,
     name: string
   ): { stream: PtyInputStream; ready: boolean } {
-    const key = this.getInputStreamKey(session.projectId, name)
+    const key = this.getInputStreamKey(sessionKeyFor(session), name)
     const existing = this.inputStreams.get(key)
     if (existing && !existing.closed) {
       return { stream: existing, ready: this.inputStreamReady.has(key) }
@@ -1630,6 +1829,8 @@ export class BrokerManager {
       () => {
         if (this.inputStreams.get(key) === stream) {
           this.inputStreamReady.add(key)
+          this.inputStreamFallbacks.delete(key)
+          this.inputStreamFallbackRetryAt.delete(key)
           this.inputStreamOpenFailures.delete(key)
         }
       },
@@ -1641,22 +1842,33 @@ export class BrokerManager {
         this.inputStreamOpenFailures.set(key, failures)
         // A stream that never opens (e.g. broker never sends pty_input_ready)
         // would otherwise be re-opened on every keystroke. Stop trying the WS
-        // after a few failures and ride HTTP until the terminal re-attaches.
+        // after a few failures, ride HTTP briefly, then retry. Cloud terminals
+        // can stay mounted across focus changes, so attachTerminal is not the
+        // only reliable signal that the fast path should get another chance.
         // This is the one case worth surfacing: transient not-ready is normal,
         // but a *persistently* unopenable stream means the low-latency fast path
         // is off for this agent — log it once rather than hiding it.
         if (failures >= MAX_INPUT_STREAM_OPEN_FAILURES && !this.inputStreamFallbacks.has(key)) {
           console.warn(
             `[broker] PTY input stream for ${name} failed to open ${failures}x; ` +
-            `routing input over HTTP for this agent until the terminal re-attaches`
+            `routing input over HTTP for this agent and retrying PTY stream shortly`
           )
         }
         if (failures >= MAX_INPUT_STREAM_OPEN_FAILURES) {
           this.inputStreamFallbacks.add(key)
+          this.inputStreamFallbackRetryAt.set(key, Date.now() + INPUT_STREAM_FALLBACK_RETRY_MS)
         }
       }
     )
     return { stream, ready: false }
+  }
+
+  private refreshExpiredInputStreamFallback(key: string): void {
+    const retryAt = this.inputStreamFallbackRetryAt.get(key)
+    if (retryAt === undefined || Date.now() < retryAt) return
+    this.inputStreamFallbacks.delete(key)
+    this.inputStreamFallbackRetryAt.delete(key)
+    this.inputStreamOpenFailures.delete(key)
   }
 
   private closeInputStream(key: string, code = 1000, reason = 'closed'): void {
@@ -1664,6 +1876,7 @@ export class BrokerManager {
     this.inputStreams.delete(key)
     this.inputStreamReady.delete(key)
     this.inputStreamFallbacks.delete(key)
+    this.inputStreamFallbackRetryAt.delete(key)
     this.inputStreamOpenFailures.delete(key)
     if (stream) {
       stream.close(code, reason)
@@ -1675,11 +1888,12 @@ export class BrokerManager {
   // disturb a healthy open stream.
   private resetInputStreamFallback(key: string): void {
     this.inputStreamFallbacks.delete(key)
+    this.inputStreamFallbackRetryAt.delete(key)
     this.inputStreamOpenFailures.delete(key)
   }
 
-  private closeInputStreamsForProject(projectId: string): void {
-    const prefix = `${projectId}:`
+  private closeInputStreamsForSession(sessionKey: string): void {
+    const prefix = `${sessionKey}:`
     for (const key of Array.from(this.inputStreams.keys())) {
       if (key.startsWith(prefix)) {
         this.closeInputStream(key, 1000, 'project closed')
@@ -1687,6 +1901,9 @@ export class BrokerManager {
     }
     for (const key of Array.from(this.inputStreamFallbacks)) {
       if (key.startsWith(prefix)) this.inputStreamFallbacks.delete(key)
+    }
+    for (const key of Array.from(this.inputStreamFallbackRetryAt.keys())) {
+      if (key.startsWith(prefix)) this.inputStreamFallbackRetryAt.delete(key)
     }
     for (const key of Array.from(this.inputStreamOpenFailures.keys())) {
       if (key.startsWith(prefix)) this.inputStreamOpenFailures.delete(key)
@@ -1698,10 +1915,16 @@ export class BrokerManager {
 
   async spawnAgent(
     projectId: string,
-    input: SpawnPtyInput,
+    spawnInput: SpawnPtyInput & { broker?: 'local' | 'cloud' },
     options: { parentAgentName?: string } = {}
   ): Promise<{ name: string; runtime: string }> {
-    const session = this.getSessionForProject(projectId)
+    // `broker` selects which of the project's sessions the agent spawns on.
+    // Default: local-first via getSessionForProject (cloud only when no local
+    // broker is running, preserving the cloud-only flow).
+    const { broker: requestedBroker, ...input } = spawnInput
+    const session = requestedBroker
+      ? this.getSessionForBroker(projectId, requestedBroker)
+      : this.getSessionForProject(projectId)
     const shellSession = isShellLikeCommand(input.cli)
     const relayAwareInput: SpawnPtyInput = shellSession
       ? {
@@ -1714,13 +1937,24 @@ export class BrokerManager {
         }
       : input
 
+    // Dedupe names across BOTH of the project's sessions — local and cloud
+    // brokers join the same relay workspace, so a name collision between them
+    // would collide on the relay even though each broker accepts it locally.
     const existingNames = new Set(
       (await session.client.listAgents()).map((agent) => agent.name)
     )
+    for (const sibling of this.sessionsForProject(session.projectId)) {
+      if (sibling === session) continue
+      const siblingAgents = await sibling.client.listAgents().catch(() => [])
+      for (const agent of siblingAgents) existingNames.add(agent.name)
+    }
     let nextInput = {
       ...relayAwareInput,
       name: getAvailableAgentName(relayAwareInput.name, existingNames)
     }
+    nextInput = session.cloudSandboxId
+      ? normalizeCloudSpawnInput(nextInput)
+      : preflightSpawnCli(nextInput)
 
     for (let attempt = 0; attempt < 20; attempt += 1) {
       try {
@@ -1736,7 +1970,7 @@ export class BrokerManager {
         }
         const spawned = await session.client.spawnPty(nextInput)
         const spawnedName = spawned.name || nextInput.name
-        this.rememberAgentProject(spawnedName, session.projectId)
+        this.rememberAgentSession(spawnedName, sessionKeyFor(session))
         const burnInput = { ...nextInput, name: spawnedName }
         const lineage = session.pearLineage.get(spawnedName)
         void stampPearBurnSpawnedAgent(
@@ -1754,7 +1988,7 @@ export class BrokerManager {
         return spawned
       } catch (err) {
         if (!isAgentNameConflict(err)) {
-          throw err
+          throw buildSpawnFailureError(err, nextInput, session.cloudSandboxId ? 'cloud' : 'local')
         }
         existingNames.add(nextInput.name)
         nextInput = {
@@ -1848,7 +2082,7 @@ export class BrokerManager {
     for (let attempt = 0; attempt < 20; attempt += 1) {
       try {
         const spawned = await session.client.spawnPty(nextInput)
-        this.rememberAgentProject(spawned.name || nextInput.name, session.projectId)
+        this.rememberAgentSession(spawned.name || nextInput.name, sessionKeyFor(session))
         return { ...spawned, cli: input.resolvedHarness }
       } catch (err) {
         if (!isAgentNameConflict(err)) {
@@ -1893,6 +2127,37 @@ export class BrokerManager {
     return false
   }
 
+  // Resolve which of the project's sessions actually has `name` registered,
+  // polling every candidate until the registration deadline. With a local +
+  // cloud session pair the ownership map may not know a freshly-spawned agent
+  // yet, and defaulting to the wrong broker makes every downstream call burn
+  // its full agent_not_found retry budget (~7.5s each) before failing — the
+  // "switching to a cloud agent terminal is painfully slow" symptom. Probing
+  // both brokers up front attaches to the right one in a single round-trip.
+  private async locateSessionForAgent(
+    name: string,
+    projectId?: string
+  ): Promise<{ session: BrokerSession; registered: boolean }> {
+    const fallback = this.getSessionForAgent(name, projectId)
+    const candidates = projectId?.trim() ? this.sessionsForProject(projectId) : [fallback]
+    if (candidates.length <= 1) {
+      return { session: fallback, registered: await this.waitForAgentRegistration(fallback, name) }
+    }
+
+    const deadline = Date.now() + 15_000
+    while (Date.now() < deadline) {
+      for (const candidate of candidates) {
+        const agents = await candidate.client.listAgents().catch(() => null)
+        if (agents?.some((agent) => agent.name === name)) {
+          this.rememberAgentSession(name, sessionKeyFor(candidate))
+          return { session: candidate, registered: true }
+        }
+      }
+      await delay(250)
+    }
+    return { session: fallback, registered: false }
+  }
+
   // Retry a broker call that targets a specific agent name on
   // agent_not_found. Closes the residual race between
   // waitForAgentRegistration returning true and the next call hitting a
@@ -1935,7 +2200,7 @@ export class BrokerManager {
       return null
     }
 
-    this.rememberAgentProject(stableAgent.name, session.projectId)
+    this.rememberAgentSession(stableAgent.name, sessionKeyFor(session))
     return stableAgent
   }
 
@@ -2029,19 +2294,19 @@ export class BrokerManager {
       throw new Error('Agent name is required')
     }
 
-    const session = this.getSessionForAgent(name, projectId)
+    // Wait for the broker to register the worker — and resolve WHICH broker
+    // owns it when the project runs local + cloud sessions side by side.
+    // spawnAgent (used by the Conversations panel's Resume flow and Add Agent
+    // dialog) returns as soon as the CLI process is forked, before the worker
+    // has connected to the broker, so the renderer races: spawn → mount
+    // terminal → attach → broker 404. claude --resume in particular reads
+    // session history first and can take 10+ seconds to register.
+    const { session, registered } = await this.locateSessionForAgent(name, projectId)
     const client = session.client
     // A re-attach (window reload, restart, tab re-open) is a fresh start for
     // this terminal — clear any stale HTTP-only fallback so the WS fast path
     // gets retried instead of being stuck on HTTP for the agent's lifetime.
-    this.resetInputStreamFallback(this.getInputStreamKey(session.projectId, name))
-    // Wait for the broker to register the worker. spawnAgent (used by the
-    // Conversations panel's Resume flow and Add Agent dialog) returns as
-    // soon as the CLI process is forked, before the worker has connected
-    // to the broker, so the renderer races: spawn → mount terminal →
-    // attach → broker 404. claude --resume in particular reads session
-    // history first and can take 10+ seconds to register.
-    const registered = await this.waitForAgentRegistration(session, name)
+    this.resetInputStreamFallback(this.getInputStreamKey(sessionKeyFor(session), name))
     if (!registered) {
       console.warn(`[broker] attachTerminal: ${name} did not appear in listAgents within wait window; falling through to per-call retry`)
     }
@@ -2114,7 +2379,8 @@ export class BrokerManager {
     }
 
     const session = this.getSessionForAgent(trimmedName, projectId)
-    const key = this.getInputStreamKey(session.projectId, trimmedName)
+    const key = this.getInputStreamKey(sessionKeyFor(session), trimmedName)
+    this.refreshExpiredInputStreamFallback(key)
     if (!this.inputStreamFallbacks.has(key)) {
       // Kick off (or reuse) the WS stream, but only *send* on it once the broker
       // has acked the handshake. Before that, fall through to HTTP so a keystroke
@@ -2175,7 +2441,7 @@ export class BrokerManager {
     if (!trimmedName) return null
     try {
       const session = this.getSessionForAgent(trimmedName, projectId)
-      const key = this.getInputStreamKey(session.projectId, trimmedName)
+      const key = this.getInputStreamKey(sessionKeyFor(session), trimmedName)
       return this.inputStreams.get(key)?.srttMs ?? null
     } catch {
       return null
@@ -2192,8 +2458,25 @@ export class BrokerManager {
       throw new Error('Agent name is required')
     }
 
-    const session = this.getSessionForAgent(trimmedName, projectId)
-    const result = await session.client.setInboundDeliveryMode(trimmedName, toInboundDeliveryMode(mode))
+    let session: BrokerSession
+    try {
+      session = this.getSessionForAgent(trimmedName, projectId)
+    } catch (err) {
+      if (isWorkspaceNotStartedError(err)) {
+        return { name: trimmedName, mode: toInboundDeliveryMode(mode), flushed: 0, pending: 0 }
+      }
+      throw err
+    }
+
+    let result: { mode: InboundDeliveryMode; flushed: number }
+    try {
+      result = await session.client.setInboundDeliveryMode(trimmedName, toInboundDeliveryMode(mode))
+    } catch (err) {
+      if (isMissingAgentError(err)) {
+        return { name: trimmedName, mode: toInboundDeliveryMode(mode), flushed: 0, pending: 0 }
+      }
+      throw err
+    }
     const pending = result.mode === 'manual_flush'
       ? await session.client.getPending(trimmedName).then((messages) => messages.length).catch(() => 0)
       : 0
@@ -2215,9 +2498,16 @@ export class BrokerManager {
     // When the project is known (the renderer always passes it for the 2.5s
     // poll), await any in-flight revive so a poll racing a respawn picks up the
     // fresh session instead of throwing "workspace not started".
-    const session = projectId?.trim()
-      ? await this.getOrAwaitSession(projectId)
-      : this.getSessionForAgent(trimmedName, projectId)
+    let session: BrokerSession
+    try {
+      if (projectId?.trim()) {
+        await this.getOrAwaitSessionsForProject(projectId)
+      }
+      session = this.getSessionForAgent(trimmedName, projectId)
+    } catch (err) {
+      if (isWorkspaceNotStartedError(err)) return []
+      throw err
+    }
     // A wedged `/api/pending` endpoint otherwise times out on every poll and
     // floods the IPC log; recover the broker and degrade to [] meanwhile. An
     // empty held-message list is harmless, so degradeOnTimeout is on.
@@ -2245,8 +2535,19 @@ export class BrokerManager {
   }
 
   async resizePty(projectId: string | undefined, name: string, rows: number, cols: number): Promise<void> {
-    const session = this.getSessionForAgent(name, projectId)
-    await session.client.resizePty(name, rows, cols)
+    let session: BrokerSession
+    try {
+      session = this.getSessionForAgent(name, projectId)
+    } catch (err) {
+      if (isWorkspaceNotStartedError(err)) return
+      throw err
+    }
+    try {
+      await session.client.resizePty(name, rows, cols)
+    } catch (err) {
+      if (isMissingAgentError(err)) return
+      throw err
+    }
   }
 
   async sendMessage(projectId: string | undefined, input: SendMessageInput): Promise<void> {
@@ -2322,7 +2623,7 @@ export class BrokerManager {
     }
     const session = this.getSessionForAgent(trimmedName, projectId)
     await session.client.release(trimmedName)
-    this.closeInputStream(this.getInputStreamKey(session.projectId, trimmedName), 1000, 'agent released')
+    this.closeInputStream(this.getInputStreamKey(sessionKeyFor(session), trimmedName), 1000, 'agent released')
   }
 
   // Run a per-session broker operation with the same self-healing listAgents
@@ -2395,23 +2696,30 @@ export class BrokerManager {
   async listAgents(projectId?: string): Promise<Array<ListAgent & {
     projectId: string
     inboundDeliveryMode?: InboundDeliveryMode
+    brokerKind?: 'local' | 'cloud'
   }>> {
     const sessions = projectId
-      ? [await this.getOrAwaitSession(projectId)]
+      ? await this.getOrAwaitSessionsForProject(projectId)
       : (await Promise.all(
           Array.from(new Set([
             ...Array.from(this.sessions.keys()),
             ...Array.from(this.revivePromises.keys()),
             ...Array.from(this.startPromises.keys())
-          ])).map((id) => this.getOrAwaitSession(id).catch(() => undefined))
-        )).filter((session): session is BrokerSession => !!session)
+          ].map(projectIdFromSessionKey))).map((id) =>
+            this.getOrAwaitSessionsForProject(id).catch(() => [] as BrokerSession[])
+          )
+        )).flat()
     // degradeOnTimeout stays false: a below-threshold timeout rethrows so the
     // renderer keeps its stale agent list rather than flickering to empty. A
     // dead/unrecoverable broker still degrades to [] for that one project so a
     // single bad session can't fail the whole call.
     const results = await Promise.all(
       sessions.map((session) =>
-        this.withWedgeRecovery<Array<ListAgent & { projectId: string; inboundDeliveryMode?: InboundDeliveryMode }>>(
+        this.withWedgeRecovery<Array<ListAgent & {
+          projectId: string
+          inboundDeliveryMode?: InboundDeliveryMode
+          brokerKind?: 'local' | 'cloud'
+        }>>(
           session,
           'listAgents',
           [],
@@ -2425,18 +2733,21 @@ export class BrokerManager {
   private async collectSessionAgents(session: BrokerSession): Promise<Array<ListAgent & {
     projectId: string
     inboundDeliveryMode?: InboundDeliveryMode
+    brokerKind?: 'local' | 'cloud'
   }>> {
     const agents = await session.client.listAgents()
     // A successful poll means the broker is answering again — clear any wedge
     // streak so a future timeout starts counting from zero.
     this.brokerTimeoutCounts.delete(`${session.projectId}:listAgents`)
+    const sessionKey = sessionKeyFor(session)
     for (const agent of agents) {
-      this.rememberAgentProject(agent.name, session.projectId)
+      this.rememberAgentSession(agent.name, sessionKey)
     }
+    const brokerKind = session.cloudSandboxId ? ('cloud' as const) : ('local' as const)
     return Promise.all(
       agents.map(async (agent) => {
         const inboundDeliveryMode = await session.client.getInboundDeliveryMode(agent.name).catch(() => undefined)
-        return { ...agent, projectId: session.projectId, inboundDeliveryMode }
+        return { ...agent, projectId: session.projectId, inboundDeliveryMode, brokerKind }
       })
     )
   }
@@ -2562,18 +2873,24 @@ export class BrokerManager {
     const targetProjectIds = projectId
       ? [projectId]
       : Array.from(new Set([
-          ...Array.from(this.sessions.keys()),
+          ...Array.from(this.sessions.values()).map((session) => session.projectId),
           ...Array.from(this.revivePromises.keys())
         ]))
     for (const targetProjectId of targetProjectIds) {
       this.revivePromises.delete(targetProjectId)
-      const session = this.sessions.get(targetProjectId)
-      try {
-        await session?.client.shutdown()
-      } catch {
-        // Ignore shutdown errors.
+      const sessions = this.sessionsForProject(targetProjectId)
+      for (const session of sessions) {
+        try {
+          await session.client.shutdown()
+        } catch {
+          // Ignore shutdown errors.
+        }
+        this.dropSession(sessionKeyFor(session), { disconnectOnly: false })
       }
-      this.dropSession(targetProjectId, { disconnectOnly: false })
+      if (!sessions.length) {
+        // No live session — still clear any residual stream/timeout state.
+        this.dropSession(targetProjectId, { disconnectOnly: false })
+      }
     }
   }
 
@@ -2585,11 +2902,11 @@ export class BrokerManager {
     }
   }
 
-  private dropSession(projectId: string, options: { disconnectOnly: boolean }): void {
-    this.closeInputStreamsForProject(projectId)
-    this.clearBrokerTimeoutCountsForProject(projectId)
+  private dropSession(sessionKey: string, options: { disconnectOnly: boolean }): void {
+    this.closeInputStreamsForSession(sessionKey)
+    this.clearBrokerTimeoutCountsForProject(projectIdFromSessionKey(sessionKey))
 
-    const session = this.sessions.get(projectId)
+    const session = this.sessions.get(sessionKey)
     if (!session) return
 
     session.unsubEvent()
@@ -2600,11 +2917,11 @@ export class BrokerManager {
         disconnect.call(session.client)
       }
     }
-    this.sessions.delete(projectId)
-    for (const [agentName, mappedProjectIds] of Array.from(this.agentProjects.entries())) {
-      mappedProjectIds.delete(projectId)
-      if (mappedProjectIds.size === 0) {
-        this.agentProjects.delete(agentName)
+    this.sessions.delete(sessionKey)
+    for (const [agentName, sessionKeys] of Array.from(this.agentSessions.entries())) {
+      sessionKeys.delete(sessionKey)
+      if (sessionKeys.size === 0) {
+        this.agentSessions.delete(agentName)
       }
     }
   }
@@ -2612,13 +2929,24 @@ export class BrokerManager {
   async detachCloudSandbox(projectId: string): Promise<void> {
     const normalizedProjectId = projectId.trim()
     if (!normalizedProjectId) return
-    const session = this.sessions.get(normalizedProjectId)
-    this.sendStatusToWindow(session?.window, normalizedProjectId, 'disconnected')
-    await this.shutdown(normalizedProjectId)
+    const sessionKey = cloudSessionKey(normalizedProjectId)
+    const session = this.sessions.get(sessionKey)
+    if (!session) return
+    try {
+      await session.client.shutdown()
+    } catch {
+      // Ignore shutdown errors.
+    }
+    this.dropSession(sessionKey, { disconnectOnly: false })
+    // Only report the project as disconnected when nothing is left serving
+    // it — a still-running local broker keeps the project connected.
+    if (!this.sessionsForProject(normalizedProjectId).length) {
+      this.sendStatusToWindow(session.window, normalizedProjectId, 'disconnected')
+    }
   }
 
   private sendStatus(projectId: string, status: string, error?: string): void {
-    const session = this.sessions.get(projectId)
+    const session = this.sessionsForProject(projectId).find((candidate) => candidate.window)
     this.sendStatusToWindow(session?.window, projectId, status, error)
   }
 

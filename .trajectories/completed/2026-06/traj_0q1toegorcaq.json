@@ -1,0 +1,105 @@
+{
+  "id": "traj_0q1toegorcaq",
+  "version": 1,
+  "task": {
+    "title": "Pear cloud sandbox warm perceived-speed UX"
+  },
+  "status": "completed",
+  "startedAt": "2026-06-02T22:05:19.727Z",
+  "completedAt": "2026-06-02T22:20:33.096Z",
+  "agents": [
+    {
+      "name": "default",
+      "role": "lead",
+      "joinedAt": "2026-06-02T22:08:16.815Z"
+    }
+  ],
+  "chapters": [
+    {
+      "id": "chap_vqeyjendlsvn",
+      "title": "Work",
+      "agentName": "default",
+      "startedAt": "2026-06-02T22:08:16.815Z",
+      "endedAt": "2026-06-02T22:20:33.096Z",
+      "events": [
+        {
+          "ts": 1780438096825,
+          "type": "decision",
+          "content": "Include minimal runtime read/write scope split on warm UX branch: Include minimal runtime read/write scope split on warm UX branch",
+          "raw": {
+            "question": "Include minimal runtime read/write scope split on warm UX branch",
+            "chosen": "Include minimal runtime read/write scope split on warm UX branch",
+            "alternatives": [],
+            "reasoning": "The branch is fresh from origin/main and the default cloud-agent live-sync attach path still passes invalid readwrite scopes via account workspace and mount setup; warm-on-intent and queued attach would otherwise fail after the sandbox warms."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1780438477194,
+          "type": "decision",
+          "content": "Use optional phase/etaMs progress contract with legacy fallback: Use optional phase/etaMs progress contract with legacy fallback",
+          "raw": {
+            "question": "Use optional phase/etaMs progress contract with legacy fallback",
+            "chosen": "Use optional phase/etaMs progress contract with legacy fallback",
+            "alternatives": [],
+            "reasoning": "codex-2 confirmed cloud PR #1720 will emit additive phase and etaMs fields; Pear consumes those names exactly but falls back to status-only warming UI when absent."
+          },
+          "significance": "high"
+        },
+        {
+          "ts": 1780438603075,
+          "type": "reflection",
+          "content": "Warm-on-intent, background attach, queued prompt, optional progress contract, cancel/reap, and runtime scope prerequisites are implemented; build and npm test are green",
+          "raw": {
+            "confidence": 0.85
+          },
+          "significance": "high",
+          "tags": [
+            "confidence:0.85"
+          ]
+        },
+        {
+          "ts": 1780438793240,
+          "type": "reflection",
+          "content": "Warm-on-intent, queued prompt, and optional phase/eta progress are implemented; build and npm test are green before commit",
+          "raw": {
+            "confidence": 0.85
+          },
+          "significance": "high",
+          "tags": [
+            "confidence:0.85"
+          ]
+        }
+      ]
+    }
+  ],
+  "retrospective": {
+    "summary": "Opened Pear PR #71 for cloud sandbox perceived-speed: warm-on-intent prewarm reuse/cancel, immediate preparing view with queued first prompt flush, optional phase/eta progress contract, and read/write cloud scope split retained. Verified npm run build, npm test, and git diff --check.",
+    "approach": "Standard approach",
+    "confidence": 0.85
+  },
+  "commits": [
+    "ffd01ca"
+  ],
+  "filesChanged": [
+    "specs/05-integrations-connect.md",
+    "src/main/cloud-agent.test.ts",
+    "src/main/cloud-agent.ts",
+    "src/main/cloud-agent.types.ts",
+    "src/main/ipc-handlers.ts",
+    "src/main/relay-workspace.test.ts",
+    "src/main/relay-workspace.ts",
+    "src/preload/index.ts",
+    "src/renderer/src/components/agents/CloudAgentPicker.tsx",
+    "src/renderer/src/components/terminal/TerminalPane.tsx",
+    "src/renderer/src/stores/cloud-agent-store.ts",
+    "src/shared/types/ipc.ts"
+  ],
+  "projectId": "/Users/khaliqgant/Projects/AgentWorkforce/pear",
+  "tags": [],
+  "_trace": {
+    "startRef": "723ebc15f25165659245d34917961932c623b797",
+    "endRef": "ffd01cacb539af8cbe0b94dd966eb37dc2efcd7a",
+    "traceId": "45ace5cd-cb2c-44a4-8bde-fea18e4cea03"
+  }
+}

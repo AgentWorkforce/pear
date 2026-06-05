@@ -1,11 +1,18 @@
 import { randomUUID } from 'node:crypto'
+import { isAbsolute, relative, resolve } from 'node:path'
 import { BrowserWindow, shell } from 'electron'
 import type { WorkspaceHandle } from '@relayfile/sdk'
-import { getAccountWorkspaceId, getApiUrl, resolveCloudAuth } from './auth'
+import { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, getApiUrl, resolveCloudAuth } from './auth'
 import { brokerManager } from './broker'
 import { cloudAgentManager } from './cloud-agent'
+import * as filesystem from './filesystem'
 import { integrationEventBridge, integrationSubscriptionSummaries } from './integration-event-bridge'
-import { integrationMountManager } from './integration-mounts'
+import { integrationMountManager, integrationMountRootForWorkspace } from './integration-mounts'
+import {
+  PROJECT_INTEGRATIONS_LINK_NAME,
+  ensureProjectIntegrationsLink,
+  removeProjectIntegrationsLink
+} from './integration-symlinks'
 import { INTEGRATIONS_CATALOG } from './integrations.catalog'
 import { getRelayWorkspaceManager } from './relay-workspace'
 import { loadStore, saveStore, type ProjectIntegration } from './store'
@@ -38,6 +45,7 @@ export type ConnectedIntegration = {
   connectedAt: string
   notifyAgent: boolean
   subscribeAgent?: boolean
+  downloadHistoricalData?: boolean
   visibleInProject?: boolean
   localMountPaths?: string[]
   lastSyncAt?: string
@@ -60,6 +68,12 @@ export type IntegrationConnectSession = {
   scopeChoices?: Record<string, unknown>
   integrationId?: string
   error?: string
+}
+
+export type IntegrationOption = {
+  value: string
+  label: string
+  hint?: string
 }
 
 export type IntegrationsEvent =
@@ -222,6 +236,11 @@ function dedupeStrings(values: string[]): string[] {
   return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean))).sort()
 }
 
+function isPathWithinRoot(rootPath: string, targetPath: string): boolean {
+  const child = relative(rootPath, targetPath)
+  return child === '' || (!!child && !child.startsWith('..') && !isAbsolute(child))
+}
+
 function toRelayfileProvider(provider: string): string {
   const normalized = provider.trim().toLowerCase()
   return normalized === 'gmail' ? 'google-mail' : normalized
@@ -241,10 +260,23 @@ function isHttpStatus(error: unknown, status: number): boolean {
     || record.response?.status === status
 }
 
+// Provider adapters materialize data at the workspace ROOT — `/github/...`,
+// `/linear/...` (see each adapter's LAYOUT.md in the relayfile workspace).
+// The catalog historically assumed `/integrations/<provider>/...`, which does
+// not exist on the server, so every mount mirrored an empty tree. Rewrite
+// both forms to the real root-level layout.
 function rewriteIntegrationMountPath(mountPath: string, relayfileProvider: string): string {
-  const match = mountPath.match(/^\/integrations\/[^/]+(\/.*)?$/)
-  if (!match) return mountPath
-  return `/integrations/${relayfileProvider}${match[1] ?? ''}`
+  const prefixed = mountPath.match(/^\/integrations\/[^/]+(\/.*)?$/)
+  if (prefixed) return `/${relayfileProvider}${prefixed[1] ?? ''}`
+  const rootLevel = mountPath.match(/^\/[^/]+(\/.*)?$/)
+  if (rootLevel) return `/${relayfileProvider}${rootLevel[1] ?? ''}`
+  return mountPath
+}
+
+function projectIntegrationPathForRelayfilePath(mountPath: string): string {
+  const trimmed = mountPath.trim()
+  const normalized = trimmed.startsWith('/') ? trimmed : `/${trimmed}`
+  return `${PROJECT_INTEGRATIONS_LINK_NAME}${normalized}`
 }
 
 function normalizeCapabilities(value: unknown): IntegrationCapabilities {
@@ -481,6 +513,11 @@ function normalizeConnectedIntegration(value: unknown): ConnectedIntegration | n
       : new Date(0).toISOString(),
     notifyAgent: typeof value.notifyAgent === 'boolean' ? value.notifyAgent : true,
     subscribeAgent: typeof value.subscribeAgent === 'boolean' ? value.subscribeAgent : false,
+    downloadHistoricalData: typeof value.downloadHistoricalData === 'boolean'
+      ? value.downloadHistoricalData
+      : typeof value.syncHistoricalData === 'boolean'
+        ? value.syncHistoricalData
+        : false,
     visibleInProject: typeof value.visibleInProject === 'boolean'
       ? value.visibleInProject
       : visibleFromScope(normalizeScope(value.scope)),
@@ -508,6 +545,7 @@ function toStoredIntegration(integration: ConnectedIntegration, displayName?: st
     connectedAt: integration.connectedAt,
     notifyAgent: integration.notifyAgent,
     subscribeAgent: integration.subscribeAgent === true,
+    downloadHistoricalData: integration.downloadHistoricalData === true,
     visibleInProject: integration.visibleInProject !== false,
     ...(integration.lastSyncAt ? { lastSyncAt: integration.lastSyncAt } : {}),
     ...(integration.lastError ? { lastError: integration.lastError } : {})
@@ -631,12 +669,59 @@ export class IntegrationsManager {
     }
   }
 
+  async listMountDirectory(projectId: string, integrationId: string, dirPath: string): Promise<filesystem.ExplorerEntry[]> {
+    const resolvedPath = await this.resolveIntegrationMountPath(projectId, integrationId, dirPath)
+    return filesystem.listDirectory(resolvedPath)
+  }
+
+  async readMountPreview(projectId: string, integrationId: string, filePath: string): Promise<filesystem.FilePreview> {
+    const resolvedPath = await this.resolveIntegrationMountPath(projectId, integrationId, filePath)
+    return filesystem.readTextPreview(resolvedPath)
+  }
+
+  async listOptions(projectId: string, provider: string, resource: string): Promise<IntegrationOption[]> {
+    if (!this.findProject(projectId)) throw new Error(`Project not found: ${projectId}`)
+    const workspaceId = await getAccountWorkspaceId(accountWorkspaceReadyRetryOptions())
+    const normalizedProvider = toRelayfileProvider(provider)
+    const normalizedResource = resource.trim().toLowerCase()
+    if (!normalizedResource) throw new Error('Integration option resource is required')
+
+    let payload: unknown
+    try {
+      payload = await this.fetchJson<unknown>(
+        'GET',
+        `api/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(normalizedProvider)}/options/${encodeURIComponent(normalizedResource)}`
+      )
+    } catch (error) {
+      if (isHttpStatus(error, 404) || /\b404\b/u.test(toErrorMessage(error))) return []
+      throw error
+    }
+
+    const rawOptions = isRecord(payload) && Array.isArray(payload.options) ? payload.options : []
+    return rawOptions
+      .filter((entry): entry is Record<string, unknown> => isRecord(entry))
+      .map((entry) => {
+        const value = readString(entry.value)
+        const label = readString(entry.label) || value
+        const hint = readString(entry.hint)
+        return value && label ? { value, label, ...(hint ? { hint } : {}) } : null
+      })
+      .filter((entry): entry is IntegrationOption => entry !== null)
+  }
+
   async startLocalMountDaemon(): Promise<void> {
     await this.syncLocalMounts()
     await this.syncAllEventSubscriptions()
   }
 
   async shutdownLocalMounts(): Promise<void> {
+    // Unlink the per-project `.integrations` symlinks before stopping the
+    // mounts so a closed app leaves no dangling links in project trees.
+    await Promise.all(
+      loadStore().projects.map((project) =>
+        removeProjectIntegrationsLink(project.rootPath).catch(() => undefined)
+      )
+    )
     await Promise.all([
       integrationMountManager.stop(),
       integrationEventBridge.closeAll()
@@ -746,7 +831,8 @@ export class IntegrationsManager {
       mountPaths,
       connectedAt: new Date().toISOString(),
       notifyAgent,
-      subscribeAgent: false
+      subscribeAgent: false,
+      downloadHistoricalData: false
     }
 
     await this.persistIntegration(projectId, integration)
@@ -768,6 +854,7 @@ export class IntegrationsManager {
       mountPaths,
       notifyAgent: existing.notifyAgent,
       subscribeAgent: existing.subscribeAgent === true,
+      downloadHistoricalData: existing.downloadHistoricalData === true,
       visibleInProject: visibleFromScope(scope)
     }
 
@@ -786,6 +873,23 @@ export class IntegrationsManager {
     const integration: ConnectedIntegration = {
       ...existing,
       subscribeAgent
+    }
+
+    await this.persistIntegration(projectId, integration)
+    await this.syncAgentState(projectId, true)
+    this.emit({ type: 'integration-added', projectId, integration })
+    return integration
+  }
+
+  async updateHistoricalDownload(
+    projectId: string,
+    integrationId: string,
+    downloadHistoricalData: boolean
+  ): Promise<ConnectedIntegration> {
+    const existing = this.requireConnectedIntegration(projectId, integrationId)
+    const integration: ConnectedIntegration = {
+      ...existing,
+      downloadHistoricalData
     }
 
     await this.persistIntegration(projectId, integration)
@@ -889,7 +993,7 @@ export class IntegrationsManager {
   }
 
   private async listCloudWorkspaceIntegrations(): Promise<ConnectedIntegration[]> {
-    const workspaceId = await getAccountWorkspaceId()
+    const workspaceId = await getAccountWorkspaceId(accountWorkspaceReadyRetryOptions())
     // The list is addressed by the account (app) workspace UUID, so it must be
     // authorized with the account access token, not the Relayfile workspace
     // handle. The handle's JWT is scoped to Pear's locally-created `rw_*`
@@ -1115,6 +1219,7 @@ export class IntegrationsManager {
               : existingIntegration.mountPaths,
             notifyAgent: existingIntegration.notifyAgent,
             subscribeAgent: existingIntegration.subscribeAgent === true,
+            downloadHistoricalData: existingIntegration.downloadHistoricalData === true,
             visibleInProject: existingVisible,
             connectedAt: existingIntegration.connectedAt || cloudIntegration.connectedAt,
             ...(cloudIntegration.lastError ? { lastError: cloudIntegration.lastError } : {})
@@ -1274,6 +1379,7 @@ export class IntegrationsManager {
     return dedupeStrings(
       this.listConnected(projectId)
         .filter((integration) => this.isVisibleInProject(projectId, integration.integrationId))
+        .filter((integration) => integration.downloadHistoricalData === true)
         .flatMap((integration) => this.canonicalMountPathsForIntegration(integration))
     )
   }
@@ -1308,17 +1414,21 @@ export class IntegrationsManager {
         const scopeLabels = collectScopeLabels(integration.scope)
         const scopeSummary = scopeLabels.length > 0 ? scopeLabels.join(', ') : 'all configured scope'
         const mountPaths = this.canonicalMountPathsForIntegration(integration)
-        const mountClause = mountPaths.length > 0
-          ? ` (mounted at ${mountPaths.join(', ')})`
-          : ' (no mount paths configured)'
-        lines.push(`- ${integration.provider}: ${scopeSummary}${mountClause}.`)
+          .map(projectIntegrationPathForRelayfilePath)
+        const scopeClause = mountPaths.length > 0
+          ? ` (event scope ${mountPaths.join(', ')})`
+          : ' (no event scope configured)'
+        const historyClause = integration.downloadHistoricalData === true
+          ? ' Historical file download is enabled.'
+          : ' Historical file download is off.'
+        lines.push(`- ${integration.provider}: ${scopeSummary}${scopeClause}.${historyClause}`)
       }
     }
 
     const subscriptions = integrationSubscriptionSummaries(integrations)
     lines.push('')
     if (!subscriptionsReady && subscriptions.length > 0) {
-      lines.push('Integration event subscriptions are requested for this project, but Pear could not register them with the event gateway yet.')
+      lines.push('Integration event subscriptions are requested for this project, but Pear could not register them with Relayfile yet.')
       lines.push('Do not assume notifications will arrive until a later integrations update confirms active subscriptions; read the mounted integration files when the user asks for current state.')
     } else if (subscriptions.length === 0) {
       lines.push('No integration event subscriptions are active for this project.')
@@ -1327,7 +1437,7 @@ export class IntegrationsManager {
       for (const subscription of subscriptions) {
         const parts = [
           subscription.watches.length > 0 ? `file changes at ${subscription.watches.join(', ')}` : '',
-          subscription.inboxes.length > 0 ? `inbox messages at ${subscription.inboxes.join(', ')}` : ''
+          subscription.targets.length > 0 ? `delivered to ${subscription.targets.join(', ')}` : 'delivered to all project agents'
         ].filter(Boolean)
         lines.push(`- ${subscription.provider}: ${parts.join('; ')}`)
       }
@@ -1337,7 +1447,7 @@ export class IntegrationsManager {
     }
 
     lines.push(
-      'When relevant to the user\'s request, read these mounts to access live data. Edits to JSON files in writeback-enabled paths will push back to the SaaS API.',
+      `Historical files are downloaded and mounted through ${PROJECT_INTEGRATIONS_LINK_NAME}/ only for integrations where historical download is enabled. Incoming webhook events do not require downloading history.`,
       '</integrations-update>'
     )
     return lines.join('\n')
@@ -1386,7 +1496,10 @@ export class IntegrationsManager {
 
   private async syncEventSubscriptions(projectId: string): Promise<boolean> {
     try {
-      await integrationEventBridge.reconcile(projectId, this.visibleIntegrationsForProject(projectId))
+      await integrationEventBridge.reconcile(
+        projectId,
+        await this.withLocalMountPaths(this.visibleIntegrationsForProject(projectId))
+      )
       return true
     } catch (error) {
       console.warn('[integrations] Failed to reconcile integration event subscriptions:', toErrorMessage(error))
@@ -1405,17 +1518,10 @@ export class IntegrationsManager {
         integration
       }))
     )
-    const cloudIntegrations = await this.listCloudWorkspaceIntegrations().catch(() => [])
     const byProvider = new Map<string, ConnectedIntegration>()
-    const configuredKeys = new Set(localEntries.map(({ integration }) =>
-      `${toRelayfileProvider(integration.provider)}:${integration.integrationId}`
-    ))
-    for (const integration of cloudIntegrations) {
-      const key = `${toRelayfileProvider(integration.provider)}:${integration.integrationId}`
-      if (!configuredKeys.has(key)) byProvider.set(key, integration)
-    }
     for (const { projectId, integration } of localEntries) {
       if (!this.isVisibleInProject(projectId, integration.integrationId)) continue
+      if (integration.downloadHistoricalData !== true) continue
       byProvider.set(`${toRelayfileProvider(integration.provider)}:${integration.integrationId}`, integration)
     }
     const integrations = Array.from(byProvider.values())
@@ -1427,19 +1533,102 @@ export class IntegrationsManager {
     } catch (error) {
       console.warn('[integrations] Failed to reconcile local integration mount:', toErrorMessage(error))
     }
+    await this.syncProjectIntegrationLinks(integrations.length > 0)
+  }
+
+  // Mirror the workspace's integration data into each project via a
+  // git-ignored `.integrations` symlink so local agents can read it from
+  // their cwd. Removed on app shutdown (see shutdownLocalMounts).
+  private async syncProjectIntegrationLinks(hasIntegrations: boolean): Promise<void> {
+    const workspaceId = integrationMountManager.currentWorkspaceId()
+    const projects = loadStore().projects
+    await Promise.all(projects.map(async (project) => {
+      try {
+        if (hasIntegrations && workspaceId) {
+          await ensureProjectIntegrationsLink(project.rootPath, workspaceId)
+        } else {
+          await removeProjectIntegrationsLink(project.rootPath)
+        }
+      } catch (error) {
+        console.warn(
+          `[integrations] Failed to sync integration symlink for ${project.rootPath}:`,
+          toErrorMessage(error)
+        )
+      }
+    }))
   }
 
   private async withLocalMountPaths(integrations: ConnectedIntegration[]): Promise<ConnectedIntegration[]> {
     await this.syncLocalMounts()
     const workspaceId = integrationMountManager.currentWorkspaceId()
     if (!workspaceId) return integrations
-    return integrations.map((integration) => ({
-      ...integration,
-      localMountPaths: integrationMountManager.localPathsFor(workspaceId, {
-        provider: integration.provider,
-        mountPaths: this.canonicalMountPathsForIntegration(integration)
+    return integrations.map((integration) => {
+      if (integration.downloadHistoricalData !== true) {
+        return {
+          ...integration,
+          localMountPaths: []
+        }
+      }
+      return {
+        ...integration,
+        localMountPaths: integrationMountManager.localPathsFor(workspaceId, {
+          provider: integration.provider,
+          mountPaths: this.canonicalMountPathsForIntegration(integration)
+        })
+      }
+    })
+  }
+
+  private async resolveIntegrationMountPath(projectId: string, integrationId: string, targetPath: string): Promise<string> {
+    const resolvedPath = resolve(targetPath)
+    const localIntegrations = await this.withLocalMountPaths(this.listConnected(projectId))
+    let integrations = localIntegrations
+    let integration = this.findIntegrationForMountPath(integrations, integrationId, resolvedPath)
+
+    if (!integration) {
+      integrations = await this.listConnectedForSettings(projectId).catch((error) => {
+        console.warn('[integrations] Failed to refresh integrations for mount browser:', toErrorMessage(error))
+        return localIntegrations
       })
-    }))
+      integration = this.findIntegrationForMountPath(integrations, integrationId, resolvedPath)
+    }
+
+    if (!integration) {
+      // The integration list is refreshed from cloud, and a transient status
+      // filter (e.g. webhook health) can drop an integration between the UI
+      // render and the click. Its mirrored files are still on disk, so fall
+      // back to confining the path to the workspace's integrations mount
+      // root — the same boundary the per-integration roots live under.
+      const workspaceId = integrationMountManager.currentWorkspaceId()
+      if (workspaceId && isPathWithinRoot(resolve(integrationMountRootForWorkspace(workspaceId)), resolvedPath)) {
+        return resolvedPath
+      }
+      throw new Error('Integration is not connected to this project')
+    }
+
+    const roots = (integration.localMountPaths || []).map((entry) => resolve(entry)).filter(Boolean)
+    if (roots.length === 0) {
+      throw new Error('Relayfile mount is not available for this integration')
+    }
+
+    if (!roots.some((root) => isPathWithinRoot(root, resolvedPath))) {
+      throw new Error('Path is outside this integration Relayfile mount')
+    }
+
+    return resolvedPath
+  }
+
+  private findIntegrationForMountPath(
+    integrations: ConnectedIntegration[],
+    integrationId: string,
+    resolvedPath: string
+  ): ConnectedIntegration | undefined {
+    return integrations.find((integration) => integration.integrationId === integrationId)
+      || integrations.find((integration) =>
+        (integration.localMountPaths || [])
+          .map((entry) => resolve(entry))
+          .some((root) => isPathWithinRoot(root, resolvedPath))
+      )
   }
 
   private visibleIntegrationsForProject(projectId: string): ConnectedIntegration[] {

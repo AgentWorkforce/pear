@@ -16,6 +16,8 @@ import {
 
 const CLOUD_API_URL = process.env.RELAY_CLOUD_URL || 'https://agentrelay.dev/cloud'
 const TOKEN_EXPIRY_BUFFER_MS = 60_000
+const ACCOUNT_WORKSPACE_RETRY_ATTEMPTS = 8
+const ACCOUNT_WORKSPACE_RETRY_DELAY_MS = 500
 
 interface AuthStatus {
   loggedIn: boolean
@@ -26,6 +28,11 @@ interface AuthStatus {
 type AccountWorkspaceCache = {
   tokenHash: string
   workspaceId: string
+}
+
+type AccountWorkspaceIdOptions = {
+  retryAttempts?: number
+  retryDelayMs?: number
 }
 
 type AuthMeta = Pick<AuthStatus, 'apiUrl' | 'user'> & {
@@ -138,6 +145,10 @@ function hasAvatarIdentity(user: UserInfo | undefined): boolean {
 
 function accountWorkspaceTokenHash(accessToken: string): string {
   return createHash('sha256').update(accessToken).digest('hex')
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function saveAuthMeta(tokens: Pick<StoredTokens, 'apiUrl' | 'user'> & Partial<Pick<StoredTokens, 'accessToken'>>): void {
@@ -645,7 +656,7 @@ export async function ensureAuthenticated(apiUrl?: string): Promise<AuthStatus> 
   return login()
 }
 
-export async function getAccountWorkspaceId(): Promise<string> {
+export async function getAccountWorkspaceId(options: AccountWorkspaceIdOptions = {}): Promise<string> {
   const auth = await resolveCloudAuth()
   if (!auth) throw new Error('cloud-auth-required')
 
@@ -655,10 +666,26 @@ export async function getAccountWorkspaceId(): Promise<string> {
     return cached.workspaceId.trim()
   }
 
-  const data = await fetchWhoamiPayload(auth.apiUrl, auth.accessToken)
-  const workspaceId = accountWorkspaceIdFromWhoami(data)
+  const retryAttempts = Math.max(1, Math.floor(options.retryAttempts ?? 1))
+  const retryDelayMs = Math.max(0, Math.floor(options.retryDelayMs ?? ACCOUNT_WORKSPACE_RETRY_DELAY_MS))
+  let workspaceId: string | undefined
+
+  for (let attempt = 1; attempt <= retryAttempts; attempt += 1) {
+    const data = await fetchWhoamiPayload(auth.apiUrl, auth.accessToken)
+    workspaceId = accountWorkspaceIdFromWhoami(data)
+    if (workspaceId) break
+    if (attempt < retryAttempts) await delay(retryDelayMs)
+  }
+
   if (!workspaceId) throw new Error('account-workspace-required')
 
   saveAccountWorkspaceCache(auth, workspaceId)
   return workspaceId
+}
+
+export function accountWorkspaceReadyRetryOptions(): Required<AccountWorkspaceIdOptions> {
+  return {
+    retryAttempts: ACCOUNT_WORKSPACE_RETRY_ATTEMPTS,
+    retryDelayMs: ACCOUNT_WORKSPACE_RETRY_DELAY_MS
+  }
 }

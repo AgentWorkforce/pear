@@ -21,17 +21,26 @@ function nextAgentName(cli: SpawnAgentCli, projectId: string, liveNames: string[
   return `${cli}-${index}`
 }
 
+async function ensureLocalBroker(project: Project): Promise<void> {
+  const projectStore = useProjectStore.getState()
+  if (projectStore.activeProjectId !== project.id) {
+    await projectStore.setActiveProject(project.id)
+  }
+
+  const cloudStatus = await pear.cloudAgent.status(project.id).catch(() => null)
+  if (cloudStatus) {
+    await pear.cloudAgent.detach(project.id)
+  }
+
+  await useProjectStore.getState().ensureBroker()
+}
+
 export async function spawnProjectAgent(
   project: Project,
   cli: SpawnAgentCli,
   customName?: string
 ): Promise<string> {
-  const projectStore = useProjectStore.getState()
-  if (projectStore.activeProjectId !== project.id) {
-    await projectStore.setActiveProject(project.id)
-  } else {
-    await projectStore.ensureBroker()
-  }
+  await ensureLocalBroker(project)
 
   const root = useProjectStore.getState().getActiveRoot()
   if (!root?.pathExists) {
@@ -99,12 +108,7 @@ export async function listProjectPersonas(project: Project): Promise<WorkforcePe
 }
 
 export async function spawnProjectPersona(project: Project, personaId: string): Promise<string> {
-  const projectStore = useProjectStore.getState()
-  if (projectStore.activeProjectId !== project.id) {
-    await projectStore.setActiveProject(project.id)
-  } else {
-    await projectStore.ensureBroker()
-  }
+  await ensureLocalBroker(project)
 
   const root = useProjectStore.getState().getActiveRoot()
   if (!root?.pathExists) {

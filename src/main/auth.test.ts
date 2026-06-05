@@ -263,6 +263,31 @@ describe('getAccountWorkspaceId', () => {
     expect(readMeta(userDataDir)?.accountWorkspace).toBeUndefined()
   })
 
+  it('retries when whoami is temporarily missing currentWorkspace', async () => {
+    writeAuthJson(userDataDir, {
+      accessToken: 'cld_at_retry',
+      refreshToken: 'cld_rt_retry',
+      apiUrl: 'https://cloud.example'
+    })
+    mock.fetchMock
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => ({ user: { id: 'user-1' } })
+      })
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => ({ currentWorkspace: { id: 'ws-after-ready' } })
+      })
+
+    const { getAccountWorkspaceId } = await import('./auth')
+    await expect(getAccountWorkspaceId({ retryAttempts: 2, retryDelayMs: 0 })).resolves.toBe('ws-after-ready')
+    expect(mock.fetchMock).toHaveBeenCalledTimes(2)
+  })
+
   it('throws account-workspace-required when whoami responds with a non-OK status', async () => {
     writeAuthJson(userDataDir, {
       accessToken: 'cld_at_401',

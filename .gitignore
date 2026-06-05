@@ -1,6 +1,8 @@
 node_modules/
 out/
 dist/
+bin/relayfile-mount
+bin/.relayfile-mount-version
 .npm-cache/
 *.env
 .DS_Store

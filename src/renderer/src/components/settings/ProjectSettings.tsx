@@ -6,6 +6,7 @@ import {
   BellOff,
   Bot,
   Check,
+  Database,
   Eye,
   EyeOff,
   Folder,
@@ -20,6 +21,11 @@ import {
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
 import { ProactiveAgentsSection } from '@/components/proactive/ProactiveAgentsSection'
 import { pear, type ConnectedIntegration } from '@/lib/ipc'
+import {
+  SlackChannelPicker,
+  type IntegrationAccessibleResource,
+  type ScopePickerValue
+} from '@/components/settings/scope-pickers'
 import { useAgentStore } from '@/stores/agent-store'
 import {
   normalizeChannelName,
@@ -164,7 +170,12 @@ function projectVisibilityFromScope(scope: Record<string, unknown>): ProjectVisi
 }
 
 function providerMountRoot(provider: string): string {
-  return `/integrations/${provider}`
+  return `/${provider}`
+}
+
+function isSlackProvider(provider: string): boolean {
+  const normalized = provider.trim().toLowerCase().replace(/-(app-oauth|app|oauth|bot-oauth|bot|api-key|apikey)$/, '')
+  return normalized === 'slack' || normalized.startsWith('slack-')
 }
 
 function cloudAgentWorkspaceMode(project: unknown): CloudAgentWorkspaceMode {
@@ -183,11 +194,90 @@ function visibilityMountPaths(integration: ConnectedIntegration, visibility: Pro
   return [providerMountRoot(integration.provider)]
 }
 
-function IntegrationVisibilitySection({ projectId }: { projectId: string }): React.ReactNode {
+const NOTIFICATION_AGENT_SCOPE_KEYS = [
+  'notifyAgents',
+  'notificationAgents',
+  'listenerAgents',
+  'agentListeners'
+]
+
+const NOTIFICATION_CHANNEL_SCOPE_KEYS = [
+  'notifyChannels',
+  'notificationChannels',
+  'listenerChannels',
+  'channelListeners',
+  'relayChannels'
+]
+
+function firstScopeString(scope: Record<string, unknown>, keys: string[]): string | null {
+  for (const key of keys) {
+    const value = scope[key]
+    if (!Array.isArray(value)) continue
+    const first = value.find((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+    if (first) return first.trim()
+  }
+  return null
+}
+
+function scopeStringList(scope: Record<string, unknown>, key: string): string[] {
+  const value = scope[key]
+  return Array.isArray(value)
+    ? value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
+    : []
+}
+
+function localPathSegments(path: string): string[] {
+  return path.split(/[\\/]+/u).filter(Boolean)
+}
+
+function providerLocalMountPath(integration: ConnectedIntegration, provider: string): string | null {
+  const providerSegment = provider.trim().toLowerCase()
+  const providerRoots = (integration.localMountPaths || [])
+    .filter((root) => localPathSegments(root).at(-1)?.toLowerCase() === providerSegment)
+  return providerRoots.find((root) => !localPathSegments(root).includes('discovery'))
+    || providerRoots[0]
+    || null
+}
+
+function joinLocalPath(root: string, ...segments: string[]): string {
+  const suffix = segments
+    .map((segment) => segment.replace(/^[/\\]+|[/\\]+$/gu, ''))
+    .filter(Boolean)
+    .join('/')
+  return suffix ? `${root.replace(/[/\\]+$/u, '')}/${suffix}` : root
+}
+
+function notificationTargetValue(scope: Record<string, unknown>): string {
+  const agent = firstScopeString(scope, NOTIFICATION_AGENT_SCOPE_KEYS)
+  if (agent) return `agent:${agent.replace(/^@/u, '')}`
+  const channel = firstScopeString(scope, NOTIFICATION_CHANNEL_SCOPE_KEYS)
+  if (channel) return `channel:${channel.replace(/^#/u, '')}`
+  return 'all'
+}
+
+function clearNotificationTargetScope(scope: Record<string, unknown>): Record<string, unknown> {
+  const nextScope = { ...scope }
+  for (const key of [...NOTIFICATION_AGENT_SCOPE_KEYS, ...NOTIFICATION_CHANNEL_SCOPE_KEYS]) {
+    delete nextScope[key]
+  }
+  return nextScope
+}
+
+function IntegrationVisibilitySection({
+  projectId,
+  channels,
+  agentNames
+}: {
+  projectId: string
+  channels: string[]
+  agentNames: string[]
+}): React.ReactNode {
   const [integrations, setIntegrations] = useState<ConnectedIntegration[]>([])
   const [loading, setLoading] = useState(true)
   const [busyIntegrationId, setBusyIntegrationId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [scopeEditorIntegrationId, setScopeEditorIntegrationId] = useState<string | null>(null)
+  const [pendingScopeValue, setPendingScopeValue] = useState<ScopePickerValue | null>(null)
 
   const load = useCallback(async () => {
     setError(null)
@@ -265,6 +355,139 @@ function IntegrationVisibilitySection({ projectId }: { projectId: string }): Rea
     }
   }, [projectId])
 
+  const setHistoricalDownload = useCallback(async (integration: ConnectedIntegration, downloadHistoricalData: boolean) => {
+    setBusyIntegrationId(integration.integrationId)
+    setError(null)
+    try {
+      const nextIntegration = await pear.integrations.updateHistoricalDownload(
+        projectId,
+        integration.integrationId,
+        downloadHistoricalData
+      )
+      setIntegrations((current) =>
+        current.map((entry) =>
+          entry.integrationId === nextIntegration.integrationId ? nextIntegration : entry
+        )
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusyIntegrationId(null)
+    }
+  }, [projectId])
+
+  const setNotificationTarget = useCallback(async (integration: ConnectedIntegration, value: string) => {
+    const nextScope = clearNotificationTargetScope(integration.scope)
+    if (value.startsWith('agent:')) {
+      const agent = value.slice('agent:'.length).trim()
+      if (agent) nextScope.notifyAgents = [agent]
+    } else if (value.startsWith('channel:')) {
+      const channel = value.slice('channel:'.length).trim().replace(/^#/u, '')
+      if (channel) nextScope.notifyChannels = [`#${channel}`]
+    }
+
+    setBusyIntegrationId(integration.integrationId)
+    setError(null)
+    try {
+      const nextIntegration = await pear.integrations.updateScope(
+        projectId,
+        integration.integrationId,
+        nextScope,
+        integration.mountPaths
+      )
+      setIntegrations((current) =>
+        current.map((entry) =>
+          entry.integrationId === nextIntegration.integrationId ? nextIntegration : entry
+        )
+      )
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusyIntegrationId(null)
+    }
+  }, [projectId])
+
+  const listSlackChannelResources = useCallback(async (integration: ConnectedIntegration): Promise<IntegrationAccessibleResource[]> => {
+    const listMountedSlackChannels = async (): Promise<IntegrationAccessibleResource[]> => {
+      const slackRoot = providerLocalMountPath(integration, 'slack')
+      if (!slackRoot) throw new Error('Slack Relayfile mount is not available yet.')
+      const channelsPath = joinLocalPath(slackRoot, 'channels')
+      const entries = await pear.integrations.listMountDir(projectId, integration.integrationId, channelsPath)
+      return entries
+        .filter((entry) => entry.type === 'directory' && !entry.name.startsWith('_') && entry.name !== 'by-name')
+        .map((entry) => {
+          const id = entry.name.includes('__')
+            ? entry.name.split('__')[0]
+            : entry.name.includes('--')
+              ? entry.name.split('--').at(-1) || entry.name
+              : entry.name
+          const name = entry.name.includes('__')
+            ? entry.name.split('__').slice(1).join('__')
+            : entry.name.includes('--')
+              ? entry.name.split('--').slice(0, -1).join('--')
+              : entry.name
+          return {
+            id,
+            displayName: name || id,
+            name: name || id,
+            path: joinLocalPath(channelsPath, entry.name)
+          }
+        })
+    }
+    const listOptions = (pear.integrations as typeof pear.integrations & {
+      listOptions?: typeof pear.integrations.listOptions
+    }).listOptions
+    if (typeof listOptions !== 'function') {
+      return listMountedSlackChannels()
+    }
+
+    try {
+      const options = await listOptions(projectId, integration.provider, 'channels')
+      if (options.length === 0) return listMountedSlackChannels()
+      return options.map((option) => ({
+        id: option.value,
+        displayName: option.label,
+        name: option.label.replace(/^#/u, ''),
+        metadata: option.hint ? { hint: option.hint } : undefined
+      }))
+    } catch {
+      return listMountedSlackChannels()
+    }
+  }, [projectId])
+
+  const saveSlackSourceChannels = useCallback(async (integration: ConnectedIntegration) => {
+    if (!pendingScopeValue) return
+    const nextScope = {
+      ...integration.scope,
+      provider: pendingScopeValue.scope.provider,
+      selection: pendingScopeValue.scope.selection,
+      channels: pendingScopeValue.scope.channels,
+      resources: pendingScopeValue.scope.resources
+    }
+
+    setBusyIntegrationId(integration.integrationId)
+    setError(null)
+    try {
+      const nextIntegration = await pear.integrations.updateScope(
+        projectId,
+        integration.integrationId,
+        nextScope,
+        pendingScopeValue.mountPaths
+      )
+      setIntegrations((current) =>
+        current.map((entry) =>
+          entry.integrationId === nextIntegration.integrationId ? nextIntegration : entry
+        )
+      )
+      setScopeEditorIntegrationId(null)
+      setPendingScopeValue(null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusyIntegrationId(null)
+    }
+  }, [pendingScopeValue, projectId])
+
   return (
     <Section
       title="Integration visibility"
@@ -285,56 +508,162 @@ function IntegrationVisibilitySection({ projectId }: { projectId: string }): Rea
             const visibility = projectVisibilityFromScope(integration.scope)
             const visible = integration.visibleInProject !== false
             const subscribed = integration.subscribeAgent === true
+            const historyDownload = integration.downloadHistoricalData === true
             const busy = busyIntegrationId === integration.integrationId
+            const notificationTarget = notificationTargetValue(integration.scope)
+            const slack = isSlackProvider(integration.provider)
+            const scopeEditorOpen = scopeEditorIntegrationId === integration.integrationId
+            const knownTargetValues = new Set([
+              'all',
+              ...agentNames.map((agent) => `agent:${agent}`),
+              ...channels.map((channel) => `channel:${channel}`)
+            ])
 
             return (
-              <div
-                key={integration.integrationId}
-                className="flex items-center gap-3 rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-3 py-2.5"
-              >
-                <Plug size={15} className="shrink-0 text-[var(--pear-text-faint)]" />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-sm text-[var(--pear-text)]">{integration.provider}</div>
-                  <div className="truncate text-xs text-[var(--pear-text-faint)]">
-                    {visible
-                      ? visibilityMountPaths(integration, visibility).join(', ')
-                      : providerMountRoot(integration.provider)}
-                  </div>
-                  {integration.localMountPaths && integration.localMountPaths.length > 0 && (
-                    <div className="truncate text-[11px] text-[var(--pear-text-faint)]">
-                      {integration.localMountPaths.join(', ')}
+              <div key={integration.integrationId} className="space-y-2">
+                <div className="flex items-center gap-3 rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-3 py-2.5">
+                  <Plug size={15} className="shrink-0 text-[var(--pear-text-faint)]" />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm text-[var(--pear-text)]">{integration.provider}</div>
+                    <div className="truncate text-xs text-[var(--pear-text-faint)]">
+                      {visible
+                        ? visibilityMountPaths(integration, visibility).join(', ')
+                        : providerMountRoot(integration.provider)}
                     </div>
+                    {integration.localMountPaths && integration.localMountPaths.length > 0 && (
+                      <div className="truncate text-[11px] text-[var(--pear-text-faint)]">
+                        {integration.localMountPaths.join(', ')}
+                      </div>
+                    )}
+                  </div>
+                  {slack && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => {
+                        setPendingScopeValue(null)
+                        setScopeEditorIntegrationId(scopeEditorOpen ? null : integration.integrationId)
+                      }}
+                      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md border transition-colors disabled:opacity-40 ${
+                        scopeEditorOpen
+                          ? 'border-[var(--pear-accent-dim)] text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)]'
+                          : 'border-[var(--pear-border)] text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]'
+                      }`}
+                      aria-expanded={scopeEditorOpen}
+                      title="Choose Slack channels to listen to"
+                      aria-label="Choose Slack channels to listen to"
+                    >
+                      <Hash size={13} />
+                    </button>
                   )}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void setSubscription(integration, !subscribed)}
+                    className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md border transition-colors disabled:opacity-40 ${
+                      subscribed
+                        ? 'border-[var(--pear-accent-dim)] text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)]'
+                        : 'border-[var(--pear-border)] text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]'
+                    }`}
+                    aria-pressed={subscribed}
+                    title={subscribed ? 'Stop sending events to agents' : 'Send events to agents'}
+                    aria-label={subscribed ? 'Stop sending events to agents' : 'Send events to agents'}
+                  >
+                    {subscribed ? <Bell size={13} /> : <BellOff size={13} />}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void setHistoricalDownload(integration, !historyDownload)}
+                    className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md border transition-colors disabled:opacity-40 ${
+                      historyDownload
+                        ? 'border-[var(--pear-accent-dim)] text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)]'
+                        : 'border-[var(--pear-border)] text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]'
+                    }`}
+                    aria-pressed={historyDownload}
+                    title={historyDownload ? 'Stop downloading historical files' : 'Download historical files'}
+                    aria-label={historyDownload ? 'Stop downloading historical files' : 'Download historical files'}
+                  >
+                    <Database size={13} />
+                  </button>
+                  {subscribed && (
+                    <select
+                      value={notificationTarget}
+                      disabled={busy}
+                      onChange={(event) => void setNotificationTarget(integration, event.target.value)}
+                      className="h-8 max-w-[160px] rounded-md border border-[var(--pear-border)] bg-[var(--pear-bg-raised)] px-2 text-xs text-[var(--pear-text-dim)] outline-none disabled:opacity-40"
+                      title="Integration event delivery target"
+                      aria-label="Integration event delivery target"
+                    >
+                      {!knownTargetValues.has(notificationTarget) && (
+                        <option value={notificationTarget}>{notificationTarget.replace(/^agent:/u, '@').replace(/^channel:/u, '#')}</option>
+                      )}
+                      <option value="all">All agents</option>
+                      {agentNames.length > 0 && (
+                        <optgroup label="Agents">
+                          {agentNames.map((agent) => (
+                            <option key={`agent:${agent}`} value={`agent:${agent}`}>@{agent}</option>
+                          ))}
+                        </optgroup>
+                      )}
+                      {channels.length > 0 && (
+                        <optgroup label="Channels">
+                          {channels.map((channel) => (
+                            <option key={`channel:${channel}`} value={`channel:${channel}`}>#{channel}</option>
+                          ))}
+                        </optgroup>
+                      )}
+                    </select>
+                  )}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void setVisibility(integration, !visible)}
+                    className={`flex h-8 items-center gap-2 rounded-md border px-3 text-xs transition-colors disabled:opacity-40 ${
+                      visible
+                        ? 'border-[var(--pear-accent-dim)] text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)]'
+                        : 'border-[var(--pear-border)] text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]'
+                    }`}
+                    aria-pressed={visible}
+                  >
+                    {visible ? <Eye size={13} /> : <EyeOff size={13} />}
+                    {visible ? 'Visible' : 'Hidden'}
+                  </button>
                 </div>
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void setSubscription(integration, !subscribed)}
-                  className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md border transition-colors disabled:opacity-40 ${
-                    subscribed
-                      ? 'border-[var(--pear-accent-dim)] text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)]'
-                      : 'border-[var(--pear-border)] text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]'
-                  }`}
-                  aria-pressed={subscribed}
-                  title={subscribed ? 'Stop sending events to agents' : 'Send events to agents'}
-                  aria-label={subscribed ? 'Stop sending events to agents' : 'Send events to agents'}
-                >
-                  {subscribed ? <Bell size={13} /> : <BellOff size={13} />}
-                </button>
-                <button
-                  type="button"
-                  disabled={busy}
-                  onClick={() => void setVisibility(integration, !visible)}
-                  className={`flex h-8 items-center gap-2 rounded-md border px-3 text-xs transition-colors disabled:opacity-40 ${
-                    visible
-                      ? 'border-[var(--pear-accent-dim)] text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)]'
-                      : 'border-[var(--pear-border)] text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]'
-                  }`}
-                  aria-pressed={visible}
-                >
-                  {visible ? <Eye size={13} /> : <EyeOff size={13} />}
-                  {visible ? 'Visible' : 'Hidden'}
-                </button>
+
+                {scopeEditorOpen && slack && (
+                  <div className="pl-0 md:pl-8">
+                    <SlackChannelPicker
+                      provider="slack"
+                      disabled={busy}
+                      initialSelectedIds={scopeStringList(integration.scope, 'channels')}
+                      listAccessibleResources={() => listSlackChannelResources(integration)}
+                      onChange={setPendingScopeValue}
+                    />
+                    <div className="mt-3 flex justify-end gap-2">
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => {
+                          setScopeEditorIntegrationId(null)
+                          setPendingScopeValue(null)
+                        }}
+                        className="h-8 rounded-md border border-[var(--pear-border)] px-3 text-xs text-[var(--pear-text-dim)] hover:text-[var(--pear-text)] disabled:opacity-40"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy || !pendingScopeValue}
+                        onClick={() => void saveSlackSourceChannels(integration)}
+                        className="flex h-8 items-center gap-2 rounded-md border border-[var(--pear-accent-dim)] px-3 text-xs text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)] disabled:opacity-40"
+                      >
+                        {busy ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+                        Save
+                      </button>
+                    </div>
+                  </div>
+                )}
               </div>
             )
           })
@@ -696,7 +1025,11 @@ export function ProjectSettings(): React.ReactNode {
           </div>
         </Section>
 
-        <IntegrationVisibilitySection projectId={project.id} />
+        <IntegrationVisibilitySection
+          projectId={project.id}
+          channels={project.channels}
+          agentNames={agents.map((agent) => agent.name)}
+        />
 
         <Section title="Danger">
           <button

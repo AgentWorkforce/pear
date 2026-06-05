@@ -288,6 +288,12 @@ export interface BrokerSpawnAgentInput {
   channels?: string[]
   cwd?: string
   args?: string[]
+  /**
+   * Which of the project's broker sessions to spawn on when both a local
+   * broker and a cloud sandbox are attached. Defaults to the local broker
+   * (or the cloud session when it is the only one running).
+   */
+  broker?: 'local' | 'cloud'
 }
 
 export interface BrokerSpawnAgentResult {
@@ -620,6 +626,7 @@ export type ConnectedIntegration = {
   connectedAt: string
   notifyAgent: boolean
   subscribeAgent?: boolean
+  downloadHistoricalData?: boolean
   visibleInProject?: boolean
   localMountPaths?: string[]
   lastSyncAt?: string
@@ -642,6 +649,12 @@ export type IntegrationConnectSession = {
   scopeChoices?: Record<string, unknown>
   integrationId?: string
   error?: string
+}
+
+export type IntegrationOption = {
+  value: string
+  label: string
+  hint?: string
 }
 
 export type IntegrationsEvent =
@@ -837,6 +850,9 @@ export interface PearAPI {
   integrations: {
     catalog: () => Promise<IntegrationAdapter[]>
     list: (projectId: string) => Promise<ConnectedIntegration[]>
+    listMountDir: (projectId: string, integrationId: string, dirPath: string) => Promise<FsDirEntry[]>
+    readMountPreview: (projectId: string, integrationId: string, filePath: string) => Promise<FsReadPreviewResult>
+    listOptions: (projectId: string, provider: string, resource: string) => Promise<IntegrationOption[]>
     startConnect: (projectId: string, provider: string) => Promise<IntegrationConnectSession>
     pollConnect: (sessionId: string) => Promise<IntegrationConnectSession>
     completeConnect: (
@@ -856,6 +872,11 @@ export interface PearAPI {
       projectId: string,
       integrationId: string,
       subscribeAgent: boolean
+    ) => Promise<ConnectedIntegration>
+    updateHistoricalDownload: (
+      projectId: string,
+      integrationId: string,
+      downloadHistoricalData: boolean
     ) => Promise<ConnectedIntegration>
     disconnect: (projectId: string, integrationId: string) => Promise<void>
     onEvent: (callback: (event: IntegrationsEvent) => void) => () => void

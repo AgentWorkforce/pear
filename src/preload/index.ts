@@ -50,6 +50,7 @@ import type {
   GitSummary,
   IntegrationAdapter,
   IntegrationConnectSession,
+  IntegrationOption,
   IntegrationsEvent,
   PearAPI,
   PendingRelayMessage,
@@ -360,6 +361,12 @@ const api = {
   integrations: {
     catalog: () => invoke<IntegrationAdapter[]>('integrations:catalog'),
     list: (projectId: string) => invoke<ConnectedIntegration[]>('integrations:list', projectId),
+    listMountDir: (projectId: string, integrationId: string, dirPath: string) =>
+      invoke<FsDirEntry[]>('integrations:list-mount-dir', projectId, integrationId, dirPath),
+    readMountPreview: (projectId: string, integrationId: string, filePath: string) =>
+      invoke<FsReadPreviewResult>('integrations:read-mount-preview', projectId, integrationId, filePath),
+    listOptions: (projectId: string, provider: string, resource: string) =>
+      invoke<IntegrationOption[]>('integrations:list-options', projectId, provider, resource),
     startConnect: (projectId: string, provider: string) =>
       invoke<IntegrationConnectSession>('integrations:start-connect', projectId, provider),
     pollConnect: (sessionId: string) =>
@@ -398,6 +405,13 @@ const api = {
         projectId,
         integrationId,
         subscribeAgent
+      ),
+    updateHistoricalDownload: (projectId: string, integrationId: string, downloadHistoricalData: boolean) =>
+      invoke<ConnectedIntegration>(
+        'integrations:update-historical-download',
+        projectId,
+        integrationId,
+        downloadHistoricalData
       ),
     disconnect: (projectId: string, integrationId: string) =>
       invoke<void>('integrations:disconnect', projectId, integrationId),

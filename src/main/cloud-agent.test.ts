@@ -76,6 +76,34 @@ const mock = vi.hoisted(() => {
           json: async () => ({ currentWorkspace: { id: 'account-workspace-id' } })
         }
       }
+      if (normalizedUrl.endsWith('/api/v1/agents/deploy') && init?.method === 'POST') {
+        const body = JSON.parse(String(init.body || '{}')) as Record<string, unknown>
+        return {
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          json: async () => ({
+            agentId: 'created-agent-1',
+            name: typeof body.name === 'string' ? body.name : 'created-agent-1'
+          })
+        }
+      }
+      if (normalizedUrl.endsWith('/api/v1/cloud-agents')) {
+        return {
+          ok: true,
+          status: 200,
+          statusText: 'OK',
+          json: async () => ({ agents: [] })
+        }
+      }
+      if (normalizedUrl.endsWith('/api/v1/cloud-agents/created-agent-1') && init?.method === 'DELETE') {
+        return {
+          ok: true,
+          status: 204,
+          statusText: 'No Content',
+          json: async () => ({})
+        }
+      }
       const parsedUrl = new URL(normalizedUrl)
       if (parsedUrl.pathname.endsWith('/api/v1/workspaces/account-workspace-id/cloud-agents/cloud-agent-1/box')) {
         const queued = boxResponses.shift()
@@ -135,7 +163,8 @@ vi.mock('electron', () => ({
 
 vi.mock('./auth', () => ({
   resolveCloudAuth: mock.resolveCloudAuth,
-  getAccountWorkspaceId: mock.getAccountWorkspaceId
+  getAccountWorkspaceId: mock.getAccountWorkspaceId,
+  accountWorkspaceReadyRetryOptions: vi.fn(() => ({ retryAttempts: 2, retryDelayMs: 0 }))
 }))
 
 vi.mock('@agent-relay/harness-driver', () => ({
@@ -166,6 +195,10 @@ vi.mock('./integrations', () => ({
   integrationsManager: {
     mountPathsFor: mock.mountPathsFor
   }
+}))
+
+vi.mock('./relayfile-mount-launcher', () => ({
+  createPearMountLauncher: vi.fn(() => ({ start: vi.fn() }))
 }))
 
 import { CloudAgentManager } from './cloud-agent'
@@ -225,6 +258,38 @@ describe('CloudAgentManager', () => {
     await Promise.resolve()
     await Promise.resolve()
   }
+
+  it('keeps a newly created cloud agent visible while the cloud list catches up', async () => {
+    const manager = new CloudAgentManager()
+
+    const created = await manager.create({
+      name: 'review-agent',
+      harness: 'claude',
+      model: 'claude-opus-4-7'
+    })
+    const agents = await manager.list()
+
+    expect(created).toMatchObject({
+      id: 'created-agent-1',
+      name: 'review-agent'
+    })
+    expect(agents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: 'created-agent-1', name: 'review-agent' })
+    ]))
+  })
+
+  it('removes deleted cloud agents from the recently-created cache', async () => {
+    const manager = new CloudAgentManager()
+
+    await manager.create({
+      name: 'review-agent',
+      harness: 'claude',
+      model: 'claude-opus-4-7'
+    })
+    await manager.delete('created-agent-1')
+
+    await expect(manager.list()).resolves.toEqual([])
+  })
 
   it('warms a box using the token account workspace, not the relay workspace', async () => {
     const manager = new CloudAgentManager()
@@ -322,6 +387,32 @@ describe('CloudAgentManager', () => {
       localDir: mock.project.rootPath,
       remotePath: '/remote/project-1',
       scopes: ['relayfile:fs:read:/**', 'relayfile:fs:write:/**']
+    })
+  })
+
+  it('keeps git-overlay clone source for dirty ssh-remote projects', async () => {
+    mock.project.rootPath = await createCleanGitProject()
+    await execFileAsync('git', ['remote', 'set-url', 'origin', 'git@github.com:acme/fast-repo.git'], {
+      cwd: mock.project.rootPath
+    })
+    await writeFile(join(mock.project.rootPath, 'local-only.txt'), 'local\n')
+    await execFileAsync('git', ['add', 'local-only.txt'], { cwd: mock.project.rootPath })
+    await execFileAsync('git', ['commit', '-m', 'local only'], { cwd: mock.project.rootPath })
+    await writeFile(join(mock.project.rootPath, 'dirty.txt'), 'dirty\n')
+    const manager = new CloudAgentManager()
+
+    await manager.attach('project-1', 'cloud-agent-1')
+
+    const boxPost = mock.fetchCalls.find((call) => call.init?.method === 'POST')
+    expect(JSON.parse(String(boxPost?.init?.body))).toEqual({
+      relayfileMountPaths: ['/integrations/github', '/workspace'],
+      workspaceSource: {
+        kind: 'git-overlay',
+        remoteUrl: 'https://github.com/acme/fast-repo.git',
+        ref: 'main',
+        shallow: true,
+        targetDir: '/workspace'
+      }
     })
   })
 

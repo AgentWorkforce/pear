@@ -1,25 +1,46 @@
+import { watch, type FSWatcher } from 'node:fs'
+import { stat } from 'node:fs/promises'
+import { join, relative, resolve, sep } from 'node:path'
 import {
-  events,
-  type AgentEvent,
-  type EventStreamHandle,
-  type WatchRegistration
-} from '@agent-relay/events'
-import { getAccountWorkspaceId, resolveCloudAuth } from './auth'
-import { brokerManager } from './broker'
-import { getRelayWorkspaceManager } from './relay-workspace'
+  RelayFileClient,
+  RelayFileSync,
+  RelayfileSetup,
+  type ChangeEvent,
+  type FilesystemEvent,
+  type Subscription
+} from '@relayfile/sdk'
 import type { ConnectedIntegration } from './integrations'
 
-type CloudAgentEventsConfig = {
-  workspaceId: string
-  agentId: string
-  gatewayUrl: string
-  apiKey: string
+const INTEGRATION_EVENT_AGENT_NAME = 'pear-integration-events'
+const INTEGRATION_EVENT_SCOPES = ['relayfile:fs:read:/**']
+const PROJECT_INTEGRATIONS_LINK_NAME = '.integrations'
+const RECENT_INJECTION_TTL_MS = 10_000
+
+type WatchRegistration = {
+  glob: string
+  coalesceMs: number
+}
+
+type DeliveryTargets = {
+  agents: string[]
+  channels: string[]
+}
+
+type SubscriptionSpec = {
+  integrationId: string
+  provider: string
+  mountPaths: string[]
+  watches: WatchRegistration[]
+  targets: DeliveryTargets
 }
 
 type ProjectSubscription = {
-  handle: EventStreamHandle
+  subscriptions: Subscription[]
   signature: string
-  abort: AbortController
+}
+
+type LocalMountSubscription = Subscription & {
+  localRoots: string[]
 }
 
 type BrokerEventBridge = {
@@ -37,11 +58,41 @@ type BrokerEventBridge = {
   ) => Promise<void> | void
 }
 
+type RelayfileEventClient = {
+  subscribe(
+    globs: string[],
+    onChange: (event: ChangeEvent) => void,
+    options?: { coalesce?: 'none' | 'fire-once'; coalesceMs?: number }
+  ): Subscription
+}
+
+type RelayfileWorkspaceHandle = {
+  workspaceId: string
+  client(): RelayfileEventClient
+}
+
+type TokenProvider = () => Promise<string | undefined>
+
+type IntegrationEventBridgeDeps = {
+  broker?: BrokerEventBridge
+  getWorkspaceHandle?: () => Promise<RelayfileWorkspaceHandle>
+}
+
+type EventWorkspaceHandleCache = {
+  apiUrl: string
+  accountKey: string
+  workspaceId: string
+  handle: RelayfileWorkspaceHandle
+}
+
 export type IntegrationSubscriptionSummary = {
   provider: string
   watches: string[]
-  inboxes: string[]
+  targets: string[]
 }
+
+let accountIntegrationEventHandle: EventWorkspaceHandleCache | null = null
+let localEventSequence = 0
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -65,13 +116,42 @@ function toRelayfileProvider(provider: string): string {
   return normalized === 'gmail' ? 'google-mail' : normalized
 }
 
+function pathSegments(path: string): string[] {
+  return path.split(/[\\/]+/u).filter(Boolean)
+}
+
+function decodeBase64UrlJson(value: string): Record<string, unknown> | null {
+  try {
+    const padded = value.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(value.length / 4) * 4, '=')
+    const decoded = Buffer.from(padded, 'base64').toString('utf8')
+    const parsed = JSON.parse(decoded)
+    return isRecord(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function workspaceIdFromJwt(token: string | undefined): string | null {
+  if (!token) return null
+  const parts = token.split('.')
+  if (parts.length !== 3 || !parts[1]) return null
+  const claims = decodeBase64UrlJson(parts[1])
+  return typeof claims?.workspace_id === 'string' && claims.workspace_id ? claims.workspace_id : null
+}
+
+// Provider adapters materialize data at the workspace root (`/github/...`,
+// `/linear/...`), so watch globs must target the root-level provider layout.
+// Tolerates the legacy `/integrations/<provider>/...` catalog form.
 function canonicalMountPaths(integration: ConnectedIntegration): string[] {
-  if (integration.mountPaths.length === 0) return []
   const provider = toRelayfileProvider(integration.provider)
-  return dedupeStrings(integration.mountPaths.map((path) => {
-    const match = path.match(/^\/integrations\/[^/]+(\/.*)?$/)
-    return match ? `/integrations/${provider}${match[1] ?? ''}` : path
-  }))
+  const mountPaths = integration.mountPaths.map((path) => {
+    const prefixed = path.match(/^\/integrations\/[^/]+(\/.*)?$/)
+    if (prefixed) return `/${provider}${prefixed[1] ?? ''}`
+    const rootLevel = path.match(/^\/[^/]+(\/.*)?$/)
+    if (rootLevel) return `/${provider}${rootLevel[1] ?? ''}`
+    return path
+  })
+  return dedupeStrings(mountPaths)
 }
 
 function watchGlobForPath(path: string): string {
@@ -83,29 +163,399 @@ function watchRegistrationsFor(integrations: ConnectedIntegration[]): WatchRegis
   return dedupeStrings(integrations.flatMap((integration) => canonicalMountPaths(integration).map(watchGlobForPath)))
     .map((glob) => ({
       glob,
-      coalesceMs: 750,
-      replayOnStart: 'none'
+      coalesceMs: 750
     }))
 }
 
-function inboxSelectorsFor(integrations: ConnectedIntegration[]): string[] {
-  const selectors: string[] = []
+function normalizeAgentTarget(value: string): string | null {
+  const trimmed = value.trim()
+  if (!trimmed || trimmed.startsWith('#')) return null
+  return trimmed.startsWith('@') ? trimmed.slice(1).trim() || null : trimmed
+}
+
+function normalizeChannelTarget(value: string): string | null {
+  const trimmed = value.trim()
+  if (!trimmed) return null
+  return trimmed.startsWith('#') ? trimmed : `#${trimmed}`
+}
+
+function deliveryTargetsFor(integrations: ConnectedIntegration[]): DeliveryTargets {
+  const agents: string[] = []
+  const channels: string[] = []
   for (const integration of integrations) {
-    if (integration.mountPaths.length === 0) continue
-    if (toRelayfileProvider(integration.provider) !== 'slack') continue
     const scope = integration.scope
-    const rawSelectors = [
-      ...stringList(scope.inboxSelectors),
-      ...stringList(scope.inboxes),
-      ...stringList(scope.channels)
-    ]
-    for (const selector of rawSelectors) {
-      const trimmed = selector.trim()
-      if (!trimmed) continue
-      selectors.push(trimmed.startsWith('#') || trimmed.startsWith('@') ? trimmed : `#${trimmed}`)
+    agents.push(
+      ...[
+        ...stringList(scope.notifyAgents),
+        ...stringList(scope.notificationAgents),
+        ...stringList(scope.listenerAgents),
+        ...stringList(scope.agentListeners)
+      ].map(normalizeAgentTarget).filter((entry): entry is string => entry !== null)
+    )
+    channels.push(
+      ...[
+        ...stringList(scope.notifyChannels),
+        ...stringList(scope.notificationChannels),
+        ...stringList(scope.listenerChannels),
+        ...stringList(scope.channelListeners),
+        ...stringList(scope.relayChannels)
+      ].map(normalizeChannelTarget).filter((entry): entry is string => entry !== null)
+    )
+  }
+  return {
+    agents: dedupeStrings(agents),
+    channels: dedupeStrings(channels)
+  }
+}
+
+function targetLabels(targets: DeliveryTargets): string[] {
+  return [...targets.agents.map((agent) => `@${agent}`), ...targets.channels]
+}
+
+function subscriptionSpecsFor(integrations: ConnectedIntegration[]): SubscriptionSpec[] {
+  return integrations.map((integration) => {
+    const mountPaths = canonicalMountPaths(integration)
+    return {
+      integrationId: integration.integrationId,
+      provider: integration.provider,
+      mountPaths,
+      watches: mountPaths.map(watchGlobForPath).map((glob) => ({
+        glob,
+        coalesceMs: 750
+      })),
+      targets: deliveryTargetsFor([integration])
+    }
+  }).filter((spec) => spec.watches.length > 0)
+}
+
+function pathIsInsideMount(path: string, mountPath: string): boolean {
+  const normalizedPath = path.trim().replace(/\/+$/u, '') || '/'
+  const normalizedMountPath = mountPath.trim().replace(/\/+$/u, '') || '/'
+  return normalizedPath === normalizedMountPath || normalizedPath.startsWith(`${normalizedMountPath}/`)
+}
+
+function projectIntegrationPathForRelayfilePath(path: string): string {
+  const normalized = path.trim().startsWith('/') ? path.trim() : `/${path.trim()}`
+  return `${PROJECT_INTEGRATIONS_LINK_NAME}${normalized}`
+}
+
+function normalizeChangePath(path: string): string[] {
+  const normalized = path.startsWith('/') ? path : `/${path}`
+  const trimmed = normalized.replace(/\/+$/u, '')
+  return trimmed === '' ? [] : trimmed.split('/').filter(Boolean)
+}
+
+function globMatchesPath(glob: string, path: string): boolean {
+  const pattern = normalizeChangePath(glob)
+  const target = normalizeChangePath(path)
+  if (pattern.at(-1) === '**') {
+    const prefix = pattern.slice(0, -1)
+    return target.length >= prefix.length &&
+      prefix.every((segment, index) => segment === '*' || segment === target[index])
+  }
+  return pattern.length === target.length &&
+    pattern.every((segment, index) => segment === '*' || segment === target[index])
+}
+
+function shouldPublishFilesystemEvent(event: FilesystemEvent): boolean {
+  return event.type === 'file.created' || event.type === 'file.updated' || event.type === 'file.deleted'
+}
+
+function filesystemEventToChangeEvent(
+  client: RelayFileClient | null,
+  workspaceId: string,
+  event: FilesystemEvent
+): ChangeEvent {
+  const path = event.path.startsWith('/') ? event.path : `/${event.path}`
+  const provider = event.provider || path.split('/').filter(Boolean)[0] || 'relayfile'
+  const resourceId = path.split('/').filter(Boolean).at(-1) || path
+  const summary = {
+    title: path
+  }
+
+  return {
+    id: event.eventId || `${workspaceId}:${path}:${event.revision}`,
+    workspace: workspaceId,
+    type: 'relayfile.changed',
+    occurredAt: event.timestamp || new Date().toISOString(),
+    resource: {
+      path,
+      provider,
+      kind: 'record',
+      id: resourceId
+    },
+    summary,
+    digest: event.revision ? `revision:${event.revision}` : undefined,
+    expand: async (level = 'summary') => {
+      if (level === 'summary') {
+        return {
+          level,
+          path,
+          summary
+        }
+      }
+      if (level === 'full') {
+        if (client) {
+          try {
+            const resource = await client.getResourceAtEvent(event.eventId, { workspaceId })
+            return {
+              level,
+              path: resource.path,
+              data: resource.data
+            }
+          } catch {
+            // Fall through to the local fallback below.
+          }
+        }
+        return {
+          level,
+          path,
+          data: { path, deleted: event.type === 'file.deleted' }
+        }
+      }
+      throw new Error(`ChangeEvent.expand(${JSON.stringify(level)}) is not implemented for integration events`)
+    }
+  } as ChangeEvent
+}
+
+function createWorkspaceScopedEventClient(
+  client: RelayFileClient,
+  workspaceId: string,
+  tokenProvider: TokenProvider
+): RelayfileEventClient {
+  return {
+    subscribe(globs, onChange, options) {
+      let active = true
+      let sync: RelayFileSync | null = null
+      const pendingByPath = new Map<string, ReturnType<typeof setTimeout>>()
+      const coalesceMs = Math.max(0, Math.floor(options?.coalesceMs ?? 750))
+      const shouldCoalesce = (options?.coalesce ?? 'fire-once') !== 'none'
+
+      const dispatch = (event: FilesystemEvent): void => {
+        if (!active) return
+        const changeEvent = filesystemEventToChangeEvent(client, workspaceId, event)
+        Promise.resolve(onChange(changeEvent)).catch((error) => {
+          console.warn('[integration-events] Change handler failed:', toErrorMessage(error))
+        })
+      }
+
+      const handleEvent = (event: FilesystemEvent): void => {
+        if (!active || !shouldPublishFilesystemEvent(event)) return
+        const path = event.path.startsWith('/') ? event.path : `/${event.path}`
+        if (!globs.some((glob) => globMatchesPath(glob, path))) return
+
+        if (!shouldCoalesce) {
+          dispatch({ ...event, path })
+          return
+        }
+
+        const existing = pendingByPath.get(path)
+        if (existing) clearTimeout(existing)
+        pendingByPath.set(path, setTimeout(() => {
+          pendingByPath.delete(path)
+          dispatch({ ...event, path })
+        }, coalesceMs))
+      }
+
+      void tokenProvider()
+        .then((token) => {
+          if (!active) return
+          const tokenWorkspaceId = workspaceIdFromJwt(token)
+          if (tokenWorkspaceId !== workspaceId) {
+            logIntegrationEvent('skipping remote stream without workspace JWT', {
+              workspaceId,
+              tokenWorkspaceId
+            })
+            return
+          }
+          sync = new RelayFileSync({
+            client,
+            workspaceId,
+            token,
+            onPollingFallback: (info) => {
+              console.warn('[integration-events] Relayfile event stream using polling fallback:', info.reason)
+            }
+          })
+          sync.on('event', handleEvent)
+          sync.on('error', (error) => {
+            console.warn('[integration-events] Relayfile event stream error:', toErrorMessage(error))
+          })
+          sync.start()
+        })
+        .catch((error) => {
+          console.warn('[integration-events] Relayfile event stream token check failed:', toErrorMessage(error))
+        })
+
+      return {
+        async unsubscribe() {
+          active = false
+          for (const timer of pendingByPath.values()) clearTimeout(timer)
+          pendingByPath.clear()
+          await sync?.stop()
+        }
+      }
     }
   }
-  return dedupeStrings(selectors)
+}
+
+function remoteRootForLocalMountPath(workspaceId: string, localPath: string): string | null {
+  const segments = pathSegments(localPath)
+  const workspaceIndex = segments.findIndex((segment) => segment === workspaceId)
+  if (workspaceIndex < 0) return null
+  const remoteSegments = segments.slice(workspaceIndex + 1)
+  return remoteSegments.length > 0 ? `/${remoteSegments.join('/')}` : null
+}
+
+function localRootsForIntegration(
+  workspaceId: string,
+  integration: ConnectedIntegration
+): Array<{ localRoot: string; remoteRoot: string }> {
+  return (integration.localMountPaths || [])
+    .map((localRoot) => {
+      const remoteRoot = remoteRootForLocalMountPath(workspaceId, localRoot)
+      return remoteRoot ? { localRoot, remoteRoot } : null
+    })
+    .filter((entry): entry is { localRoot: string; remoteRoot: string } => entry !== null)
+}
+
+function remotePathForLocalPath(localRoot: string, remoteRoot: string, localPath: string): string | null {
+  const relativePath = relative(localRoot, localPath)
+  if (!relativePath || relativePath.startsWith('..') || relativePath === '..') return null
+  const normalizedRelative = relativePath.split(sep).join('/')
+  return `${remoteRoot.replace(/\/+$/u, '')}/${normalizedRelative}`
+}
+
+async function fileEventForLocalPath(
+  workspaceId: string,
+  localPath: string,
+  remotePath: string,
+  eventType: string
+): Promise<FilesystemEvent | null> {
+  const stats = await stat(localPath).catch(() => null)
+  if (stats?.isDirectory()) return null
+  localEventSequence += 1
+  return {
+    eventId: `local:${workspaceId}:${remotePath}:${Date.now()}:${localEventSequence}`,
+    type: stats ? (eventType === 'rename' ? 'file.created' : 'file.updated') : 'file.deleted',
+    path: remotePath,
+    revision: stats ? `${Math.round(stats.mtimeMs)}:${stats.size}` : '',
+    timestamp: new Date().toISOString()
+  }
+}
+
+function watchLocalMounts(
+  workspaceId: string,
+  integrations: ConnectedIntegration[],
+  globs: string[],
+  onChange: (event: ChangeEvent) => void,
+  coalesceMs: number
+): LocalMountSubscription | null {
+  const roots = new Map<string, { localRoot: string; remoteRoot: string }>()
+  for (const integration of integrations) {
+    for (const root of localRootsForIntegration(workspaceId, integration)) {
+      roots.set(resolve(root.localRoot), { localRoot: resolve(root.localRoot), remoteRoot: root.remoteRoot })
+    }
+  }
+  if (roots.size === 0) return null
+
+  let active = true
+  const watchers: FSWatcher[] = []
+  const pendingByPath = new Map<string, ReturnType<typeof setTimeout>>()
+
+  const schedule = (localRoot: string, remoteRoot: string, localPath: string, eventType: string): void => {
+    const remotePath = remotePathForLocalPath(localRoot, remoteRoot, localPath)
+    if (!remotePath || !shouldNotifyRelayfilePath(remotePath)) return
+    if (!globs.some((glob) => globMatchesPath(glob, remotePath))) return
+
+    const existing = pendingByPath.get(remotePath)
+    if (existing) clearTimeout(existing)
+    pendingByPath.set(remotePath, setTimeout(() => {
+      pendingByPath.delete(remotePath)
+      if (!active) return
+      void fileEventForLocalPath(workspaceId, localPath, remotePath, eventType)
+        .then((event) => {
+          if (!event || !active) return
+          logIntegrationEvent('local mount event', {
+            workspaceId,
+            path: event.path,
+            type: event.type,
+            localPath
+          })
+          onChange(filesystemEventToChangeEvent(null, workspaceId, event))
+        })
+        .catch((error) => {
+          console.warn('[integration-events] Local mount event failed:', toErrorMessage(error))
+        })
+    }, coalesceMs))
+  }
+
+  for (const { localRoot, remoteRoot } of roots.values()) {
+    try {
+      const watcher = watch(localRoot, { recursive: true }, (eventType, filename) => {
+        if (!active || !filename) return
+        schedule(localRoot, remoteRoot, join(localRoot, String(filename)), eventType)
+      })
+      watcher.on('error', (error) => {
+        console.warn('[integration-events] Local mount watcher error:', toErrorMessage(error))
+      })
+      watchers.push(watcher)
+    } catch (error) {
+      console.warn('[integration-events] Failed to watch local integration mount:', {
+        localRoot,
+        error: toErrorMessage(error)
+      })
+    }
+  }
+
+  if (watchers.length === 0) return null
+  return {
+    localRoots: Array.from(roots.keys()),
+    async unsubscribe() {
+      active = false
+      for (const timer of pendingByPath.values()) clearTimeout(timer)
+      pendingByPath.clear()
+      await Promise.all(watchers.map((watcher) => new Promise<void>((resolveClose) => {
+        watcher.once('close', resolveClose)
+        watcher.close()
+      })))
+    }
+  }
+}
+
+function specsForEvent(event: ChangeEvent, specs: SubscriptionSpec[]): SubscriptionSpec[] {
+  const path = event.resource.path
+  return specs.filter((spec) => spec.mountPaths.some((mountPath) => pathIsInsideMount(path, mountPath)))
+}
+
+function longestMatchingMountPath(path: string, spec: SubscriptionSpec): string | null {
+  return spec.mountPaths
+    .filter((mountPath) => pathIsInsideMount(path, mountPath))
+    .sort((a, b) => b.length - a.length)[0] || null
+}
+
+function pathTailAfterMount(path: string, mountPath: string): string {
+  const normalizedPath = path.trim().replace(/\/+$/u, '') || '/'
+  const normalizedMountPath = mountPath.trim().replace(/\/+$/u, '') || '/'
+  if (normalizedPath === normalizedMountPath) return '/'
+  return normalizedPath.slice(normalizedMountPath.length) || '/'
+}
+
+function injectionDeduplicationKey(projectId: string, event: ChangeEvent, matchedSpecs: SubscriptionSpec[]): string {
+  const path = event.resource.path.startsWith('/') ? event.resource.path : `/${event.resource.path}`
+  const scopedKeys = matchedSpecs
+    .map((spec) => {
+      const mountPath = longestMatchingMountPath(path, spec)
+      return mountPath
+        ? `${spec.integrationId}:${spec.provider}:${pathTailAfterMount(path, mountPath)}`
+        : null
+    })
+    .filter((entry): entry is string => entry !== null)
+  if (scopedKeys.length > 0) return `${projectId}:${event.type}:${dedupeStrings(scopedKeys).join('|')}`
+  return `${projectId}:${event.type}:${path}`
+}
+
+function logIntegrationEvent(message: string, metadata: Record<string, unknown>): void {
+  console.info(`[integration-events] ${message}`, metadata)
 }
 
 export function integrationSubscriptionSummaries(
@@ -113,35 +563,17 @@ export function integrationSubscriptionSummaries(
 ): IntegrationSubscriptionSummary[] {
   return integrations
     .filter((integration) => integration.subscribeAgent === true)
-    .map((integration) => ({
-      provider: integration.provider,
-      watches: watchRegistrationsFor([integration]).map((watch) => watch.glob),
-      inboxes: inboxSelectorsFor([integration])
-    }))
-    .filter((summary) => summary.watches.length > 0 || summary.inboxes.length > 0)
-}
-
-function normalizeGatewayEventsUrl(value: string | undefined): string | undefined {
-  const trimmed = value?.trim()
-  if (!trimmed) return undefined
-  const url = new URL(trimmed)
-  if (!url.pathname || url.pathname === '/') {
-    url.pathname = '/v1/agent-events'
-  } else if (!url.pathname.endsWith('/v1/agent-events')) {
-    url.pathname = `${url.pathname.replace(/\/+$/u, '')}/v1/agent-events`
-  }
-  if (url.protocol === 'http:') url.protocol = 'ws:'
-  if (url.protocol === 'https:') url.protocol = 'wss:'
-  return url.toString()
-}
-
-function projectAgentId(agentId: string, projectId: string): string {
-  return `${agentId}-${projectId}`
-    .trim()
-    .toLowerCase()
-    .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-    .slice(0, 96) || 'pear-cloud-agent-events'
+    .map((integration) => {
+      const targets = deliveryTargetsFor([integration])
+      return {
+        provider: integration.provider,
+        watches: watchRegistrationsFor([integration])
+          .map((watch) => watch.glob)
+          .map(projectIntegrationPathForRelayfilePath),
+        targets: targetLabels(targets)
+      }
+    })
+    .filter((summary) => summary.watches.length > 0)
 }
 
 function eventSummaryValue(value: unknown): string | undefined {
@@ -150,11 +582,44 @@ function eventSummaryValue(value: unknown): string | undefined {
   return undefined
 }
 
-function formatIntegrationEventMessage(event: AgentEvent): string {
+function shouldNotifyRelayfilePath(pathValue: string): boolean {
+  const path = pathValue.trim()
+  if (!path || !path.startsWith('/')) return false
+
+  const leaf = path.split('/').pop() || ''
+  if (
+    leaf === 'LAYOUT.md' ||
+    leaf === '_index.json' ||
+    leaf === '.schema.json' ||
+    leaf === '.create.example.json' ||
+    path.includes('/discovery/') ||
+    path.includes('/.relay/') ||
+    path.includes('/.relayfile-') ||
+    path.endsWith('/.schema.json') ||
+    path.endsWith('/.create.example.json')
+  ) {
+    return false
+  }
+
+  // Local writeback drafts are commands from an agent, not provider-originated
+  // updates. Notifying agents about their own draft files creates loops.
+  if (/\/(?:draft[@-][^/]*|create)\.json$/u.test(path)) return false
+
+  return true
+}
+
+function shouldNotifyRelayfileChange(event: ChangeEvent): boolean {
+  return shouldNotifyRelayfilePath(event.resource.path)
+}
+
+function formatIntegrationEventMessage(event: ChangeEvent): string {
   const summary = isRecord(event.summary) ? event.summary : {}
   const resource = isRecord(event.resource) ? event.resource : {}
   const provider = eventSummaryValue(resource.provider) || 'integration'
-  const path = eventSummaryValue((event as { path?: unknown }).path) || eventSummaryValue(resource.path)
+  const relayfilePath = eventSummaryValue(resource.path)
+  const projectPath = relayfilePath ? projectIntegrationPathForRelayfilePath(relayfilePath) : undefined
+  const resourceKind = eventSummaryValue(resource.kind)
+  const resourceId = eventSummaryValue(resource.id)
   const title = eventSummaryValue(summary.title)
   const status = eventSummaryValue(summary.status)
   const actor = isRecord(summary.actor)
@@ -171,22 +636,18 @@ function formatIntegrationEventMessage(event: AgentEvent): string {
     `Event id: ${event.id}`
   ]
 
-  if (path) lines.push(`Path: ${path}`)
+  if (projectPath) lines.push(`Path: ${projectPath}`)
+  if (relayfilePath) lines.push(`Relayfile path: ${relayfilePath}`)
+  if (resourceKind) lines.push(`Resource kind: ${resourceKind}`)
+  if (resourceId) lines.push(`Resource id: ${resourceId}`)
   if (title) lines.push(`Title: ${title}`)
   if (status) lines.push(`Status: ${status}`)
   if (actor) lines.push(`Actor: ${actor}`)
   if (fieldsChanged) lines.push(`Fields changed: ${fieldsChanged}`)
   if (labels) lines.push(`Labels: ${labels}`)
 
-  if (event.type === 'relaycast.message') {
-    const message = event as { channel?: string; messageId?: string; threadId?: string }
-    if (message.channel) lines.push(`Channel: ${message.channel}`)
-    if (message.messageId) lines.push(`Message id: ${message.messageId}`)
-    if (message.threadId) lines.push(`Thread id: ${message.threadId}`)
-  }
-
   lines.push(
-    'Handle this like an incoming user-relevant integration update. Use the mounted integration files for context and the existing writeback/messaging path when a response is needed.',
+    'Handle this like an incoming user-relevant integration update. The Relayfile path above identifies the changed record; use the matching .integrations path for extra context only when historical download is enabled. Use the existing writeback or messaging path when a response is needed.',
     '</integration-event>'
   )
   return lines.join('\n')
@@ -194,6 +655,12 @@ function formatIntegrationEventMessage(event: AgentEvent): string {
 
 export class IntegrationEventBridge {
   private subscriptions = new Map<string, ProjectSubscription>()
+  private recentInjections = new Map<string, number>()
+  private readonly deps: IntegrationEventBridgeDeps
+
+  constructor(deps: IntegrationEventBridgeDeps = {}) {
+    this.deps = deps
+  }
 
   async reconcile(projectId: string, integrations: ConnectedIntegration[]): Promise<void> {
     const subscribed = integrations.filter((integration) => integration.subscribeAgent === true)
@@ -202,53 +669,100 @@ export class IntegrationEventBridge {
       return
     }
 
-    const watches = watchRegistrationsFor(subscribed)
-    const inbox = inboxSelectorsFor(subscribed)
-    if (watches.length === 0 && inbox.length === 0) {
+    const specs = subscriptionSpecsFor(subscribed)
+    const watches = dedupeStrings(specs.flatMap((spec) => spec.watches.map((watch) => watch.glob))).map((glob) => ({
+      glob,
+      coalesceMs: 750
+    }))
+    if (watches.length === 0) {
       await this.close(projectId)
       return
     }
 
-    const config = await this.resolveEventsConfig()
-    const agentId = projectAgentId(config.agentId, projectId)
+    const handle = await this.getWorkspaceHandle()
     const signature = JSON.stringify({
-      workspaceId: config.workspaceId,
-      agentId,
-      gatewayUrl: config.gatewayUrl,
+      workspaceId: handle.workspaceId,
       watches,
-      inbox
+      specs: specs.map((spec) => ({
+        integrationId: spec.integrationId,
+        provider: spec.provider,
+        mountPaths: spec.mountPaths,
+        targets: spec.targets
+      }))
     })
     if (this.subscriptions.get(projectId)?.signature === signature) return
 
     await this.close(projectId)
-    const abort = new AbortController()
-    let handle: EventStreamHandle | null = null
+    const subscriptions: Subscription[] = []
     try {
-      handle = events({
-        workspace: config.workspaceId,
-        apiKey: config.apiKey,
-        agentId,
-        gatewayUrl: config.gatewayUrl,
-        signal: abort.signal,
-        onEvent: async (event) => {
-          await this.injectEvent(projectId, event)
-        },
-        onError: (error, event) => {
-          console.warn('[integration-events] Event delivery failed:', {
+      logIntegrationEvent('subscribing', {
+        projectId,
+        workspaceId: handle.workspaceId,
+        globs: watches.map((watch) => watch.glob),
+        specs: specs.map((spec) => ({
+          integrationId: spec.integrationId,
+          provider: spec.provider,
+          mountPaths: spec.mountPaths,
+          targets: targetLabels(spec.targets)
+        }))
+      })
+      subscriptions.push(
+        handle.client().subscribe(
+          watches.map((watch) => watch.glob),
+          (event) => {
+            logIntegrationEvent('received', {
+              projectId,
+              eventId: event.id,
+              type: event.type,
+              path: event.resource.path
+            })
+            void this.injectEvent(projectId, event, specs).catch((error) => {
+              console.warn('[integration-events] Event delivery failed:', {
+                projectId,
+                eventId: event.id,
+                error: toErrorMessage(error)
+              })
+            })
+          },
+          {
+            coalesce: 'fire-once',
+            coalesceMs: Math.max(...watches.map((watch) => watch.coalesceMs), 750)
+          }
+        )
+      )
+      const localSubscription = watchLocalMounts(
+        handle.workspaceId,
+        subscribed,
+        watches.map((watch) => watch.glob),
+        (event) => {
+          logIntegrationEvent('received', {
             projectId,
             eventId: event.id,
-            error: toErrorMessage(error)
+            type: event.type,
+            path: event.resource.path,
+            source: 'local-mount'
           })
-        }
-      })
-
-      await handle.ready
-      if (watches.length > 0) await handle.registerWatches(watches)
-      if (inbox.length > 0) await handle.registerInboxes(inbox)
-      this.subscriptions.set(projectId, { handle, signature, abort })
+          void this.injectEvent(projectId, event, specs).catch((error) => {
+            console.warn('[integration-events] Local event delivery failed:', {
+              projectId,
+              eventId: event.id,
+              error: toErrorMessage(error)
+            })
+          })
+        },
+        Math.max(...watches.map((watch) => watch.coalesceMs), 750)
+      )
+      if (localSubscription) {
+        logIntegrationEvent('watching local mounts', {
+          projectId,
+          workspaceId: handle.workspaceId,
+          localRoots: localSubscription.localRoots
+        })
+        subscriptions.push(localSubscription)
+      }
+      this.subscriptions.set(projectId, { subscriptions, signature })
     } catch (error) {
-      abort.abort()
-      await handle?.close().catch(() => undefined)
+      await Promise.all(subscriptions.map((subscription) => subscription.unsubscribe().catch(() => undefined)))
       throw error
     }
   }
@@ -257,95 +771,153 @@ export class IntegrationEventBridge {
     const subscription = this.subscriptions.get(projectId)
     this.subscriptions.delete(projectId)
     if (!subscription) return
-    subscription.abort.abort()
-    await subscription.handle.close().catch(() => undefined)
+    await Promise.all(subscription.subscriptions.map((entry) => entry.unsubscribe().catch(() => undefined)))
   }
 
   async closeAll(): Promise<void> {
     await Promise.all(Array.from(this.subscriptions.keys()).map((projectId) => this.close(projectId)))
   }
 
-  private async resolveEventsConfig(): Promise<CloudAgentEventsConfig> {
-    const auth = await resolveCloudAuth()
-    if (auth) {
-      const workspaceId = await getAccountWorkspaceId()
-      const response = await fetch(`${auth.apiUrl}/api/v1/workspaces/${encodeURIComponent(workspaceId)}/agent-events`, {
-        headers: { Authorization: `Bearer ${auth.accessToken}` }
+  private async injectEvent(projectId: string, event: ChangeEvent, specs: SubscriptionSpec[]): Promise<void> {
+    if (!shouldNotifyRelayfileChange(event)) {
+      logIntegrationEvent('skipped filtered path', {
+        projectId,
+        eventId: event.id,
+        path: event.resource.path
       })
-      if (response.ok) {
-        const config = this.normalizeCloudConfig(await response.json().catch(() => null))
-        if (config) return config
-      } else if (![404, 405, 501].includes(response.status)) {
-        const body = await response.json().catch(() => null)
-        throw new Error(`Cloud agent events config failed: ${response.status} ${this.payloadMessage(body, response.statusText)}`)
+      return
+    }
+
+    const matchedSpecs = specsForEvent(event, specs)
+    if (matchedSpecs.length === 0) {
+      logIntegrationEvent('skipped unmatched path', {
+        projectId,
+        eventId: event.id,
+        path: event.resource.path,
+        mountPaths: specs.flatMap((spec) => spec.mountPaths)
+      })
+      return
+    }
+
+    const duplicateKey = injectionDeduplicationKey(projectId, event, matchedSpecs)
+    if (this.wasRecentlyInjected(duplicateKey)) {
+      logIntegrationEvent('skipped duplicate path', {
+        projectId,
+        eventId: event.id,
+        path: event.resource.path,
+        duplicateKey
+      })
+      return
+    }
+
+    const bridge = await this.bridge()
+    let allProjectAgents: string[] | null = null
+    const recipients: string[] = []
+
+    for (const spec of matchedSpecs) {
+      const explicitTargets = dedupeStrings([...spec.targets.agents, ...spec.targets.channels])
+      if (explicitTargets.length === 0) {
+        allProjectAgents ??= (await bridge.listAgents(projectId))
+          .filter((agent) => agent.projectId === undefined || agent.projectId === projectId)
+          .map((agent) => agent.name)
+        recipients.push(...allProjectAgents)
+      } else {
+        recipients.push(...spec.targets.agents, ...spec.targets.channels)
       }
     }
 
-    const gatewayUrl = normalizeGatewayEventsUrl(
-      process.env.PEAR_AGENT_EVENTS_URL ||
-      process.env.RELAY_AGENT_EVENTS_URL ||
-      process.env.AGENT_GATEWAY_BASE_URL ||
-      process.env.NEXT_PUBLIC_AGENT_GATEWAY_BASE_URL
-    )
-    if (!gatewayUrl) {
-      throw new Error('agent-events-gateway-unconfigured')
-    }
-
-    const handle = await getRelayWorkspaceManager().getWorkspaceHandle()
-    return {
-      workspaceId: handle.workspaceId,
-      agentId: 'pear-project-events',
-      gatewayUrl,
-      apiKey: handle.getToken()
-    }
-  }
-
-  private normalizeCloudConfig(value: unknown): CloudAgentEventsConfig | null {
-    if (!isRecord(value)) return null
-    const workspaceId = typeof value.workspaceId === 'string' ? value.workspaceId.trim() : ''
-    const agentId = typeof value.agentId === 'string' ? value.agentId.trim() : ''
-    const gatewayUrl = normalizeGatewayEventsUrl(typeof value.gatewayUrl === 'string' ? value.gatewayUrl : undefined)
-    const apiKey = typeof value.apiKey === 'string' ? value.apiKey.trim() : ''
-    if (!workspaceId || !agentId || !gatewayUrl || !apiKey) return null
-    return { workspaceId, agentId, gatewayUrl, apiKey }
-  }
-
-  private payloadMessage(payload: unknown, fallback: string): string {
-    if (isRecord(payload)) {
-      for (const key of ['error', 'message', 'detail']) {
-        const value = payload[key]
-        if (typeof value === 'string' && value.trim()) return value.trim()
-      }
-    }
-    return fallback
-  }
-
-  private async injectEvent(projectId: string, event: AgentEvent): Promise<void> {
-    const bridge = this.bridge()
-    const agents = await bridge.listAgents(projectId)
+    const uniqueRecipients = dedupeStrings(recipients)
+    logIntegrationEvent('injecting', {
+      projectId,
+      eventId: event.id,
+      path: event.resource.path,
+      recipients: uniqueRecipients
+    })
     await Promise.all(
-      agents
-        .filter((agent) => agent.projectId === undefined || agent.projectId === projectId)
-        .map((agent) => bridge.sendMessage(projectId, {
-          to: agent.name,
-          from: 'integration',
-          text: formatIntegrationEventMessage(event),
-          priority: 0,
-          mode: 'steer',
-          data: {
-            kind: 'integration-event',
-            system: true,
-            eventId: event.id,
-            eventType: event.type,
-            occurredAt: event.occurredAt,
-            resource: isRecord(event.resource) ? { ...event.resource } : undefined,
-            path: (event as { path?: unknown }).path
-          }
-        }))
+      uniqueRecipients.map((recipient) => bridge.sendMessage(projectId, {
+        to: recipient,
+        from: 'integration',
+        text: formatIntegrationEventMessage(event),
+        priority: 0,
+        mode: 'steer',
+        data: {
+          kind: 'integration-event',
+          system: true,
+          eventId: event.id,
+          eventType: event.type,
+          occurredAt: event.occurredAt,
+          resource: isRecord(event.resource) ? { ...event.resource } : undefined,
+          path: event.resource.path
+        }
+      }))
     )
   }
 
-  private bridge(): BrokerEventBridge {
+  private wasRecentlyInjected(key: string): boolean {
+    const now = Date.now()
+    for (const [entryKey, expiresAt] of this.recentInjections.entries()) {
+      if (expiresAt <= now) this.recentInjections.delete(entryKey)
+    }
+    if (this.recentInjections.has(key)) return true
+    this.recentInjections.set(key, now + RECENT_INJECTION_TTL_MS)
+    return false
+  }
+
+  private async getWorkspaceHandle(): Promise<RelayfileWorkspaceHandle> {
+    if (this.deps.getWorkspaceHandle) return this.deps.getWorkspaceHandle()
+    const { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, resolveCloudAuth } = await import('./auth.ts')
+    const auth = await resolveCloudAuth()
+    if (!auth) {
+      accountIntegrationEventHandle = null
+      throw new Error('cloud-auth-required')
+    }
+
+    const workspaceId = await getAccountWorkspaceId(accountWorkspaceReadyRetryOptions())
+    if (
+      accountIntegrationEventHandle &&
+      accountIntegrationEventHandle.apiUrl === auth.apiUrl &&
+      accountIntegrationEventHandle.accountKey === auth.accountKey &&
+      accountIntegrationEventHandle.workspaceId === workspaceId
+    ) {
+      return accountIntegrationEventHandle.handle
+    }
+
+    const tokenProvider = async (): Promise<string | undefined> => {
+      const fresh = await resolveCloudAuth()
+      return fresh?.accessToken ?? auth.accessToken
+    }
+    const setup = new RelayfileSetup({
+      cloudApiUrl: auth.apiUrl,
+      accessToken: tokenProvider
+    })
+    const joined = await setup.joinWorkspace(workspaceId, {
+      agentName: INTEGRATION_EVENT_AGENT_NAME,
+      scopes: INTEGRATION_EVENT_SCOPES
+    })
+    const workspaceTokenProvider = async (): Promise<string> => {
+      await joined.refreshToken()
+      return joined.getToken()
+    }
+    const client = new RelayFileClient({
+      baseUrl: joined.info.relayfileUrl,
+      token: workspaceTokenProvider
+    })
+    const handle: RelayfileWorkspaceHandle = {
+      workspaceId,
+      client: () => createWorkspaceScopedEventClient(client, workspaceId, workspaceTokenProvider)
+    }
+    accountIntegrationEventHandle = {
+      apiUrl: auth.apiUrl,
+      accountKey: auth.accountKey,
+      workspaceId,
+      handle
+    }
+    return handle
+  }
+
+  private async bridge(): Promise<BrokerEventBridge> {
+    if (this.deps.broker) return this.deps.broker
+    const { brokerManager } = await import('./broker')
     return brokerManager as unknown as BrokerEventBridge
   }
 }

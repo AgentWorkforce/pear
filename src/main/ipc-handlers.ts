@@ -202,7 +202,7 @@ export function registerIpcHandlers(): void {
     return brokerManager.autoFixRuntime(projectId, cwd, name, win, channels, errorMessage)
   })
 
-  ipcMain.handle('broker:spawn-agent', async (_, projectId: string, input: SpawnPtyInput) => {
+  ipcMain.handle('broker:spawn-agent', async (_, projectId: string, input: SpawnPtyInput & { broker?: 'local' | 'cloud' }) => {
     return brokerManager.spawnAgent(projectId, input)
   })
 
@@ -556,6 +556,18 @@ export function registerIpcHandlers(): void {
     return integrationsManager.listConnectedForSettings(projectId)
   })
 
+  ipcMain.handle('integrations:list-mount-dir', async (_, projectId: string, integrationId: string, dirPath: string) => {
+    return integrationsManager.listMountDirectory(projectId, integrationId, dirPath)
+  })
+
+  ipcMain.handle('integrations:read-mount-preview', async (_, projectId: string, integrationId: string, filePath: string) => {
+    return integrationsManager.readMountPreview(projectId, integrationId, filePath)
+  })
+
+  ipcMain.handle('integrations:list-options', async (_, projectId: string, provider: string, resource: string) => {
+    return integrationsManager.listOptions(projectId, provider, resource)
+  })
+
   ipcMain.handle('integrations:start-connect', async (_, projectId: string, provider: string) => {
     return integrationsManager.startConnect(projectId, provider)
   })
@@ -589,6 +601,13 @@ export function registerIpcHandlers(): void {
     'integrations:update-subscription',
     async (_, projectId: string, integrationId: string, subscribeAgent: boolean) => {
       return integrationsManager.updateSubscription(projectId, integrationId, subscribeAgent)
+    }
+  )
+
+  ipcMain.handle(
+    'integrations:update-historical-download',
+    async (_, projectId: string, integrationId: string, downloadHistoricalData: boolean) => {
+      return integrationsManager.updateHistoricalDownload(projectId, integrationId, downloadHistoricalData)
     }
   )
 

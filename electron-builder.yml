@@ -17,9 +17,12 @@ files:
 extraResources:
   - from: resources/app-icon.png
     to: app-icon.png
+  - from: bin/relayfile-mount
+    to: bin/relayfile-mount
 
 asarUnpack:
   - resources/**
+  - bin/**
   - node_modules/@agent-relay/sdk/bin/**
 
 mac:
