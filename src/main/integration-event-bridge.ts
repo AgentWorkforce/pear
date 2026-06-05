@@ -11,6 +11,10 @@ import {
   type Subscription
 } from '@relayfile/sdk'
 import type { ConnectedIntegration } from './integrations'
+import type {
+  IntegrationEventTelemetryCounters,
+  IntegrationEventTelemetrySnapshot
+} from '../shared/types/ipc'
 
 const INTEGRATION_EVENT_AGENT_NAME = 'pear-integration-events'
 const INTEGRATION_EVENT_SCOPES = ['relayfile:fs:read:/**']
@@ -23,14 +27,6 @@ const MAX_AGGREGATED_WARNING_KEYS = 256
 
 type IntegrationEventCounterName = 'eventsReceived' | 'eventsInjected' | 'eventsCoalesced' | 'eventsDropped'
 type IntegrationEventGaugeName = 'queueDepth' | 'mountCount'
-
-export type IntegrationEventTelemetryCounters = Record<IntegrationEventCounterName, number> &
-  Record<IntegrationEventGaugeName, number>
-
-export type IntegrationEventTelemetrySnapshot = {
-  totals: IntegrationEventTelemetryCounters
-  projects: Record<string, IntegrationEventTelemetryCounters>
-}
 
 type WatchRegistration = {
   glob: string
@@ -482,10 +478,14 @@ function createWorkspaceScopedEventClient(
           if (!active) return
           const tokenWorkspaceId = workspaceIdFromJwt(token)
           if (tokenWorkspaceId && tokenWorkspaceId !== workspaceId) {
-            logIntegrationEvent('skipping remote stream with mismatched workspace JWT', {
-              workspaceId,
-              tokenWorkspaceId
-            })
+            warnIntegrationEventAggregated(
+              `skipping remote stream with mismatched workspace JWT:${workspaceId}`,
+              'skipping remote stream with mismatched workspace JWT',
+              {
+                workspaceId,
+                tokenWorkspaceId
+              }
+            )
             return
           }
           logIntegrationEvent('remote stream starting', {

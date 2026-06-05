@@ -575,7 +575,7 @@ test('integration event debug flag enables verbose delivery logs', async () => {
   assert.ok(debugCalls.some((call) => call[0] === '[integration-events] injecting'))
 })
 
-test('integration event delivery failures warn once by default without verbose logs', async () => {
+test('integration event delivery failures use aggregated warn cadence by default without verbose logs', async () => {
   const harness = makeHarness(['alice'], { failSend: true })
   const debugCalls: unknown[][] = []
   const warnCalls: unknown[][] = []
@@ -598,18 +598,25 @@ test('integration event delivery failures warn once by default without verbose l
       })
     ])
 
-    await harness.emit(changeEvent('/github/repos/acme/widgets-1.json', 'github'))
-    await harness.emit(changeEvent('/github/repos/acme/widgets-2.json', 'github'))
+    for (let index = 1; index <= 26; index += 1) {
+      await harness.emit(changeEvent(`/github/repos/acme/widgets-${index}.json`, 'github'))
+    }
   } finally {
     console.debug = originalDebug
     console.warn = originalWarn
   }
 
   assert.equal(debugCalls.length, 0)
-  assert.equal(warnCalls.length, 1)
+  assert.equal(warnCalls.length, 2)
   assert.equal(warnCalls[0][0], '[integration-events] event delivery failed')
+  assert.equal(warnCalls[1][0], '[integration-events] event delivery failed')
+  assert.deepEqual(warnCalls.map((call) => (call[1] as { occurrences: number }).occurrences), [1, 26])
+  assert.deepEqual(
+    warnCalls.map((call) => (call[1] as { suppressedSinceLastLog: number }).suppressedSinceLastLog),
+    [0, 24]
+  )
   assert.deepEqual(getIntegrationEventTelemetrySnapshot().projects['project-1'], {
-    eventsReceived: 2,
+    eventsReceived: 26,
     eventsInjected: 0,
     eventsCoalesced: 0,
     eventsDropped: 0,
