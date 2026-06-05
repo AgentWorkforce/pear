@@ -58,15 +58,6 @@ export interface MessageReconciler {
   dispose: () => void
 }
 
-export function scheduleHumanMessageSentReconciliation(input: {
-  lastHumanMessageSentAt: number
-  reconciler: Pick<MessageReconciler, 'schedule'>
-}): void {
-  if (input.lastHumanMessageSentAt > 0) {
-    input.reconciler.schedule('human-message-sent')
-  }
-}
-
 function normalizeChannelName(value: string | undefined): string | null {
   const normalized = value?.trim().replace(/^#/, '')
   return normalized || null
@@ -215,7 +206,6 @@ export function useMessageReconciliation(): void {
   const activeTabId = useUIStore((s) => s.activeTabId)
   const tabs = useUIStore((s) => s.tabs)
   const brokerStatus = useAgentStore((s) => s.brokerStatus)
-  const lastHumanMessageSentAt = useAgentStore((s) => s.lastHumanMessageSentAt)
   const activeTab = getActiveTab(tabs, activeTabId)
   const activeRoomKey = activeTab?.kind === 'channel'
     ? `channel:${activeTab.projectId || activeProjectId || ''}:${normalizeChannelName(activeTab.channelName) || ''}`
@@ -254,10 +244,6 @@ export function useMessageReconciliation(): void {
       reconciler.schedule('broker-status')
     }
   }, [brokerStatus, reconciler])
-
-  useEffect(() => {
-    scheduleHumanMessageSentReconciliation({ lastHumanMessageSentAt, reconciler })
-  }, [lastHumanMessageSentAt, reconciler])
 
   useEffect(() => {
     const scheduleAfterRefresh = (reason: string): void => {
