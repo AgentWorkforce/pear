@@ -100,6 +100,7 @@ type RelayfileEventClient = {
       coalesce?: 'none' | 'fire-once'
       coalesceMs?: number
       pathScope?: string[]
+      from?: 'now' | 'legacy'
       onCoalesced?: () => void
       onQueueDepth?: (depth: number) => void
     }
@@ -552,12 +553,16 @@ function createWorkspaceScopedEventClient(
           }
           logIntegrationEvent('remote stream starting', {
             workspaceId,
-            globs
+            globs,
+            pathScope: options?.pathScope,
+            from: options?.from ?? 'now'
           })
           sync = new RelayFileSync({
             client,
             workspaceId,
             token,
+            from: options?.from ?? 'now',
+            paths: options?.pathScope?.length ? options.pathScope : globs,
             onPollingFallback: (info) => {
               warnIntegrationEventAggregated(
                 `remote stream polling fallback:${workspaceId}`,
@@ -1323,6 +1328,7 @@ export class IntegrationEventBridge {
             coalesce: 'fire-once',
             coalesceMs: Math.max(...watches.map((watch) => watch.coalesceMs), 750),
             pathScope: watches.map((watch) => watch.glob),
+            from: 'now',
             onCoalesced: () => incrementIntegrationEventCounter(projectId, 'eventsCoalesced'),
             onQueueDepth: (depth) => setIntegrationEventGauge(projectId, 'queueDepth', depth)
           }
@@ -1484,7 +1490,7 @@ export class IntegrationEventBridge {
       })
       return
     }
-    const contextLines = await eventContextLines(event, localMountWorkspaceId)
+    const contextLines = await eventContextLines(event, options.localMountWorkspaceId)
     logIntegrationEvent('injecting', {
       projectId,
       eventId: event.id,
