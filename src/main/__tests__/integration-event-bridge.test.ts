@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict'
 import { join } from 'node:path'
-import { test } from 'node:test'
+import { beforeEach, test } from 'node:test'
 
 import type { ChangeEvent, Subscription } from '@relayfile/sdk'
 import {
+  getIntegrationEventTelemetrySnapshot,
   IntegrationEventBridge,
   integrationSubscriptionSummaries,
   localWatchEventPathsForFilename,
-  localWatchRootsFor
+  localWatchRootsFor,
+  resetIntegrationEventTelemetryForTests
 } from '../integration-event-bridge.ts'
 import type { ConnectedIntegration } from '../integrations.ts'
 
@@ -26,7 +28,12 @@ type SentMessage = {
 type SubscribeCall = {
   globs: string[]
   onChange: (event: ChangeEvent) => void
-  options?: { coalesce?: 'none' | 'fire-once'; coalesceMs?: number }
+  options?: {
+    coalesce?: 'none' | 'fire-once'
+    coalesceMs?: number
+    onCoalesced?: () => void
+    onQueueDepth?: (depth: number) => void
+  }
 }
 
 function integration(overrides: Partial<ConnectedIntegration> & {
@@ -76,7 +83,7 @@ function changeEvent(
   } as ChangeEvent
 }
 
-function makeHarness(agents = ['alice', 'bob']): {
+function makeHarness(agents = ['alice', 'bob'], options: { failSend?: boolean } = {}): {
   bridge: IntegrationEventBridge
   subscribeCalls: SubscribeCall[]
   sent: SentMessage[]
@@ -107,6 +114,7 @@ function makeHarness(agents = ['alice', 'bob']): {
         return agents.map((name) => ({ name, projectId }))
       },
       sendMessage: async (projectId, input) => {
+        if (options.failSend) throw new Error('broker unavailable')
         sent.push({ projectId, input })
       }
     }
@@ -121,6 +129,11 @@ function makeHarness(agents = ['alice', 'bob']): {
 
   return { bridge, subscribeCalls, sent, listAgentsCalls, emit }
 }
+
+beforeEach(() => {
+  resetIntegrationEventTelemetryForTests()
+  delete process.env.PEAR_INTEGRATION_EVENTS_DEBUG
+})
 
 test('integration events route only to the targets for the matching integration path', async () => {
   const harness = makeHarness()
@@ -489,4 +502,150 @@ test('integration events ignore agent-originated Relayfile writes', async () => 
 
   assert.deepEqual(harness.sent, [])
   assert.deepEqual(harness.listAgentsCalls, [])
+})
+
+test('integration event delivery is quiet by default while counters remain available', async () => {
+  const harness = makeHarness(['alice'])
+  const debugCalls: unknown[][] = []
+  const infoCalls: unknown[][] = []
+  const originalDebug = console.debug
+  const originalInfo = console.info
+  console.debug = (...args: unknown[]) => {
+    debugCalls.push(args)
+  }
+  console.info = (...args: unknown[]) => {
+    infoCalls.push(args)
+  }
+
+  try {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'github',
+        integrationId: 'github-1',
+        mountPaths: ['/github/repos'],
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+
+    await harness.emit(changeEvent('/github/repos/acme/widgets.json', 'github'))
+    await harness.emit(changeEvent('/github/repos/_index.json', 'github'))
+    await harness.emit(changeEvent('/github/repos/acme/widgets.json', 'github'))
+  } finally {
+    console.debug = originalDebug
+    console.info = originalInfo
+  }
+
+  assert.equal(debugCalls.length, 0)
+  assert.equal(infoCalls.length, 0)
+  assert.deepEqual(getIntegrationEventTelemetrySnapshot().projects['project-1'], {
+    eventsReceived: 3,
+    eventsInjected: 1,
+    eventsCoalesced: 0,
+    eventsDropped: 2,
+    queueDepth: 0,
+    mountCount: 0
+  })
+})
+
+test('integration event debug flag enables verbose delivery logs', async () => {
+  process.env.PEAR_INTEGRATION_EVENTS_DEBUG = '1'
+  const harness = makeHarness(['alice'])
+  const debugCalls: unknown[][] = []
+  const originalDebug = console.debug
+  console.debug = (...args: unknown[]) => {
+    debugCalls.push(args)
+  }
+
+  try {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'github',
+        integrationId: 'github-1',
+        mountPaths: ['/github/repos'],
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+
+    await harness.emit(changeEvent('/github/repos/acme/widgets.json', 'github'))
+  } finally {
+    console.debug = originalDebug
+  }
+
+  assert.ok(debugCalls.some((call) => call[0] === '[integration-events] received'))
+  assert.ok(debugCalls.some((call) => call[0] === '[integration-events] injecting'))
+})
+
+test('integration event delivery failures use aggregated warn cadence by default without verbose logs', async () => {
+  const harness = makeHarness(['alice'], { failSend: true })
+  const debugCalls: unknown[][] = []
+  const warnCalls: unknown[][] = []
+  const originalDebug = console.debug
+  const originalWarn = console.warn
+  console.debug = (...args: unknown[]) => {
+    debugCalls.push(args)
+  }
+  console.warn = (...args: unknown[]) => {
+    warnCalls.push(args)
+  }
+
+  try {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'github',
+        integrationId: 'github-1',
+        mountPaths: ['/github/repos'],
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+
+    for (let index = 1; index <= 26; index += 1) {
+      await harness.emit(changeEvent(`/github/repos/acme/widgets-${index}.json`, 'github'))
+    }
+  } finally {
+    console.debug = originalDebug
+    console.warn = originalWarn
+  }
+
+  assert.equal(debugCalls.length, 0)
+  assert.equal(warnCalls.length, 2)
+  assert.equal(warnCalls[0][0], '[integration-events] event delivery failed')
+  assert.equal(warnCalls[1][0], '[integration-events] event delivery failed')
+  assert.deepEqual(warnCalls.map((call) => (call[1] as { occurrences: number }).occurrences), [1, 26])
+  assert.deepEqual(
+    warnCalls.map((call) => (call[1] as { suppressedSinceLastLog: number }).suppressedSinceLastLog),
+    [0, 24]
+  )
+  assert.deepEqual(getIntegrationEventTelemetrySnapshot().projects['project-1'], {
+    eventsReceived: 26,
+    eventsInjected: 0,
+    eventsCoalesced: 0,
+    eventsDropped: 0,
+    queueDepth: 0,
+    mountCount: 0
+  })
+})
+
+test('integration event telemetry records coalescing and queue depth callbacks', async () => {
+  const harness = makeHarness(['alice'])
+
+  await harness.bridge.reconcile('project-1', [
+    integration({
+      provider: 'github',
+      integrationId: 'github-1',
+      mountPaths: ['/github/repos'],
+      scope: { notifyAgents: ['alice'] }
+    })
+  ])
+
+  harness.subscribeCalls[0].options?.onCoalesced?.()
+  harness.subscribeCalls[0].options?.onQueueDepth?.(7)
+
+  assert.deepEqual(getIntegrationEventTelemetrySnapshot().projects['project-1'], {
+    eventsReceived: 0,
+    eventsInjected: 0,
+    eventsCoalesced: 1,
+    eventsDropped: 0,
+    queueDepth: 7,
+    mountCount: 0
+  })
 })

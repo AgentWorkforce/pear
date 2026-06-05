@@ -53,6 +53,7 @@ import type {
   GitSummary,
   IntegrationAdapter,
   IntegrationConnectSession,
+  IntegrationEventTelemetrySnapshot,
   IntegrationOption,
   IntegrationsEvent,
   PearAPI,
@@ -139,6 +140,7 @@ export type {
   IntegrationCapabilities,
   IntegrationConnectSession,
   IntegrationConnectStatus,
+  IntegrationEventTelemetrySnapshot,
   IntegrationsEvent,
   MessageInjectionMode,
   PearAPI,
@@ -373,6 +375,7 @@ const api = {
   integrations: {
     catalog: () => invoke<IntegrationAdapter[]>('integrations:catalog'),
     list: (projectId: string) => invoke<ConnectedIntegration[]>('integrations:list', projectId),
+    telemetry: () => invoke<IntegrationEventTelemetrySnapshot>('integrations:telemetry'),
     listMountDir: (projectId: string, integrationId: string, dirPath: string) =>
       invoke<FsDirEntry[]>('integrations:list-mount-dir', projectId, integrationId, dirPath),
     listRemoteDir: (projectId: string, remotePath: string) =>

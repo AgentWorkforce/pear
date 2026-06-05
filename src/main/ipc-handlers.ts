@@ -22,6 +22,7 @@ import * as auth from './auth'
 import { cloudAgentManager } from './cloud-agent'
 import { proactiveAgentManager } from './proactive-agent'
 import { integrationsManager } from './integrations'
+import { getIntegrationEventTelemetrySnapshot } from './integration-event-bridge'
 import { aiHistManager } from './ai-hist'
 import { burnManager, type BurnAgentInput, type BurnProjectInput, type BurnSessionBreakdownInput, type BurnFingerprintInput } from './burn'
 import { resetRelayWorkspaceManager } from './relay-workspace'
@@ -571,6 +572,10 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('integrations:list', async (_, projectId: string) => {
     return integrationsManager.listConnectedForSettings(projectId)
+  })
+
+  ipcMain.handle('integrations:telemetry', () => {
+    return getIntegrationEventTelemetrySnapshot()
   })
 
   ipcMain.handle('integrations:list-mount-dir', async (_, projectId: string, integrationId: string, dirPath: string) => {

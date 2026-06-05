@@ -709,6 +709,20 @@ export type IntegrationsEvent =
   | { type: 'integration-removed'; projectId: string; integrationId: string }
   | { type: 'integration-error'; projectId: string; integrationId: string; message: string }
 
+export type IntegrationEventTelemetryCounters = {
+  eventsReceived: number
+  eventsInjected: number
+  eventsCoalesced: number
+  eventsDropped: number
+  queueDepth: number
+  mountCount: number
+}
+
+export type IntegrationEventTelemetrySnapshot = {
+  totals: IntegrationEventTelemetryCounters
+  projects: Record<string, IntegrationEventTelemetryCounters>
+}
+
 export interface AuthUser {
   name?: string
   email?: string
@@ -899,6 +913,7 @@ export interface PearAPI {
   integrations: {
     catalog: () => Promise<IntegrationAdapter[]>
     list: (projectId: string) => Promise<ConnectedIntegration[]>
+    telemetry: () => Promise<IntegrationEventTelemetrySnapshot>
     listMountDir: (projectId: string, integrationId: string, dirPath: string) => Promise<FsDirEntry[]>
     listRemoteDir: (projectId: string, remotePath: string) => Promise<FsDirEntry[]>
     readMountPreview: (projectId: string, integrationId: string, filePath: string) => Promise<FsReadPreviewResult>
