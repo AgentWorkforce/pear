@@ -344,6 +344,7 @@ const DEFAULT_RECONCILE_MESSAGE_LIMIT = 50
 const MAX_RECONCILE_MESSAGE_LIMIT = 100
 const EVENT_STREAM_REBIND_COOLDOWN_MS = 5_000
 const PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS = 60_000
+const PTY_CHUNK_CONTENT_DEDUPE_TTL_MS = 1_000
 const MAX_PTY_CHUNK_DEDUPE_ENTRIES = 2_000
 // After this many consecutive failures to open a PTY input stream, give up on
 // the WS fast path for that agent briefly and send over HTTP while it cools down.
@@ -621,8 +622,12 @@ function isBrokerUnreachableError(err: unknown): boolean {
   return someInCauseChain(err, (node) => {
     const code = node.code
     if (code === 'ECONNREFUSED' || code === 'ECONNRESET') return true
+    if (code === 'UND_ERR_SOCKET') {
+      const message = node.message
+      return typeof message === 'string' && /other side closed|socket closed/i.test(message)
+    }
     const message = node.message
-    return typeof message === 'string' && /ECONNREFUSED|ECONNRESET/.test(message)
+    return typeof message === 'string' && /ECONNREFUSED|ECONNRESET|UND_ERR_SOCKET/.test(message)
   })
 }
 
@@ -1952,8 +1957,11 @@ export class BrokerManager {
   private isDuplicatePtyChunk(sessionKey: string, name: string, event: BrokerEvent): boolean {
     const now = Date.now()
     for (const [key, seenAt] of this.recentPtyChunks) {
+      const ttl = key.startsWith('chunk:')
+        ? PTY_CHUNK_CONTENT_DEDUPE_TTL_MS
+        : PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS
       if (
-        now - seenAt > PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS ||
+        now - seenAt > ttl ||
         this.recentPtyChunks.size > MAX_PTY_CHUNK_DEDUPE_ENTRIES
       ) {
         this.recentPtyChunks.delete(key)
@@ -1970,14 +1978,28 @@ export class BrokerManager {
         ? eventRecord.id
         : ''
     const identity = eventId || (seq ? `seq:${seq}` : '')
-    if (!identity) return false
+    const chunk = typeof eventRecord.chunk === 'string' ? eventRecord.chunk : ''
+    if (!identity && !chunk) return false
 
-    const key = `${sessionKey}:${name}:${identity}`
+    const contentKeyPrefix = `chunk:${sessionKey}:${name}:`
+    const key = identity
+      ? `identity:${sessionKey}:${name}:${identity}`
+      : `${contentKeyPrefix}${chunk}`
+    const ttl = identity
+      ? PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS
+      : PTY_CHUNK_CONTENT_DEDUPE_TTL_MS
     const previous = this.recentPtyChunks.get(key)
-    if (previous !== undefined && now - previous <= PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS) {
+    if (previous !== undefined && now - previous <= ttl) {
       return true
     }
 
+    if (!identity) {
+      for (const previousKey of this.recentPtyChunks.keys()) {
+        if (previousKey.startsWith(contentKeyPrefix)) {
+          this.recentPtyChunks.delete(previousKey)
+        }
+      }
+    }
     this.recentPtyChunks.set(key, now)
     return false
   }
@@ -2669,6 +2691,7 @@ export class BrokerManager {
       // and the broker's transient "internal channel closed" while it's
       // tearing down. Both surface as noise that's not actionable.
       if (isMissingAgentError(err)) return
+      if (isBrokerUnreachableError(err)) return
       const message = toErrorMessage(err)
       if (/internal channel closed|internal reply dropped/i.test(message)) return
       console.warn(`[broker] sendInputFireAndForget failed for ${trimmedName}:`, err)
