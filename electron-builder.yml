@@ -45,7 +45,10 @@ mac:
       arch: arm64
 
 dmg:
-  artifactName: ${name}-${version}-${arch}.${ext}
+  # Stable (un-versioned) filename so the public download link can rely on
+  # GitHub's `releases/latest/download/pear-arm64.dmg` URL. The version is still
+  # recorded by the release tag; only the asset filename is fixed.
+  artifactName: ${name}-${arch}.${ext}
 
 # No native modules — skip the rebuild step.
 npmRebuild: false
