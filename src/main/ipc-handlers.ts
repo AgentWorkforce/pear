@@ -180,6 +180,9 @@ export function registerIpcHandlers(): void {
       return false
     }
     await brokerManager.start(projectId, cwd, name, win, channels)
+    void integrationsManager.notifyAgentState(projectId).catch((error) => {
+      console.warn('[integrations] Failed to notify agents after broker start:', error instanceof Error ? error.message : String(error))
+    })
     return true
   })
 
@@ -570,6 +573,10 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('integrations:list-mount-dir', async (_, projectId: string, integrationId: string, dirPath: string) => {
     return integrationsManager.listMountDirectory(projectId, integrationId, dirPath)
+  })
+
+  ipcMain.handle('integrations:list-remote-dir', async (_, projectId: string, remotePath: string) => {
+    return integrationsManager.listRemoteDirectory(projectId, remotePath)
   })
 
   ipcMain.handle('integrations:read-mount-preview', async (_, projectId: string, integrationId: string, filePath: string) => {

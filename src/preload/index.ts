@@ -375,6 +375,8 @@ const api = {
     list: (projectId: string) => invoke<ConnectedIntegration[]>('integrations:list', projectId),
     listMountDir: (projectId: string, integrationId: string, dirPath: string) =>
       invoke<FsDirEntry[]>('integrations:list-mount-dir', projectId, integrationId, dirPath),
+    listRemoteDir: (projectId: string, remotePath: string) =>
+      invoke<FsDirEntry[]>('integrations:list-remote-dir', projectId, remotePath),
     readMountPreview: (projectId: string, integrationId: string, filePath: string) =>
       invoke<FsReadPreviewResult>('integrations:read-mount-preview', projectId, integrationId, filePath),
     listOptions: (projectId: string, provider: string, resource: string) =>

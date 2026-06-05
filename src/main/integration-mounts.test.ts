@@ -172,6 +172,56 @@ describe('IntegrationMountManager', () => {
     ])
   })
 
+  it('preserves root-level discovery mounts for writeback metadata', async () => {
+    const manager = new IntegrationMountManager()
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/discovery/slack']
+      }
+    ])
+
+    expect(mock.mountInputs).toHaveLength(1)
+    expect(mock.mountInputs[0]).toMatchObject({
+      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/discovery/slack',
+      remotePath: '/discovery/slack',
+      agentName: 'pear-integrations-discovery-slack',
+      scopes: ['relayfile:fs:read:/discovery/slack/**', 'relayfile:fs:write:/discovery/slack/**']
+    })
+    expect(manager.localPathsFor('account-workspace-id', {
+      provider: 'slack',
+      mountPaths: ['/discovery/slack']
+    })).toEqual([
+      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/discovery/slack'
+    ])
+  })
+
+  it('scopes bare discovery mounts to the integration provider', async () => {
+    const manager = new IntegrationMountManager()
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/discovery']
+      }
+    ])
+
+    expect(mock.mountInputs).toHaveLength(1)
+    expect(mock.mountInputs[0]).toMatchObject({
+      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/discovery/slack',
+      remotePath: '/discovery/slack',
+      agentName: 'pear-integrations-discovery-slack',
+      scopes: ['relayfile:fs:read:/discovery/slack/**', 'relayfile:fs:write:/discovery/slack/**']
+    })
+    expect(manager.localPathsFor('account-workspace-id', {
+      provider: 'slack',
+      mountPaths: ['/discovery']
+    })).toEqual([
+      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/discovery/slack'
+    ])
+  })
+
   it('restarts mounted providers when the relayfile mount token reaches its refresh time', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-06-05T00:00:00.000Z'))
@@ -214,6 +264,7 @@ describe('IntegrationMountManager', () => {
     })
     await Promise.resolve()
     await Promise.resolve()
+    await new Promise((resolve) => setTimeout(resolve, 0))
 
     expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels')).toHaveLength(2)
   })

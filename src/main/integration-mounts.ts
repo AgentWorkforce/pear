@@ -75,6 +75,10 @@ export function integrationProviderRoot(mountPath: string): string | null {
 function canonicalIntegrationMountPath(mountPath: string, provider: string): string | null {
   const providerSegment = sanitizePathSegment(provider.trim().toLowerCase())
   const segments = remotePathSegments(mountPath)
+  if (segments[0] === 'discovery') {
+    const discoverySegments = segments.length > 1 ? segments : ['discovery', providerSegment]
+    return `/${discoverySegments.join('/')}`
+  }
   const withoutLegacyRoot = segments[0] === 'integrations' ? segments.slice(2) : segments.slice(1)
   if (segments[0] === 'integrations') {
     const legacyProvider = segments[1] || providerSegment

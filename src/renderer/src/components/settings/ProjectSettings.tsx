@@ -1,5 +1,5 @@
 import type React from 'react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AlertTriangle,
   Bell,
@@ -234,9 +234,7 @@ function providerLocalMountPath(integration: ConnectedIntegration, provider: str
   const providerSegment = provider.trim().toLowerCase()
   const providerRoots = (integration.localMountPaths || [])
     .filter((root) => localPathSegments(root).at(-1)?.toLowerCase() === providerSegment)
-  return providerRoots.find((root) => !localPathSegments(root).includes('discovery'))
-    || providerRoots[0]
-    || null
+  return providerRoots.find((root) => !localPathSegments(root).includes('discovery')) || null
 }
 
 function joinLocalPath(root: string, ...segments: string[]): string {
@@ -247,12 +245,81 @@ function joinLocalPath(root: string, ...segments: string[]): string {
   return suffix ? `${root.replace(/[/\\]+$/u, '')}/${suffix}` : root
 }
 
+function slackChannelResourceFromEntry(entry: { name: string; path: string }): IntegrationAccessibleResource {
+  const channelId = entry.name.includes('__')
+    ? entry.name.split('__')[0]
+    : entry.name.includes('--')
+      ? entry.name.split('--').at(-1) || entry.name
+      : entry.name
+  const name = entry.name.includes('__')
+    ? entry.name.split('__').slice(1).join('__')
+    : entry.name.includes('--')
+      ? entry.name.split('--').slice(0, -1).join('--')
+      : entry.name
+  const remotePath = `/slack/channels/${entry.name}`
+  return {
+    id: remotePath,
+    displayName: name || channelId,
+    name: name || channelId,
+    path: entry.path,
+    metadata: {
+      channelFolder: entry.name,
+      channelId,
+      remotePath
+    }
+  }
+}
+
+function isConcreteSlackChannelEntry(entry: { name: string; path: string }): boolean {
+  if (!entry.name || entry.name.startsWith('_') || entry.name === 'by-name') return false
+  if (entry.name.includes('{') || entry.name.includes('}')) return false
+  if (localPathSegments(entry.path).includes('discovery')) return false
+  return true
+}
+
+function slackChannelResourceFromOption(option: { value: string; label: string; hint?: string }): IntegrationAccessibleResource {
+  const id = option.value.trim()
+  const name = option.label.replace(/^#/u, '').trim() || id
+  return {
+    id,
+    displayName: option.label,
+    name,
+    metadata: {
+      channelId: id,
+      ...(option.hint ? { hint: option.hint } : {})
+    }
+  }
+}
+
+function integrationStatusSummary(
+  integration: ConnectedIntegration,
+  visibility: ProjectVisibilityMetadata,
+  visible: boolean
+): string {
+  if (!visible) return 'Hidden'
+  if (integration.downloadHistoricalData === true) return visibilityMountPaths(integration, visibility).join(', ')
+  if (integration.subscribeAgent === true) return 'Listening for events'
+  return 'Historical files not mounted'
+}
+
+const RESOURCE_CACHE_TTL_MS = 5 * 60 * 1000
+
+type ResourceCacheEntry = {
+  expiresAt: number
+  resources?: IntegrationAccessibleResource[]
+  promise?: Promise<IntegrationAccessibleResource[]>
+}
+
 function notificationTargetValue(scope: Record<string, unknown>): string {
   const agent = firstScopeString(scope, NOTIFICATION_AGENT_SCOPE_KEYS)
   if (agent) return `agent:${agent.replace(/^@/u, '')}`
   const channel = firstScopeString(scope, NOTIFICATION_CHANNEL_SCOPE_KEYS)
   if (channel) return `channel:${channel.replace(/^#/u, '')}`
   return 'all'
+}
+
+function resolvedNotificationTargetValue(value: string, knownValues: Set<string>): string {
+  return knownValues.has(value) ? value : 'all'
 }
 
 function clearNotificationTargetScope(scope: Record<string, unknown>): Record<string, unknown> {
@@ -278,6 +345,7 @@ function IntegrationVisibilitySection({
   const [error, setError] = useState<string | null>(null)
   const [scopeEditorIntegrationId, setScopeEditorIntegrationId] = useState<string | null>(null)
   const [pendingScopeValue, setPendingScopeValue] = useState<ScopePickerValue | null>(null)
+  const resourceCacheRef = useRef(new Map<string, ResourceCacheEntry>())
 
   const load = useCallback(async () => {
     setError(null)
@@ -407,53 +475,89 @@ function IntegrationVisibilitySection({
     }
   }, [projectId])
 
-  const listSlackChannelResources = useCallback(async (integration: ConnectedIntegration): Promise<IntegrationAccessibleResource[]> => {
-    const listMountedSlackChannels = async (): Promise<IntegrationAccessibleResource[]> => {
-      const slackRoot = providerLocalMountPath(integration, 'slack')
-      if (!slackRoot) throw new Error('Slack Relayfile mount is not available yet.')
-      const channelsPath = joinLocalPath(slackRoot, 'channels')
-      const entries = await pear.integrations.listMountDir(projectId, integration.integrationId, channelsPath)
-      return entries
-        .filter((entry) => entry.type === 'directory' && !entry.name.startsWith('_') && entry.name !== 'by-name')
-        .map((entry) => {
-          const id = entry.name.includes('__')
-            ? entry.name.split('__')[0]
-            : entry.name.includes('--')
-              ? entry.name.split('--').at(-1) || entry.name
-              : entry.name
-          const name = entry.name.includes('__')
-            ? entry.name.split('__').slice(1).join('__')
-            : entry.name.includes('--')
-              ? entry.name.split('--').slice(0, -1).join('--')
-              : entry.name
-          return {
-            id,
-            displayName: name || id,
-            name: name || id,
-            path: joinLocalPath(channelsPath, entry.name)
-          }
-        })
-    }
-    const listOptions = (pear.integrations as typeof pear.integrations & {
-      listOptions?: typeof pear.integrations.listOptions
-    }).listOptions
-    if (typeof listOptions !== 'function') {
-      return listMountedSlackChannels()
-    }
+  const cachedResources = useCallback(
+    async (cacheKey: string, loadResources: () => Promise<IntegrationAccessibleResource[]>): Promise<IntegrationAccessibleResource[]> => {
+      const now = Date.now()
+      const cached = resourceCacheRef.current.get(cacheKey)
+      if (cached?.resources && cached.expiresAt > now) return cached.resources
+      if (cached?.promise) return cached.promise
 
-    try {
-      const options = await listOptions(projectId, integration.provider, 'channels')
-      if (options.length === 0) return listMountedSlackChannels()
-      return options.map((option) => ({
-        id: option.value,
-        displayName: option.label,
-        name: option.label.replace(/^#/u, ''),
-        metadata: option.hint ? { hint: option.hint } : undefined
-      }))
-    } catch {
-      return listMountedSlackChannels()
-    }
-  }, [projectId])
+      const promise = loadResources()
+        .then((resources) => {
+          resourceCacheRef.current.set(cacheKey, {
+            resources,
+            expiresAt: Date.now() + RESOURCE_CACHE_TTL_MS
+          })
+          return resources
+        })
+        .catch((err) => {
+          resourceCacheRef.current.delete(cacheKey)
+          throw err
+        })
+
+      resourceCacheRef.current.set(cacheKey, {
+        promise,
+        expiresAt: now + RESOURCE_CACHE_TTL_MS
+      })
+      return promise
+    },
+    []
+  )
+
+  const listSlackChannelResources = useCallback(async (integration: ConnectedIntegration): Promise<IntegrationAccessibleResource[]> => {
+    const cacheKey = `slack-channels:${projectId}:${integration.integrationId}`
+    return cachedResources(cacheKey, async () => {
+      const listRemoteSlackChannels = async (): Promise<IntegrationAccessibleResource[]> => {
+        const listRemoteDir = (pear.integrations as typeof pear.integrations & {
+          listRemoteDir?: typeof pear.integrations.listRemoteDir
+        }).listRemoteDir
+        if (typeof listRemoteDir !== 'function') throw new Error('Slack Relayfile remote directory listing is not available yet.')
+
+        const entries = await listRemoteDir(projectId, '/slack/channels')
+        return entries
+          .filter((entry) => entry.type === 'directory' && isConcreteSlackChannelEntry(entry))
+          .map(slackChannelResourceFromEntry)
+      }
+
+      const listMountedSlackChannels = async (): Promise<IntegrationAccessibleResource[]> => {
+        const slackRoot = providerLocalMountPath(integration, 'slack')
+        if (!slackRoot) throw new Error('Slack Relayfile mount is not available yet.')
+        const channelsPath = joinLocalPath(slackRoot, 'channels')
+        const entries = await pear.integrations.listMountDir(projectId, integration.integrationId, channelsPath)
+        return entries
+          .filter((entry) => entry.type === 'directory' && isConcreteSlackChannelEntry(entry))
+          .map((entry) => slackChannelResourceFromEntry({
+            name: entry.name,
+            path: joinLocalPath(channelsPath, entry.name)
+          }))
+      }
+      const listOptions = (pear.integrations as typeof pear.integrations & {
+        listOptions?: typeof pear.integrations.listOptions
+      }).listOptions
+
+      if (typeof listOptions === 'function') {
+        try {
+          const options = await listOptions(projectId, integration.provider, 'channels')
+          const optionChannels = options.map(slackChannelResourceFromOption)
+          if (optionChannels.length > 0) return optionChannels
+        } catch (err) {
+          console.warn('[integrations] Failed to list Slack channel options:', err)
+          const mountedChannels = await listMountedSlackChannels().catch(() => [])
+          if (mountedChannels.length > 0) return mountedChannels
+          const message = err instanceof Error ? err.message : String(err)
+          throw new Error(`Slack channel options are unavailable: ${message}`)
+        }
+      }
+
+      const remoteChannels = await listRemoteSlackChannels().catch((err) => {
+        console.warn('[integrations] Failed to list remote Slack channels:', err)
+        return []
+      })
+      if (remoteChannels.length > 0) return remoteChannels
+
+      return listMountedSlackChannels().catch(() => [])
+    })
+  }, [cachedResources, projectId])
 
   const saveSlackSourceChannels = useCallback(async (integration: ConnectedIntegration) => {
     if (!pendingScopeValue) return
@@ -499,7 +603,12 @@ function IntegrationVisibilitySection({
         </div>
       )}
       <div className="space-y-2">
-        {integrations.length === 0 ? (
+        {loading && integrations.length === 0 ? (
+          <div className="flex items-center gap-2 rounded-lg border border-dashed border-[var(--pear-border)] px-4 py-3 text-sm text-[var(--pear-text-faint)]">
+            <Loader2 size={13} className="animate-spin" />
+            Loading integrations
+          </div>
+        ) : integrations.length === 0 ? (
           <div className="rounded-lg border border-dashed border-[var(--pear-border)] px-4 py-3 text-sm text-[var(--pear-text-faint)]">
             No account integrations connected
           </div>
@@ -510,14 +619,21 @@ function IntegrationVisibilitySection({
             const subscribed = integration.subscribeAgent === true
             const historyDownload = integration.downloadHistoricalData === true
             const busy = busyIntegrationId === integration.integrationId
-            const notificationTarget = notificationTargetValue(integration.scope)
             const slack = isSlackProvider(integration.provider)
             const scopeEditorOpen = scopeEditorIntegrationId === integration.integrationId
+            const selectedSlackSourceIds = Array.from(new Set([
+              ...integration.mountPaths,
+              ...scopeStringList(integration.scope, 'channels')
+            ]))
             const knownTargetValues = new Set([
               'all',
               ...agentNames.map((agent) => `agent:${agent}`),
               ...channels.map((channel) => `channel:${channel}`)
             ])
+            const notificationTarget = resolvedNotificationTargetValue(
+              notificationTargetValue(integration.scope),
+              knownTargetValues
+            )
 
             return (
               <div key={integration.integrationId} className="space-y-2">
@@ -526,11 +642,9 @@ function IntegrationVisibilitySection({
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm text-[var(--pear-text)]">{integration.provider}</div>
                     <div className="truncate text-xs text-[var(--pear-text-faint)]">
-                      {visible
-                        ? visibilityMountPaths(integration, visibility).join(', ')
-                        : providerMountRoot(integration.provider)}
+                      {integrationStatusSummary(integration, visibility, visible)}
                     </div>
-                    {integration.localMountPaths && integration.localMountPaths.length > 0 && (
+                    {historyDownload && integration.localMountPaths && integration.localMountPaths.length > 0 && (
                       <div className="truncate text-[11px] text-[var(--pear-text-faint)]">
                         {integration.localMountPaths.join(', ')}
                       </div>
@@ -595,9 +709,6 @@ function IntegrationVisibilitySection({
                       title="Integration event delivery target"
                       aria-label="Integration event delivery target"
                     >
-                      {!knownTargetValues.has(notificationTarget) && (
-                        <option value={notificationTarget}>{notificationTarget.replace(/^agent:/u, '@').replace(/^channel:/u, '#')}</option>
-                      )}
                       <option value="all">All agents</option>
                       {agentNames.length > 0 && (
                         <optgroup label="Agents">
@@ -636,7 +747,7 @@ function IntegrationVisibilitySection({
                     <SlackChannelPicker
                       provider="slack"
                       disabled={busy}
-                      initialSelectedIds={scopeStringList(integration.scope, 'channels')}
+                      initialSelectedIds={selectedSlackSourceIds}
                       listAccessibleResources={() => listSlackChannelResources(integration)}
                       onChange={setPendingScopeValue}
                     />

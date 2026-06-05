@@ -139,8 +139,21 @@ function relativeMountPath(root: string | null, path: string | null): string {
     : normalizedPath
 }
 
+function canBrowseSyncedData(integration: ConnectedIntegration): boolean {
+  return integration.downloadHistoricalData === true
+}
+
+function localPathSegments(path: string): string[] {
+  return path.split(/[\\/]+/u).filter(Boolean)
+}
+
+function historicalLocalMountPaths(integration: ConnectedIntegration): string[] {
+  return (integration.localMountPaths || [])
+    .filter((root) => !localPathSegments(root).includes('discovery'))
+}
+
 function IntegrationRelayfileBrowser({
-  integration,
+  roots,
   currentPath,
   entries,
   preview,
@@ -150,7 +163,7 @@ function IntegrationRelayfileBrowser({
   onOpenFile,
   onRefresh
 }: {
-  integration: ConnectedIntegration
+  roots: string[]
   currentPath: string | null
   entries: FsDirEntry[]
   preview: { path: string; result: FsReadPreviewResult } | null
@@ -160,7 +173,6 @@ function IntegrationRelayfileBrowser({
   onOpenFile: (path: string) => void
   onRefresh: () => void
 }): React.ReactNode {
-  const roots = integration.localMountPaths || []
   const currentRoot = rootForPath(roots, currentPath)
   const parent = currentPath ? pathParent(currentPath) : null
   const canGoUp = !!parent && !!currentRoot && pathWithinRoot(currentRoot, parent)
@@ -395,6 +407,18 @@ export function AccountSettings(): React.ReactNode {
     })
   }, [activeProjectId, completeSession, loadConnected])
 
+  useEffect(() => {
+    if (!expandedIntegrationId) return
+    const expanded = connected.find((integration) => integration.integrationId === expandedIntegrationId)
+    if (expanded && canBrowseSyncedData(expanded)) return
+
+    setExpandedIntegrationId(null)
+    setBrowserPath(null)
+    setBrowserEntries([])
+    setBrowserPreview(null)
+    setBrowserError(null)
+  }, [connected, expandedIntegrationId])
+
   const startConnect = useCallback(async (adapter: IntegrationAdapter) => {
     if (!activeProjectId) {
       setError('Select a project before connecting an integration.')
@@ -501,6 +525,9 @@ export function AccountSettings(): React.ReactNode {
   }, [activeProjectId])
 
   const toggleMountBrowser = useCallback((integration: ConnectedIntegration) => {
+    if (!canBrowseSyncedData(integration)) return
+
+    const roots = historicalLocalMountPaths(integration)
     if (expandedIntegrationId === integration.integrationId) {
       setExpandedIntegrationId(null)
       setBrowserPath(null)
@@ -510,7 +537,7 @@ export function AccountSettings(): React.ReactNode {
       return
     }
 
-    const root = integration.localMountPaths?.[0]
+    const root = roots[0]
     setExpandedIntegrationId(integration.integrationId)
     setBrowserPath(root || null)
     setBrowserEntries([])
@@ -599,10 +626,15 @@ export function AccountSettings(): React.ReactNode {
         <section className="border-t border-[var(--pear-border-subtle)] pt-6">
           <div className="mb-3 flex items-center justify-between gap-3">
             <h2 className="text-xs font-semibold uppercase tracking-wider text-[var(--pear-text-faint)]">Connected</h2>
-            <span className="text-xs text-[var(--pear-text-faint)]">{connected.length}</span>
+            <span className="text-xs text-[var(--pear-text-faint)]">{loading ? 'Loading' : connected.length}</span>
           </div>
           <div className="space-y-2">
-            {connected.length === 0 ? (
+            {loading && connected.length === 0 ? (
+              <div className="flex items-center gap-2 rounded-lg border border-dashed border-[var(--pear-border)] px-4 py-3 text-sm text-[var(--pear-text-faint)]">
+                <Loader2 size={13} className="animate-spin" />
+                Loading integrations
+              </div>
+            ) : connected.length === 0 ? (
               <div className="rounded-lg border border-dashed border-[var(--pear-border)] px-4 py-3 text-sm text-[var(--pear-text-faint)]">
                 No integrations connected
               </div>
@@ -610,34 +642,50 @@ export function AccountSettings(): React.ReactNode {
               connected.map((integration) => {
                 const adapter = adapterByProvider.get(canonicalProviderKey(integration.provider))
                 const expanded = expandedIntegrationId === integration.integrationId
+                const browsable = canBrowseSyncedData(integration)
+                const browserRoots = historicalLocalMountPaths(integration)
                 return (
                   <div key={integration.integrationId} className="space-y-2">
                     <div className="flex items-center gap-3 rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-3 py-2.5">
-                      <button
-                        type="button"
-                        onClick={() => toggleMountBrowser(integration)}
-                        className="flex min-w-0 flex-1 items-center gap-3 text-left"
-                        aria-expanded={expanded}
-                      >
-                        {expanded
-                          ? <ChevronDown size={14} className="shrink-0 text-[var(--pear-text-faint)]" />
-                          : <ChevronRight size={14} className="shrink-0 text-[var(--pear-text-faint)]" />}
-                        <IntegrationLogo iconUrl={adapter?.iconUrl} label={adapter?.displayName || integration.provider} />
-                        <div className="min-w-0 flex-1">
-                          <div className="flex items-center gap-1.5">
-                            <span className="truncate text-sm text-[var(--pear-text)]">{adapter?.displayName || integration.provider}</span>
-                            <CheckCircle2 size={13} className="shrink-0 text-[var(--pear-accent-bright)]" />
-                          </div>
-                          <div className="truncate text-xs text-[var(--pear-text-faint)]">
-                            {integration.mountPaths.join(', ') || 'No mount paths'}
-                          </div>
-                          {integration.localMountPaths && integration.localMountPaths.length > 0 && (
-                            <div className="truncate text-[11px] text-[var(--pear-text-faint)]">
-                              {integration.localMountPaths.join(', ')}
+                      {browsable ? (
+                        <button
+                          type="button"
+                          onClick={() => toggleMountBrowser(integration)}
+                          className="flex min-w-0 flex-1 items-center gap-3 text-left"
+                          aria-expanded={expanded}
+                        >
+                          {expanded
+                            ? <ChevronDown size={14} className="shrink-0 text-[var(--pear-text-faint)]" />
+                            : <ChevronRight size={14} className="shrink-0 text-[var(--pear-text-faint)]" />}
+                          <IntegrationLogo iconUrl={adapter?.iconUrl} label={adapter?.displayName || integration.provider} />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="truncate text-sm text-[var(--pear-text)]">{adapter?.displayName || integration.provider}</span>
+                              <CheckCircle2 size={13} className="shrink-0 text-[var(--pear-accent-bright)]" />
                             </div>
-                          )}
+                            {integration.mountPaths.length > 0 && (
+                              <div className="truncate text-xs text-[var(--pear-text-faint)]">
+                                {integration.mountPaths.join(', ')}
+                              </div>
+                            )}
+                            {integration.localMountPaths && integration.localMountPaths.length > 0 && (
+                              <div className="truncate text-[11px] text-[var(--pear-text-faint)]">
+                                {integration.localMountPaths.join(', ')}
+                              </div>
+                            )}
+                          </div>
+                        </button>
+                      ) : (
+                        <div className="flex min-w-0 flex-1 items-center gap-3">
+                          <IntegrationLogo iconUrl={adapter?.iconUrl} label={adapter?.displayName || integration.provider} />
+                          <div className="min-w-0 flex-1">
+                            <div className="flex items-center gap-1.5">
+                              <span className="truncate text-sm text-[var(--pear-text)]">{adapter?.displayName || integration.provider}</span>
+                              <CheckCircle2 size={13} className="shrink-0 text-[var(--pear-accent-bright)]" />
+                            </div>
+                          </div>
                         </div>
-                      </button>
+                      )}
                       <button
                         type="button"
                         disabled={busyProvider === integration.provider}
@@ -650,9 +698,9 @@ export function AccountSettings(): React.ReactNode {
                       </button>
                     </div>
 
-                    {expanded && (
+                    {expanded && browsable && (
                       <IntegrationRelayfileBrowser
-                        integration={integration}
+                        roots={browserRoots}
                         currentPath={browserPath}
                         entries={browserEntries}
                         preview={browserPreview}
@@ -661,7 +709,7 @@ export function AccountSettings(): React.ReactNode {
                         onOpenDirectory={(path) => void openMountDirectory(integration, path)}
                         onOpenFile={(path) => void openMountPreview(integration, path)}
                         onRefresh={() => {
-                          const root = integration.localMountPaths?.[0] || null
+                          const root = browserRoots[0] || null
                           if (browserPath) {
                             void openMountDirectory(integration, browserPath)
                           } else if (root) {

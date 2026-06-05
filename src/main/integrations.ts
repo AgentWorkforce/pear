@@ -1,13 +1,19 @@
 import { randomUUID } from 'node:crypto'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { BrowserWindow, shell } from 'electron'
-import type { WorkspaceHandle } from '@relayfile/sdk'
+import type { TreeResponse, WorkspaceHandle } from '@relayfile/sdk'
 import { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, getApiUrl, resolveCloudAuth } from './auth'
 import { brokerManager } from './broker'
 import { cloudAgentManager } from './cloud-agent'
 import * as filesystem from './filesystem'
 import { integrationEventBridge, integrationSubscriptionSummaries } from './integration-event-bridge'
 import { integrationMountManager, integrationMountRootForWorkspace } from './integration-mounts'
+import {
+  canListRemoteDirectoryForMountPaths,
+  canShowRemoteDirectoryEntryForMountPaths,
+  normalizeRemoteDirectoryPath,
+  remotePathName
+} from './integration-remote-paths'
 import {
   PROJECT_INTEGRATIONS_LINK_NAME,
   ensureProjectIntegrationsLink,
@@ -74,6 +80,11 @@ export type IntegrationOption = {
   value: string
   label: string
   hint?: string
+}
+
+type SlackChannelOptionResponse = {
+  channels?: unknown
+  nextCursor?: unknown
 }
 
 export type IntegrationsEvent =
@@ -181,7 +192,9 @@ type IntegrationSystemMessageBridge = {
 const POLL_INTERVAL_MS = 2_000
 const POLL_TIMEOUT_MS = 5 * 60_000
 const CATALOG_CACHE_MS = 5 * 60_000
+const SYSTEM_MESSAGE_DEBOUNCE_MS = 1_000
 const CATALOG_PATH = '/api/v1/integrations/catalog'
+const MAX_REMOTE_DIRECTORY_ENTRIES = 5_000
 
 // Only providers currently active in ../cloud are surfaced. This mirrors the
 // non-deprecated relayfile providers in
@@ -266,6 +279,11 @@ function isHttpStatus(error: unknown, status: number): boolean {
 // not exist on the server, so every mount mirrored an empty tree. Rewrite
 // both forms to the real root-level layout.
 function rewriteIntegrationMountPath(mountPath: string, relayfileProvider: string): string {
+  const discovery = mountPath.match(/^\/discovery(?:\/.*)?$/u)
+  if (discovery) {
+    const normalized = mountPath.replace(/\/+$/u, '')
+    return normalized === '/discovery' ? `/discovery/${relayfileProvider}` : normalized
+  }
   const prefixed = mountPath.match(/^\/integrations\/[^/]+(\/.*)?$/)
   if (prefixed) return `/${relayfileProvider}${prefixed[1] ?? ''}`
   const rootLevel = mountPath.match(/^\/[^/]+(\/.*)?$/)
@@ -277,6 +295,10 @@ function projectIntegrationPathForRelayfilePath(mountPath: string): string {
   const trimmed = mountPath.trim()
   const normalized = trimmed.startsWith('/') ? trimmed : `/${trimmed}`
   return `${PROJECT_INTEGRATIONS_LINK_NAME}${normalized}`
+}
+
+function discoveryMountPathForProvider(provider: string): string {
+  return `/discovery/${toRelayfileProvider(provider)}`
 }
 
 function normalizeCapabilities(value: unknown): IntegrationCapabilities {
@@ -595,6 +617,7 @@ export class IntegrationsManager {
   private sessions = new Map<string, IntegrationConnectSession>()
   private sessionMetadata = new Map<string, SessionMetadata>()
   private pollTimers = new Map<string, NodeJS.Timeout>()
+  private systemMessageTimers = new Map<string, NodeJS.Timeout>()
   private catalogCache: IntegrationAdapter[] | null = null
   private catalogFetchedAt = 0
 
@@ -679,23 +702,66 @@ export class IntegrationsManager {
     return filesystem.readTextPreview(resolvedPath)
   }
 
+  async listRemoteDirectory(projectId: string, remotePath: string): Promise<filesystem.ExplorerEntry[]> {
+    if (!this.findProject(projectId)) throw new Error(`Project not found: ${projectId}`)
+    const path = normalizeRemoteDirectoryPath(remotePath)
+    if (!path || path === '/') throw new Error('Integration remote directory path is required')
+    const mountPaths = this.listableRemoteMountPaths(projectId)
+    if (!canListRemoteDirectoryForMountPaths(path, mountPaths)) {
+      throw new Error('Integration remote directory is outside this project integration scope')
+    }
+
+    return this.withWorkspaceHandle(async (handle) => {
+      const entries: filesystem.ExplorerEntry[] = []
+      let cursor: string | undefined
+
+      do {
+        const tree = await handle.client().listTree(handle.workspaceId, {
+          path,
+          depth: 1,
+          ...(cursor ? { cursor } : {})
+        }) as TreeResponse
+
+        for (const entry of tree.entries) {
+          if (entry.path === path) continue
+          if (!canShowRemoteDirectoryEntryForMountPaths(entry.path, mountPaths)) continue
+          entries.push({
+            name: remotePathName(entry.path),
+            path: entry.path,
+            type: entry.type === 'dir' ? 'directory' : 'file'
+          })
+        }
+
+        cursor = tree.nextCursor ?? undefined
+      } while (cursor && entries.length < MAX_REMOTE_DIRECTORY_ENTRIES)
+
+      return entries.sort((a, b) => {
+        if (a.type !== b.type) return a.type === 'directory' ? -1 : 1
+        return a.name.localeCompare(b.name)
+      })
+    })
+  }
+
   async listOptions(projectId: string, provider: string, resource: string): Promise<IntegrationOption[]> {
     if (!this.findProject(projectId)) throw new Error(`Project not found: ${projectId}`)
-    const workspaceId = await getAccountWorkspaceId(accountWorkspaceReadyRetryOptions())
     const normalizedProvider = toRelayfileProvider(provider)
     const normalizedResource = resource.trim().toLowerCase()
     if (!normalizedResource) throw new Error('Integration option resource is required')
 
-    let payload: unknown
-    try {
-      payload = await this.fetchJson<unknown>(
-        'GET',
-        `api/v1/workspaces/${workspaceId}/integrations/${encodeURIComponent(normalizedProvider)}/options/${encodeURIComponent(normalizedResource)}`
-      )
-    } catch (error) {
-      if (isHttpStatus(error, 404) || /\b404\b/u.test(toErrorMessage(error))) return []
-      throw error
-    }
+    const payload = await this.withWorkspaceHandle(async (handle) => {
+      try {
+        return await handle.requestJson({
+          operation: 'listIntegrationOptions',
+          method: 'GET',
+          path: `api/v1/workspaces/${handle.workspaceId}/integrations/${encodeURIComponent(normalizedProvider)}/options/${encodeURIComponent(normalizedResource)}`
+        }) as unknown
+      } catch (error) {
+        if (normalizedProvider === 'slack' && normalizedResource === 'channels') {
+          return this.listLegacySlackChannelOptions(handle, normalizedProvider, error)
+        }
+        throw error
+      }
+    })
 
     const rawOptions = isRecord(payload) && Array.isArray(payload.options) ? payload.options : []
     return rawOptions
@@ -709,12 +775,58 @@ export class IntegrationsManager {
       .filter((entry): entry is IntegrationOption => entry !== null)
   }
 
+  private async listLegacySlackChannelOptions(
+    handle: WorkspaceHandle,
+    provider: string,
+    originalError: unknown
+  ): Promise<{ options: IntegrationOption[] }> {
+    const options: IntegrationOption[] = []
+    let cursor: string | undefined
+
+    try {
+      do {
+        const query = cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''
+        const payload = await handle.requestJson({
+          operation: 'listSlackAvailableChannels',
+          method: 'GET',
+          path: `api/v1/workspaces/${handle.workspaceId}/integrations/${encodeURIComponent(provider)}/channels/available${query}`
+        }) as SlackChannelOptionResponse
+        const channels = Array.isArray(payload.channels) ? payload.channels : []
+        for (const channel of channels) {
+          if (!isRecord(channel)) continue
+          const value = readString(channel.id)
+          if (!value) continue
+          const name = readString(channel.name) || value
+          const isPrivate = channel.isPrivate === true || channel.is_private === true
+          options.push({
+            value,
+            label: `#${name}`,
+            ...(isPrivate ? { hint: 'private' } : {})
+          })
+        }
+        cursor = readString(payload.nextCursor)
+      } while (cursor)
+      return { options }
+    } catch (fallbackError) {
+      throw new Error(
+        `Slack channel options are unavailable: ${toErrorMessage(originalError)}; fallback failed: ${toErrorMessage(fallbackError)}`
+      )
+    }
+  }
+
   async startLocalMountDaemon(): Promise<void> {
     await this.syncLocalMounts()
     await this.syncAllEventSubscriptions()
   }
 
+  async notifyAgentState(projectId: string): Promise<void> {
+    await this.syncAgentState(projectId, true)
+  }
+
   async shutdownLocalMounts(): Promise<void> {
+    for (const timer of this.systemMessageTimers.values()) clearTimeout(timer)
+    this.systemMessageTimers.clear()
+
     // Unlink the per-project `.integrations` symlinks before stopping the
     // mounts so a closed app leaves no dangling links in project trees.
     await Promise.all(
@@ -1379,8 +1491,7 @@ export class IntegrationsManager {
     return dedupeStrings(
       this.listConnected(projectId)
         .filter((integration) => this.isVisibleInProject(projectId, integration.integrationId))
-        .filter((integration) => integration.downloadHistoricalData === true)
-        .flatMap((integration) => this.canonicalMountPathsForIntegration(integration))
+        .flatMap((integration) => this.mountPathsForAgentWorkspace(integration))
     )
   }
 
@@ -1397,7 +1508,7 @@ export class IntegrationsManager {
     const subscriptionsReady = await this.syncEventSubscriptions(projectId)
 
     if (notifyAgent) {
-      await this.safeInjectSystemMessage(projectId, this.buildSystemMessageSnippet(integrations, subscriptionsReady))
+      this.scheduleSystemMessage(projectId, this.buildSystemMessageSnippet(integrations, subscriptionsReady))
     }
   }
 
@@ -1415,13 +1526,16 @@ export class IntegrationsManager {
         const scopeSummary = scopeLabels.length > 0 ? scopeLabels.join(', ') : 'all configured scope'
         const mountPaths = this.canonicalMountPathsForIntegration(integration)
           .map(projectIntegrationPathForRelayfilePath)
+        const discoveryPath = projectIntegrationPathForRelayfilePath(discoveryMountPathForProvider(integration.provider))
         const scopeClause = mountPaths.length > 0
           ? ` (event scope ${mountPaths.join(', ')})`
           : ' (no event scope configured)'
         const historyClause = integration.downloadHistoricalData === true
-          ? ' Historical file download is enabled.'
-          : ' Historical file download is off.'
-        lines.push(`- ${integration.provider}: ${scopeSummary}${scopeClause}.${historyClause}`)
+          ? ` Historical provider records are available at ${mountPaths.join(', ') || 'the configured provider paths'}.`
+          : ' Historical provider records are not mounted.'
+        lines.push(
+          `- ${integration.provider}: ${scopeSummary}${scopeClause}. Writeback discovery is available at ${discoveryPath}. ${historyClause}`
+        )
       }
     }
 
@@ -1429,7 +1543,7 @@ export class IntegrationsManager {
     lines.push('')
     if (!subscriptionsReady && subscriptions.length > 0) {
       lines.push('Integration event subscriptions are requested for this project, but Pear could not register them with Relayfile yet.')
-      lines.push('Do not assume notifications will arrive until a later integrations update confirms active subscriptions; read the mounted integration files when the user asks for current state.')
+      lines.push('Do not assume notifications will arrive until a later integrations update confirms active subscriptions. If historical provider records are mounted for an integration, read them when the user asks for current state; otherwise rely on incoming events and explicit user-provided context.')
     } else if (subscriptions.length === 0) {
       lines.push('No integration event subscriptions are active for this project.')
     } else {
@@ -1447,10 +1561,32 @@ export class IntegrationsManager {
     }
 
     lines.push(
-      `Historical files are downloaded and mounted through ${PROJECT_INTEGRATIONS_LINK_NAME}/ only for integrations where historical download is enabled. Incoming webhook events do not require downloading history.`,
+      `Writeback discovery schemas and examples are mounted through ${PROJECT_INTEGRATIONS_LINK_NAME}/discovery/<provider>/ for connected integrations. Historical provider records are mounted through ${PROJECT_INTEGRATIONS_LINK_NAME}/ only when historical download is enabled. Incoming webhook events do not require downloading history.`,
       '</integrations-update>'
     )
     return lines.join('\n')
+  }
+
+  private mountPathsForAgentWorkspace(integration: ConnectedIntegration): string[] {
+    return dedupeStrings([
+      discoveryMountPathForProvider(integration.provider),
+      ...(integration.downloadHistoricalData === true
+        ? this.canonicalMountPathsForIntegration(integration)
+        : [])
+    ])
+  }
+
+  private mountPathsForLocalSync(integration: ConnectedIntegration): string[] {
+    return this.mountPathsForAgentWorkspace(integration)
+  }
+
+  private listableRemoteMountPaths(projectId: string): string[] {
+    return dedupeStrings(
+      this.visibleIntegrationsForProject(projectId).flatMap((integration) => [
+        discoveryMountPathForProvider(integration.provider),
+        ...this.canonicalMountPathsForIntegration(integration)
+      ])
+    )
   }
 
   private canonicalMountPathsForIntegration(integration: ConnectedIntegration): string[] {
@@ -1483,6 +1619,17 @@ export class IntegrationsManager {
     } catch (error) {
       console.warn('[integrations] Failed to inject integration system message:', toErrorMessage(error))
     }
+  }
+
+  private scheduleSystemMessage(projectId: string, message: string): void {
+    const existing = this.systemMessageTimers.get(projectId)
+    if (existing) clearTimeout(existing)
+
+    const timer = setTimeout(() => {
+      this.systemMessageTimers.delete(projectId)
+      void this.safeInjectSystemMessage(projectId, message)
+    }, SYSTEM_MESSAGE_DEBOUNCE_MS)
+    this.systemMessageTimers.set(projectId, timer)
   }
 
   private async safeUpdateMountPaths(projectId: string, paths: string[]): Promise<void> {
@@ -1518,17 +1665,24 @@ export class IntegrationsManager {
         integration
       }))
     )
-    const byProvider = new Map<string, ConnectedIntegration>()
+    const byProvider = new Map<string, { integration: ConnectedIntegration; mountPaths: Set<string> }>()
     for (const { projectId, integration } of localEntries) {
       if (!this.isVisibleInProject(projectId, integration.integrationId)) continue
-      if (integration.downloadHistoricalData !== true) continue
-      byProvider.set(`${toRelayfileProvider(integration.provider)}:${integration.integrationId}`, integration)
+      const key = `${toRelayfileProvider(integration.provider)}:${integration.integrationId}`
+      const entry = byProvider.get(key) ?? {
+        integration,
+        mountPaths: new Set<string>()
+      }
+      for (const mountPath of this.mountPathsForLocalSync(integration)) {
+        entry.mountPaths.add(mountPath)
+      }
+      byProvider.set(key, entry)
     }
     const integrations = Array.from(byProvider.values())
     try {
-      await integrationMountManager.ensureMounted(integrations.map((integration) => ({
+      await integrationMountManager.ensureMounted(integrations.map(({ integration, mountPaths }) => ({
         provider: integration.provider,
-        mountPaths: this.canonicalMountPathsForIntegration(integration)
+        mountPaths: Array.from(mountPaths)
       })))
     } catch (error) {
       console.warn('[integrations] Failed to reconcile local integration mount:', toErrorMessage(error))
@@ -1563,17 +1717,11 @@ export class IntegrationsManager {
     const workspaceId = integrationMountManager.currentWorkspaceId()
     if (!workspaceId) return integrations
     return integrations.map((integration) => {
-      if (integration.downloadHistoricalData !== true) {
-        return {
-          ...integration,
-          localMountPaths: []
-        }
-      }
       return {
         ...integration,
         localMountPaths: integrationMountManager.localPathsFor(workspaceId, {
           provider: integration.provider,
-          mountPaths: this.canonicalMountPathsForIntegration(integration)
+          mountPaths: this.mountPathsForLocalSync(integration)
         })
       }
     })

@@ -77,6 +77,7 @@ function makeHarness(agents = ['alice', 'bob']): {
   const bridge = new IntegrationEventBridge({
     getWorkspaceHandle: async () => ({
       workspaceId: 'workspace-id',
+      localMountWorkspaceId: 'workspace-id',
       client: () => ({
         subscribe(globs, onChange, options) {
           subscribeCalls.push({ globs: [...globs], onChange, options })
@@ -152,6 +153,24 @@ test('channel notification targets do not fall back to all project agents', asyn
   assert.deepEqual(harness.listAgentsCalls, [])
 })
 
+test('offline notification agents fall back to current project agents', async () => {
+  const harness = makeHarness(['alice', 'bob'])
+
+  await harness.bridge.reconcile('project-1', [
+    integration({
+      provider: 'slack',
+      integrationId: 'slack-1',
+      mountPaths: ['/slack/channels'],
+      scope: { notifyAgents: ['claude-1'] }
+    })
+  ])
+
+  await harness.emit(changeEvent('/slack/channels/general/messages/123.json', 'slack'))
+
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'bob'])
+  assert.deepEqual(harness.listAgentsCalls, ['project-1'])
+})
+
 test('integration events watch selected relayfile mount paths', async () => {
   const harness = makeHarness()
   const slackIntegration = integration({
@@ -168,9 +187,11 @@ test('integration events watch selected relayfile mount paths', async () => {
   await harness.bridge.reconcile('project-1', [slackIntegration])
 
   assert.deepEqual(harness.subscribeCalls[0].globs, [
+    '/slack/channels/C123ABC/**',
     '/slack/channels/C123ABC__proj-cloud/**'
   ])
   assert.deepEqual(integrationSubscriptionSummaries([slackIntegration])[0].watches, [
+    '.integrations/slack/channels/C123ABC/**',
     '.integrations/slack/channels/C123ABC__proj-cloud/**'
   ])
 
@@ -179,6 +200,32 @@ test('integration events watch selected relayfile mount paths', async () => {
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
   assert.match(harness.sent[0].input.text, /Path: \.integrations\/slack\/channels\/C123ABC__proj-cloud\/messages\/1713220123_001100\/meta\.json/u)
   assert.match(harness.sent[0].input.text, /Relayfile path: \/slack\/channels\/C123ABC__proj-cloud\/messages\/1713220123_001100\/meta\.json/u)
+
+  harness.sent.splice(0)
+  await harness.emit(changeEvent('/slack/channels/C123ABC/messages/1713220124_001100/meta.json', 'slack'))
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
+})
+
+test('integration events preserve discovery mount paths', async () => {
+  const harness = makeHarness()
+  const slackIntegration = integration({
+    provider: 'slack',
+    integrationId: 'slack-1',
+    mountPaths: ['/discovery/slack']
+  })
+
+  await harness.bridge.reconcile('project-1', [slackIntegration])
+
+  assert.deepEqual(harness.subscribeCalls[0].globs, [
+    '/discovery/slack/**'
+  ])
+  assert.deepEqual(integrationSubscriptionSummaries([slackIntegration])[0].watches, [
+    '.integrations/discovery/slack/**'
+  ])
+
+  await harness.emit(changeEvent('/discovery/slack/actions/create-message/.schema.json', 'slack'))
+  assert.deepEqual(harness.sent, [])
+  assert.deepEqual(harness.listAgentsCalls, [])
 })
 
 test('resource alias mount paths inject the same relative event only once', async () => {
