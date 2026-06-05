@@ -872,16 +872,25 @@ export class IntegrationEventBridge {
     const bridge = await this.bridge()
     let allProjectAgents: string[] | null = null
     const recipients: string[] = []
+    const listProjectAgents = async (): Promise<string[]> => {
+      allProjectAgents ??= (await bridge.listAgents(projectId))
+        .filter((agent) => agent.projectId === undefined || agent.projectId === projectId)
+        .map((agent) => agent.name)
+      return allProjectAgents
+    }
 
     for (const spec of matchedSpecs) {
-      const explicitTargets = dedupeStrings([...spec.targets.agents, ...spec.targets.channels])
+      const projectAgents = spec.targets.agents.length > 0
+        ? await listProjectAgents()
+        : null
+      const onlineExplicitAgents = projectAgents
+        ? spec.targets.agents.filter((agent) => projectAgents.includes(agent))
+        : []
+      const explicitTargets = dedupeStrings([...onlineExplicitAgents, ...spec.targets.channels])
       if (explicitTargets.length === 0) {
-        allProjectAgents ??= (await bridge.listAgents(projectId))
-          .filter((agent) => agent.projectId === undefined || agent.projectId === projectId)
-          .map((agent) => agent.name)
-        recipients.push(...allProjectAgents)
+        recipients.push(...await listProjectAgents())
       } else {
-        recipients.push(...spec.targets.agents, ...spec.targets.channels)
+        recipients.push(...explicitTargets)
       }
     }
 

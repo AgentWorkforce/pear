@@ -318,6 +318,10 @@ function notificationTargetValue(scope: Record<string, unknown>): string {
   return 'all'
 }
 
+function resolvedNotificationTargetValue(value: string, knownValues: Set<string>): string {
+  return knownValues.has(value) ? value : 'all'
+}
+
 function clearNotificationTargetScope(scope: Record<string, unknown>): Record<string, unknown> {
   const nextScope = { ...scope }
   for (const key of [...NOTIFICATION_AGENT_SCOPE_KEYS, ...NOTIFICATION_CHANNEL_SCOPE_KEYS]) {
@@ -615,7 +619,6 @@ function IntegrationVisibilitySection({
             const subscribed = integration.subscribeAgent === true
             const historyDownload = integration.downloadHistoricalData === true
             const busy = busyIntegrationId === integration.integrationId
-            const notificationTarget = notificationTargetValue(integration.scope)
             const slack = isSlackProvider(integration.provider)
             const scopeEditorOpen = scopeEditorIntegrationId === integration.integrationId
             const selectedSlackSourceIds = Array.from(new Set([
@@ -627,6 +630,10 @@ function IntegrationVisibilitySection({
               ...agentNames.map((agent) => `agent:${agent}`),
               ...channels.map((channel) => `channel:${channel}`)
             ])
+            const notificationTarget = resolvedNotificationTargetValue(
+              notificationTargetValue(integration.scope),
+              knownTargetValues
+            )
 
             return (
               <div key={integration.integrationId} className="space-y-2">
@@ -702,9 +709,6 @@ function IntegrationVisibilitySection({
                       title="Integration event delivery target"
                       aria-label="Integration event delivery target"
                     >
-                      {!knownTargetValues.has(notificationTarget) && (
-                        <option value={notificationTarget}>{notificationTarget.replace(/^agent:/u, '@').replace(/^channel:/u, '#')}</option>
-                      )}
                       <option value="all">All agents</option>
                       {agentNames.length > 0 && (
                         <optgroup label="Agents">
