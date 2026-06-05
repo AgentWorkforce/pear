@@ -719,6 +719,7 @@ function watchLocalMounts(
 
   let active = true
   const watchers: FSWatcher[] = []
+  const watchedLocalRoots: string[] = []
   const pendingByPath = new Map<string, ReturnType<typeof setTimeout>>()
 
   const schedule = (localRoot: string, remoteRoot: string, filename: string, eventType: string): void => {
@@ -783,6 +784,7 @@ function watchLocalMounts(
         )
       })
       watchers.push(watcher)
+      watchedLocalRoots.push(localRoot)
     } catch (error) {
       const errorMessage = toErrorMessage(error)
       warnIntegrationEventAggregated(
@@ -799,7 +801,7 @@ function watchLocalMounts(
 
   if (watchers.length === 0) return null
   return {
-    localRoots: Array.from(roots.keys()),
+    localRoots: watchedLocalRoots,
     async unsubscribe() {
       active = false
       for (const timer of pendingByPath.values()) clearTimeout(timer)
