@@ -1078,7 +1078,7 @@ function sessionKeyFor(session: BrokerSession): string {
 
 export class BrokerManager {
   private sessions = new Map<string, BrokerSession>()
-  private startPromises = new Map<string, Promise<void>>()
+  private startPromises = new Map<string, Promise<unknown>>()
   private revivePromises = new Map<string, Promise<boolean>>()
   // Which broker sessions (by session key) an agent name is registered on.
   // Both a project's local and cloud brokers join the same relay workspace,
