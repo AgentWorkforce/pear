@@ -492,6 +492,31 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('keeps repeated PTY chunks when broker events have no identity', async () => {
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    const local = await startLocalWithWindow(manager, win)
+    const listener = local.onEvent.mock.calls.at(-1)?.[0]
+    expect(listener).toBeTypeOf('function')
+
+    listener?.({
+      kind: 'worker_stream',
+      name: 'claude-1',
+      chunk: 'pong\n'
+    })
+    listener?.({
+      kind: 'worker_stream',
+      name: 'claude-1',
+      chunk: 'pong\n'
+    })
+
+    const ptyCalls = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([channel]) => channel === 'broker:pty-chunk')
+    expect(ptyCalls).toHaveLength(2)
+
+    await manager.shutdown()
+  })
+
   it('refreshEventStream rebinds the harness stream from the last seen sequence', async () => {
     const manager = new BrokerManager()
     const local = await startLocal(manager)

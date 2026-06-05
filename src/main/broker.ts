@@ -344,7 +344,6 @@ const DEFAULT_RECONCILE_MESSAGE_LIMIT = 50
 const MAX_RECONCILE_MESSAGE_LIMIT = 100
 const EVENT_STREAM_REBIND_COOLDOWN_MS = 5_000
 const PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS = 60_000
-const PTY_CHUNK_CONTENT_DEDUPE_TTL_MS = 1_000
 const MAX_PTY_CHUNK_DEDUPE_ENTRIES = 2_000
 // After this many consecutive failures to open a PTY input stream, give up on
 // the WS fast path for that agent briefly and send over HTTP while it cools down.
@@ -1885,7 +1884,7 @@ export class BrokerManager {
         'name' in event && typeof event.name === 'string' &&
         'chunk' in event && typeof event.chunk === 'string'
       ) {
-        if (this.isDuplicatePtyChunk(sessionKey, event.name, event.chunk, event)) {
+        if (this.isDuplicatePtyChunk(sessionKey, event.name, event)) {
           return
         }
         const targetWindow = this.windowForSession(sessionKey, win)
@@ -1940,12 +1939,11 @@ export class BrokerManager {
     }
   }
 
-  private isDuplicatePtyChunk(sessionKey: string, name: string, chunk: string, event: BrokerEvent): boolean {
+  private isDuplicatePtyChunk(sessionKey: string, name: string, event: BrokerEvent): boolean {
     const now = Date.now()
     for (const [key, seenAt] of this.recentPtyChunks) {
-      const ttl = key.includes(':chunk:') ? PTY_CHUNK_CONTENT_DEDUPE_TTL_MS : PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS
       if (
-        now - seenAt > ttl ||
+        now - seenAt > PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS ||
         this.recentPtyChunks.size > MAX_PTY_CHUNK_DEDUPE_ENTRIES
       ) {
         this.recentPtyChunks.delete(key)
@@ -1962,13 +1960,11 @@ export class BrokerManager {
         ? eventRecord.id
         : ''
     const identity = eventId || (seq ? `seq:${seq}` : '')
-    const key = identity
-      ? `${sessionKey}:${name}:${identity}`
-      : `${sessionKey}:${name}:chunk:${chunk}`
+    if (!identity) return false
 
+    const key = `${sessionKey}:${name}:${identity}`
     const previous = this.recentPtyChunks.get(key)
-    const ttl = identity ? PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS : PTY_CHUNK_CONTENT_DEDUPE_TTL_MS
-    if (previous !== undefined && now - previous <= ttl) {
+    if (previous !== undefined && now - previous <= PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS) {
       return true
     }
 
