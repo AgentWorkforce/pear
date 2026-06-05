@@ -70,6 +70,7 @@ type RelayfileEventClient = {
 
 type RelayfileWorkspaceHandle = {
   workspaceId: string
+  localMountWorkspaceId: string
   client(): RelayfileEventClient
 }
 
@@ -83,7 +84,7 @@ type IntegrationEventBridgeDeps = {
 type EventWorkspaceHandleCache = {
   apiUrl: string
   accountKey: string
-  workspaceId: string
+  accountWorkspaceId: string
   handle: RelayfileWorkspaceHandle
 }
 
@@ -737,6 +738,7 @@ export class IntegrationEventBridge {
     const handle = await this.getWorkspaceHandle()
     const signature = JSON.stringify({
       workspaceId: handle.workspaceId,
+      localMountWorkspaceId: handle.localMountWorkspaceId,
       watches,
       specs: specs.map((spec) => ({
         integrationId: spec.integrationId,
@@ -753,6 +755,7 @@ export class IntegrationEventBridge {
       logIntegrationEvent('subscribing', {
         projectId,
         workspaceId: handle.workspaceId,
+        localMountWorkspaceId: handle.localMountWorkspaceId,
         globs: watches.map((watch) => watch.glob),
         specs: specs.map((spec) => ({
           integrationId: spec.integrationId,
@@ -786,7 +789,7 @@ export class IntegrationEventBridge {
         )
       )
       const localSubscription = watchLocalMounts(
-        handle.workspaceId,
+        handle.localMountWorkspaceId,
         subscribed,
         watches.map((watch) => watch.glob),
         (event) => {
@@ -811,6 +814,7 @@ export class IntegrationEventBridge {
         logIntegrationEvent('watching local mounts', {
           projectId,
           workspaceId: handle.workspaceId,
+          localMountWorkspaceId: handle.localMountWorkspaceId,
           localRoots: localSubscription.localRoots
         })
         subscriptions.push(localSubscription)
@@ -927,12 +931,12 @@ export class IntegrationEventBridge {
       throw new Error('cloud-auth-required')
     }
 
-    const workspaceId = await getAccountWorkspaceId(accountWorkspaceReadyRetryOptions())
+    const accountWorkspaceId = await getAccountWorkspaceId(accountWorkspaceReadyRetryOptions())
     if (
       accountIntegrationEventHandle &&
       accountIntegrationEventHandle.apiUrl === auth.apiUrl &&
       accountIntegrationEventHandle.accountKey === auth.accountKey &&
-      accountIntegrationEventHandle.workspaceId === workspaceId
+      accountIntegrationEventHandle.accountWorkspaceId === accountWorkspaceId
     ) {
       return accountIntegrationEventHandle.handle
     }
@@ -945,10 +949,11 @@ export class IntegrationEventBridge {
       cloudApiUrl: auth.apiUrl,
       accessToken: tokenProvider
     })
-    const joined = await setup.joinWorkspace(workspaceId, {
+    const joined = await setup.joinWorkspace(accountWorkspaceId, {
       agentName: INTEGRATION_EVENT_AGENT_NAME,
       scopes: INTEGRATION_EVENT_SCOPES
     })
+    const relayWorkspaceId = joined.workspaceId
     const workspaceTokenProvider = async (): Promise<string> => {
       await joined.refreshToken()
       return joined.getToken()
@@ -958,13 +963,14 @@ export class IntegrationEventBridge {
       token: workspaceTokenProvider
     })
     const handle: RelayfileWorkspaceHandle = {
-      workspaceId,
-      client: () => createWorkspaceScopedEventClient(client, workspaceId, workspaceTokenProvider)
+      workspaceId: relayWorkspaceId,
+      localMountWorkspaceId: accountWorkspaceId,
+      client: () => createWorkspaceScopedEventClient(client, relayWorkspaceId, workspaceTokenProvider)
     }
     accountIntegrationEventHandle = {
       apiUrl: auth.apiUrl,
       accountKey: auth.accountKey,
-      workspaceId,
+      accountWorkspaceId,
       handle
     }
     return handle

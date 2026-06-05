@@ -77,6 +77,7 @@ function makeHarness(agents = ['alice', 'bob']): {
   const bridge = new IntegrationEventBridge({
     getWorkspaceHandle: async () => ({
       workspaceId: 'workspace-id',
+      localMountWorkspaceId: 'workspace-id',
       client: () => ({
         subscribe(globs, onChange, options) {
           subscribeCalls.push({ globs: [...globs], onChange, options })
