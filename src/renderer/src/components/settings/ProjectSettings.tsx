@@ -484,6 +484,7 @@ function IntegrationVisibilitySection({
   const listSlackChannelResources = useCallback(async (integration: ConnectedIntegration): Promise<IntegrationAccessibleResource[]> => {
     const cacheKey = `slack-channels:${projectId}:${integration.integrationId}`
     return cachedResources(cacheKey, async () => {
+      const hasLocalSlackMount = (): boolean => providerLocalMountPath(integration, 'slack') !== null
       const listRemoteSlackChannels = async (): Promise<IntegrationAccessibleResource[]> => {
         const listRemoteDir = (pear.integrations as typeof pear.integrations & {
           listRemoteDir?: typeof pear.integrations.listRemoteDir
@@ -514,11 +515,14 @@ function IntegrationVisibilitySection({
       try {
         const remoteChannels = await listRemoteSlackChannels()
         if (remoteChannels.length > 0) return remoteChannels
-      } catch {
+      } catch (err) {
+        console.warn('[integrations] Failed to list remote Slack channels:', err)
         // Fall through to live Nango options, then local mount fallback.
       }
 
-      if (typeof listOptions !== 'function') return listMountedSlackChannels()
+      if (typeof listOptions !== 'function') {
+        return hasLocalSlackMount() ? listMountedSlackChannels() : []
+      }
 
       try {
         const options = await listOptions(projectId, integration.provider, 'channels')
@@ -529,9 +533,10 @@ function IntegrationVisibilitySection({
           metadata: option.hint ? { hint: option.hint } : undefined
         }))
         if (optionChannels.length > 0) return optionChannels
-        return listMountedSlackChannels()
+        return hasLocalSlackMount() ? listMountedSlackChannels() : []
       } catch (err) {
-        if (providerLocalMountPath(integration, 'slack')) return listMountedSlackChannels()
+        console.warn('[integrations] Failed to list Slack channel options:', err)
+        if (hasLocalSlackMount()) return listMountedSlackChannels()
         const message = err instanceof Error ? err.message : String(err)
         throw new Error(`Slack channel options are unavailable: ${message}`)
       }
