@@ -283,6 +283,28 @@ test('local fallback watchers are limited to bounded command roots when historic
   assert.deepEqual(Array.from(byRemoteRoot.keys()), ['/slack/.outbox'])
 })
 
+test('local fallback watchers accept legacy integration command mount paths', () => {
+  const roots = localWatchRootsFor(
+    'workspace-id',
+    [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/integrations/slack/.outbox'],
+        downloadHistoricalData: true,
+        localMountPaths: [
+          join('/tmp', 'relayfile', 'workspaces', 'workspace-id', 'slack', '.outbox')
+        ]
+      })
+    ],
+    [
+      '/slack/.outbox/**'
+    ]
+  )
+
+  assert.equal(roots.some((root) => root.remoteRoot === '/slack/.outbox'), true)
+})
+
 test('integration events preserve discovery mount paths', async () => {
   const harness = makeHarness()
   const slackIntegration = integration({

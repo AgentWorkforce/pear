@@ -478,7 +478,7 @@ function localRootsForIntegration(
 function allowsLocalMountWatching(integration: ConnectedIntegration): boolean {
   // Local filesystem fallback must never recursively watch provider history roots.
   return integration.downloadHistoricalData === true &&
-    integration.mountPaths.some((mountPath) => isBoundedLocalCommandRoot(mountPath))
+    canonicalMountPaths(integration).some((mountPath) => isBoundedLocalCommandRoot(mountPath))
 }
 
 function isBoundedLocalCommandRoot(remoteRoot: string): boolean {
