@@ -281,6 +281,11 @@ function isIntegrationNotFoundError(error: unknown): boolean {
 // not exist on the server, so every mount mirrored an empty tree. Rewrite
 // both forms to the real root-level layout.
 function rewriteIntegrationMountPath(mountPath: string, relayfileProvider: string): string {
+  const discovery = mountPath.match(/^\/discovery(?:\/.*)?$/u)
+  if (discovery) {
+    const normalized = mountPath.replace(/\/+$/u, '')
+    return normalized === '/discovery' ? `/discovery/${relayfileProvider}` : normalized
+  }
   const prefixed = mountPath.match(/^\/integrations\/[^/]+(\/.*)?$/)
   if (prefixed) return `/${relayfileProvider}${prefixed[1] ?? ''}`
   const rootLevel = mountPath.match(/^\/[^/]+(\/.*)?$/)
