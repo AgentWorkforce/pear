@@ -36,6 +36,36 @@ const mock = vi.hoisted(() => {
     activeProjectId: 'project-1'
   }
   let mountReconcilePromise: Promise<void> = Promise.resolve()
+  const readFileCalls: Array<{ workspaceId: string; path: string }> = []
+  const relayClient = {
+    readFile: vi.fn(async (workspaceId: string, path: string) => {
+      readFileCalls.push({ workspaceId, path })
+      return {
+        path,
+        revision: 'rev-1',
+        contentType: 'application/json',
+        content: JSON.stringify({
+          provider: 'slack',
+          objectType: 'message',
+          payload: {
+            text: 'hello from the remote Slack record',
+            channel: 'C123',
+            ts: '1713220123.001100',
+            user: 'U456'
+          }
+        }),
+        encoding: 'utf-8'
+      }
+    })
+  }
+  const workspaceHandle = {
+    workspaceId: 'account-workspace-id',
+    client: vi.fn(() => relayClient)
+  }
+  const relayWorkspaceManager = {
+    withHandle: vi.fn(async (fn: (handle: typeof workspaceHandle) => Promise<unknown>) => fn(workspaceHandle)),
+    getWorkspaceHandle: vi.fn(async () => workspaceHandle)
+  }
 
   const jsonResponse = (payload: unknown, status = 200, statusText = 'OK') => ({
     ok: status >= 200 && status < 300,
@@ -130,6 +160,9 @@ const mock = vi.hoisted(() => {
     cloudAgentManager: {
       updateMountPaths: vi.fn(async () => undefined)
     },
+    readFileCalls,
+    relayClient,
+    relayWorkspaceManager,
     brokerManager: {
       listAgents: vi.fn(async () => []),
       sendMessage: vi.fn(async () => undefined)
@@ -190,10 +223,7 @@ vi.mock('./integration-symlinks', () => ({
 }))
 
 vi.mock('./relay-workspace', () => ({
-  getRelayWorkspaceManager: vi.fn(() => ({
-    withHandle: vi.fn(),
-    getWorkspaceHandle: vi.fn()
-  }))
+  getRelayWorkspaceManager: vi.fn(() => mock.relayWorkspaceManager)
 }))
 
 import { IntegrationsManager, localSyncMountPathsForIntegration } from './integrations'
@@ -221,6 +251,10 @@ describe('IntegrationsManager', () => {
     mock.integrationMountManager.stop.mockClear()
     mock.integrationEventBridge.reconcile.mockClear()
     mock.cloudAgentManager.updateMountPaths.mockClear()
+    mock.readFileCalls.splice(0)
+    mock.relayClient.readFile.mockClear()
+    mock.relayWorkspaceManager.withHandle.mockClear()
+    mock.relayWorkspaceManager.getWorkspaceHandle.mockClear()
     mock.brokerManager.listAgents.mockClear()
     mock.brokerManager.sendMessage.mockClear()
     mock.ensureProjectIntegrationsLink.mockClear()
@@ -355,5 +389,36 @@ describe('IntegrationsManager', () => {
     })
 
     finishMountReconcile()
+  })
+
+  it('reads a targeted remote Slack event record without reconciling local mounts', async () => {
+    const manager = new IntegrationsManager()
+
+    const preview = await manager.readRemoteFile(
+      'project-1',
+      '/slack/channels/C123/messages/1713220123_001100.json'
+    )
+
+    expect(preview).toMatchObject({
+      kind: 'text',
+      content: expect.stringContaining('hello from the remote Slack record')
+    })
+    expect(mock.readFileCalls).toEqual([
+      {
+        workspaceId: 'account-workspace-id',
+        path: '/slack/channels/C123/messages/1713220123_001100.json'
+      }
+    ])
+    expect(mock.integrationMountManager.ensureMounted).not.toHaveBeenCalled()
+  })
+
+  it('rejects targeted remote file reads outside the project integration scope', async () => {
+    const manager = new IntegrationsManager()
+
+    await expect(
+      manager.readRemoteFile('project-1', '/github/repos/acme/app/issues/1.json')
+    ).rejects.toThrow('outside this project integration scope')
+
+    expect(mock.readFileCalls).toEqual([])
   })
 })

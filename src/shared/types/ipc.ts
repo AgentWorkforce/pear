@@ -916,6 +916,7 @@ export interface PearAPI {
     telemetry: () => Promise<IntegrationEventTelemetrySnapshot>
     listMountDir: (projectId: string, integrationId: string, dirPath: string) => Promise<FsDirEntry[]>
     listRemoteDir: (projectId: string, remotePath: string) => Promise<FsDirEntry[]>
+    readRemoteFile: (projectId: string, remotePath: string) => Promise<FsReadPreviewResult>
     readMountPreview: (projectId: string, integrationId: string, filePath: string) => Promise<FsReadPreviewResult>
     listOptions: (projectId: string, provider: string, resource: string) => Promise<IntegrationOption[]>
     startConnect: (projectId: string, provider: string) => Promise<IntegrationConnectSession>
