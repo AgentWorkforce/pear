@@ -7,7 +7,11 @@ import { brokerManager } from './broker'
 import { cloudAgentManager } from './cloud-agent'
 import * as filesystem from './filesystem'
 import { integrationEventBridge, integrationSubscriptionSummaries } from './integration-event-bridge'
-import { integrationMountManager, integrationMountRootForWorkspace } from './integration-mounts'
+import {
+  integrationMountManager,
+  integrationMountRootForWorkspace,
+  MAX_LOCAL_INTEGRATION_MOUNT_PATHS
+} from './integration-mounts'
 import {
   canListRemoteDirectoryForMountPaths,
   canShowRemoteDirectoryEntryForMountPaths,
@@ -312,6 +316,52 @@ function projectIntegrationPathForRelayfilePath(mountPath: string): string {
 
 function discoveryMountPathForProvider(provider: string): string {
   return `/discovery/${toRelayfileProvider(provider)}`
+}
+
+function canonicalMountPathsForConnectedIntegration(integration: ConnectedIntegration): string[] {
+  return dedupeStrings(
+    integration.mountPaths.map((mountPath) =>
+      rewriteIntegrationMountPath(mountPath, toRelayfileProvider(integration.provider))
+    )
+  )
+}
+
+function isNarrowHistoricalMountPath(mountPath: string): boolean {
+  const segments = mountPath.split('/').filter(Boolean)
+  if (segments[0] === 'discovery') return true
+  return segments.length >= 3
+}
+
+function outboxMountPathFor(mountPath: string): string {
+  const normalized = mountPath.trim().replace(/\/+$/u, '')
+  return `${normalized}/.outbox`
+}
+
+function writebackCommandMountPathsForIntegration(integration: ConnectedIntegration): string[] {
+  return canonicalMountPathsForConnectedIntegration(integration)
+    .filter(isNarrowHistoricalMountPath)
+    .map(outboxMountPathFor)
+}
+
+export function localSyncMountPathsForIntegration(integration: ConnectedIntegration): string[] {
+  const discoveryPath = discoveryMountPathForProvider(integration.provider)
+  const historicalPaths = integration.downloadHistoricalData === true
+    ? canonicalMountPathsForConnectedIntegration(integration).filter(isNarrowHistoricalMountPath)
+    : writebackCommandMountPathsForIntegration(integration)
+  return dedupeStrings([discoveryPath, ...historicalPaths])
+}
+
+function skippedHistoricalMountPathsForIntegration(integration: ConnectedIntegration): string[] {
+  if (integration.downloadHistoricalData !== true) return []
+  return canonicalMountPathsForConnectedIntegration(integration)
+    .filter((mountPath) => !isNarrowHistoricalMountPath(mountPath))
+}
+
+function skippedCappedLocalSyncMountPathsForIntegration(integration: ConnectedIntegration): string[] {
+  const mountPaths = [...localSyncMountPathsForIntegration(integration)].sort()
+  return mountPaths.length > MAX_LOCAL_INTEGRATION_MOUNT_PATHS
+    ? mountPaths.slice(MAX_LOCAL_INTEGRATION_MOUNT_PATHS)
+    : []
 }
 
 function normalizeCapabilities(value: unknown): IntegrationCapabilities {
@@ -1547,15 +1597,32 @@ export class IntegrationsManager {
         const mountPaths = this.canonicalMountPathsForIntegration(integration)
           .map(projectIntegrationPathForRelayfilePath)
         const discoveryPath = projectIntegrationPathForRelayfilePath(discoveryMountPathForProvider(integration.provider))
-        const writebackPaths = mountPaths.join(', ') || 'the configured provider paths'
+        const writebackCommandPaths = writebackCommandMountPathsForIntegration(integration)
+          .map(projectIntegrationPathForRelayfilePath)
+        const historyEnabled = integration.downloadHistoricalData === true
+        const writebackPaths = historyEnabled
+          ? mountPaths.join(', ') || 'the configured provider paths'
+          : writebackCommandPaths.join(', ')
+        const writebackInstruction = writebackPaths
+          ? `create writeback files under ${writebackPaths}, not under discovery`
+          : 'select narrower resources before creating local writeback files; discovery is schema-only'
+        const skippedHistoryPaths = skippedHistoricalMountPathsForIntegration(integration)
+          .map(projectIntegrationPathForRelayfilePath)
+        const skippedCappedPaths = skippedCappedLocalSyncMountPathsForIntegration(integration)
+          .map(projectIntegrationPathForRelayfilePath)
+        const skippedLocalPaths = dedupeStrings([...skippedHistoryPaths, ...skippedCappedPaths])
         const scopeClause = mountPaths.length > 0
           ? ` (event scope ${mountPaths.join(', ')})`
           : ' (no event scope configured)'
-        const historyClause = integration.downloadHistoricalData === true
-          ? ` Historical provider records are available at ${writebackPaths}.`
-          : ` Live/writeback provider paths are mounted at ${writebackPaths}, but historical provider records are not intentionally downloaded.`
+        const historyClause = historyEnabled
+          ? skippedLocalPaths.length > 0
+            ? ` Historical download is enabled, but these provider paths are not locally poll-mounted: ${skippedLocalPaths.join(', ')}. Select fewer or narrower resources to download local history.`
+            : ` Historical provider records are available at ${writebackPaths}.`
+          : writebackPaths
+            ? ` Local historical provider records are not downloaded. Writeback command roots are mounted at ${writebackPaths}; provider context should be read on demand or through incoming events.`
+            : ` Local historical provider records are not downloaded. No narrow writeback command roots are mounted; select narrower resources to enable local writeback transport.`
         lines.push(
-          `- ${integration.provider}: ${scopeSummary}${scopeClause}. Writeback schemas and examples are available at ${discoveryPath}; create writeback files under ${writebackPaths}, not under discovery. ${historyClause}`
+          `- ${integration.provider}: ${scopeSummary}${scopeClause}. Writeback schemas and examples are available at ${discoveryPath}; ${writebackInstruction}. ${historyClause}`
         )
       }
     }
@@ -1596,7 +1663,7 @@ export class IntegrationsManager {
   }
 
   private mountPathsForLocalSync(integration: ConnectedIntegration): string[] {
-    return this.mountPathsForAgentWorkspace(integration)
+    return localSyncMountPathsForIntegration(integration)
   }
 
   private listableRemoteMountPaths(projectId: string): string[] {
@@ -1609,11 +1676,7 @@ export class IntegrationsManager {
   }
 
   private canonicalMountPathsForIntegration(integration: ConnectedIntegration): string[] {
-    return dedupeStrings(
-      integration.mountPaths.map((mountPath) =>
-        rewriteIntegrationMountPath(mountPath, toRelayfileProvider(integration.provider))
-      )
-    )
+    return canonicalMountPathsForConnectedIntegration(integration)
   }
 
   private async safeInjectSystemMessage(projectId: string, message: string): Promise<void> {

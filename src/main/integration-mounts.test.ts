@@ -245,6 +245,20 @@ describe('IntegrationMountManager', () => {
     expect(mock.mountInputs.filter((input) => input.remotePath === '/github/repos')).toHaveLength(2)
   })
 
+  it('caps local integration mount starts when selected resources exceed the mount budget', async () => {
+    const manager = new IntegrationMountManager()
+
+    await manager.ensureMounted(Array.from({ length: 30 }, (_, index) => ({
+      provider: 'slack',
+      mountPaths: [`/slack/channels/C${String(index).padStart(3, '0')}`]
+    })))
+
+    expect(mock.mountInputs).toHaveLength(24)
+    expect(mock.mountInputs.map((input) => input.remotePath)).toEqual(
+      Array.from({ length: 24 }, (_, index) => `/slack/channels/C${String(index).padStart(3, '0')}`)
+    )
+  })
+
   it('restarts a mounted provider after mount output reports an expired token', async () => {
     const manager = new IntegrationMountManager()
 

@@ -12,6 +12,7 @@ const MOUNT_READY_TIMEOUT_MS = 60_000
 const MOUNT_REFRESH_FALLBACK_MARGIN_MS = 5 * 60_000
 const MOUNT_REFRESH_MIN_DELAY_MS = 1_000
 const MOUNT_AUTH_RESTART_THROTTLE_MS = 60_000
+export const MAX_LOCAL_INTEGRATION_MOUNT_PATHS = 24
 
 type IntegrationMountInput = {
   provider: string
@@ -374,9 +375,18 @@ function isMountAuthExpiredOutput(text: string): boolean {
 }
 
 function mountPathsForIntegrations(integrations: IntegrationMountInput[]): string[] {
-  return Array.from(new Set(
+  const mountPaths = Array.from(new Set(
     integrations
       .flatMap((integration) => integration.mountPaths.map((mountPath) => canonicalIntegrationMountPath(mountPath, integration.provider)))
       .filter((mountPath): mountPath is string => !!mountPath)
   )).sort()
+  if (mountPaths.length <= MAX_LOCAL_INTEGRATION_MOUNT_PATHS) return mountPaths
+
+  const kept = mountPaths.slice(0, MAX_LOCAL_INTEGRATION_MOUNT_PATHS)
+  const skipped = mountPaths.slice(MAX_LOCAL_INTEGRATION_MOUNT_PATHS)
+  console.warn(
+    `[integration-mounts] Local integration mount budget exceeded; mounting ${kept.length} of ${mountPaths.length} paths. ` +
+    `Skipped: ${skipped.join(', ')}`
+  )
+  return kept
 }

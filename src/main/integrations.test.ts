@@ -195,7 +195,14 @@ vi.mock('./relay-workspace', () => ({
   }))
 }))
 
-import { IntegrationsManager } from './integrations'
+import { IntegrationsManager, localSyncMountPathsForIntegration } from './integrations'
+
+type SystemMessageSnippetBuilder = {
+  buildSystemMessageSnippet(
+    integrations: Array<Parameters<typeof localSyncMountPathsForIntegration>[0]>,
+    subscriptionsReady: boolean
+  ): string
+}
 
 describe('IntegrationsManager', () => {
   beforeEach(() => {
@@ -254,6 +261,73 @@ describe('IntegrationsManager', () => {
     expect(mock.fetchCalls.map((call) => new URL(call.url).pathname + new URL(call.url).search)).toContain(
       '/api/v1/workspaces/account-workspace-id/integrations/slack/channels/available?cursor=cursor-2'
     )
+  })
+
+  it('keeps local sync to discovery and narrow outbox command roots while historical download is off', () => {
+    expect(localSyncMountPathsForIntegration({
+      provider: 'slack',
+      integrationId: 'slack-integration-1',
+      scope: {},
+      mountPaths: ['/slack/channels', '/slack/channels/C123', '/slack/dms/D123'],
+      connectedAt: '2026-06-05T00:00:00.000Z',
+      notifyAgent: true,
+      subscribeAgent: true,
+      downloadHistoricalData: false
+    })).toEqual([
+      '/discovery/slack',
+      '/slack/channels/C123/.outbox',
+      '/slack/dms/D123/.outbox'
+    ])
+  })
+
+  it('only includes narrow provider record paths when historical download is on', () => {
+    expect(localSyncMountPathsForIntegration({
+      provider: 'slack',
+      integrationId: 'slack-integration-1',
+      scope: {},
+      mountPaths: ['/slack/channels', '/slack/channels/C123', '/integrations/slack/dms/D123'],
+      connectedAt: '2026-06-05T00:00:00.000Z',
+      notifyAgent: true,
+      subscribeAgent: true,
+      downloadHistoricalData: true
+    })).toEqual(['/discovery/slack', '/slack/channels/C123', '/slack/dms/D123'])
+  })
+
+  it('names outbox command roots in agent guidance while historical download is off', () => {
+    const manager = new IntegrationsManager() as unknown as SystemMessageSnippetBuilder
+
+    const message = manager.buildSystemMessageSnippet([{
+      provider: 'slack',
+      integrationId: 'slack-integration-1',
+      scope: {},
+      mountPaths: ['/slack/channels/C123'],
+      connectedAt: '2026-06-05T00:00:00.000Z',
+      notifyAgent: true,
+      subscribeAgent: true,
+      downloadHistoricalData: false
+    }], true)
+
+    expect(message).toContain('create writeback files under .integrations/slack/channels/C123/.outbox')
+    expect(message).toContain('Writeback command roots are mounted at .integrations/slack/channels/C123/.outbox')
+    expect(message).not.toContain('create writeback files under .integrations/slack/channels/C123, not under discovery')
+  })
+
+  it('surfaces local mount budget skips in agent guidance', () => {
+    const manager = new IntegrationsManager() as unknown as SystemMessageSnippetBuilder
+
+    const message = manager.buildSystemMessageSnippet([{
+      provider: 'slack',
+      integrationId: 'slack-integration-1',
+      scope: {},
+      mountPaths: Array.from({ length: 30 }, (_, index) => `/slack/channels/C${String(index).padStart(3, '0')}`),
+      connectedAt: '2026-06-05T00:00:00.000Z',
+      notifyAgent: true,
+      subscribeAgent: true,
+      downloadHistoricalData: true
+    }], true)
+
+    expect(message).toContain('not locally poll-mounted')
+    expect(message).toContain('.integrations/slack/channels/C023')
   })
 
   it('does not block updateScope on integration state sync', async () => {

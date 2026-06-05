@@ -314,6 +314,15 @@ function integrationStatusSummary(
   return 'Historical files not mounted'
 }
 
+function historicalDownloadWarning(integration: ConnectedIntegration): string {
+  const selected = integration.mountPaths.length > 0 ? integration.mountPaths.join(', ') : 'the configured provider scope'
+  return [
+    `Download historical ${integration.provider} files locally?`,
+    '',
+    `Pear will only mount selected resources (${selected}). Broad provider roots and collection roots are skipped to avoid unbounded local sync. Large histories can still use significant disk, CPU, and network.`
+  ].join('\n')
+}
+
 const RESOURCE_CACHE_TTL_MS = 5 * 60 * 1000
 
 type ResourceCacheEntry = {
@@ -437,6 +446,7 @@ function IntegrationVisibilitySection({
   }, [projectId])
 
   const setHistoricalDownload = useCallback(async (integration: ConnectedIntegration, downloadHistoricalData: boolean) => {
+    if (downloadHistoricalData && !window.confirm(historicalDownloadWarning(integration))) return
     setBusyIntegrationId(integration.integrationId)
     setError(null)
     try {
@@ -664,6 +674,12 @@ function IntegrationVisibilitySection({
                     <div className="truncate text-xs text-[var(--pear-text-faint)]">
                       {integrationStatusSummary(integration, visibility, visible)}
                     </div>
+                    {!historyDownload && (
+                      <div className="mt-1 flex items-center gap-1 text-[11px] text-[var(--pear-yellow)]">
+                        <AlertTriangle size={11} className="shrink-0" />
+                        <span className="truncate">Historical download can be expensive; selected resources only.</span>
+                      </div>
+                    )}
                     {historyDownload && integration.localMountPaths && integration.localMountPaths.length > 0 && (
                       <div className="truncate text-[11px] text-[var(--pear-text-faint)]">
                         {integration.localMountPaths.join(', ')}
@@ -716,8 +732,8 @@ function IntegrationVisibilitySection({
                         : 'border-[var(--pear-border)] text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]'
                     }`}
                     aria-pressed={historyDownload}
-                    title={historyDownload ? 'Stop downloading historical files' : 'Download historical files'}
-                    aria-label={historyDownload ? 'Stop downloading historical files' : 'Download historical files'}
+                    title={historyDownload ? 'Stop downloading historical files' : 'Download selected historical files'}
+                    aria-label={historyDownload ? 'Stop downloading historical files' : 'Download selected historical files'}
                   >
                     <Database size={13} />
                   </button>
