@@ -207,6 +207,7 @@ test('channel notification targets do not fall back to all project agents', asyn
   ])
 
   await harness.emit(changeEvent('/slack/channels/general/messages/123.json', 'slack'))
+  await waitForSent(harness, 1)
 
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['#triage'])
   assert.deepEqual(harness.listAgentsCalls, [])
@@ -225,6 +226,7 @@ test('offline notification agents fall back to current project agents', async ()
   ])
 
   await harness.emit(changeEvent('/slack/channels/general/messages/123.json', 'slack'))
+  await waitForSent(harness, 2)
 
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'bob'])
   assert.deepEqual(harness.listAgentsCalls, ['project-1'])
@@ -255,6 +257,7 @@ test('integration events watch selected relayfile mount paths', async () => {
   ])
 
   await harness.emit(changeEvent('/slack/channels/C123ABC__proj-cloud/messages/1713220123_001100/meta.json', 'slack'))
+  await waitForSent(harness, 1)
 
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
   assert.match(harness.sent[0].input.text, /Path: \.integrations\/slack\/channels\/C123ABC__proj-cloud\/messages\/1713220123_001100\/meta\.json/u)
@@ -262,6 +265,7 @@ test('integration events watch selected relayfile mount paths', async () => {
 
   harness.sent.splice(0)
   await harness.emit(changeEvent('/slack/channels/C123ABC/messages/1713220124_001100/meta.json', 'slack'))
+  await waitForSent(harness, 1)
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
 })
 
