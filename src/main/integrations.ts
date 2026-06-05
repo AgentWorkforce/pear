@@ -214,7 +214,6 @@ const POLL_INTERVAL_MS = 2_000
 const POLL_TIMEOUT_MS = 5 * 60_000
 const CATALOG_CACHE_MS = 5 * 60_000
 const SYSTEM_MESSAGE_DEBOUNCE_MS = 1_000
-const SYSTEM_MESSAGE_DEDUPE_MS = 30_000
 const SYSTEM_MESSAGE_AGENT_WAIT_TIMEOUT_MS = 8_000
 const SYSTEM_MESSAGE_AGENT_WAIT_INTERVAL_MS = 500
 const LOCAL_MOUNT_CLOUD_HYDRATION_THROTTLE_MS = 30_000
@@ -720,7 +719,10 @@ export class IntegrationsManager {
   private sessionMetadata = new Map<string, SessionMetadata>()
   private pollTimers = new Map<string, NodeJS.Timeout>()
   private systemMessageTimers = new Map<string, NodeJS.Timeout>()
-  private recentlyInjectedSystemMessages = new Map<string, number>()
+  // Last successfully broadcast system message per project. Content-keyed (not
+  // TTL-keyed): an unchanged integrations update is never re-broadcast, no
+  // matter how often reconcile runs; any content change re-sends immediately.
+  private lastBroadcastSystemMessages = new Map<string, string>()
   private catalogCache: IntegrationAdapter[] | null = null
   private catalogFetchedAt = 0
   private localMountCloudHydrationStartedAt = 0
@@ -935,9 +937,11 @@ export class IntegrationsManager {
 
   async startLocalMountDaemon(): Promise<void> {
     await this.syncActiveEventSubscriptions()
-    void this.syncLocalMounts().catch((error) => {
-      console.warn('[integrations] Failed to start local integration mounts:', toErrorMessage(error))
-    })
+    void this.syncLocalMounts()
+      .then(() => this.syncActiveEventSubscriptions())
+      .catch((error) => {
+        console.warn('[integrations] Failed to start local integration mounts:', toErrorMessage(error))
+      })
   }
 
   async notifyAgentState(projectId: string): Promise<void> {
@@ -1793,12 +1797,7 @@ export class IntegrationsManager {
     options: IntegrationSystemMessageOptions = {}
   ): Promise<void> {
     try {
-      const messageKey = `${projectId}\0${message}`
-      const now = Date.now()
-      for (const [key, expiresAt] of Array.from(this.recentlyInjectedSystemMessages.entries())) {
-        if (expiresAt <= now) this.recentlyInjectedSystemMessages.delete(key)
-      }
-      if (this.recentlyInjectedSystemMessages.has(messageKey)) return
+      if (this.lastBroadcastSystemMessages.get(projectId) === message) return
 
       const bridge = brokerManager as unknown as IntegrationSystemMessageBridge
       const agents = await this.listSystemMessageAgents(bridge, projectId, options.waitForAgent === true)
@@ -1817,12 +1816,15 @@ export class IntegrationsManager {
                 system: true
               }
             } as const
-            return bridge.sendMessageAndWaitForDelivery
-              ? bridge.sendMessageAndWaitForDelivery(projectId, input)
-              : bridge.sendMessage(projectId, input)
+            // Delivery confirmations can hang behind inactive PTYs. Integration
+            // updates are setup context, so broker send acceptance is the
+            // reliable boundary for idempotent notification.
+            return bridge.sendMessage(projectId, input)
           })
       )
-      this.recentlyInjectedSystemMessages.set(messageKey, Date.now() + SYSTEM_MESSAGE_DEDUPE_MS)
+      // Recorded only after every send was accepted: a failed broadcast leaves
+      // no signature, so the next reconcile retries the identical message.
+      this.lastBroadcastSystemMessages.set(projectId, message)
     } catch (error) {
       console.warn('[integrations] Failed to inject integration system message:', toErrorMessage(error))
     }
