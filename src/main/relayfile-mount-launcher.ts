@@ -1,11 +1,8 @@
 import { accessSync, constants } from 'node:fs'
 import { join, resolve } from 'node:path'
 import { app } from 'electron'
-import {
-  createDefaultMountLauncher,
-  type MountLauncher,
-  type MountLauncherStart
-} from '@relayfile/sdk'
+import { type MountLauncher, type MountLauncherStart } from '@relayfile/sdk'
+import { createDefaultMountLauncher } from '@relayfile/sdk/mount-launcher'
 
 function canExecute(filePath: string | undefined): filePath is string {
   if (!filePath) return false

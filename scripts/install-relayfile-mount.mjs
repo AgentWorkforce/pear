@@ -3,12 +3,16 @@
 // app (see extraResources in electron-builder.yml) and found at runtime by
 // src/main/relayfile-mount-launcher.ts.
 //
-// Resolution order:
+// Default development resolution order:
 //   1. RELAYFILE_MOUNT_BIN          — explicit path to a prebuilt binary
 //   2. RELAYFILE_DIST_DIR / sibling — local relayfile source checkout (../relayfile/dist)
 //   3. GitHub release download      — relayfile-mount-<platform>-<arch> from the
 //                                     AgentWorkforce/relayfile release matching the
 //                                     installed @relayfile/sdk version
+//
+// Release mode (`--release` or RELAYFILE_MOUNT_INSTALL_SOURCE=release) ignores
+// local binaries and always installs from the matching GitHub release unless
+// the optional build-time check sees that the release binary is already present.
 import { access, chmod, copyFile, mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises'
 import { constants, createWriteStream } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
@@ -17,6 +21,8 @@ import { pipeline } from 'node:stream/promises'
 import { createRequire } from 'node:module'
 
 const optional = process.argv.includes('--optional')
+const releaseMode = process.argv.includes('--release') || process.env.RELAYFILE_MOUNT_INSTALL_SOURCE === 'release'
+const forceReleaseDownload = releaseMode && !optional
 const scriptDir = dirname(fileURLToPath(import.meta.url))
 const pearRoot = resolve(scriptDir, '..')
 const require = createRequire(join(pearRoot, 'package.json'))
@@ -68,15 +74,17 @@ function fail(message) {
   process.exit(1)
 }
 
-async function installFromFile(source) {
+async function installFromFile(source, marker = `local:${source}`) {
   await mkdir(dirname(target), { recursive: true })
   if ((await realpath(source).catch(() => null)) === (await realpath(target).catch(() => null))) {
     await chmod(target, 0o755)
+    await writeFile(versionMarker, `${marker}\n`)
     console.log(`[relayfile-mount] already installed at ${target}`)
     return
   }
   await copyFile(source, target)
   await chmod(target, 0o755)
+  await writeFile(versionMarker, `${marker}\n`)
   console.log(`[relayfile-mount] installed ${source} -> ${target}`)
 }
 
@@ -102,6 +110,35 @@ async function downloadRelease(version) {
   console.log(`[relayfile-mount] installed v${version} -> ${target}`)
 }
 
+async function installedMarker() {
+  return (await canRead(target)) && (await canRead(versionMarker))
+    ? (await readFile(versionMarker, 'utf8')).trim()
+    : null
+}
+
+function requireSdkVersion() {
+  const version = sdkVersion()
+  if (!version) {
+    fail('could not determine @relayfile/sdk version (is it installed?)')
+  }
+  return version
+}
+
+if (releaseMode) {
+  const version = requireSdkVersion()
+  const installedVersion = await installedMarker()
+  if (!forceReleaseDownload && installedVersion === version) {
+    console.log(`[relayfile-mount] v${version} already installed at ${target}`)
+    process.exit(0)
+  }
+  try {
+    await downloadRelease(version)
+  } catch (error) {
+    fail(error instanceof Error ? error.message : String(error))
+  }
+  process.exit(0)
+}
+
 // 1. Explicit binary path
 if (process.env.RELAYFILE_MOUNT_BIN) {
   const source = resolve(process.env.RELAYFILE_MOUNT_BIN)
@@ -123,14 +160,8 @@ if (await canRead(localDist)) {
 }
 
 // 3. GitHub release matching the installed @relayfile/sdk version
-const version = sdkVersion()
-if (!version) {
-  fail('could not determine @relayfile/sdk version (is it installed?)')
-}
-
-const installedVersion = (await canRead(target)) && (await canRead(versionMarker))
-  ? (await readFile(versionMarker, 'utf8')).trim()
-  : null
+const version = requireSdkVersion()
+const installedVersion = await installedMarker()
 if (installedVersion === version) {
   console.log(`[relayfile-mount] v${version} already installed at ${target}`)
   process.exit(0)
