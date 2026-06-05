@@ -1,6 +1,8 @@
-import { accessSync, constants, existsSync, readFileSync } from 'fs'
+import { accessSync, chmodSync, constants, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { execFileSync } from 'child_process'
+import { createHash } from 'node:crypto'
 import { createRequire } from 'node:module'
+import { tmpdir } from 'node:os'
 import { basename, delimiter, dirname, join } from 'path'
 
 const requireForResolve = createRequire(import.meta.url)
@@ -13,14 +15,16 @@ export interface AgentRelayMcpCommandOptions {
   resourcesPath?: string
 }
 
-const PACKAGED_AGENT_RELAY_MCP_LAUNCHER = [
-  'agent-relay-mcp',
-  process.platform === 'win32' ? 'launch.cmd' : 'launch.sh'
-]
+function packagedAgentRelayMcpLauncherParts(): string[] {
+  return [
+    'agent-relay-mcp',
+    process.platform === 'win32' ? 'launch.cmd' : 'launch.sh'
+  ]
+}
 
 export function canExecute(filePath: string): boolean {
   try {
-    accessSync(filePath, constants.X_OK)
+    accessSync(filePath, process.platform === 'win32' ? constants.F_OK : constants.X_OK)
     return true
   } catch {
     return false
@@ -97,7 +101,7 @@ function resolvePackagedAgentRelayMcpLauncher(resourcesPath?: string): string {
     throw new Error('Unable to resolve packaged Agent Relay MCP resources path')
   }
 
-  const candidate = join(resourcesPath, ...PACKAGED_AGENT_RELAY_MCP_LAUNCHER)
+  const candidate = join(resourcesPath, ...packagedAgentRelayMcpLauncherParts())
   if (hasAsarPathSegment(candidate)) {
     throw new Error(`Packaged Agent Relay MCP launcher resolved inside app.asar: ${candidate}`)
   }
@@ -105,6 +109,58 @@ function resolvePackagedAgentRelayMcpLauncher(resourcesPath?: string): string {
     throw new Error(`Packaged Agent Relay MCP launcher is missing or not executable: ${candidate}`)
   }
   return candidate
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'"'"'`)}'`
+}
+
+function windowsCmdQuote(value: string): string {
+  return `"${value.replace(/"/g, '""').replace(/%/g, '%%')}"`
+}
+
+function packagedMcpShimRoots(): string[] {
+  // Use /tmp on POSIX so the MCP command handed to Codex has no spaces even
+  // when the app is installed as "Pear by Agent Relay.app".
+  if (process.platform !== 'win32') return ['/tmp']
+
+  return [
+    tmpdir(),
+    process.env.PUBLIC || 'C:\\Users\\Public',
+    process.env.ProgramData || 'C:\\ProgramData'
+  ].filter((candidate, index, candidates) => candidate && !/\s/.test(candidate) && candidates.indexOf(candidate) === index)
+}
+
+function materializePackagedAgentRelayMcpShim(launcherPath: string): string {
+  if (!/\s/.test(launcherPath)) return launcherPath
+
+  const hash = createHash('sha256').update(launcherPath).digest('hex').slice(0, 16)
+  const content = process.platform === 'win32'
+    ? `@echo off\r\n${windowsCmdQuote(launcherPath)} %*\r\n`
+    : `#!/bin/sh\nexec ${shellQuote(launcherPath)} "$@"\n`
+  const errors: string[] = []
+
+  for (const root of packagedMcpShimRoots()) {
+    const shimDir = join(root, 'pear-agent-relay-mcp', hash)
+    const shimPath = join(shimDir, process.platform === 'win32' ? 'launch.cmd' : 'launch.sh')
+    if (/\s/.test(shimPath)) continue
+
+    try {
+      mkdirSync(shimDir, { recursive: true })
+      if (!existsSync(shimPath) || readFileSync(shimPath, 'utf8') !== content) {
+        writeFileSync(shimPath, content, 'utf8')
+      }
+      if (process.platform !== 'win32') chmodSync(shimPath, 0o755)
+      if (!canExecute(shimPath)) {
+        throw new Error(`shim is missing or not executable`)
+      }
+      return shimPath
+    } catch (err) {
+      errors.push(`${shimPath}: ${err instanceof Error ? err.message : String(err)}`)
+    }
+  }
+
+  throw new Error(`Unable to create whitespace-free packaged Agent Relay MCP launcher shim for ${launcherPath}${errors.length ? `: ${errors.join('; ')}` : ''}`)
 }
 
 function resolveBundledAgentRelayMcpScript(): string | undefined {
@@ -130,7 +186,7 @@ export function resolveAgentRelayMcpCommand(options: AgentRelayMcpCommandOptions
   }
 
   if (options.isPackaged) {
-    return assertNoAsarMcpCommand(resolvePackagedAgentRelayMcpLauncher(options.resourcesPath))
+    return assertNoAsarMcpCommand(materializePackagedAgentRelayMcpShim(resolvePackagedAgentRelayMcpLauncher(options.resourcesPath)))
   }
 
   const bundledMcpScript = resolveBundledAgentRelayMcpScript()
