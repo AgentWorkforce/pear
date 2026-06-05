@@ -1,0 +1,87 @@
+name: Mirror release to public download repo
+
+# Fires when you click "Publish" on the draft GitHub Release that the
+# "Release (macOS)" workflow created. Copies the notarized .dmg into the PUBLIC
+# AgentWorkforce/pear-releases repo so relay/web can hand out an anonymous,
+# token-free download link: https://origin.agentrelay.net/pear/download
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: read # read the asset from THIS (private) repo's release
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the DMG from the published release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${{ github.event.release.tag_name }}" \
+            --repo "${{ github.repository }}" \
+            --pattern '*.dmg' \
+            --dir dist
+          # Copy to a stable filename so the public "latest/download" URL never
+          # changes, even though the source artifact is version-stamped.
+          src="$(ls dist/*.dmg | head -n1)"
+          cp "$src" dist/Pear-arm64.dmg
+
+      - name: Publish to the public releases repo
+        env:
+          # PAT or fine-grained token with contents:write on
+          # AgentWorkforce/pear-releases (GITHUB_TOKEN only scopes to this repo).
+          GH_TOKEN: ${{ secrets.PEAR_RELEASES_TOKEN }}
+        run: |
+          TAG="${{ github.event.release.tag_name }}"
+          # Create the public release if it doesn't exist yet, then (re)upload the
+          # asset. A full (non-draft, non-prerelease) release is required for the
+          # public "releases/latest/download/..." URL to resolve.
+          gh release view "$TAG" --repo AgentWorkforce/pear-releases >/dev/null 2>&1 \
+            || gh release create "$TAG" \
+                 --repo AgentWorkforce/pear-releases \
+                 --title "$TAG" \
+                 --notes "Pear ${TAG} — macOS (Apple Silicon)."
+          gh release upload "$TAG" dist/Pear-arm64.dmg \
+            --repo AgentWorkforce/pear-releases --clobber
+
+      - name: Regenerate the README release index
+        env:
+          GH_TOKEN: ${{ secrets.PEAR_RELEASES_TOKEN }}
+        run: |
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/AgentWorkforce/pear-releases.git" releases-repo
+          cd releases-repo
+
+          # Build the table rows from every published release, newest first.
+          {
+            echo '| Version | Date | Download |'
+            echo '| --- | --- | --- |'
+            gh release list --repo AgentWorkforce/pear-releases \
+              --exclude-drafts --limit 200 \
+              --json tagName,publishedAt \
+              --jq 'sort_by(.publishedAt) | reverse | .[] | "| **\(.tagName)** | \(.publishedAt[0:10]) | [Pear-arm64.dmg](https://github.com/AgentWorkforce/pear-releases/releases/download/\(.tagName)/Pear-arm64.dmg) |"'
+          } > /tmp/releases-table.md
+
+          # Splice the table between the RELEASES markers, leaving the rest of
+          # the README untouched.
+          awk '
+            /<!-- RELEASES:START -->/ {
+              print
+              while ((getline line < "/tmp/releases-table.md") > 0) print line
+              skip = 1
+              next
+            }
+            /<!-- RELEASES:END -->/ { skip = 0 }
+            !skip { print }
+          ' README.md > README.new && mv README.new README.md
+
+          if git diff --quiet README.md; then
+            echo "README already up to date."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add README.md
+          git commit -m "docs: update release index for ${{ github.event.release.tag_name }}"
+          git push
