@@ -1,5 +1,5 @@
 import { existsSync, watch, type FSWatcher } from 'node:fs'
-import { appendFile, mkdir, readFile, stat } from 'node:fs/promises'
+import { appendFile, mkdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import {
@@ -7,6 +7,7 @@ import {
   RelayFileSync,
   RelayfileSetup,
   type ChangeEvent,
+  type FileReadResponse,
   type FilesystemEvent,
   type Subscription
 } from '@relayfile/sdk'
@@ -25,13 +26,13 @@ const REPLAY_SKEW_TOLERANCE_MS = 15 * 60_000
 const INTEGRATION_EVENT_LOG_PATH = join(homedir(), '.agentworkforce', 'pear', 'integration-events.log')
 const AGGREGATED_WARNING_REPEAT_EVERY = 25
 const MAX_AGGREGATED_WARNING_KEYS = 256
-const MAX_INLINE_EVENT_TEXT_CHARS = 4_000
 const SLACK_LIVE_EVENT_WINDOW_MS = 30 * 60 * 1_000
 const SLACK_DM_EVENT_GLOBS = [
   '/slack/channels/D*/**',
   '/slack/dms/*/**',
   '/slack/users/*/messages/**'
 ]
+const MAX_EVENT_CONTEXT_PREVIEW_BYTES = 32 * 1024
 
 type IntegrationEventCounterName = 'eventsReceived' | 'eventsInjected' | 'eventsCoalesced' | 'eventsDropped'
 type IntegrationEventGaugeName = 'queueDepth' | 'mountCount'
@@ -60,6 +61,16 @@ type ProjectSubscription = {
   subscriptions: Subscription[]
   signature: string
 }
+
+type EventContextPreview = {
+  path: string
+  kind: 'text' | 'binary' | 'too-large'
+  content: string
+  size: number
+  contentType?: string
+}
+
+type EventContextPreviewMetadata = Omit<EventContextPreview, 'content'>
 
 type LocalMountSubscription = Subscription & {
   localRoots: string[]
@@ -105,6 +116,7 @@ type RelayfileEventClient = {
       onQueueDepth?: (depth: number) => void
     }
   ): Subscription
+  readFile?(workspaceId: string, path: string): Promise<FileReadResponse>
 }
 
 type RelayfileWorkspaceHandle = {
@@ -194,11 +206,6 @@ export function resetIntegrationEventTelemetryForTests(): void {
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
-}
-
-function truncateForSystemMessage(text: string, maxChars = MAX_INLINE_EVENT_TEXT_CHARS): string {
-  const normalized = text.trim()
-  return normalized.length > maxChars ? `${normalized.slice(0, maxChars)}...` : normalized
 }
 
 function isUnauthorizedError(error: unknown): boolean {
@@ -1040,6 +1047,69 @@ function eventSummaryValue(value: unknown): string | undefined {
   return undefined
 }
 
+function integrationEventMetadata(event: ChangeEvent): Record<string, unknown> {
+  const summary = isRecord(event.summary) ? event.summary : {}
+  const resource = isRecord(event.resource) ? event.resource : {}
+  const actor = isRecord(summary.actor)
+    ? eventSummaryValue(summary.actor.displayName) || eventSummaryValue(summary.actor.id)
+    : undefined
+  return {
+    provider: eventSummaryValue(resource.provider),
+    resourcePath: eventSummaryValue(resource.path),
+    resourceId: eventSummaryValue(resource.id),
+    title: eventSummaryValue(summary.title),
+    status: eventSummaryValue(summary.status),
+    actor
+  }
+}
+
+function eventContextPreviewFromFile(file: FileReadResponse): EventContextPreview {
+  const rawContent = file.content || ''
+  const buffer = file.encoding === 'base64'
+    ? Buffer.from(rawContent, 'base64')
+    : Buffer.from(rawContent, 'utf8')
+  const size = buffer.byteLength
+
+  // The current Relayfile SDK readFile call returns the full file; this cap only
+  // bounds what Pear injects into agent context after the targeted read.
+  if (size > MAX_EVENT_CONTEXT_PREVIEW_BYTES) {
+    return {
+      path: file.path,
+      kind: 'too-large',
+      content: '',
+      size,
+      contentType: file.contentType
+    }
+  }
+
+  if (buffer.includes(0)) {
+    return {
+      path: file.path,
+      kind: 'binary',
+      content: '',
+      size,
+      contentType: file.contentType
+    }
+  }
+
+  return {
+    path: file.path,
+    kind: 'text',
+    content: buffer.toString('utf8'),
+    size,
+    contentType: file.contentType
+  }
+}
+
+function eventContextPreviewMetadata(preview: EventContextPreview): EventContextPreviewMetadata {
+  return {
+    path: preview.path,
+    kind: preview.kind,
+    size: preview.size,
+    contentType: preview.contentType
+  }
+}
+
 function shouldNotifyRelayfilePath(pathValue: string): boolean {
   const path = pathValue.trim()
   if (!path || !path.startsWith('/')) return false
@@ -1093,38 +1163,11 @@ function repeatedSlackRoot(path: string): boolean {
   return (matches?.length || 0) > 1
 }
 
-async function readLocalEventRecord(event: ChangeEvent, localMountWorkspaceId: string): Promise<unknown | null> {
-  const localPath = localPathForRemoteRoot(localMountWorkspaceId, event.resource.path)
-  const raw = await readFile(localPath, 'utf8').catch(() => null)
-  if (!raw) return null
-  try {
-    return JSON.parse(raw)
-  } catch {
-    return null
-  }
-}
-
-function recordWebhookReceivedAtMs(record: unknown): number | null {
-  if (!isRecord(record)) return null
-  const payload = isRecord(record.payload) ? record.payload : record
-  const webhook = isRecord(payload._webhook) ? payload._webhook : undefined
-  const receivedAt = webhook?.receivedAt
-  if (typeof receivedAt !== 'string') return null
-  const parsed = Date.parse(receivedAt)
-  return Number.isFinite(parsed) ? parsed : null
-}
-
-async function shouldNotifySlackMessageChange(event: ChangeEvent, localMountWorkspaceId: string): Promise<boolean> {
+function shouldNotifySlackMessageChange(event: ChangeEvent): boolean {
   const path = event.resource.path
   if (repeatedSlackRoot(path)) return false
 
-  const record = await readLocalEventRecord(event, localMountWorkspaceId)
   const occurredAtMs = Date.parse(event.occurredAt)
-  const webhookReceivedAtMs = recordWebhookReceivedAtMs(record)
-  if (webhookReceivedAtMs !== null && Number.isFinite(occurredAtMs)) {
-    return Math.abs(occurredAtMs - webhookReceivedAtMs) <= SLACK_LIVE_EVENT_WINDOW_MS
-  }
-
   const slackTsMs = slackEventTimestampMs(path)
   if (slackTsMs !== null && Number.isFinite(occurredAtMs)) {
     return Math.abs(occurredAtMs - slackTsMs) <= SLACK_LIVE_EVENT_WINDOW_MS
@@ -1133,11 +1176,11 @@ async function shouldNotifySlackMessageChange(event: ChangeEvent, localMountWork
   return true
 }
 
-async function shouldNotifyRelayfileChange(event: ChangeEvent, localMountWorkspaceId: string): Promise<boolean> {
+function shouldNotifyRelayfileChange(event: ChangeEvent): boolean {
   if (eventOrigin(event) === 'agent_write') return false
   if (!shouldNotifyRelayfilePath(event.resource.path)) return false
   if (event.resource.provider === 'slack' && slackEventContextPath(event.resource.path)) {
-    return shouldNotifySlackMessageChange(event, localMountWorkspaceId)
+    return shouldNotifySlackMessageChange(event)
   }
   return true
 }
@@ -1146,52 +1189,10 @@ function slackEventContextPath(path: string): boolean {
   return /^\/slack\/(?:channels|dms|users)\/[^/]+\/(?:messages|threads)\/.+\.json$/u.test(path)
 }
 
-function slackRecordContextLines(record: unknown): string[] {
-  if (!isRecord(record)) return []
-  const payload = isRecord(record.payload) ? record.payload : record
-  const rawEvent = isRecord(payload.raw_event) ? payload.raw_event : undefined
-  const text = eventSummaryValue(payload.text) || eventSummaryValue(rawEvent?.text)
-  const user = eventSummaryValue(payload.user) || eventSummaryValue(rawEvent?.user)
-  const channel = eventSummaryValue(payload.channel) || eventSummaryValue(payload.channelId) || eventSummaryValue(rawEvent?.channel)
-  const threadTs = eventSummaryValue(payload.thread_ts) || eventSummaryValue(payload.threadTs) || eventSummaryValue(rawEvent?.thread_ts)
-  const ts = eventSummaryValue(payload.ts) || eventSummaryValue(payload.replyTs) || eventSummaryValue(rawEvent?.ts)
-
-  const lines: string[] = []
-  if (text) lines.push(`Slack text: ${truncateForSystemMessage(text)}`)
-  if (channel) lines.push(`Slack channel: ${channel}`)
-  if (threadTs) lines.push(`Slack thread ts: ${threadTs}`)
-  if (ts) lines.push(`Slack message ts: ${ts}`)
-  if (user) lines.push(`Slack user: ${user}`)
-  return lines
-}
-
-async function localEventContextLines(event: ChangeEvent, localMountWorkspaceId: string): Promise<string[]> {
-  const path = event.resource.path
-  if (pathSegments(path).some((segment) => segment === '.' || segment === '..')) return []
-  return slackRecordContextLines(await readLocalEventRecord(event, localMountWorkspaceId))
-}
-
-async function expandedEventContextLines(event: ChangeEvent): Promise<string[]> {
-  try {
-    const expanded = await event.expand('full')
-    if (!isRecord(expanded)) return []
-    const data = isRecord(expanded.data) ? expanded.data : expanded
-    return slackRecordContextLines(data)
-  } catch {
-    return []
-  }
-}
-
-async function eventContextLines(event: ChangeEvent, localMountWorkspaceId: string): Promise<string[]> {
-  const provider = eventSummaryValue(event.resource.provider)
-  const path = event.resource.path
-  if (provider !== 'slack' || !slackEventContextPath(path)) return []
-
-  const expandedLines = await expandedEventContextLines(event)
-  return expandedLines.length > 0 ? expandedLines : localEventContextLines(event, localMountWorkspaceId)
-}
-
-function formatIntegrationEventMessage(event: ChangeEvent, contextLines: string[] = []): string {
+function formatIntegrationEventMessage(
+  event: ChangeEvent,
+  contextPreview?: EventContextPreview
+): string {
   const summary = isRecord(event.summary) ? event.summary : {}
   const resource = isRecord(event.resource) ? event.resource : {}
   const provider = eventSummaryValue(resource.provider) || 'integration'
@@ -1224,10 +1225,21 @@ function formatIntegrationEventMessage(event: ChangeEvent, contextLines: string[
   if (actor) lines.push(`Actor: ${actor}`)
   if (fieldsChanged) lines.push(`Fields changed: ${fieldsChanged}`)
   if (labels) lines.push(`Labels: ${labels}`)
-  lines.push(...contextLines)
+  if (relayfilePath) {
+    lines.push(`Targeted context path: ${relayfilePath}`)
+  }
+  if (contextPreview) {
+    if (contextPreview.kind === 'text') {
+      lines.push('Inline context preview:', contextPreview.content)
+    } else if (contextPreview.kind === 'too-large') {
+      lines.push(`Context preview skipped: ${contextPreview.size} bytes exceeds the injection preview cap.`)
+    } else {
+      lines.push(`Context preview skipped: binary content (${contextPreview.size} bytes).`)
+    }
+  }
 
   lines.push(
-    'Handle this like an incoming user-relevant integration update. The Relayfile path above identifies the changed record; use any inline event context first, then read the matching .integrations path for more detail when available. Use the existing writeback or messaging path when a response is needed.',
+    'Handle this like an incoming user-relevant integration update. The inline context preview, Relayfile path, and structured event data identify the changed record. Use the matching .integrations path only when historical download is enabled. Use the existing writeback or messaging path when a response is needed.',
     '</integration-event>'
   )
   return lines.join('\n')
@@ -1400,13 +1412,38 @@ export class IntegrationEventBridge {
     await Promise.all(Array.from(this.subscriptions.keys()).map((projectId) => this.close(projectId)))
   }
 
+  private async readEventContextPreview(projectId: string, event: ChangeEvent): Promise<EventContextPreview | undefined> {
+    if (event.type === 'file.deleted') return undefined
+    const path = eventSummaryValue(event.resource.path)
+    if (!path) return undefined
+
+    try {
+      const handle = await this.getWorkspaceHandle()
+      const client = handle.client()
+      if (typeof client.readFile !== 'function') return undefined
+      return eventContextPreviewFromFile(await client.readFile(handle.workspaceId, path))
+    } catch (error) {
+      warnIntegrationEventAggregated(
+        `event context read failed:${projectId}`,
+        'event context read failed',
+        {
+          projectId,
+          eventId: event.id,
+          path,
+          error: toErrorMessage(error)
+        }
+      )
+      return undefined
+    }
+  }
+
   private async injectEvent(
     projectId: string,
     event: ChangeEvent,
     specs: SubscriptionSpec[],
     options: EventInjectionOptions
   ): Promise<void> {
-    if (!await shouldNotifyRelayfileChange(event, options.localMountWorkspaceId)) {
+    if (!shouldNotifyRelayfileChange(event)) {
       incrementIntegrationEventCounter(projectId, 'eventsDropped')
       logIntegrationEvent('skipped filtered path', {
         projectId,
@@ -1490,7 +1527,10 @@ export class IntegrationEventBridge {
       })
       return
     }
-    const contextLines = await eventContextLines(event, options.localMountWorkspaceId)
+
+    const eventMetadata = integrationEventMetadata(event)
+    const contextPreview = await this.readEventContextPreview(projectId, event)
+    const contextPreviewData = contextPreview ? eventContextPreviewMetadata(contextPreview) : undefined
     logIntegrationEvent('injecting', {
       projectId,
       eventId: event.id,
@@ -1502,7 +1542,7 @@ export class IntegrationEventBridge {
         const input = {
           to: recipient,
           from: 'integration',
-          text: formatIntegrationEventMessage(event, contextLines),
+          text: formatIntegrationEventMessage(event, contextPreview),
           priority: 0,
           mode: 'steer',
           data: {
@@ -1512,7 +1552,9 @@ export class IntegrationEventBridge {
             eventType: event.type,
             occurredAt: event.occurredAt,
             resource: isRecord(event.resource) ? { ...event.resource } : undefined,
-            path: event.resource.path
+            path: event.resource.path,
+            contextPreview: contextPreviewData,
+            ...eventMetadata
           }
         } as const
         return bridge.sendMessageAndWaitForDelivery

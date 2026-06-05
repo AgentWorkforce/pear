@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { BrowserWindow, shell } from 'electron'
-import type { TreeResponse, WorkspaceHandle } from '@relayfile/sdk'
+import type { FileReadResponse, TreeResponse, WorkspaceHandle } from '@relayfile/sdk'
 import { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, getApiUrl, resolveCloudAuth } from './auth'
 import { brokerManager } from './broker'
 import { cloudAgentManager } from './cloud-agent'
@@ -15,6 +15,7 @@ import {
 import {
   canListRemoteDirectoryForMountPaths,
   canShowRemoteDirectoryEntryForMountPaths,
+  isRelayfilePathWithinRoot,
   normalizeRemoteDirectoryPath,
   remotePathName
 } from './integration-remote-paths'
@@ -212,6 +213,7 @@ const SYSTEM_MESSAGE_DEBOUNCE_MS = 1_000
 const LOCAL_MOUNT_CLOUD_HYDRATION_THROTTLE_MS = 30_000
 const CATALOG_PATH = '/api/v1/integrations/catalog'
 const MAX_REMOTE_DIRECTORY_ENTRIES = 5_000
+const MAX_REMOTE_FILE_PREVIEW_BYTES = 1024 * 1024
 
 // Only providers currently active in ../cloud are surfaced. This mirrors the
 // non-deprecated relayfile providers in
@@ -658,6 +660,33 @@ function getPayloadMessage(payload: unknown, fallback: string): string {
   return fallback
 }
 
+function remoteFileReadToPreview(file: FileReadResponse): filesystem.FilePreview {
+  const rawContent = file.content || ''
+  const buffer = file.encoding === 'base64'
+    ? Buffer.from(rawContent, 'base64')
+    : Buffer.from(rawContent, 'utf8')
+  const size = buffer.byteLength
+  if (size > MAX_REMOTE_FILE_PREVIEW_BYTES) {
+    return {
+      kind: 'too-large',
+      content: '',
+      size
+    }
+  }
+  if (buffer.includes(0)) {
+    return {
+      kind: 'binary',
+      content: '',
+      size
+    }
+  }
+  return {
+    kind: 'text',
+    content: buffer.toString('utf8'),
+    size
+  }
+}
+
 function collectScopeLabels(scope: Record<string, unknown>): string[] {
   const labels: string[] = []
   const visit = (value: unknown): void => {
@@ -768,6 +797,21 @@ export class IntegrationsManager {
   async readMountPreview(projectId: string, integrationId: string, filePath: string): Promise<filesystem.FilePreview> {
     const resolvedPath = await this.resolveIntegrationMountPath(projectId, integrationId, filePath)
     return filesystem.readTextPreview(resolvedPath)
+  }
+
+  async readRemoteFile(projectId: string, remotePath: string): Promise<filesystem.FilePreview> {
+    if (!this.findProject(projectId)) throw new Error(`Project not found: ${projectId}`)
+    const path = normalizeRemoteDirectoryPath(remotePath)
+    if (!path || path === '/') throw new Error('Integration remote file path is required')
+    const mountPaths = this.listableRemoteMountPaths(projectId)
+    if (!mountPaths.some((mountPath) => isRelayfilePathWithinRoot(mountPath, path))) {
+      throw new Error('Integration remote file is outside this project integration scope')
+    }
+
+    return this.withWorkspaceHandle(async (handle) => {
+      const file = await handle.client().readFile(handle.workspaceId, path)
+      return remoteFileReadToPreview(file)
+    })
   }
 
   async listRemoteDirectory(projectId: string, remotePath: string): Promise<filesystem.ExplorerEntry[]> {

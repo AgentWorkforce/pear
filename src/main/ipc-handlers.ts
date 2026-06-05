@@ -590,6 +590,10 @@ export function registerIpcHandlers(): void {
     return integrationsManager.readMountPreview(projectId, integrationId, filePath)
   })
 
+  ipcMain.handle('integrations:read-remote-file', async (_, projectId: string, remotePath: string) => {
+    return integrationsManager.readRemoteFile(projectId, remotePath)
+  })
+
   ipcMain.handle('integrations:list-options', async (_, projectId: string, provider: string, resource: string) => {
     return integrationsManager.listOptions(projectId, provider, resource)
   })

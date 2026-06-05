@@ -380,6 +380,8 @@ const api = {
       invoke<FsDirEntry[]>('integrations:list-mount-dir', projectId, integrationId, dirPath),
     listRemoteDir: (projectId: string, remotePath: string) =>
       invoke<FsDirEntry[]>('integrations:list-remote-dir', projectId, remotePath),
+    readRemoteFile: (projectId: string, remotePath: string) =>
+      invoke<FsReadPreviewResult>('integrations:read-remote-file', projectId, remotePath),
     readMountPreview: (projectId: string, integrationId: string, filePath: string) =>
       invoke<FsReadPreviewResult>('integrations:read-mount-preview', projectId, integrationId, filePath),
     listOptions: (projectId: string, provider: string, resource: string) =>
