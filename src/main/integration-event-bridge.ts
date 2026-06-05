@@ -1,7 +1,7 @@
 import { existsSync, watch, type FSWatcher } from 'node:fs'
 import { appendFile, mkdir, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join, relative, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import {
   RelayFileClient,
   RelayFileSync,
@@ -16,6 +16,7 @@ const INTEGRATION_EVENT_AGENT_NAME = 'pear-integration-events'
 const INTEGRATION_EVENT_SCOPES = ['relayfile:fs:read:/**']
 const PROJECT_INTEGRATIONS_LINK_NAME = '.integrations'
 const RECENT_INJECTION_TTL_MS = 10_000
+const RECENT_LOGICAL_CHANGE_TTL_MS = 10 * 60_000
 const INTEGRATION_EVENT_LOG_PATH = join(homedir(), '.agentworkforce', 'pear', 'integration-events.log')
 
 type WatchRegistration = {
@@ -317,10 +318,13 @@ function filesystemEventToChangeEvent(
       path,
       provider,
       kind: 'record',
-      id: resourceId
+      id: resourceId,
+      origin: event.origin,
+      revision: event.revision
     },
     summary,
     digest: event.revision ? `revision:${event.revision}` : undefined,
+    origin: event.origin,
     expand: async (level = 'summary') => {
       if (level === 'summary') {
         return {
@@ -556,6 +560,37 @@ function remotePathForLocalPath(localRoot: string, remoteRoot: string, localPath
   return `${remoteRoot.replace(/\/+$/u, '')}/${normalizedRelative}`
 }
 
+function normalizeRelayfilePath(path: string): string {
+  const segments = pathSegments(path)
+  return segments.length > 0 ? `/${segments.join('/')}` : '/'
+}
+
+function localPathForRemotePathInsideRoot(localRoot: string, remoteRoot: string, remotePath: string): string {
+  const tail = pathTailAfterMount(remotePath, remoteRoot)
+  return tail === '/' ? resolve(localRoot) : join(resolve(localRoot), ...pathSegments(tail))
+}
+
+export function localWatchEventPathsForFilename(
+  localRoot: string,
+  remoteRoot: string,
+  filename: string
+): { localPath: string; remotePath: string } | null {
+  const trimmed = filename.trim()
+  if (!trimmed) return null
+
+  const asRemotePath = normalizeRelayfilePath(trimmed)
+  if (pathIsInsideMount(asRemotePath, remoteRoot)) {
+    return {
+      localPath: localPathForRemotePathInsideRoot(localRoot, remoteRoot, asRemotePath),
+      remotePath: asRemotePath
+    }
+  }
+
+  const localPath = isAbsolute(trimmed) ? resolve(trimmed) : join(localRoot, trimmed)
+  const remotePath = remotePathForLocalPath(localRoot, remoteRoot, localPath)
+  return remotePath ? { localPath, remotePath } : null
+}
+
 async function fileEventForLocalPath(
   workspaceId: string,
   localPath: string,
@@ -569,6 +604,7 @@ async function fileEventForLocalPath(
     eventId: `local:${workspaceId}:${remotePath}:${Date.now()}:${localEventSequence}`,
     type: stats ? (eventType === 'rename' ? 'file.created' : 'file.updated') : 'file.deleted',
     path: remotePath,
+    origin: 'system',
     revision: stats ? `${Math.round(stats.mtimeMs)}:${stats.size}` : '',
     timestamp: new Date().toISOString()
   }
@@ -591,9 +627,10 @@ function watchLocalMounts(
   const watchers: FSWatcher[] = []
   const pendingByPath = new Map<string, ReturnType<typeof setTimeout>>()
 
-  const schedule = (localRoot: string, remoteRoot: string, localPath: string, eventType: string): void => {
-    const remotePath = remotePathForLocalPath(localRoot, remoteRoot, localPath)
-    if (!remotePath || !shouldNotifyRelayfilePath(remotePath)) return
+  const schedule = (localRoot: string, remoteRoot: string, filename: string, eventType: string): void => {
+    const eventPaths = localWatchEventPathsForFilename(localRoot, remoteRoot, filename)
+    if (!eventPaths || !shouldNotifyRelayfilePath(eventPaths.remotePath)) return
+    const { localPath, remotePath } = eventPaths
     if (!globs.some((glob) => globMatchesPath(glob, remotePath))) return
 
     const existing = pendingByPath.get(remotePath)
@@ -623,7 +660,7 @@ function watchLocalMounts(
     try {
       const watcher = watch(localRoot, { recursive: true }, (eventType, filename) => {
         if (!active || !filename) return
-        schedule(localRoot, remoteRoot, join(localRoot, String(filename)), eventType)
+        schedule(localRoot, remoteRoot, String(filename), eventType)
       })
       watcher.on('error', (error) => {
         console.warn('[integration-events] Local mount watcher error:', toErrorMessage(error))
@@ -684,6 +721,26 @@ function injectionDeduplicationKey(projectId: string, event: ChangeEvent, matche
   return `${projectId}:${event.type}:${path}`
 }
 
+function eventRecordValue(event: ChangeEvent, key: string): unknown {
+  const resource = isRecord(event.resource) ? event.resource : {}
+  const summary = isRecord(event.summary) ? event.summary : {}
+  return (event as Record<string, unknown>)[key] ?? resource[key] ?? summary[key]
+}
+
+function eventOrigin(event: ChangeEvent): string | null {
+  const origin = eventRecordValue(event, 'origin')
+  return typeof origin === 'string' && origin.trim() ? origin.trim() : null
+}
+
+function eventChangeFingerprint(event: ChangeEvent): string | null {
+  const digest = eventRecordValue(event, 'digest')
+  const revision = eventRecordValue(event, 'revision')
+  const contentHash = eventRecordValue(event, 'contentHash')
+  const fingerprint = [digest, revision, contentHash]
+    .find((value) => typeof value === 'string' && value.trim().length > 0)
+  return typeof fingerprint === 'string' ? fingerprint.trim() : null
+}
+
 function logIntegrationEvent(message: string, metadata: Record<string, unknown>): void {
   console.info(`[integration-events] ${message}`, metadata)
   if (isTestProcess()) return
@@ -740,6 +797,8 @@ function shouldNotifyRelayfilePath(pathValue: string): boolean {
 
   const leaf = path.split('/').pop() || ''
   if (
+    leaf.startsWith('.') ||
+    leaf.includes('.tmp-') ||
     leaf === 'LAYOUT.md' ||
     leaf === '_index.json' ||
     leaf === '.schema.json' ||
@@ -758,11 +817,24 @@ function shouldNotifyRelayfilePath(pathValue: string): boolean {
   // Local writeback drafts are commands from an agent, not provider-originated
   // updates. Notifying agents about their own draft files creates loops.
   if (/\/(?:draft[@-][^/]*|create)\.json$/u.test(path)) return false
+  if (isLikelyLocalWritebackCommandPath(path)) return false
 
   return true
 }
 
+function isLikelyLocalWritebackCommandPath(path: string): boolean {
+  const segments = pathSegments(path)
+  const leaf = segments.at(-1) || ''
+  const stem = leaf.replace(/\.json$/u, '')
+  const provider = segments[0]
+  if (provider !== 'slack' && provider !== 'chat') return false
+  if (!leaf.endsWith('.json') || leaf === 'meta.json') return false
+  if (!segments.some((segment) => segment === 'messages' || segment === 'replies')) return false
+  return !/^\d+(?:[._-]\d+)*$/u.test(stem)
+}
+
 function shouldNotifyRelayfileChange(event: ChangeEvent): boolean {
+  if (eventOrigin(event) === 'agent_write') return false
   return shouldNotifyRelayfilePath(event.resource.path)
 }
 
@@ -957,12 +1029,14 @@ export class IntegrationEventBridge {
     }
 
     const duplicateKey = injectionDeduplicationKey(projectId, event, matchedSpecs)
-    if (this.wasRecentlyInjected(duplicateKey)) {
+    const fingerprint = eventChangeFingerprint(event)
+    const recentKey = fingerprint ? `${duplicateKey}:change:${fingerprint}` : duplicateKey
+    if (this.wasRecentlyInjected(recentKey, fingerprint ? RECENT_LOGICAL_CHANGE_TTL_MS : RECENT_INJECTION_TTL_MS)) {
       logIntegrationEvent('skipped duplicate path', {
         projectId,
         eventId: event.id,
         path: event.resource.path,
-        duplicateKey
+        duplicateKey: recentKey
       })
       return
     }
@@ -1024,13 +1098,13 @@ export class IntegrationEventBridge {
     )
   }
 
-  private wasRecentlyInjected(key: string): boolean {
+  private wasRecentlyInjected(key: string, ttlMs = RECENT_INJECTION_TTL_MS): boolean {
     const now = Date.now()
     for (const [entryKey, expiresAt] of this.recentInjections.entries()) {
       if (expiresAt <= now) this.recentInjections.delete(entryKey)
     }
     if (this.recentInjections.has(key)) return true
-    this.recentInjections.set(key, now + RECENT_INJECTION_TTL_MS)
+    this.recentInjections.set(key, now + ttlMs)
     return false
   }
 
