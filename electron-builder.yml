@@ -1,6 +1,7 @@
 appId: com.agentrelay.pear
 productName: Pear by Agent Relay
 copyright: Copyright © 2026 Agent Workforce Incorporated
+extends: electron-builder.mcp-resources.yml
 
 directories:
   buildResources: build
@@ -13,12 +14,6 @@ files:
   - package.json
   - node_modules/**
   - '!node_modules/.cache/**'
-
-extraResources:
-  - from: resources/app-icon.png
-    to: app-icon.png
-  - from: bin/relayfile-mount
-    to: bin/relayfile-mount
 
 asarUnpack:
   - resources/**
