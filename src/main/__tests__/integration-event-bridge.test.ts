@@ -591,9 +591,13 @@ test('integration event targeted context read is skipped for deleted files', asy
     ])
   })
 
+  const deletedEvent = changeEvent('/slack/channels/C123ABC/messages/1780668000_000000/meta.json', 'slack')
   await harness.emit({
-    ...changeEvent('/slack/channels/C123ABC/messages/1780668000_000000/meta.json', 'slack'),
-    type: 'file.deleted'
+    ...deletedEvent,
+    resource: {
+      ...deletedEvent.resource,
+      filesystemEventType: 'file.deleted'
+    }
   })
   await waitForSent(harness, 1)
 

@@ -448,7 +448,8 @@ function filesystemEventToChangeEvent(
       kind: 'record',
       id: resourceId,
       origin: event.origin,
-      revision: event.revision
+      revision: event.revision,
+      filesystemEventType: event.type
     },
     summary,
     digest: event.revision ? `revision:${event.revision}` : undefined,
@@ -1176,6 +1177,11 @@ function shouldNotifySlackMessageChange(event: ChangeEvent): boolean {
   return true
 }
 
+function isDeletedRelayfileEvent(event: ChangeEvent): boolean {
+  return eventRecordValue(event, 'type') === 'file.deleted' ||
+    eventRecordValue(event, 'filesystemEventType') === 'file.deleted'
+}
+
 function shouldNotifyRelayfileChange(event: ChangeEvent): boolean {
   if (eventOrigin(event) === 'agent_write') return false
   if (!shouldNotifyRelayfilePath(event.resource.path)) return false
@@ -1413,7 +1419,7 @@ export class IntegrationEventBridge {
   }
 
   private async readEventContextPreview(projectId: string, event: ChangeEvent): Promise<EventContextPreview | undefined> {
-    if (event.type === 'file.deleted') return undefined
+    if (isDeletedRelayfileEvent(event)) return undefined
     const path = eventSummaryValue(event.resource.path)
     if (!path) return undefined
 
