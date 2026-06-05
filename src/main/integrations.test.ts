@@ -495,6 +495,17 @@ describe('IntegrationsManager', () => {
     )
   })
 
+  it('builds initial spawn instructions from project integrations', () => {
+    const manager = new IntegrationsManager()
+
+    const instructions = manager.initialSpawnInstructions('project-1')
+
+    expect(instructions).toContain('Initial project integration context')
+    expect(instructions).toContain('<integrations-update>')
+    expect(instructions).toContain('slack')
+    expect(instructions).toContain('.integrations/discovery/slack')
+  })
+
   it('reads a targeted remote Slack event record without reconciling local mounts', async () => {
     const manager = new IntegrationsManager()
 

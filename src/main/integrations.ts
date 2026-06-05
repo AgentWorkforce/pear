@@ -944,6 +944,10 @@ export class IntegrationsManager {
     await this.syncAgentState(projectId, true, { waitForAgent: true })
   }
 
+  async refreshAgentState(projectId: string): Promise<void> {
+    await this.syncAgentState(projectId, false)
+  }
+
   async shutdownLocalMounts(): Promise<void> {
     for (const timer of this.systemMessageTimers.values()) clearTimeout(timer)
     this.systemMessageTimers.clear()
@@ -1732,6 +1736,15 @@ export class IntegrationsManager {
       '</integrations-update>'
     )
     return lines.join('\n')
+  }
+
+  initialSpawnInstructions(projectId: string): string | undefined {
+    const integrations = this.visibleIntegrationsForProject(projectId)
+    if (integrations.length === 0) return undefined
+    return [
+      'Initial project integration context. Treat this as setup context, not as the user task.',
+      this.buildSystemMessageSnippet(integrations, true)
+    ].join('\n')
   }
 
   private mountPathsForAgentWorkspace(integration: ConnectedIntegration): string[] {

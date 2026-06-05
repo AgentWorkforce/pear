@@ -268,8 +268,8 @@ function scheduleIntegrationAgentRefresh(projectId: string): void {
 
   const timer = setTimeout(() => {
     integrationAgentRefreshTimers.delete(projectId)
-    void integrationsManager.notifyAgentState(projectId).catch((error) => {
-      console.warn('[integrations] Failed to notify newly ready agent:', error instanceof Error ? error.message : String(error))
+    void integrationsManager.refreshAgentState(projectId).catch((error) => {
+      console.warn('[integrations] Failed to refresh newly ready agent integration state:', error instanceof Error ? error.message : String(error))
     })
   }, 2_000)
   integrationAgentRefreshTimers.set(projectId, timer)

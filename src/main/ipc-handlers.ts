@@ -211,7 +211,15 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('broker:spawn-agent', async (_, projectId: string, input: SpawnPtyInput & { broker?: 'local' | 'cloud' }) => {
-    const result = await brokerManager.spawnAgent(projectId, input)
+    const integrationInstructions = integrationsManager.initialSpawnInstructions(projectId)
+    const result = await brokerManager.spawnAgent(projectId, integrationInstructions
+      ? {
+          ...input,
+          task: input.task?.trim()
+            ? `${integrationInstructions}\n\nUser task:\n${input.task.trim()}`
+            : integrationInstructions
+        }
+      : input)
     integrationEventBridge.invalidateProjectAgentCache(projectId)
     return result
   })
