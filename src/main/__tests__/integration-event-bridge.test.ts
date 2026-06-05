@@ -588,6 +588,36 @@ test('slack local event context rejects traversal paths', async () => {
   }
 })
 
+test('historical replay allowance is scoped to the matching integration', async () => {
+  const harness = makeHarness()
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-history',
+        mountPaths: ['/slack/channels'],
+        downloadHistoricalData: true,
+        scope: { notifyAgents: ['alice'] }
+      }),
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-live',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        scope: { notifyAgents: ['bob'] }
+      })
+    ])
+  })
+
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC__proj-cloud/messages/1713220123_001100/meta.json',
+    'slack',
+    '2026-06-01T12:00:00.000Z'
+  ))
+
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
+})
+
 test('local fallback watchers are disabled when historical download is off', () => {
   const roots = localWatchRootsFor(
     'workspace-id',

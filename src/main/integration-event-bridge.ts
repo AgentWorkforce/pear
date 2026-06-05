@@ -896,16 +896,16 @@ function eventOccurredAtMs(event: ChangeEvent): number | null {
   return Number.isFinite(value) ? value : null
 }
 
-function shouldSuppressHistoricalRemoteReplay(
+function historicalRemoteReplayAllowedSpecs(
   event: ChangeEvent,
   matchedSpecs: SubscriptionSpec[],
   options: EventInjectionOptions
-): boolean {
-  if (options.source !== 'remote') return false
-  if (matchedSpecs.some((spec) => spec.allowHistoricalReplay)) return false
+): SubscriptionSpec[] {
+  if (options.source !== 'remote') return matchedSpecs
   const occurredAtMs = eventOccurredAtMs(event)
-  if (occurredAtMs === null) return false
-  return occurredAtMs < options.subscriptionStartedAtMs - REPLAY_SKEW_TOLERANCE_MS
+  if (occurredAtMs === null) return matchedSpecs
+  if (occurredAtMs >= options.subscriptionStartedAtMs - REPLAY_SKEW_TOLERANCE_MS) return matchedSpecs
+  return matchedSpecs.filter((spec) => spec.allowHistoricalReplay)
 }
 
 function longestMatchingMountPath(path: string, spec: SubscriptionSpec): string | null {
@@ -1410,29 +1410,28 @@ export class IntegrationEventBridge {
       return
     }
 
-    const matchedSpecs = specsForEvent(event, specs)
+    const eventMatchedSpecs = specsForEvent(event, specs)
+    const matchedSpecs = historicalRemoteReplayAllowedSpecs(event, eventMatchedSpecs, options)
     if (matchedSpecs.length === 0) {
       incrementIntegrationEventCounter(projectId, 'eventsDropped')
-      logIntegrationEvent('skipped unmatched path', {
-        projectId,
-        eventId: event.id,
-        path: event.resource.path,
-        mountPaths: specs.flatMap((spec) => spec.mountPaths)
-      })
-      return
-    }
-
-    if (shouldSuppressHistoricalRemoteReplay(event, matchedSpecs, options)) {
-      incrementIntegrationEventCounter(projectId, 'eventsDropped')
-      logIntegrationEvent('skipped historical remote replay', {
-        projectId,
-        eventId: event.id,
-        path: event.resource.path,
-        occurredAt: event.occurredAt,
-        subscriptionStartedAt: new Date(options.subscriptionStartedAtMs).toISOString(),
-        replaySkewToleranceMs: REPLAY_SKEW_TOLERANCE_MS,
-        temporaryPendingSdkContract: true
-      })
+      if (eventMatchedSpecs.length > 0) {
+        logIntegrationEvent('skipped historical remote replay', {
+          projectId,
+          eventId: event.id,
+          path: event.resource.path,
+          occurredAt: event.occurredAt,
+          subscriptionStartedAt: new Date(options.subscriptionStartedAtMs).toISOString(),
+          replaySkewToleranceMs: REPLAY_SKEW_TOLERANCE_MS,
+          temporaryPendingSdkContract: true
+        })
+      } else {
+        logIntegrationEvent('skipped unmatched path', {
+          projectId,
+          eventId: event.id,
+          path: event.resource.path,
+          mountPaths: specs.flatMap((spec) => spec.mountPaths)
+        })
+      }
       return
     }
 
