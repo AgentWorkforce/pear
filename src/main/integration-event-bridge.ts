@@ -288,21 +288,21 @@ function toErrorMessage(error: unknown): string {
     return message || 'empty string error'
   }
   if (isRecord(error)) {
-    const message = error.message
+    const record = error as Record<string, unknown>
+    const message = record.message
     if (typeof message === 'string' && message.trim()) return message.trim()
-    const reason = error.reason
+    const reason = record.reason
     if (typeof reason === 'string' && reason.trim()) return reason.trim()
     const parts = [
-      typeof error.name === 'string' && error.name.trim() ? error.name.trim() : null,
-      typeof error.type === 'string' && error.type.trim() ? `type=${error.type.trim()}` : null,
-      typeof error.code === 'string' && error.code.trim() ? `code=${error.code.trim()}` : typeof error.code === 'number' ? `code=${error.code}` : null,
-      typeof error.status === 'string' && error.status.trim() ? `status=${error.status.trim()}` : typeof error.status === 'number' ? `status=${error.status}` : null,
-      typeof error.statusCode === 'string' && error.statusCode.trim() ? `statusCode=${error.statusCode.trim()}` : typeof error.statusCode === 'number' ? `statusCode=${error.statusCode}` : null,
-      typeof error.httpStatus === 'string' && error.httpStatus.trim() ? `httpStatus=${error.httpStatus.trim()}` : typeof error.httpStatus === 'number' ? `httpStatus=${error.httpStatus}` : null
+      typeof record.name === 'string' && record.name.trim() ? record.name.trim() : null,
+      typeof record.type === 'string' && record.type.trim() ? `type=${record.type.trim()}` : null,
+      typeof record.code === 'string' && record.code.trim() ? `code=${record.code.trim()}` : typeof record.code === 'number' ? `code=${record.code}` : null,
+      typeof record.status === 'string' && record.status.trim() ? `status=${record.status.trim()}` : typeof record.status === 'number' ? `status=${record.status}` : null,
+      typeof record.statusCode === 'string' && record.statusCode.trim() ? `statusCode=${record.statusCode.trim()}` : typeof record.statusCode === 'number' ? `statusCode=${record.statusCode}` : null,
+      typeof record.httpStatus === 'string' && record.httpStatus.trim() ? `httpStatus=${record.httpStatus.trim()}` : typeof record.httpStatus === 'number' ? `httpStatus=${record.httpStatus}` : null
     ].filter((entry): entry is string => entry !== null)
     if (parts.length > 0) return parts.join(' ')
-
-    const constructorName = (error as { constructor?: { name?: string } }).constructor?.name
+    const constructorName = record.constructor?.name
     if (constructorName && constructorName !== 'Object') return constructorName
 
     try {

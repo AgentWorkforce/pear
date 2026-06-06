@@ -271,6 +271,19 @@ describe('IntegrationMountManager', () => {
     })
   })
 
+  it('rejects Slack command roots with traversal segments', async () => {
+    const manager = new IntegrationMountManager()
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/channels/C123/../messages']
+      }
+    ])
+
+    expect(mock.mountInputs).toHaveLength(0)
+  })
+
   it('scopes bare discovery mounts to the integration provider', async () => {
     const manager = new IntegrationMountManager()
 
