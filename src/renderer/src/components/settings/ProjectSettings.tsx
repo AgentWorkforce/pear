@@ -842,9 +842,13 @@ export function ProjectSettings(): React.ReactNode {
   const activeChannelName = useProjectStore((s) => s.activeChannelName)
   const setActiveRoot = useProjectStore((s) => s.setActiveRoot)
   const setActiveChannel = useProjectStore((s) => s.setActiveChannel)
+  const setActiveProject = useProjectStore((s) => s.setActiveProject)
   const updateProject = useProjectStore((s) => s.updateProject)
   const removeProject = useProjectStore((s) => s.removeProject)
   const addRoot = useProjectStore((s) => s.addRoot)
+  const clearRootConflict = useProjectStore((s) => s.clearRootConflict)
+  const createWorktreeRoot = useProjectStore((s) => s.createWorktreeRoot)
+  const pendingRootConflict = useProjectStore((s) => s.pendingRootConflict)
   const removeRoot = useProjectStore((s) => s.removeRoot)
   const addChannel = useProjectStore((s) => s.addChannel)
   const removeChannel = useProjectStore((s) => s.removeChannel)
@@ -1023,6 +1027,47 @@ export function ProjectSettings(): React.ReactNode {
                 }}
               />
             ))}
+            {pendingRootConflict && (
+              <div className="rounded-lg border border-[var(--pear-yellow,#f59e0b)]/30 bg-[var(--pear-yellow,#f59e0b)]/10 p-4 text-sm">
+                <p className="mb-1 font-medium text-[var(--pear-text)]">Repo already in another project</p>
+                <p className="mb-3 text-[var(--pear-text-dim)]">
+                  <span className="font-mono text-xs">{pendingRootConflict.path}</span> is already part of{' '}
+                  <strong>{pendingRootConflict.existingProjectName}</strong>. Create an isolated git worktree
+                  so both projects can work independently, or go to the existing project.
+                </p>
+                <div className="flex flex-wrap gap-2">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void run(async () => {
+                        clearRootConflict()
+                        await createWorktreeRoot(pendingRootConflict.path)
+                      })
+                    }
+                    className="rounded-md bg-[var(--pear-accent)] px-3 py-1.5 text-xs font-medium text-white hover:bg-[var(--pear-accent-bright)]"
+                  >
+                    Create worktree
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      clearRootConflict()
+                      void setActiveProject(pendingRootConflict.existingProjectId)
+                    }}
+                    className="rounded-md border border-[var(--pear-border)] px-3 py-1.5 text-xs text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-overlay)] hover:text-[var(--pear-text)]"
+                  >
+                    Go to &ldquo;{pendingRootConflict.existingProjectName}&rdquo;
+                  </button>
+                  <button
+                    type="button"
+                    onClick={clearRootConflict}
+                    className="rounded-md px-3 py-1.5 text-xs text-[var(--pear-text-faint)] hover:text-[var(--pear-text-dim)]"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </Section>
 

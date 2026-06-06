@@ -201,6 +201,8 @@ const api = {
       invoke<unknown>('project:add-root', projectId, name, rootPath),
     removeRoot: (projectId: string, rootId: string) =>
       invoke<void>('project:remove-root', projectId, rootId),
+    createWorktreeRoot: (projectId: string, repoPath: string, projectName: string, name?: string) =>
+      invoke<unknown>('project:create-worktree-root', projectId, repoPath, projectName, name),
     addIntegration: (projectId: string, name: string, type?: string) =>
       invoke<unknown>('project:add-integration', projectId, name, type),
     removeIntegration: (projectId: string, integrationId: string) =>

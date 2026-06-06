@@ -193,6 +193,13 @@ export function setProjectChannelPeople(projectId: string, channelName: string, 
   return normalizedPeople
 }
 
+export function findProjectsWithPath(rootPath: string): Array<{ id: string; name: string }> {
+  const data = loadStore()
+  return data.projects
+    .filter((p) => p.roots.some((r) => r.path === rootPath))
+    .map((p) => ({ id: p.id, name: p.name }))
+}
+
 export function addProjectRoot(projectId: string, rootPath: string, name?: string): ProjectRoot {
   const data = loadStore()
   const project = withProject(data, projectId)

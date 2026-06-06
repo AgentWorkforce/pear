@@ -1,6 +1,6 @@
 import { pear, type WorkforcePersona } from '@/lib/ipc'
 import { getAgentKey, useAgentStore } from '@/stores/agent-store'
-import { useProjectStore, type Project } from '@/stores/project-store'
+import { useProjectStore, type Project, type ProjectRoot } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 
 export type SpawnAgentCli = 'claude' | 'codex'
@@ -38,11 +38,12 @@ async function ensureLocalBroker(project: Project): Promise<void> {
 export async function spawnProjectAgent(
   project: Project,
   cli: SpawnAgentCli,
-  customName?: string
+  customName?: string,
+  rootOverride?: ProjectRoot
 ): Promise<string> {
   await ensureLocalBroker(project)
 
-  const root = useProjectStore.getState().getActiveRoot()
+  const root = rootOverride ?? useProjectStore.getState().getActiveRoot()
   if (!root?.pathExists) {
     throw new Error(`Project root not found: ${root?.path || project.rootPath}`)
   }
@@ -107,10 +108,10 @@ export async function listProjectPersonas(project: Project): Promise<WorkforcePe
   return pear.broker.listPersonas(project.id)
 }
 
-export async function spawnProjectPersona(project: Project, personaId: string): Promise<string> {
+export async function spawnProjectPersona(project: Project, personaId: string, rootOverride?: ProjectRoot): Promise<string> {
   await ensureLocalBroker(project)
 
-  const root = useProjectStore.getState().getActiveRoot()
+  const root = rootOverride ?? useProjectStore.getState().getActiveRoot()
   if (!root?.pathExists) {
     throw new Error(`Project root not found: ${root?.path || project.rootPath}`)
   }

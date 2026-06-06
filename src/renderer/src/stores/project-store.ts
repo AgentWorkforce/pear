@@ -6,7 +6,9 @@ import {
   makeProjectSchema,
   normalizeChannelName
 } from '@shared/schemas/project'
-import { pear } from '@/lib/ipc'
+import { pear, type ProjectRootConflict } from '@/lib/ipc'
+
+export type { ProjectRootConflict }
 
 // Renderer enriches each root with `pathExists` populated by the main process.
 const RendererProjectRootSchema = ProjectRootSchema.and(
@@ -70,6 +72,7 @@ interface ProjectState {
   brokerStarted: boolean
   brokerProjectId: string | null
   loading: boolean
+  pendingRootConflict: ProjectRootConflict | null
 
   load: () => Promise<void>
   ensureBroker: () => Promise<void>
@@ -81,6 +84,8 @@ interface ProjectState {
   setActiveRoot: (id: string | null) => void
   setActiveChannel: (name: string | null) => void
   addRoot: (name?: string, rootPath?: string) => Promise<ProjectRoot | null>
+  clearRootConflict: () => void
+  createWorktreeRoot: (repoPath: string, name?: string) => Promise<ProjectRoot | null>
   removeRoot: (id: string) => Promise<void>
   addChannel: (name: string) => Promise<void>
   rememberDiscoveredChannels: (projectId: string | undefined, channels: string[]) => void
@@ -103,6 +108,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   brokerStarted: false,
   brokerProjectId: null,
   loading: false,
+  pendingRootConflict: null,
 
   load: async () => {
     set({ loading: true })
@@ -216,11 +222,35 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   addRoot: async (name, rootPath) => {
     const { activeProjectId } = get()
     if (!activeProjectId) return null
-    const root = parseRoot(await pear.project.addRoot(activeProjectId, name, rootPath))
-    await get().load()
-    if (root) {
-      get().setActiveRoot(root.id)
+    const raw = await pear.project.addRoot(activeProjectId, name, rootPath)
+    if (!raw) return null
+
+    const result = raw as Record<string, unknown>
+    if (result.kind === 'conflict') {
+      set({ pendingRootConflict: raw as unknown as ProjectRootConflict })
+      return null
     }
+
+    const rootData = result.kind === 'added' ? (result as { root: unknown }).root : raw
+    const root = parseRoot(rootData)
+    await get().load()
+    if (root) get().setActiveRoot(root.id)
+    return root
+  },
+
+  clearRootConflict: () => {
+    set({ pendingRootConflict: null })
+  },
+
+  createWorktreeRoot: async (repoPath, name) => {
+    const { activeProjectId, getActiveProject } = get()
+    if (!activeProjectId) return null
+    const project = getActiveProject()
+    if (!project) return null
+    const raw = await pear.project.createWorktreeRoot(activeProjectId, repoPath, project.name, name)
+    const root = parseRoot(raw)
+    await get().load()
+    if (root) get().setActiveRoot(root.id)
     return root
   },
 

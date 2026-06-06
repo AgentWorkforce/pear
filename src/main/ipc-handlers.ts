@@ -1,5 +1,5 @@
 import { app, ipcMain, dialog, BrowserWindow, shell } from 'electron'
-import { resolve } from 'path'
+import { basename, join, resolve } from 'path'
 import type { SpawnPtyInput, SendMessageInput } from '@agent-relay/harness-driver'
 import {
   loadStore,
@@ -12,6 +12,7 @@ import {
   setProjectChannelPeople,
   addProjectRoot,
   removeProjectRoot,
+  findProjectsWithPath,
   addProjectIntegration,
   removeProjectIntegration
 } from './store'
@@ -158,7 +159,31 @@ export function registerIpcHandlers(): void {
       if (result.canceled || !result.filePaths[0]) return null
       path = result.filePaths[0]
     }
-    return addProjectRoot(projectId, path, name)
+
+    const conflict = findProjectsWithPath(path).find((p) => p.id !== projectId)
+    if (conflict) {
+      return { kind: 'conflict', existingProjectId: conflict.id, existingProjectName: conflict.name, path }
+    }
+
+    return { kind: 'added', root: addProjectRoot(projectId, path, name) }
+  })
+
+  ipcMain.handle('project:create-worktree-root', async (_, projectId: string, repoPath: string, projectName: string, name?: string) => {
+    const gitRoot = await git.getGitRoot(repoPath)
+    if (!gitRoot) throw new Error(`Not a git repository: ${repoPath}`)
+
+    const repoBasename = basename(gitRoot)
+    const worktreePath = join(app.getPath('userData'), 'worktrees', projectId, repoBasename)
+
+    const branchSlug = projectName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40) || 'pear'
+    const branchName = `pear/${branchSlug}`
+
+    await git.createWorktree(gitRoot, worktreePath, branchName)
+    return addProjectRoot(projectId, worktreePath, name || repoBasename)
   })
 
   ipcMain.handle('project:remove-root', (_, projectId: string, rootId: string) => {

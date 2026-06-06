@@ -787,6 +787,13 @@ export type UpdaterState =
   | { kind: 'downloaded'; version: string }
   | { kind: 'error'; message: string }
 
+export interface ProjectRootConflict {
+  kind: 'conflict'
+  existingProjectId: string
+  existingProjectName: string
+  path: string
+}
+
 export interface PearAPI {
   app: {
     confirmQuit: () => Promise<boolean>
@@ -803,6 +810,7 @@ export interface PearAPI {
     setChannelPeople: (projectId: string, channelName: string, people: string[]) => Promise<string[]>
     addRoot: (projectId: string, name?: string, rootPath?: string) => Promise<unknown>
     removeRoot: (projectId: string, rootId: string) => Promise<void>
+    createWorktreeRoot: (projectId: string, repoPath: string, projectName: string, name?: string) => Promise<unknown>
     addIntegration: (projectId: string, name: string, type?: string) => Promise<unknown>
     removeIntegration: (projectId: string, integrationId: string) => Promise<void>
   }
