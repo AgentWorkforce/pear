@@ -456,8 +456,8 @@ async function waitForSent(harness: { sent: SentMessage[] }, count: number, time
   }
 }
 
-async function waitForDropped(projectId: string, count: number): Promise<void> {
-  const deadline = Date.now() + 1_000
+async function waitForDropped(projectId: string, count: number, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
   while ((getIntegrationEventTelemetrySnapshot().projects[projectId]?.eventsDropped || 0) < count && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
