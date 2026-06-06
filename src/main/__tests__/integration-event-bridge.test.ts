@@ -428,6 +428,73 @@ test('integration event remote stream fallback replays the outage gap and logs n
   }
 })
 
+test('integration event remote stream fallback suppresses feed replay of streamed event ids', async () => {
+  const syncs: FakeRelayFileSync[] = []
+  const received: ChangeEvent[] = []
+  const streamedEvent = {
+    eventId: 'ws:file.created:/slack/channels/C123/messages/1780735200_000000/meta.json:rev-1:2026-06-06T08:40:00.000Z',
+    type: 'file.created',
+    path: '/slack/channels/C123/messages/1780735200_000000/meta.json',
+    revision: 'rev-1',
+    timestamp: '2026-06-06T08:40:00.000Z'
+  } as const
+  const client = {
+    async getEvents(_workspaceId: string, _options: { cursor?: string; limit?: number }) {
+      return {
+        events: [
+          streamedEvent,
+          {
+            eventId: 'ws:file.created:/slack/channels/C123/messages/1780735314_000000/meta.json:rev-2:2026-06-06T08:41:00.000Z',
+            type: 'file.created',
+            path: '/slack/channels/C123/messages/1780735314_000000/meta.json',
+            revision: 'rev-2',
+            timestamp: '2026-06-06T08:41:00.000Z'
+          }
+        ],
+        nextCursor: null
+      }
+    },
+    async getResourceAtEvent() {
+      throw new Error('not used')
+    }
+  }
+  const eventClient = createWorkspaceScopedEventClient(
+    client as never,
+    'workspace-id',
+    async () => 'workspace-token',
+    'https://relayfile.example',
+    () => {
+      const sync = new FakeRelayFileSync()
+      syncs.push(sync)
+      return sync as never
+    }
+  )
+
+  const subscription = eventClient.subscribe(
+    ['/slack/channels/C123/**'],
+    (event) => {
+      received.push(event)
+    },
+    { coalesce: 'none', from: 'legacy', pathScope: ['/slack/channels/C123/**'] }
+  )
+
+  await waitUntil(() => syncs.length === 1)
+  syncs[0].emit('event', streamedEvent)
+  await waitUntil(() => received.length === 1)
+
+  for (let index = 0; index < 5; index += 1) {
+    syncs[0].emit('error', new Error('websocket reconnect failed'))
+  }
+
+  await waitUntil(() => received.length === 2)
+  assert.deepEqual(received.map((event) => event.resource.path), [
+    '/slack/channels/C123/messages/1780735200_000000/meta.json',
+    '/slack/channels/C123/messages/1780735314_000000/meta.json'
+  ])
+
+  await subscription.unsubscribe()
+})
+
 async function waitForSent(harness: { sent: SentMessage[] }, count: number, timeoutMs = 1_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (harness.sent.length < count && Date.now() < deadline) {

@@ -51,6 +51,7 @@ const PROJECT_AGENT_RECIPIENT_CACHE_TTL_MS = 2_000
 const MAX_BROKER_SENDS_PER_SECOND = 25
 const REMOTE_STREAM_ERROR_POLLING_FALLBACK_THRESHOLD = 5
 const REMOTE_STREAM_POLL_INTERVAL_MS = 5_000
+const REMOTE_STREAM_EVENT_ID_CACHE_LIMIT = 2_000
 
 type IntegrationEventCounterName =
   | 'eventsReceived'
@@ -623,6 +624,7 @@ export function createWorkspaceScopedEventClient(
       let consecutiveStreamErrors = 0
       let lastEventCursor: string | undefined
       const polledEventIds = new Set<string>()
+      const polledEventIdOrder: string[] = []
       const pendingByPath = new Map<string, ReturnType<typeof setTimeout>>()
       const coalesceMs = Math.max(0, Math.floor(options?.coalesceMs ?? 750))
       const shouldCoalesce = (options?.coalesce ?? 'fire-once') !== 'none'
@@ -651,13 +653,22 @@ export function createWorkspaceScopedEventClient(
         })
       }
 
+      const rememberPolledEventId = (eventId: string | undefined): void => {
+        if (!eventId) return
+        lastEventCursor = eventId
+        if (polledEventIds.has(eventId)) return
+        polledEventIds.add(eventId)
+        polledEventIdOrder.push(eventId)
+        while (polledEventIdOrder.length > REMOTE_STREAM_EVENT_ID_CACHE_LIMIT) {
+          const evicted = polledEventIdOrder.shift()
+          if (evicted) polledEventIds.delete(evicted)
+        }
+      }
+
       const handleEvent = (event: FilesystemEvent): void => {
         if (!active || !shouldPublishFilesystemEvent(event)) return
         consecutiveStreamErrors = 0
-        if (event.eventId) {
-          lastEventCursor = event.eventId
-          polledEventIds.add(event.eventId)
-        }
+        rememberPolledEventId(event.eventId)
         const path = event.path.startsWith('/') ? event.path : `/${event.path}`
         if (!globs.some((glob) => globMatchesPath(glob, path))) return
         if (pathScope && !pathScope.some((glob) => globMatchesPath(glob, path))) return
