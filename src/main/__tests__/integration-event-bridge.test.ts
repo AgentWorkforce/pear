@@ -336,6 +336,10 @@ test('integration event remote stream falls back to event feed polling after rep
   })
   assert.equal(received[1].resource.path, '/slack/channels/C123/messages/1780735314_000000/meta.json')
 
+  syncs[0].emit('event', pollEvent)
+  await new Promise((resolve) => setImmediate(resolve))
+  assert.equal(received.length, 2)
+
   await subscription.unsubscribe()
 })
 

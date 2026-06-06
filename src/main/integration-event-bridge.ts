@@ -799,7 +799,10 @@ export function createWorkspaceScopedEventClient(
               )
             }
           })
-          sync.on('event', handleEvent)
+          sync.on('event', (event) => {
+            if (polling) return
+            handleEvent(event)
+          })
           sync.on('state', (state) => {
             if (state === 'open') consecutiveStreamErrors = 0
             logIntegrationEvent('remote stream state', {
