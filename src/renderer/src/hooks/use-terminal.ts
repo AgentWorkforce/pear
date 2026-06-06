@@ -217,6 +217,7 @@ export function useTerminal(
       if (holdInput || typingActiveRef.current) {
         await pear.broker.sendInput(projectId, agentName!, data).catch((err) => {
           console.warn('[terminal] held input failed:', err)
+          throw err
         })
       } else {
         pear.broker.sendInputFast(projectId, agentName!, data)
@@ -567,6 +568,7 @@ export function useTerminal(
       if (holdInput || typingActiveRef.current) {
         await pear.broker.sendInput(projectId, agentName, data).catch((err) => {
           console.warn('[terminal] held input failed:', err)
+          throw err
         })
       } else {
         pear.broker.sendInputFast(projectId, agentName, data)
