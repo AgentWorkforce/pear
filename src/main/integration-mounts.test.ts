@@ -456,4 +456,40 @@ describe('IntegrationMountManager', () => {
     })
     expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/messages')).toHaveLength(2)
   })
+
+  it('suppresses replayed state-poll auth alerts while a restart is throttled', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-06T14:00:00.000Z'))
+    const manager = new IntegrationMountManager()
+    const healthObserver = vi.fn()
+    manager.setHealthObserver(healthObserver)
+    mock.readFile.mockResolvedValue(JSON.stringify({
+      status: 'writeback-pending',
+      pendingWriteback: 1,
+      lastSuccessfulReconcileAt: '2026-06-06T13:59:00.000Z',
+      lastError: {
+        code: 'unauthorized',
+        statusCode: 401,
+        message: 'http 401 unauthorized: Token has expired',
+        at: '2026-06-06T14:00:30.000Z'
+      }
+    }))
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/channels/C123/messages']
+      }
+    ])
+
+    await vi.advanceTimersByTimeAsync(45_000)
+    await Promise.resolve()
+    await Promise.resolve()
+    await vi.advanceTimersByTimeAsync(45_000)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(healthObserver).toHaveBeenCalledTimes(1)
+    expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/messages')).toHaveLength(2)
+  })
 })

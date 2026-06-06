@@ -137,6 +137,7 @@ export class IntegrationMountManager {
   private desiredMountPaths: string[] = []
   private healthPollTimer: ReturnType<typeof setInterval> | null = null
   private healthObserver: ((alert: MountHealthAlert) => void) | null = null
+  private handledHealthErrorKeys = new Map<string, string>()
 
   setHealthObserver(observer: ((alert: MountHealthAlert) => void) | null): void {
     this.healthObserver = observer
@@ -176,6 +177,7 @@ export class IntegrationMountManager {
     for (const timer of this.refreshTimers.values()) clearTimeout(timer)
     this.refreshTimers.clear()
     this.authRestartedAt.clear()
+    this.handledHealthErrorKeys.clear()
     const roots = Array.from(this.handles.keys())
     for (const root of roots) {
       await this.stopHandle(root)
@@ -245,32 +247,45 @@ export class IntegrationMountManager {
       )
       // Only act on errors newer than the last good cycle — a recovered mount
       // keeps its historical lastError in state.json.
-      if (errorAt !== null && lastSuccessAt !== null && errorAt <= lastSuccessAt) continue
+      if (errorAt !== null && lastSuccessAt !== null && errorAt <= lastSuccessAt) {
+        this.handledHealthErrorKeys.delete(remotePath)
+        continue
+      }
       const message = typeof lastError.message === 'string' ? lastError.message : ''
       const unauthorized = lastError.statusCode === 401 ||
         lastError.code === 'unauthorized' ||
         isMountAuthExpiredOutput(message)
       if (!unauthorized) continue
+      const healthErrorKey = [
+        errorAt ?? 'missing-at',
+        typeof lastError.statusCode === 'number' ? lastError.statusCode : '',
+        typeof lastError.code === 'string' ? lastError.code : '',
+        message
+      ].join('|')
+      if (this.handledHealthErrorKeys.get(remotePath) === healthErrorKey) continue
       const pendingWriteback = typeof state.pendingWriteback === 'number' ? state.pendingWriteback : 0
-      console.warn(
-        `[integration-mounts] Mount auth expired for ${remotePath} (state poll); restarting with fresh credentials`,
-        { pendingWriteback, error: message || 'unauthorized' }
-      )
-      this.healthObserver?.({
-        remotePath,
-        status: typeof state.status === 'string' ? state.status : null,
-        pendingWriteback,
-        message: message || 'unauthorized'
-      })
-      this.queueForcedRestart(remotePath, 'auth failure (state poll)')
+      const queued = this.queueForcedRestart(remotePath, 'auth failure (state poll)')
+      if (queued) {
+        this.handledHealthErrorKeys.set(remotePath, healthErrorKey)
+        console.warn(
+          `[integration-mounts] Mount auth expired for ${remotePath} (state poll); restarting with fresh credentials`,
+          { pendingWriteback, error: message || 'unauthorized' }
+        )
+        this.healthObserver?.({
+          remotePath,
+          status: typeof state.status === 'string' ? state.status : null,
+          pendingWriteback,
+          message: message || 'unauthorized'
+        })
+      }
     }
   }
 
-  private queueForcedRestart(remotePath: string, reason: string): void {
-    if (!this.handles.has(remotePath)) return
+  private queueForcedRestart(remotePath: string, reason: string): boolean {
+    if (!this.handles.has(remotePath)) return false
     const now = Date.now()
     const lastRestartedAt = this.authRestartedAt.get(remotePath) ?? 0
-    if (now - lastRestartedAt < MOUNT_AUTH_RESTART_THROTTLE_MS) return
+    if (now - lastRestartedAt < MOUNT_AUTH_RESTART_THROTTLE_MS) return false
     this.authRestartedAt.set(remotePath, now)
 
     const previous = this.pending ?? Promise.resolve()
@@ -287,6 +302,7 @@ export class IntegrationMountManager {
         if (this.pending === pending) this.pending = null
       })
     this.pending = pending
+    return true
   }
 
   private scheduleRefresh(remotePath: string, handle: MountedWorkspaceHandle): void {
