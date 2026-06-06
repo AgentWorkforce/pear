@@ -10,6 +10,7 @@
   },
   "scripts": {
     "postinstall": "node scripts/install-relayfile-mount.mjs --optional",
+    "icons:macos": "node scripts/apply-macos-icon-mask.mjs",
     "relayfile-mount:install": "node scripts/install-relayfile-mount.mjs",
     "relayfile-mount:install:release": "node scripts/install-relayfile-mount.mjs --release",
     "generate:mcp-resources": "node scripts/generate-mcp-extraResources.mjs",
@@ -17,9 +18,9 @@
     "dev": "electron-vite dev",
     "build": "npm run generate:mcp-resources && node scripts/install-relayfile-mount.mjs --optional && electron-vite build",
     "preview": "electron-vite preview",
-    "dist:mac": "npm run relayfile-mount:install:release && RELAYFILE_MOUNT_INSTALL_SOURCE=release npm run build && electron-builder --mac --publish never",
+    "dist:mac": "npm run icons:macos && npm run relayfile-mount:install:release && RELAYFILE_MOUNT_INSTALL_SOURCE=release npm run build && electron-builder --mac --publish never",
     "verify:mcp-spawn": "node scripts/verify-mcp-spawn.mjs",
-    "release:mac": "npm run relayfile-mount:install:release && RELAYFILE_MOUNT_INSTALL_SOURCE=release npm run build && electron-builder --mac --publish always",
+    "release:mac": "npm run icons:macos && npm run relayfile-mount:install:release && RELAYFILE_MOUNT_INSTALL_SOURCE=release npm run build && electron-builder --mac --publish always",
     "test": "node --experimental-strip-types --no-warnings --test 'src/main/__tests__/*.test.ts'",
     "personas:refresh": "npx --yes agentworkforce install @agentworkforce/persona-autonomous-actor --overwrite"
   },
