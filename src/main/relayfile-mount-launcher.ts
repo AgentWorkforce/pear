@@ -1,4 +1,5 @@
 import { accessSync, constants } from 'node:fs'
+import { mkdir, rename, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { app } from 'electron'
 import { type MountLauncher, type MountLauncherStart } from '@relayfile/sdk'
@@ -58,16 +59,41 @@ export function ensureRelayfileMountBinary(): string {
   return binary
 }
 
+// Creds-file contract (mount-token refresh workstream): JSON {token, mintedAt,
+// expiresAt?}, token required, timestamps advisory; written atomically via
+// tmp+rename. A creds-aware mount binary re-reads this file on 401 instead of
+// stalling on its static launch token; older binaries ignore the env var
+// entirely (same precedent as RELAYFILE_MOUNT_LOCAL_LAYOUT, relayfile#243), so
+// no version gating is needed. Every mount (re)start rewrites the file with
+// the freshly minted token.
+async function writeMountCredsFile(localDir: string, token: string): Promise<string | null> {
+  const credsPath = join(localDir, '.relay', 'creds.json')
+  try {
+    await mkdir(join(localDir, '.relay'), { recursive: true })
+    const tmpPath = `${credsPath}.tmp`
+    await writeFile(tmpPath, JSON.stringify({ token, mintedAt: new Date().toISOString() }), 'utf8')
+    await rename(tmpPath, credsPath)
+    return credsPath
+  } catch (error) {
+    console.warn('[relayfile-mount-launcher] Failed to write mount creds file:', error)
+    return null
+  }
+}
+
 export function createPearMountLauncher(options: { onEvent?: MountLauncherStart['onEvent'] } = {}): MountLauncher {
   const launcher = createDefaultMountLauncher()
   return {
-    start: (input) => {
+    start: async (input) => {
       const binary = ensureRelayfileMountBinary()
+      const token = input.env.RELAYFILE_TOKEN
+      const localDir = input.env.RELAYFILE_LOCAL_DIR
+      const credsPath = token && localDir ? await writeMountCredsFile(localDir, token) : null
       return launcher.start({
         ...input,
         env: {
           ...input.env,
-          RELAYFILE_MOUNT_BIN: binary
+          RELAYFILE_MOUNT_BIN: binary,
+          ...(credsPath ? { RELAYFILE_MOUNT_CREDS_FILE: credsPath } : {})
         },
         onEvent: (event) => {
           options.onEvent?.(event)

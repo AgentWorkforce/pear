@@ -1,4 +1,4 @@
-import { chmod, mkdir, rm } from 'node:fs/promises'
+import { chmod, mkdir, readFile, rm } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -15,11 +15,21 @@ const MOUNT_READY_TIMEOUT_MS = 60_000
 const MOUNT_REFRESH_FALLBACK_MARGIN_MS = 5 * 60_000
 const MOUNT_REFRESH_MIN_DELAY_MS = 1_000
 const MOUNT_AUTH_RESTART_THROTTLE_MS = 60_000
+// Stays under MOUNT_AUTH_RESTART_THROTTLE_MS so back-to-back poll hits
+// coalesce into one restart instead of racing it.
+const MOUNT_HEALTH_POLL_INTERVAL_MS = 45_000
 export const MAX_LOCAL_INTEGRATION_MOUNT_PATHS = 24
 
 type IntegrationMountInput = {
   provider: string
   mountPaths: string[]
+}
+
+export type MountHealthAlert = {
+  remotePath: string
+  status: string | null
+  pendingWriteback: number
+  message: string
 }
 
 type IntegrationMountSpec = {
@@ -125,6 +135,12 @@ export class IntegrationMountManager {
   private workspaceId: string | null = null
   private pending: Promise<void> | null = null
   private desiredMountPaths: string[] = []
+  private healthPollTimer: ReturnType<typeof setInterval> | null = null
+  private healthObserver: ((alert: MountHealthAlert) => void) | null = null
+
+  setHealthObserver(observer: ((alert: MountHealthAlert) => void) | null): void {
+    this.healthObserver = observer
+  }
 
   async ensureMounted(integrations: IntegrationMountInput[]): Promise<void> {
     const mountPaths = mountPathsForIntegrations(integrations)
@@ -155,6 +171,8 @@ export class IntegrationMountManager {
   }
 
   private async stopAll(): Promise<void> {
+    if (this.healthPollTimer) clearInterval(this.healthPollTimer)
+    this.healthPollTimer = null
     for (const timer of this.refreshTimers.values()) clearTimeout(timer)
     this.refreshTimers.clear()
     this.authRestartedAt.clear()
@@ -198,6 +216,54 @@ export class IntegrationMountManager {
     }
 
     return mountPaths.map((mountPath) => integrationLocalPathForRemote(workspaceId, mountPath))
+  }
+
+  // The mount binary runs detached (background: true) and logs sync failures
+  // to .relay/mount.log + state.json — the launcher's stdout scrape only sees
+  // startup output, so an expired token mid-session stalls writeback silently
+  // (observed: 4+ min of 401 cycles with 1 dirty file queued). Polling
+  // state.json is the deterministic signal; the stdout scrape stays for the
+  // startup window.
+  private ensureHealthPolling(): void {
+    if (this.healthPollTimer || this.handles.size === 0) return
+    const timer = setInterval(() => {
+      void this.checkMountHealth()
+    }, MOUNT_HEALTH_POLL_INTERVAL_MS)
+    timer.unref?.()
+    this.healthPollTimer = timer
+  }
+
+  private async checkMountHealth(): Promise<void> {
+    for (const [remotePath, handle] of Array.from(this.handles.entries())) {
+      const state = await readMountStateFile(handle.localDir)
+      if (!state) continue
+      const lastError = asRecord(state.lastError)
+      if (!lastError) continue
+      const errorAt = parseTimestamp(typeof lastError.at === 'string' ? lastError.at : null)
+      const lastSuccessAt = parseTimestamp(
+        typeof state.lastSuccessfulReconcileAt === 'string' ? state.lastSuccessfulReconcileAt : null
+      )
+      // Only act on errors newer than the last good cycle — a recovered mount
+      // keeps its historical lastError in state.json.
+      if (errorAt !== null && lastSuccessAt !== null && errorAt <= lastSuccessAt) continue
+      const message = typeof lastError.message === 'string' ? lastError.message : ''
+      const unauthorized = lastError.statusCode === 401 ||
+        lastError.code === 'unauthorized' ||
+        isMountAuthExpiredOutput(message)
+      if (!unauthorized) continue
+      const pendingWriteback = typeof state.pendingWriteback === 'number' ? state.pendingWriteback : 0
+      console.warn(
+        `[integration-mounts] Mount auth expired for ${remotePath} (state poll); restarting with fresh credentials`,
+        { pendingWriteback, error: message || 'unauthorized' }
+      )
+      this.healthObserver?.({
+        remotePath,
+        status: typeof state.status === 'string' ? state.status : null,
+        pendingWriteback,
+        message: message || 'unauthorized'
+      })
+      this.queueForcedRestart(remotePath, 'auth failure (state poll)')
+    }
   }
 
   private queueForcedRestart(remotePath: string, reason: string): void {
@@ -336,6 +402,7 @@ export class IntegrationMountManager {
     }
 
     await this.removeLegacyIntegrationMountRoot(mountRoot)
+    this.ensureHealthPolling()
   }
 
   private createSetup(auth: { apiUrl: string; accessToken: string }): RelayfileSetup {
@@ -410,6 +477,23 @@ function refreshTimeFor(handle: MountedWorkspaceHandle): number | null {
 
 function isMountAuthExpiredOutput(text: string): boolean {
   return /(?:401|unauthorized|token has expired|invalid jwt)/iu.test(text)
+}
+
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null
+}
+
+// The mount binary maintains .relay/state.json inside the local mount dir
+// (the same contract the SDK ready-probe reads). A missing or mid-write file
+// resolves null and the poll simply retries next cycle.
+async function readMountStateFile(localDir: string): Promise<Record<string, unknown> | null> {
+  try {
+    return asRecord(JSON.parse(await readFile(join(localDir, '.relay', 'state.json'), 'utf8')))
+  } catch {
+    return null
+  }
 }
 
 function mountPathsForIntegrations(integrations: IntegrationMountInput[]): string[] {
