@@ -1,5 +1,5 @@
 import { accessSync, constants } from 'node:fs'
-import { mkdir, rename, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, rename, writeFile } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { app } from 'electron'
 import { type MountLauncher, type MountLauncherStart } from '@relayfile/sdk'
@@ -69,10 +69,16 @@ export function ensureRelayfileMountBinary(): string {
 async function writeMountCredsFile(localDir: string, token: string): Promise<string | null> {
   const credsPath = join(localDir, '.relay', 'creds.json')
   try {
-    await mkdir(join(localDir, '.relay'), { recursive: true })
+    const relayDir = join(localDir, '.relay')
+    await mkdir(relayDir, { recursive: true, mode: 0o700 })
+    await chmod(relayDir, 0o700).catch(() => undefined)
     const tmpPath = `${credsPath}.tmp`
-    await writeFile(tmpPath, JSON.stringify({ token, mintedAt: new Date().toISOString() }), 'utf8')
+    await writeFile(tmpPath, JSON.stringify({ token, mintedAt: new Date().toISOString() }), {
+      encoding: 'utf8',
+      mode: 0o600
+    })
     await rename(tmpPath, credsPath)
+    await chmod(credsPath, 0o600).catch(() => undefined)
     return credsPath
   } catch (error) {
     console.warn('[relayfile-mount-launcher] Failed to write mount creds file:', error)

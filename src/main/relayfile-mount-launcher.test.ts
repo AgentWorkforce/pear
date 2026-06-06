@@ -36,6 +36,7 @@ describe('createPearMountLauncher', () => {
   })
 
   afterEach(async () => {
+    vi.useRealTimers()
     if (previousRelayfileMountBin === undefined) {
       delete process.env.RELAYFILE_MOUNT_BIN
     } else {
@@ -51,6 +52,7 @@ describe('createPearMountLauncher', () => {
     const launcher = createPearMountLauncher()
 
     await launcher.start({
+      readyTimeoutMs: 60_000,
       env: {
         RELAYFILE_TOKEN: 'relay_pa_test-token',
         RELAYFILE_LOCAL_DIR: localDir
@@ -65,6 +67,8 @@ describe('createPearMountLauncher', () => {
       })
     }))
     await expect(stat(`${credsPath}.tmp`)).rejects.toMatchObject({ code: 'ENOENT' })
+    expect((await stat(join(localDir, '.relay'))).mode & 0o777).toBe(0o700)
+    expect((await stat(credsPath)).mode & 0o777).toBe(0o600)
     expect(JSON.parse(await readFile(credsPath, 'utf8'))).toEqual({
       token: 'relay_pa_test-token',
       mintedAt: '2026-06-06T14:00:00.000Z'
@@ -76,11 +80,13 @@ describe('createPearMountLauncher', () => {
     const launcher = createPearMountLauncher()
 
     await launcher.start({
+      readyTimeoutMs: 60_000,
       env: {
         RELAYFILE_LOCAL_DIR: join(tempDir, 'missing-token')
       }
     })
     await launcher.start({
+      readyTimeoutMs: 60_000,
       env: {
         RELAYFILE_TOKEN: 'relay_pa_test-token'
       }
