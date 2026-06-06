@@ -13,7 +13,7 @@
 // Release mode (`--release` or RELAYFILE_MOUNT_INSTALL_SOURCE=release) ignores
 // local binaries and installs from the matching GitHub release unless that
 // release binary is already present.
-import { access, chmod, copyFile, mkdir, readFile, realpath, rename, writeFile } from 'node:fs/promises'
+import { access, chmod, copyFile, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { constants, createWriteStream } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -81,10 +81,22 @@ async function installFromFile(source, marker = `local:${source}`) {
     console.log(`[relayfile-mount] already installed at ${target}`)
     return
   }
-  await copyFile(source, target)
-  await chmod(target, 0o755)
+  await replaceTargetWithExecutable((tempPath) => copyFile(source, tempPath))
   await writeFile(versionMarker, `${marker}\n`)
   console.log(`[relayfile-mount] installed ${source} -> ${target}`)
+}
+
+async function replaceTargetWithExecutable(writeTemp) {
+  await mkdir(dirname(target), { recursive: true })
+  const tempPath = `${target}.tmp-${process.pid}`
+  try {
+    await writeTemp(tempPath)
+    await chmod(tempPath, 0o755)
+    await rename(tempPath, target)
+  } catch (error) {
+    await rm(tempPath, { force: true }).catch(() => {})
+    throw error
+  }
 }
 
 async function downloadRelease(version) {
@@ -95,16 +107,7 @@ async function downloadRelease(version) {
   if (!response.ok || !response.body) {
     throw new Error(`download failed: ${response.status} ${response.statusText} for ${url}`)
   }
-  await mkdir(dirname(target), { recursive: true })
-  const tempPath = `${target}.tmp-${process.pid}`
-  try {
-    await pipeline(response.body, createWriteStream(tempPath))
-    await chmod(tempPath, 0o755)
-    await rename(tempPath, target)
-  } catch (error) {
-    await import('node:fs/promises').then(({ rm }) => rm(tempPath, { force: true }))
-    throw error
-  }
+  await replaceTargetWithExecutable((tempPath) => pipeline(response.body, createWriteStream(tempPath)))
   await writeFile(versionMarker, `${version}\n`)
   console.log(`[relayfile-mount] installed v${version} -> ${target}`)
 }
