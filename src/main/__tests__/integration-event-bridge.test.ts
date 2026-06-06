@@ -454,6 +454,7 @@ async function waitForSent(harness: { sent: SentMessage[] }, count: number, time
   while (harness.sent.length < count && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
+  assert.equal(harness.sent.length >= count, true)
 }
 
 async function waitForDropped(projectId: string, count: number, timeoutMs = 1_000): Promise<void> {
@@ -461,6 +462,7 @@ async function waitForDropped(projectId: string, count: number, timeoutMs = 1_00
   while ((getIntegrationEventTelemetrySnapshot().projects[projectId]?.eventsDropped || 0) < count && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
+  assert.equal((getIntegrationEventTelemetrySnapshot().projects[projectId]?.eventsDropped || 0) >= count, true)
 }
 
 test('integration events route only to the targets for the matching integration path', async () => {
@@ -700,6 +702,15 @@ test('slack raw-id and slug alias paths with distinct revisions inject once per 
   ))
   await waitForSent(harness, 2)
   assert.match(harness.sent[1].input.text, /Message:\nedited Slack message/u)
+
+  slackText = 'original Slack message'
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json',
+    'slack',
+    { digest: 'revision:slug-copy-replay' }
+  ))
+  await waitForDropped('project-1', 2)
+  assert.equal(harness.sent.length, 2)
 
   // A different logical message via either alias form still injects.
   await harness.emit(changeEvent(

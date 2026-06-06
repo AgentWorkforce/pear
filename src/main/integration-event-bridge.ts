@@ -99,7 +99,7 @@ type EventContextPreviewMetadata = Omit<EventContextPreview, 'content'>
 
 type SlackLogicalInjectionState = {
   expiresAt: number
-  contentHash?: string
+  contentHashes?: Set<string>
 }
 
 type DispatchItem = {
@@ -2581,14 +2581,17 @@ export class IntegrationEventBridge {
       : undefined
     const existing = this.slackLogicalInjections.get(key)
     if (existing) {
-      if (!contentHash || !existing.contentHash || existing.contentHash === contentHash) {
+      if (!contentHash || !existing.contentHashes || existing.contentHashes.has(contentHash)) {
         return false
       }
+      existing.contentHashes.add(contentHash)
+      existing.expiresAt = now + ttlMs
+      return true
     }
 
     this.slackLogicalInjections.set(key, {
       expiresAt: now + ttlMs,
-      contentHash
+      contentHashes: contentHash ? new Set([contentHash]) : undefined
     })
     return true
   }
