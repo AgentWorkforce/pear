@@ -3,18 +3,6 @@ import { useEffect, useState } from 'react'
 import { User } from 'lucide-react'
 import type { AuthUser } from '@/lib/ipc'
 
-function githubUsernameFromEmail(email?: string): string {
-  const match = email?.trim().match(/^(?:\d+\+)?([^@]+)@users\.noreply\.github\.com$/i)
-  return match?.[1] || ''
-}
-
-function normalizeGithubUsername(value?: string): string {
-  return (value || '')
-    .trim()
-    .replace(/^@+/, '')
-    .replace(/[^A-Za-z0-9-]/g, '')
-}
-
 function isRemoteAvatarUrl(value: string): boolean {
   try {
     const url = new URL(value)
@@ -24,20 +12,13 @@ function isRemoteAvatarUrl(value: string): boolean {
   }
 }
 
-function githubAvatarUrl(user?: AuthUser | null): string | null {
-  const username = normalizeGithubUsername(
-    user?.githubUsername || user?.username || githubUsernameFromEmail(user?.email)
-  )
-  return username ? `https://github.com/${encodeURIComponent(username)}.png?size=96` : null
-}
-
 function providedAvatarUrl(user?: AuthUser | null): string | null {
   const avatarUrl = user?.avatarUrl?.trim()
   return avatarUrl && isRemoteAvatarUrl(avatarUrl) ? avatarUrl : null
 }
 
 function avatarUrls(user?: AuthUser | null): string[] {
-  return Array.from(new Set([user?.cachedAvatarUrl, providedAvatarUrl(user), githubAvatarUrl(user)]
+  return Array.from(new Set([user?.cachedAvatarUrl, providedAvatarUrl(user)]
     .map((url) => url?.trim())
     .filter((url): url is string => !!url)))
 }

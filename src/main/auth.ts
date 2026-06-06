@@ -18,6 +18,7 @@ const CLOUD_API_URL = process.env.RELAY_CLOUD_URL || 'https://agentrelay.dev/clo
 const TOKEN_EXPIRY_BUFFER_MS = 60_000
 const ACCOUNT_WORKSPACE_RETRY_ATTEMPTS = 8
 const ACCOUNT_WORKSPACE_RETRY_DELAY_MS = 500
+const warnedWhoamiWorkspaceFailures = new Set<string>()
 
 interface AuthStatus {
   loggedIn: boolean
@@ -26,7 +27,8 @@ interface AuthStatus {
 }
 
 type AccountWorkspaceCache = {
-  tokenHash: string
+  accountKey?: string
+  tokenHash?: string
   workspaceId: string
 }
 
@@ -128,16 +130,35 @@ function accountWorkspaceTokenHash(accessToken: string): string {
   return createHash('sha256').update(accessToken).digest('hex')
 }
 
+function accountWorkspaceCacheMatches(
+  cached: AccountWorkspaceCache | undefined,
+  auth: Pick<CloudAuth, 'accountKey' | 'accessToken'>
+): boolean {
+  if (!cached?.workspaceId.trim()) return false
+  return cached.accountKey === auth.accountKey ||
+    cached.tokenHash === accountWorkspaceTokenHash(auth.accessToken)
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function saveAuthMeta(tokens: Pick<StoredTokens, 'apiUrl' | 'user'> & Partial<Pick<StoredTokens, 'accessToken'>>): void {
   const previous = loadAuthMeta()
+  const accountKey = tokens.accessToken
+    ? deriveCloudAuthAccountKey(tokens.apiUrl, tokens.accessToken, tokens.user)
+    : undefined
   const tokenHash = tokens.accessToken ? accountWorkspaceTokenHash(tokens.accessToken) : undefined
   const accountWorkspace =
-    tokenHash && previous.accountWorkspace?.tokenHash === tokenHash
-      ? previous.accountWorkspace
+    accountKey && accountWorkspaceCacheMatches(previous.accountWorkspace, {
+      accountKey,
+      accessToken: tokens.accessToken || ''
+    })
+      ? {
+          ...previous.accountWorkspace,
+          accountKey,
+          ...(tokenHash ? { tokenHash } : {})
+        }
       : undefined
   const meta = {
     apiUrl: tokens.apiUrl,
@@ -240,7 +261,21 @@ function clearTokens(): void {
   }
 }
 
-async function fetchWhoamiPayload(apiUrl: string, accessToken: string): Promise<unknown | undefined> {
+type WhoamiPayloadResult =
+  | { ok: true; data: unknown }
+  | { ok: false; failureClass: string; status?: number }
+
+function whoamiFailureClassForStatus(status: number): string {
+  return `whoami-http-${status}`
+}
+
+function warnWhoamiWorkspaceFailure(failureClass: string): void {
+  if (warnedWhoamiWorkspaceFailures.has(failureClass)) return
+  warnedWhoamiWorkspaceFailures.add(failureClass)
+  console.warn('[auth] Account workspace whoami lookup failed:', { failureClass })
+}
+
+async function fetchWhoamiPayload(apiUrl: string, accessToken: string): Promise<WhoamiPayloadResult> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 2500)
 
@@ -249,10 +284,21 @@ async function fetchWhoamiPayload(apiUrl: string, accessToken: string): Promise<
       headers: { Authorization: `Bearer ${accessToken}` },
       signal: controller.signal
     })
-    if (!res.ok) return undefined
-    return await res.json() as unknown
-  } catch {
-    return undefined
+    if (!res.ok) {
+      return {
+        ok: false,
+        status: res.status,
+        failureClass: whoamiFailureClassForStatus(res.status)
+      }
+    }
+    return { ok: true, data: await res.json() as unknown }
+  } catch (error) {
+    return {
+      ok: false,
+      failureClass: error instanceof Error && error.name === 'AbortError'
+        ? 'whoami-timeout'
+        : 'whoami-network'
+    }
   } finally {
     clearTimeout(timeout)
   }
@@ -277,6 +323,7 @@ function saveAccountWorkspaceCache(auth: CloudAuth, workspaceId: string): void {
     apiUrl: auth.apiUrl || previous.apiUrl?.trim() || CLOUD_API_URL,
     user: previous.user,
     accountWorkspace: {
+      accountKey: auth.accountKey,
       tokenHash: accountWorkspaceTokenHash(auth.accessToken),
       workspaceId
     }
@@ -286,7 +333,9 @@ function saveAccountWorkspaceCache(auth: CloudAuth, workspaceId: string): void {
 
 async function fetchWhoami(apiUrl: string, accessToken: string): Promise<UserInfo | undefined> {
   try {
-    const data = await fetchWhoamiPayload(apiUrl, accessToken)
+    const payload = await fetchWhoamiPayload(apiUrl, accessToken)
+    if (!payload.ok) return undefined
+    const data = payload.data
     const record = isRecord(data) ? data : {}
     const userRecord = firstObject(record, ['user']) || record
     const organizationRecord = firstObject(record, ['organization', 'org'])
@@ -646,24 +695,36 @@ export async function getAccountWorkspaceId(options: AccountWorkspaceIdOptions =
   const auth = await resolveCloudAuth()
   if (!auth) throw new Error('cloud-auth-required')
 
-  const tokenHash = accountWorkspaceTokenHash(auth.accessToken)
   const cached = loadAuthMeta().accountWorkspace
-  if (cached?.tokenHash === tokenHash && cached.workspaceId.trim()) {
+  if (accountWorkspaceCacheMatches(cached, auth)) {
     return cached.workspaceId.trim()
   }
 
   const retryAttempts = Math.max(1, Math.floor(options.retryAttempts ?? 1))
   const retryDelayMs = Math.max(0, Math.floor(options.retryDelayMs ?? ACCOUNT_WORKSPACE_RETRY_DELAY_MS))
   let workspaceId: string | undefined
+  let failureClass = 'whoami-no-workspace-in-payload'
 
   for (let attempt = 1; attempt <= retryAttempts; attempt += 1) {
-    const data = await fetchWhoamiPayload(auth.apiUrl, auth.accessToken)
-    workspaceId = accountWorkspaceIdFromWhoami(data)
+    const payload = await fetchWhoamiPayload(auth.apiUrl, auth.accessToken)
+    if (!payload.ok) {
+      failureClass = payload.failureClass
+      if (payload.status === 401 || payload.status === 403) {
+        warnWhoamiWorkspaceFailure(failureClass)
+        throw new Error(`cloud-auth-required:${failureClass}`)
+      }
+    } else {
+      workspaceId = accountWorkspaceIdFromWhoami(payload.data)
+      failureClass = workspaceId ? '' : 'whoami-no-workspace-in-payload'
+    }
     if (workspaceId) break
     if (attempt < retryAttempts) await delay(retryDelayMs)
   }
 
-  if (!workspaceId) throw new Error('account-workspace-required')
+  if (!workspaceId) {
+    warnWhoamiWorkspaceFailure(failureClass)
+    throw new Error(`account-workspace-required:${failureClass}`)
+  }
 
   saveAccountWorkspaceCache(auth, workspaceId)
   return workspaceId

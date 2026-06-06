@@ -426,6 +426,19 @@ function IntegrationVisibilitySection({
 
   useEffect(() => {
     return pear.integrations.onEvent((event) => {
+      if (event.type === 'integration-auth-recovered') {
+        setAuthRequired(false)
+        setWorkspaceRequired(false)
+        void load()
+        return
+      }
+      if (event.type === 'integration-auth-required') {
+        setAuthRequired(event.reason === 'cloud-auth-required')
+        setWorkspaceRequired(event.reason === 'account-workspace-required')
+        setIntegrations([])
+        setLoading(false)
+        return
+      }
       if ('projectId' in event && event.projectId === projectId) void load()
     })
   }, [load, projectId])

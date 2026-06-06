@@ -99,6 +99,15 @@ export type IntegrationsEvent =
   | { type: 'integration-removed'; projectId: string; integrationId: string }
   | { type: 'integration-error'; projectId: string; integrationId: string; message: string }
   | { type: 'mount-auth-stall'; remotePath: string; status: string | null; pendingWriteback: number; message: string }
+  | { type: 'integration-auth-required'; reason: 'cloud-auth-required' | 'account-workspace-required'; message: string }
+  | { type: 'integration-auth-recovered' }
+
+export type IntegrationAuthRecoveryState = {
+  reason: 'cloud-auth-required' | 'account-workspace-required'
+  since: number
+  failureClass?: string
+  message: string
+}
 
 type StoredIntegration = ProjectIntegration & Partial<ConnectedIntegration> & {
   provider?: string
@@ -219,6 +228,7 @@ const SYSTEM_MESSAGE_DEBOUNCE_MS = 1_000
 const SYSTEM_MESSAGE_AGENT_WAIT_TIMEOUT_MS = 8_000
 const SYSTEM_MESSAGE_AGENT_WAIT_INTERVAL_MS = 500
 const LOCAL_MOUNT_CLOUD_HYDRATION_THROTTLE_MS = 30_000
+const AUTH_RECOVERY_RETRY_INTERVAL_MS = 30_000
 const CATALOG_PATH = '/api/v1/integrations/catalog'
 const MAX_REMOTE_DIRECTORY_ENTRIES = 5_000
 const MAX_REMOTE_FILE_PREVIEW_BYTES = 1024 * 1024
@@ -271,6 +281,24 @@ function isAccountWorkspaceRequiredError(error: unknown): boolean {
   return /account-workspace-required/i.test(toErrorMessage(error))
 }
 
+function isIntegrationAuthRecoveryError(error: unknown): boolean {
+  return isCloudAuthRequiredError(error) || isAccountWorkspaceRequiredError(error)
+}
+
+function integrationAuthRecoveryReason(error: unknown): IntegrationAuthRecoveryState['reason'] {
+  return isAccountWorkspaceRequiredError(error) ? 'account-workspace-required' : 'cloud-auth-required'
+}
+
+function integrationAuthRecoveryFailureClass(error: unknown): string | undefined {
+  const message = toErrorMessage(error)
+  const match = message.match(/\b(?:cloud-auth-required|account-workspace-required):([a-z0-9-]+)/i)
+  return match?.[1]
+}
+
+function integrationAuthRecoveryMessage(reason: IntegrationAuthRecoveryState['reason'], failureClass?: string): string {
+  return failureClass ? `${reason}:${failureClass}` : reason
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
@@ -306,6 +334,13 @@ function isHttpStatus(error: unknown, status: number): boolean {
     || record.statusCode === status
     || record.httpStatus === status
     || record.response?.status === status
+}
+
+function httpError(message: string, status: number): Error & { status: number; httpStatus: number } {
+  const error = new Error(message) as Error & { status: number; httpStatus: number }
+  error.status = status
+  error.httpStatus = status
+  return error
 }
 
 // Provider adapters materialize data at the workspace ROOT — `/github/...`,
@@ -733,13 +768,25 @@ export class IntegrationsManager {
   private catalogFetchedAt = 0
   private localMountCloudHydrationStartedAt = 0
   private localMountCloudHydrationPromise: Promise<void> | null = null
+  private authRecoveryState: IntegrationAuthRecoveryState | null = null
+  private authRecoveryRetryTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor() {
     // Surface mount auth stalls (expired token + queued writeback) to the
     // renderer; the mount manager restarts the mount itself, this is the
     // user-visible signal that writebacks were paused meanwhile.
     integrationMountManager.setHealthObserver((alert) => {
-      this.emit({ type: 'mount-auth-stall', ...alert })
+      if (alert.type === 'auth-required') {
+        this.setAuthRecoveryState(alert.reason, undefined, alert.message)
+        return
+      }
+      this.emit({
+        type: 'mount-auth-stall',
+        remotePath: alert.remotePath,
+        status: alert.status,
+        pendingWriteback: alert.pendingWriteback,
+        message: alert.message
+      })
     })
   }
 
@@ -748,6 +795,68 @@ export class IntegrationsManager {
     return () => {
       this.listeners.delete(handler)
     }
+  }
+
+  getAuthRecoveryState(): IntegrationAuthRecoveryState | null {
+    return this.authRecoveryState
+  }
+
+  private setAuthRecoveryState(
+    reason: IntegrationAuthRecoveryState['reason'],
+    failureClass?: string,
+    message = integrationAuthRecoveryMessage(reason, failureClass)
+  ): void {
+    const previous = this.authRecoveryState
+    const state: IntegrationAuthRecoveryState = {
+      reason,
+      since: previous?.reason === reason && previous.failureClass === failureClass
+        ? previous.since
+        : Date.now(),
+      ...(failureClass ? { failureClass } : {}),
+      message
+    }
+    this.authRecoveryState = state
+    this.scheduleAuthRecoveryRetry()
+    if (
+      previous?.reason === state.reason &&
+      previous.failureClass === state.failureClass &&
+      previous.message === state.message
+    ) {
+      return
+    }
+    this.emit({
+      type: 'integration-auth-required',
+      reason,
+      message
+    })
+  }
+
+  private clearAuthRecoveryState(): void {
+    if (!this.authRecoveryState && !this.authRecoveryRetryTimer) return
+    const hadState = !!this.authRecoveryState
+    this.authRecoveryState = null
+    if (this.authRecoveryRetryTimer) clearTimeout(this.authRecoveryRetryTimer)
+    this.authRecoveryRetryTimer = null
+    if (hadState) this.emit({ type: 'integration-auth-recovered' })
+  }
+
+  private scheduleAuthRecoveryRetry(): void {
+    if (this.authRecoveryRetryTimer) return
+    const timer = setTimeout(() => {
+      this.authRecoveryRetryTimer = null
+      if (!this.authRecoveryState) return
+      void this.syncLocalMounts({ hydrateCloud: false })
+        .catch((error) => {
+          if (!isIntegrationAuthRecoveryError(error)) {
+            console.warn('[integrations] Failed to retry integration mount recovery:', toErrorMessage(error))
+          }
+        })
+        .finally(() => {
+          if (this.authRecoveryState) this.scheduleAuthRecoveryRetry()
+        })
+    }, AUTH_RECOVERY_RETRY_INTERVAL_MS)
+    timer.unref?.()
+    this.authRecoveryRetryTimer = timer
   }
 
   async listCatalog(): Promise<IntegrationAdapter[]> {
@@ -804,11 +913,19 @@ export class IntegrationsManager {
     } catch (error) {
       if (isAccountWorkspaceRequiredError(error)) {
         console.warn(
-          `[integrations] Account workspace unavailable; returning local integrations only (${local.length} items)`
+          '[integrations] Account workspace unavailable; integration recovery is required'
         )
-        return this.withLocalMountPaths(local)
+        const failureClass = integrationAuthRecoveryFailureClass(error)
+        this.setAuthRecoveryState('account-workspace-required', failureClass)
+        const decorated = await this.withLocalMountPaths(local)
+        this.setAuthRecoveryState('account-workspace-required', failureClass)
+        return decorated
       }
       if (isCloudAuthRequiredError(error)) throw error
+      if (isHttpStatus(error, 403)) {
+        this.setAuthRecoveryState('cloud-auth-required', 'workspace-access-revoked')
+        throw new Error('cloud-auth-required:workspace-access-revoked')
+      }
 
       // Surface the failure to the renderer instead of silently downgrading to
       // an empty list. The UI catches and renders this in the error banner so
@@ -1214,7 +1331,10 @@ export class IntegrationsManager {
     const payload = await response.json().catch(() => null) as unknown
 
     if (!response.ok) {
-      throw new Error(`${method} ${path} failed: ${response.status} ${getPayloadMessage(payload, response.statusText)}`)
+      throw httpError(
+        `${method} ${path} failed: ${response.status} ${getPayloadMessage(payload, response.statusText)}`,
+        response.status
+      )
     }
 
     return payload as T
@@ -1892,6 +2012,11 @@ export class IntegrationsManager {
       return true
     } catch (error) {
       if (isAccountWorkspaceRequiredError(error)) {
+        this.setAuthRecoveryState('account-workspace-required', integrationAuthRecoveryFailureClass(error))
+        return false
+      }
+      if (isCloudAuthRequiredError(error)) {
+        this.setAuthRecoveryState('cloud-auth-required', integrationAuthRecoveryFailureClass(error))
         return false
       }
       console.warn('[integrations] Failed to reconcile integration event subscriptions:', toErrorMessage(error))
@@ -1926,6 +2051,10 @@ export class IntegrationsManager {
       }
     })()
       .catch((error) => {
+        if (isHttpStatus(error, 403)) {
+          this.setAuthRecoveryState('cloud-auth-required', 'workspace-access-revoked')
+          throw new Error('cloud-auth-required:workspace-access-revoked')
+        }
         console.warn('[integrations] Failed to hydrate cloud integrations for local mounts:', toErrorMessage(error))
       })
       .finally(() => {
@@ -1969,8 +2098,17 @@ export class IntegrationsManager {
         mountPaths: Array.from(mountPaths)
       })))
     } catch (error) {
+      if (isIntegrationAuthRecoveryError(error)) {
+        this.setAuthRecoveryState(
+          integrationAuthRecoveryReason(error),
+          integrationAuthRecoveryFailureClass(error)
+        )
+        throw error
+      }
       console.warn('[integrations] Failed to reconcile local integration mount:', toErrorMessage(error))
+      return
     }
+    this.clearAuthRecoveryState()
     await this.syncProjectIntegrationLinks(integrations.length > 0)
   }
 
@@ -1997,7 +2135,9 @@ export class IntegrationsManager {
   }
 
   private async withLocalMountPaths(integrations: ConnectedIntegration[]): Promise<ConnectedIntegration[]> {
-    await this.syncLocalMounts({ hydrateCloud: false })
+    await this.syncLocalMounts({ hydrateCloud: false }).catch((error) => {
+      if (!isIntegrationAuthRecoveryError(error)) throw error
+    })
     const workspaceId = integrationMountManager.currentWorkspaceId()
     if (!workspaceId) return integrations
     return integrations.map((integration) => {

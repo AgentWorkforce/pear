@@ -633,6 +633,10 @@ export function registerIpcHandlers(): void {
     return integrationsManager.listConnectedForSettings(projectId)
   })
 
+  ipcMain.handle('integrations:auth-recovery-state', () => {
+    return integrationsManager.getAuthRecoveryState()
+  })
+
   ipcMain.handle('integrations:telemetry', () => {
     return getIntegrationEventTelemetrySnapshot()
   })

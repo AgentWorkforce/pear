@@ -709,6 +709,15 @@ export type IntegrationsEvent =
   | { type: 'integration-removed'; projectId: string; integrationId: string }
   | { type: 'integration-error'; projectId: string; integrationId: string; message: string }
   | { type: 'mount-auth-stall'; remotePath: string; status: string | null; pendingWriteback: number; message: string }
+  | { type: 'integration-auth-required'; reason: 'cloud-auth-required' | 'account-workspace-required'; message: string }
+  | { type: 'integration-auth-recovered' }
+
+export type IntegrationAuthRecoveryState = {
+  reason: 'cloud-auth-required' | 'account-workspace-required'
+  since: number
+  failureClass?: string
+  message: string
+}
 
 export type IntegrationEventTelemetryCounters = {
   eventsReceived: number
@@ -962,6 +971,7 @@ export interface PearAPI {
   integrations: {
     catalog: () => Promise<IntegrationAdapter[]>
     list: (projectId: string) => Promise<ConnectedIntegration[]>
+    authRecoveryState: () => Promise<IntegrationAuthRecoveryState | null>
     telemetry: () => Promise<IntegrationEventTelemetrySnapshot>
     listMountDir: (projectId: string, integrationId: string, dirPath: string) => Promise<FsDirEntry[]>
     listRemoteDir: (projectId: string, remotePath: string) => Promise<FsDirEntry[]>
