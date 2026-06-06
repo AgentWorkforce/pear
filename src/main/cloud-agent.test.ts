@@ -345,6 +345,62 @@ describe('CloudAgentManager', () => {
       relayfileMountPaths: ['/integrations/github', '/workspace'],
       workspaceKey: 'rk_live_project'
     })
+    expect(mock.brokerManager.attachCloudSandbox).toHaveBeenCalledWith(
+      'project-1',
+      expect.objectContaining({
+        sandboxId: 'sandbox-1',
+        sentWorkspaceKey: 'rk_live_project'
+      }),
+      undefined
+    )
+  })
+
+  it('does not pass a sent workspace key for keyless warms', async () => {
+    const manager = new CloudAgentManager()
+
+    await manager.attach('project-1', 'cloud-agent-1')
+
+    expect(mock.brokerManager.attachCloudSandbox).toHaveBeenCalledWith(
+      'project-1',
+      expect.not.objectContaining({
+        sentWorkspaceKey: expect.anything()
+      }),
+      undefined
+    )
+  })
+
+  it('clears the sent workspace key when a cloud agent detaches', async () => {
+    mock.brokerManager.workspaceKeyForProject.mockResolvedValueOnce('rk_live_project')
+    const manager = new CloudAgentManager()
+    await manager.attach('project-1', 'cloud-agent-1')
+    await manager.detach('project-1')
+    mock.brokerManager.attachCloudSandbox.mockClear()
+
+    await (manager as unknown as {
+      connectBroker: (projectId: string, sandbox: {
+        sandboxId: string
+        execUrl: string
+        filesUrl: string
+        relayfileToken: string
+        relayfileMountPath: string
+        status: 'ready'
+      }) => Promise<void>
+    }).connectBroker('project-1', {
+      sandboxId: 'sandbox-2',
+      execUrl: 'https://sandbox-2.example',
+      filesUrl: 'https://sandbox-2.example/files',
+      relayfileToken: 'relayfile-token-2',
+      relayfileMountPath: '/remote/project-1',
+      status: 'ready'
+    })
+
+    expect(mock.brokerManager.attachCloudSandbox).toHaveBeenCalledWith(
+      'project-1',
+      expect.not.objectContaining({
+        sentWorkspaceKey: expect.anything()
+      }),
+      undefined
+    )
   })
 
   it('reuses a warm-on-intent box when attach is clicked', async () => {

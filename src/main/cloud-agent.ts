@@ -470,6 +470,10 @@ export class CloudAgentManager {
   private appliedConflictPolicies = new Map<string, ConflictPolicy>()
   private mountRestartPromises = new Map<string, Promise<void>>()
   private workspaceSources = new Map<string, CloudAgentWorkspaceSource>()
+  // Relay workspace keys actually sent on POST /box, per project — arms the
+  // attach-time stale-broker tripwire (#125). Tracked here because the
+  // sandbox object is replaced by warm-poll GETs between warm and attach.
+  private sentWorkspaceKeys = new Map<string, string>()
   private prewarms = new Map<string, PrewarmEntry>()
   private canceledAttaches = new Set<string>()
   private eventHandlers = new Set<(event: CloudAgentEvent) => void>()
@@ -659,6 +663,7 @@ export class CloudAgentManager {
     this.lastSettledAt.delete(normalizedProjectId)
     this.appliedConflictPolicies.delete(normalizedProjectId)
     this.workspaceSources.delete(normalizedProjectId)
+    this.sentWorkspaceKeys.delete(normalizedProjectId)
     this.persistCloudAgent(normalizedProjectId, null)
     this.emit({ type: 'mount-status', projectId: normalizedProjectId, mount: toMountStatus(null) })
   }
@@ -1085,6 +1090,11 @@ export class CloudAgentManager {
     // workspace, exactly as before.
     const workspaceKey = await (brokerManager as unknown as CloudBrokerAdapter)
       .workspaceKeyForProject?.(projectId)
+    if (workspaceKey) {
+      this.sentWorkspaceKeys.set(projectId, workspaceKey)
+    } else {
+      this.sentWorkspaceKeys.delete(projectId)
+    }
     const relayBroker = {
       ...(workspaceKey ? { workspaceKey } : {}),
       brokerName: `cloud-${cloudAgentId.slice(0, 8)}`
@@ -1281,7 +1291,13 @@ export class CloudAgentManager {
     const broker = brokerManager as unknown as CloudBrokerAdapter
     const attach = broker.attachCloudSandbox || broker.connectCloudSandbox
     if (attach) {
-      await attach.call(brokerManager, projectId, sandbox, win)
+      const sentWorkspaceKey = this.sentWorkspaceKeys.get(projectId)
+      await attach.call(
+        brokerManager,
+        projectId,
+        sentWorkspaceKey ? { ...sandbox, sentWorkspaceKey } : sandbox,
+        win
+      )
       return
     }
 

@@ -313,6 +313,13 @@ export interface CloudAgentSandboxHandle {
   execUrl: string
   apiKey?: string
   relayfileMountPath?: string
+  /**
+   * The relay workspace key provisioning actually sent on POST /box (#125).
+   * Set only when the warm path resolved a local key — its presence arms the
+   * attach-time tripwire that detects a sandbox broker silently ignoring
+   * AGENT_RELAY_WORKSPACE_KEY (stale, pre-strict-join binary).
+   */
+  sentWorkspaceKey?: string
 }
 
 type BrokerEventObserver = (projectId: string, event: BrokerEvent) => void
@@ -1562,7 +1569,28 @@ export class BrokerManager {
         baseUrl: execUrl,
         ...(apiKey ? { apiKey } : {})
       })
-      await client.getSession()
+      const sessionMetadata = await client.getSession()
+
+      // #125 tripwire: provisioning asked this sandbox broker to JOIN an
+      // explicit workspace. A different key in the session means the broker
+      // ignored AGENT_RELAY_WORKSPACE_KEY (a pre-strict-join binary, e.g. a
+      // stale snapshot bake) and silently created an isolated workspace —
+      // exactly the failure #125 fixed. Compare only when a key was actually
+      // sent; prefixes keep the event diagnosable from logs without leaking
+      // whole keys.
+      const sentWorkspaceKey = handle.sentWorkspaceKey?.trim() || undefined
+      const sandboxWorkspaceKey = sessionMetadata.workspace_key || undefined
+      const workspaceKeyMismatch = !!sentWorkspaceKey && sandboxWorkspaceKey !== sentWorkspaceKey
+      if (workspaceKeyMismatch) {
+        console.error(
+          `[broker] Cloud sandbox broker ignored workspace key for project ${normalizedProjectId} — stale broker binary?`,
+          {
+            sandboxId,
+            sentWorkspaceKeyPrefix: sentWorkspaceKey?.slice(0, 8),
+            sandboxWorkspaceKeyPrefix: sandboxWorkspaceKey?.slice(0, 8) ?? '(none)'
+          }
+        )
+      }
 
       const eventStreamGeneration = this.nextEventStreamGeneration()
       const unsubEvent = this.attachClient(sessionKey, client, win, eventStreamGeneration)
@@ -1591,6 +1619,15 @@ export class BrokerManager {
       })
       client.connectEvents()
 
+      if (workspaceKeyMismatch) {
+        this.publishBrokerEvent(sessionKey, normalizedProjectId, win, {
+          kind: 'cloud_workspace_key_mismatch',
+          cloudSandboxId: sandboxId,
+          sentWorkspaceKeyPrefix: sentWorkspaceKey?.slice(0, 8) ?? null,
+          sandboxWorkspaceKeyPrefix: sandboxWorkspaceKey?.slice(0, 8) ?? null,
+          detail: 'sandbox broker ignored AGENT_RELAY_WORKSPACE_KEY — stale broker binary?'
+        })
+      }
       this.publishBrokerEvent(sessionKey, normalizedProjectId, win, {
         kind: 'broker_initialized',
         name: `cloud-${normalizedProjectId}`,
