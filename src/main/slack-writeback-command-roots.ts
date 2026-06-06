@@ -1,10 +1,11 @@
 const SLACK_WRITEBACK_COLLECTIONS = new Set(['channels', 'dms', 'users'])
 
-function normalizeRemotePath(path: string): string {
+function normalizeRemotePath(path: string): string | null {
   const segments = path
     .trim()
     .split(/[\\/]+/)
-    .filter((segment) => segment.length > 0 && segment !== '.' && segment !== '..')
+    .filter((segment) => segment.length > 0)
+  if (segments.some((segment) => segment === '.' || segment === '..')) return null
   return segments.length > 0 ? `/${segments.join('/')}` : '/'
 }
 
@@ -16,6 +17,7 @@ function isSlackProvider(provider: string): boolean {
 export function slackWritebackCommandMountPathFor(provider: string, mountPath: string): string | null {
   if (!isSlackProvider(provider)) return null
   const normalized = normalizeRemotePath(mountPath)
+  if (!normalized) return null
   const segments = normalized.split('/').filter(Boolean)
   if (segments[0] !== 'slack') return null
 
@@ -38,5 +40,6 @@ export function slackWritebackCommandMountPathFor(provider: string, mountPath: s
 }
 
 export function isSlackWritebackCommandRoot(remotePath: string): boolean {
-  return slackWritebackCommandMountPathFor('slack', remotePath) === normalizeRemotePath(remotePath)
+  const normalized = normalizeRemotePath(remotePath)
+  return normalized !== null && slackWritebackCommandMountPathFor('slack', remotePath) === normalized
 }
