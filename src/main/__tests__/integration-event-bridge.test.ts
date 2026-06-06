@@ -711,6 +711,60 @@ test('slack raw-id and slug alias paths with distinct revisions inject once per 
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'alice', 'alice'])
 })
 
+test('slack raw-id and slug alias duplicates suppress when one context read is sparse', async () => {
+  const harness = makeHarness(['alice'], {
+    readFileResponse: (_workspaceId, path) => {
+      if (path.includes('__proj-cloud')) throw new Error('remote file not ready')
+      return {
+        path,
+        revision: 'rev-context',
+        contentType: 'application/json',
+        content: JSON.stringify({ provider: 'slack', text: 'readable Slack message' }),
+        encoding: 'utf-8'
+      }
+    }
+  })
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        downloadHistoricalData: false,
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+  })
+
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC/messages/1780668000_000000/meta.json',
+    'slack',
+    { digest: 'revision:raw-copy' }
+  ))
+  await waitForSent(harness, 1)
+
+  await harness.emit({
+    ...changeEvent(
+      '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json',
+      'slack',
+      { digest: 'revision:slug-copy' }
+    ),
+    expand: async () => ({
+      level: 'full',
+      path: '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json',
+      data: {
+        path: '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json',
+        deleted: false
+      }
+    })
+  } as ChangeEvent)
+  await waitForDropped('project-1', 1, 2_500)
+
+  assert.equal(harness.sent.length, 1)
+  assert.match(harness.sent[0].input.text, /Message:\nreadable Slack message/u)
+})
+
 test('remote replayed events older than the subscription session are dropped by default', async () => {
   const harness = makeHarness()
 

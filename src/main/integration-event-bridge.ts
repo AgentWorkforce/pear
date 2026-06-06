@@ -97,6 +97,11 @@ type EventContextPreview = {
 
 type EventContextPreviewMetadata = Omit<EventContextPreview, 'content'>
 
+type SlackLogicalInjectionState = {
+  expiresAt: number
+  contentHash?: string
+}
+
 type DispatchItem = {
   event: ChangeEvent
   specs: SubscriptionSpec[]
@@ -1295,8 +1300,7 @@ function stableContentFingerprint(content: string): string {
 
 function eventDedupeKeyWithFingerprint(
   duplicateKey: string,
-  fingerprint: string | null,
-  contextPreview?: EventContextPreview
+  fingerprint: string | null
 ): { key: string; ttlMs: number } {
   if (!fingerprint) {
     return {
@@ -1306,11 +1310,8 @@ function eventDedupeKeyWithFingerprint(
   }
 
   if (fingerprint.startsWith('slack:')) {
-    const contentAwareFingerprint = contextPreview?.kind === 'text'
-      ? `${fingerprint}:content:${stableContentFingerprint(contextPreview.content)}`
-      : fingerprint
     return {
-      key: `${duplicateKey}:change:${contentAwareFingerprint}`,
+      key: `${duplicateKey}:change:${fingerprint}`,
       ttlMs: SLACK_RECORD_REPLAY_TTL_MS
     }
   }
@@ -2041,6 +2042,7 @@ export class IntegrationEventBridge {
   private subscriptions = new Map<string, ProjectSubscription>()
   private dispatchers = new Map<string, ProjectEventDispatcher>()
   private recentInjections = new Map<string, number>()
+  private slackLogicalInjections = new Map<string, SlackLogicalInjectionState>()
   private projectAgentRecipientCache = new Map<string, ProjectAgentRecipientCacheEntry>()
   private notificationTargetCache = new Map<string, NotificationTargetCacheEntry>()
   private brokerSendPacers = new Map<string, ProjectBrokerSendPacer>()
@@ -2369,7 +2371,7 @@ export class IntegrationEventBridge {
       // Release the dedupe key: a duplicate of this event (remote copy of a
       // local change, coalesced update) must be allowed to retry once a
       // recipient registers; otherwise the event is suppressed for the TTL.
-      if (dedupeClaimed) this.recentInjections.delete(dedupe.key)
+      if (dedupeClaimed) this.releaseDedupeKey(dedupe.key, needsSlackContentAwareDedupe)
       incrementIntegrationEventCounter(projectId, 'eventsDropped')
       warnIntegrationEventAggregated(
         `skipped no recipients:${projectId}`,
@@ -2386,8 +2388,8 @@ export class IntegrationEventBridge {
     const eventMetadata = integrationEventMetadata(event)
     const contextPreview = await this.readEventContextPreview(projectId, event)
     if (needsSlackContentAwareDedupe) {
-      dedupe = eventDedupeKeyWithFingerprint(duplicateKey, fingerprint, contextPreview)
-      if (this.wasRecentlyInjected(dedupe.key, dedupe.ttlMs)) {
+      dedupe = eventDedupeKeyWithFingerprint(duplicateKey, fingerprint)
+      if (!this.claimSlackLogicalInjection(dedupe.key, contextPreview, dedupe.ttlMs)) {
         incrementIntegrationEventCounter(projectId, 'eventsDropped')
         logIntegrationEvent('skipped duplicate path', {
           projectId,
@@ -2438,7 +2440,7 @@ export class IntegrationEventBridge {
       // No recipient got the event. Release the dedupe key so a duplicate of
       // this event (remote copy of a local change, coalesced update) retries
       // delivery instead of being dropped as a recent injection.
-      if (dedupeClaimed) this.recentInjections.delete(dedupe.key)
+      if (dedupeClaimed) this.releaseDedupeKey(dedupe.key, needsSlackContentAwareDedupe)
       throw sendErrors[0].error
     }
     if (sendErrors.length > 0) {
@@ -2562,6 +2564,41 @@ export class IntegrationEventBridge {
     if (this.recentInjections.has(key)) return true
     this.recentInjections.set(key, now + ttlMs)
     return false
+  }
+
+  private claimSlackLogicalInjection(
+    key: string,
+    contextPreview: EventContextPreview | undefined,
+    ttlMs: number
+  ): boolean {
+    const now = Date.now()
+    for (const [entryKey, entry] of this.slackLogicalInjections.entries()) {
+      if (entry.expiresAt <= now) this.slackLogicalInjections.delete(entryKey)
+    }
+
+    const contentHash = contextPreview?.kind === 'text'
+      ? stableContentFingerprint(contextPreview.content)
+      : undefined
+    const existing = this.slackLogicalInjections.get(key)
+    if (existing) {
+      if (!contentHash || !existing.contentHash || existing.contentHash === contentHash) {
+        return false
+      }
+    }
+
+    this.slackLogicalInjections.set(key, {
+      expiresAt: now + ttlMs,
+      contentHash
+    })
+    return true
+  }
+
+  private releaseDedupeKey(key: string, isSlackLogicalKey: boolean): void {
+    if (isSlackLogicalKey) {
+      this.slackLogicalInjections.delete(key)
+    } else {
+      this.recentInjections.delete(key)
+    }
   }
 
   private async getWorkspaceHandle(): Promise<RelayfileWorkspaceHandle> {
