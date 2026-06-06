@@ -8,6 +8,7 @@ import {
   IntegrationEventBridge,
   createWorkspaceScopedEventClient,
   integrationSubscriptionSummaries,
+  integrationRelayFileSyncOptions,
   localWatchEventPathsForFilename,
   localWatchRootsFor,
   relayfileSdkPathFiltersFor,
@@ -269,6 +270,20 @@ test('relayfile sdk path filters broaden partial-segment Slack DM globs', () => 
     '/slack/dms/*/**',
     '/slack/users/*/messages/**'
   ])
+})
+
+test('integration event remote stream keeps a refreshable relayfile token provider', () => {
+  const tokenProvider = async () => 'workspace-token'
+  const options = integrationRelayFileSyncOptions({
+    client: {} as never,
+    workspaceId: 'workspace-id',
+    baseUrl: 'https://relayfile.example',
+    tokenProvider,
+    from: 'legacy',
+    paths: ['/slack/channels/*/**']
+  })
+
+  assert.equal(options.token, tokenProvider)
 })
 
 test('integration event remote stream falls back to event feed polling after repeated stream errors', async () => {

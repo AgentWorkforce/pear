@@ -59,6 +59,13 @@ function remotePathSegments(remotePath: string): string[] {
     .map(sanitizePathSegment)
 }
 
+function hasTraversalPathSegment(remotePath: string): boolean {
+  return remotePath
+    .split(/[\\/]+/u)
+    .map((segment) => segment.trim())
+    .some((segment) => segment === '.' || segment === '..')
+}
+
 export function integrationMountRootForWorkspace(workspaceId: string): string {
   return integrationMountWorkspaceRoot(workspaceId)
 }
@@ -88,6 +95,7 @@ export function integrationProviderRoot(mountPath: string): string | null {
 }
 
 function canonicalIntegrationMountPath(mountPath: string, provider: string): string | null {
+  if (hasTraversalPathSegment(mountPath)) return null
   const providerSegment = sanitizePathSegment(provider.trim().toLowerCase())
   const segments = remotePathSegments(mountPath)
   if (segments[0] === 'discovery') {
@@ -361,7 +369,8 @@ export class IntegrationMountManager {
   }
 
   private createContractLauncher(spec: IntegrationMountSpec, launcher: MountLauncher): MountLauncher {
-    return Object.assign({
+    return {
+      ...launcher,
       start: (input: MountLauncherStart) => launcher.start({
         ...input,
         env: {
@@ -370,9 +379,7 @@ export class IntegrationMountManager {
           RELAYFILE_MOUNT_SYNC_MODE: spec.syncMode
         }
       })
-    }, {
-      __options: (launcher as { __options?: unknown }).__options
-    }) as MountLauncher
+    }
   }
 
   private async removeLegacyIntegrationMountRoot(mountRoot: string): Promise<void> {
