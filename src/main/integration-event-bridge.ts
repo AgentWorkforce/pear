@@ -10,6 +10,7 @@ import {
   type ChangeEvent,
   type FileReadResponse,
   type FilesystemEvent,
+  type RelayFileSyncOptions,
   type Subscription
 } from '@relayfile/sdk'
 import type { ConnectedIntegration } from './integrations'
@@ -48,6 +49,8 @@ const MAX_DISPATCH_SUMMARY_GROUPS = 10
 const MAX_DISPATCHED_EVENTS_PER_SECOND = 25
 const PROJECT_AGENT_RECIPIENT_CACHE_TTL_MS = 2_000
 const MAX_BROKER_SENDS_PER_SECOND = 25
+const REMOTE_STREAM_ERROR_POLLING_FALLBACK_THRESHOLD = 5
+const REMOTE_STREAM_POLL_INTERVAL_MS = 5_000
 
 type IntegrationEventCounterName =
   | 'eventsReceived'
@@ -179,6 +182,7 @@ type RelayfileWorkspaceHandle = {
 }
 
 type TokenProvider = () => Promise<string | undefined>
+type RelayFileSyncFactory = (options: RelayFileSyncOptions) => RelayFileSync
 
 type IntegrationEventBridgeDeps = {
   broker?: BrokerEventBridge
@@ -261,7 +265,41 @@ export function resetIntegrationEventTelemetryForTests(): void {
 }
 
 function toErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
+  if (error instanceof Error) {
+    const message = error.message.trim()
+    return message || error.name || error.constructor.name || 'Error'
+  }
+  if (typeof error === 'string') {
+    const message = error.trim()
+    return message || 'empty string error'
+  }
+  if (isRecord(error)) {
+    const message = error.message
+    if (typeof message === 'string' && message.trim()) return message.trim()
+    const reason = error.reason
+    if (typeof reason === 'string' && reason.trim()) return reason.trim()
+    const parts = [
+      typeof error.name === 'string' && error.name.trim() ? error.name.trim() : null,
+      typeof error.type === 'string' && error.type.trim() ? `type=${error.type.trim()}` : null,
+      typeof error.code === 'string' && error.code.trim() ? `code=${error.code.trim()}` : typeof error.code === 'number' ? `code=${error.code}` : null,
+      typeof error.status === 'string' && error.status.trim() ? `status=${error.status.trim()}` : typeof error.status === 'number' ? `status=${error.status}` : null,
+      typeof error.statusCode === 'string' && error.statusCode.trim() ? `statusCode=${error.statusCode.trim()}` : typeof error.statusCode === 'number' ? `statusCode=${error.statusCode}` : null,
+      typeof error.httpStatus === 'string' && error.httpStatus.trim() ? `httpStatus=${error.httpStatus.trim()}` : typeof error.httpStatus === 'number' ? `httpStatus=${error.httpStatus}` : null
+    ].filter((entry): entry is string => entry !== null)
+    if (parts.length > 0) return parts.join(' ')
+
+    const constructorName = (error as { constructor?: { name?: string } }).constructor?.name
+    if (constructorName && constructorName !== 'Object') return constructorName
+
+    try {
+      const json = JSON.stringify(error)
+      if (json && json !== '{}') return json
+    } catch {
+      // Fall through to String(error).
+    }
+  }
+  const text = String(error).trim()
+  return text && text !== '[object Object]' ? text : 'unknown error'
 }
 
 function isUnauthorizedError(error: unknown): boolean {
@@ -568,16 +606,23 @@ function filesystemEventToChangeEvent(
   } as ChangeEvent
 }
 
-function createWorkspaceScopedEventClient(
+export function createWorkspaceScopedEventClient(
   client: RelayFileClient,
   workspaceId: string,
   tokenProvider: TokenProvider,
-  baseUrl?: string
+  baseUrl?: string,
+  syncFactory: RelayFileSyncFactory = (options) => new RelayFileSync(options)
 ): RelayfileEventClient {
   return {
     subscribe(globs, onChange, options) {
       let active = true
       let sync: RelayFileSync | null = null
+      let polling = false
+      let pollingTimer: ReturnType<typeof setTimeout> | null = null
+      let pollingInFlight = false
+      let consecutiveStreamErrors = 0
+      let lastEventCursor: string | undefined
+      const polledEventIds = new Set<string>()
       const pendingByPath = new Map<string, ReturnType<typeof setTimeout>>()
       const coalesceMs = Math.max(0, Math.floor(options?.coalesceMs ?? 750))
       const shouldCoalesce = (options?.coalesce ?? 'fire-once') !== 'none'
@@ -608,6 +653,11 @@ function createWorkspaceScopedEventClient(
 
       const handleEvent = (event: FilesystemEvent): void => {
         if (!active || !shouldPublishFilesystemEvent(event)) return
+        consecutiveStreamErrors = 0
+        if (event.eventId) {
+          lastEventCursor = event.eventId
+          polledEventIds.add(event.eventId)
+        }
         const path = event.path.startsWith('/') ? event.path : `/${event.path}`
         if (!globs.some((glob) => globMatchesPath(glob, path))) return
         if (pathScope && !pathScope.some((glob) => globMatchesPath(glob, path))) return
@@ -628,6 +678,73 @@ function createWorkspaceScopedEventClient(
           dispatch({ ...event, path })
         }, coalesceMs))
         options?.onQueueDepth?.(pendingByPath.size)
+      }
+
+      const pollOnce = async (): Promise<void> => {
+        if (!active || pollingInFlight) return
+        pollingInFlight = true
+        try {
+          let cursor = lastEventCursor
+          for (;;) {
+            const response = await client.getEvents(workspaceId, {
+              cursor,
+              limit: 1000
+            })
+            const events = response.events ?? []
+            for (const event of events) {
+              if (event.eventId && polledEventIds.has(event.eventId)) {
+                lastEventCursor = event.eventId
+                continue
+              }
+              handleEvent(event)
+            }
+            const nextCursor = response.nextCursor || null
+            if (events.length > 0) {
+              lastEventCursor = events[events.length - 1]?.eventId ?? lastEventCursor
+            }
+            if (nextCursor) lastEventCursor = nextCursor
+            if (!nextCursor || nextCursor === cursor) break
+            cursor = nextCursor
+          }
+          consecutiveStreamErrors = 0
+        } catch (error) {
+          const errorMessage = toErrorMessage(error)
+          warnIntegrationEventAggregated(
+            `remote stream polling error:${workspaceId}`,
+            'remote stream polling error',
+            {
+              workspaceId,
+              error: errorMessage
+            }
+          )
+        } finally {
+          pollingInFlight = false
+        }
+      }
+
+      const schedulePolling = (delayMs = REMOTE_STREAM_POLL_INTERVAL_MS): void => {
+        if (!active || !polling || pollingTimer) return
+        pollingTimer = setTimeout(() => {
+          pollingTimer = null
+          void pollOnce().finally(() => schedulePolling())
+        }, delayMs)
+      }
+
+      const startPollingFallback = (reason: string): void => {
+        if (!active || polling) return
+        polling = true
+        warnIntegrationEventAggregated(
+          `remote stream forced polling fallback:${workspaceId}`,
+          'remote stream forced polling fallback',
+          {
+            workspaceId,
+            reason,
+            cursor: lastEventCursor
+          }
+        )
+        void sync?.stop().catch(() => undefined)
+        sync = null
+        void pollOnce().finally(() => schedulePolling())
       }
 
       void tokenProvider()
@@ -653,7 +770,7 @@ function createWorkspaceScopedEventClient(
             from: options?.from ?? 'now',
             transport: baseUrl ? 'websocket' : 'polling'
           })
-          sync = new RelayFileSync({
+          sync = syncFactory({
             client,
             workspaceId,
             baseUrl,
@@ -673,12 +790,14 @@ function createWorkspaceScopedEventClient(
           })
           sync.on('event', handleEvent)
           sync.on('state', (state) => {
+            if (state === 'open') consecutiveStreamErrors = 0
             logIntegrationEvent('remote stream state', {
               workspaceId,
               state
             })
           })
           sync.on('error', (error) => {
+            consecutiveStreamErrors += 1
             const errorMessage = toErrorMessage(error)
             warnIntegrationEventAggregated(
               `remote stream error:${workspaceId}`,
@@ -688,6 +807,9 @@ function createWorkspaceScopedEventClient(
                 error: errorMessage
               }
             )
+            if (consecutiveStreamErrors >= REMOTE_STREAM_ERROR_POLLING_FALLBACK_THRESHOLD) {
+              startPollingFallback('repeated-stream-errors')
+            }
           })
           sync.start()
         })
@@ -706,6 +828,8 @@ function createWorkspaceScopedEventClient(
       return {
         async unsubscribe() {
           active = false
+          if (pollingTimer) clearTimeout(pollingTimer)
+          pollingTimer = null
           for (const timer of pendingByPath.values()) clearTimeout(timer)
           pendingByPath.clear()
           await sync?.stop()
