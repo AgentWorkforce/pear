@@ -13,7 +13,7 @@
 // Release mode (`--release` or RELAYFILE_MOUNT_INSTALL_SOURCE=release) ignores
 // local binaries and installs from the matching GitHub release unless that
 // release binary is already present.
-import { access, chmod, copyFile, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { access, chmod, copyFile, lstat, mkdir, readFile, realpath, rename, rm, writeFile } from 'node:fs/promises'
 import { constants, createWriteStream } from 'node:fs'
 import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -75,7 +75,8 @@ function fail(message) {
 
 async function installFromFile(source, marker = `local:${source}`) {
   await mkdir(dirname(target), { recursive: true })
-  if ((await realpath(source).catch(() => null)) === (await realpath(target).catch(() => null))) {
+  const targetIsSymlink = await lstat(target).then((stats) => stats.isSymbolicLink()).catch(() => false)
+  if (!targetIsSymlink && (await realpath(source).catch(() => null)) === (await realpath(target).catch(() => null))) {
     await chmod(target, 0o755)
     await writeFile(versionMarker, `${marker}\n`)
     console.log(`[relayfile-mount] already installed at ${target}`)
