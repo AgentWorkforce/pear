@@ -1040,8 +1040,8 @@ export function ProjectSettings(): React.ReactNode {
                     type="button"
                     onClick={() =>
                       void run(async () => {
-                        clearRootConflict()
-                        await createWorktreeRoot(pendingRootConflict.path)
+                        const root = await createWorktreeRoot(pendingRootConflict.path)
+                        if (root) clearRootConflict()
                       })
                     }
                     className="rounded-md bg-[var(--pear-accent)] px-3 py-1.5 text-xs font-medium text-white hover:bg-[var(--pear-accent-bright)]"

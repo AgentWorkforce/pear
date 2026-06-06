@@ -794,6 +794,27 @@ export interface ProjectRootConflict {
   path: string
 }
 
+export interface ProjectRootRecord {
+  id: string
+  name: string
+  path: string
+  pathExists?: boolean
+}
+
+export interface ProjectRootAdded {
+  kind: 'added'
+  root: ProjectRootRecord
+}
+
+export type AddRootResult = ProjectRootAdded | ProjectRootConflict
+
+export interface ProjectIntegrationResult {
+  id: string
+  name: string
+  type: string
+  [key: string]: unknown
+}
+
 export interface PearAPI {
   app: {
     confirmQuit: () => Promise<boolean>
@@ -808,10 +829,10 @@ export interface PearAPI {
     addChannel: (projectId: string, name: string) => Promise<void>
     removeChannel: (projectId: string, name: string) => Promise<void>
     setChannelPeople: (projectId: string, channelName: string, people: string[]) => Promise<string[]>
-    addRoot: (projectId: string, name?: string, rootPath?: string) => Promise<unknown>
+    addRoot: (projectId: string, name?: string, rootPath?: string) => Promise<AddRootResult | null>
     removeRoot: (projectId: string, rootId: string) => Promise<void>
-    createWorktreeRoot: (projectId: string, repoPath: string, projectName: string, name?: string) => Promise<unknown>
-    addIntegration: (projectId: string, name: string, type?: string) => Promise<unknown>
+    createWorktreeRoot: (projectId: string, repoPath: string, projectName: string, name?: string) => Promise<ProjectRootRecord>
+    addIntegration: (projectId: string, name: string, type?: string) => Promise<ProjectIntegrationResult>
     removeIntegration: (projectId: string, integrationId: string) => Promise<void>
   }
   broker: {

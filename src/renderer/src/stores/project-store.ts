@@ -6,7 +6,7 @@ import {
   makeProjectSchema,
   normalizeChannelName
 } from '@shared/schemas/project'
-import { pear, type ProjectRootConflict } from '@/lib/ipc'
+import { pear, type AddRootResult, type ProjectRootConflict } from '@/lib/ipc'
 
 export type { ProjectRootConflict }
 
@@ -222,17 +222,16 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
   addRoot: async (name, rootPath) => {
     const { activeProjectId } = get()
     if (!activeProjectId) return null
-    const raw = await pear.project.addRoot(activeProjectId, name, rootPath)
-    if (!raw) return null
+    const result: AddRootResult | null = await pear.project.addRoot(activeProjectId, name, rootPath)
+    if (!result) return null
 
-    const result = raw as Record<string, unknown>
     if (result.kind === 'conflict') {
-      set({ pendingRootConflict: raw as unknown as ProjectRootConflict })
+      set({ pendingRootConflict: result })
       return null
     }
 
-    const rootData = result.kind === 'added' ? (result as { root: unknown }).root : raw
-    const root = parseRoot(rootData)
+    const root = parseRoot(result.root)
+    if (root) set({ pendingRootConflict: null })
     await get().load()
     if (root) get().setActiveRoot(root.id)
     return root
@@ -249,6 +248,7 @@ export const useProjectStore = create<ProjectState>((set, get) => ({
     if (!project) return null
     const raw = await pear.project.createWorktreeRoot(activeProjectId, repoPath, project.name, name)
     const root = parseRoot(raw)
+    if (root) set({ pendingRootConflict: null })
     await get().load()
     if (root) get().setActiveRoot(root.id)
     return root

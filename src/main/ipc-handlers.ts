@@ -1,4 +1,5 @@
 import { app, ipcMain, dialog, BrowserWindow, shell } from 'electron'
+import { createHash } from 'crypto'
 import { basename, join, resolve } from 'path'
 import type { SpawnPtyInput, SendMessageInput } from '@agent-relay/harness-driver'
 import {
@@ -173,7 +174,8 @@ export function registerIpcHandlers(): void {
     if (!gitRoot) throw new Error(`Not a git repository: ${repoPath}`)
 
     const repoBasename = basename(gitRoot)
-    const worktreePath = join(app.getPath('userData'), 'worktrees', projectId, repoBasename)
+    const repoHash = createHash('sha1').update(gitRoot).digest('hex').slice(0, 8)
+    const worktreePath = join(app.getPath('userData'), 'worktrees', projectId, `${repoBasename}-${repoHash}`)
 
     const branchSlug = projectName
       .toLowerCase()

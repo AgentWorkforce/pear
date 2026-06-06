@@ -6,6 +6,7 @@ import type {
   AiHistSession,
   AiHistStats,
   AiHistStatusResponse,
+  AddRootResult,
   AuthLoginInput,
   AuthStatus,
   BrokerAttachTerminalInput,
@@ -66,6 +67,8 @@ import type {
   ProactiveAgentRunsPage,
   ProactiveAgentTranscript,
   ProjectListResult,
+  ProjectIntegrationResult,
+  ProjectRootRecord,
   TerminalAttachMode,
   UpdaterState,
   WorkforcePersona
@@ -77,6 +80,7 @@ export type {
   AiHistResumeEntry,
   AiHistSession,
   AiHistSource,
+  AddRootResult,
   AiHistStats,
   AiHistStatusResponse,
   AgentCurrentState,
@@ -160,6 +164,9 @@ export type {
   ProactiveAgentTranscript,
   ProactiveAgentWatchEventKind,
   ProjectListResult,
+  ProjectIntegrationResult,
+  ProjectRootConflict,
+  ProjectRootRecord,
   TerminalAttachMode,
   ViewMode,
   WorkforcePersona
@@ -198,13 +205,13 @@ const api = {
     setChannelPeople: (projectId: string, channelName: string, people: string[]) =>
       invoke<string[]>('project:set-channel-people', projectId, channelName, people),
     addRoot: (projectId: string, name?: string, rootPath?: string) =>
-      invoke<unknown>('project:add-root', projectId, name, rootPath),
+      invoke<AddRootResult | null>('project:add-root', projectId, name, rootPath),
     removeRoot: (projectId: string, rootId: string) =>
       invoke<void>('project:remove-root', projectId, rootId),
     createWorktreeRoot: (projectId: string, repoPath: string, projectName: string, name?: string) =>
-      invoke<unknown>('project:create-worktree-root', projectId, repoPath, projectName, name),
+      invoke<ProjectRootRecord>('project:create-worktree-root', projectId, repoPath, projectName, name),
     addIntegration: (projectId: string, name: string, type?: string) =>
-      invoke<unknown>('project:add-integration', projectId, name, type),
+      invoke<ProjectIntegrationResult>('project:add-integration', projectId, name, type),
     removeIntegration: (projectId: string, integrationId: string) =>
       invoke<void>('project:remove-integration', projectId, integrationId)
   },

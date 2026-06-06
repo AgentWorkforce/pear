@@ -21,10 +21,13 @@ function nextAgentName(cli: SpawnAgentCli, projectId: string, liveNames: string[
   return `${cli}-${index}`
 }
 
-async function ensureLocalBroker(project: Project): Promise<void> {
+async function ensureLocalBroker(project: Project, rootOverride?: ProjectRoot): Promise<void> {
   const projectStore = useProjectStore.getState()
   if (projectStore.activeProjectId !== project.id) {
     await projectStore.setActiveProject(project.id)
+  }
+  if (rootOverride) {
+    useProjectStore.getState().setActiveRoot(rootOverride.id)
   }
 
   const cloudStatus = await pear.cloudAgent.status(project.id).catch(() => null)
@@ -41,7 +44,10 @@ export async function spawnProjectAgent(
   customName?: string,
   rootOverride?: ProjectRoot
 ): Promise<string> {
-  await ensureLocalBroker(project)
+  if (rootOverride && !rootOverride.pathExists) {
+    throw new Error(`Project root not found: ${rootOverride.path || project.rootPath}`)
+  }
+  await ensureLocalBroker(project, rootOverride)
 
   const root = rootOverride ?? useProjectStore.getState().getActiveRoot()
   if (!root?.pathExists) {
@@ -51,12 +57,13 @@ export async function spawnProjectAgent(
   const liveAgents = await pear.broker.listAgents(project.id)
   const agentStore = useAgentStore.getState()
   for (const liveAgent of liveAgents) {
+    const trackedAgent = agentStore.agents.find((agent) => agent.projectId === project.id && agent.name === liveAgent.name)
     agentStore.trackSpawnedAgent(
       liveAgent.name,
       project.id,
-      root.id,
+      trackedAgent?.rootId ?? root.id,
       liveAgent.cli || cli,
-      root.path,
+      trackedAgent?.rootPath ?? root.path,
       {
         currentState: liveAgent.current_state,
         terminalMode: liveAgent.inboundDeliveryMode === 'manual_flush' ? 'drive' : 'passthrough',
@@ -109,7 +116,10 @@ export async function listProjectPersonas(project: Project): Promise<WorkforcePe
 }
 
 export async function spawnProjectPersona(project: Project, personaId: string, rootOverride?: ProjectRoot): Promise<string> {
-  await ensureLocalBroker(project)
+  if (rootOverride && !rootOverride.pathExists) {
+    throw new Error(`Project root not found: ${rootOverride.path || project.rootPath}`)
+  }
+  await ensureLocalBroker(project, rootOverride)
 
   const root = rootOverride ?? useProjectStore.getState().getActiveRoot()
   if (!root?.pathExists) {
@@ -119,12 +129,13 @@ export async function spawnProjectPersona(project: Project, personaId: string, r
   const liveAgents = await pear.broker.listAgents(project.id)
   const agentStore = useAgentStore.getState()
   for (const liveAgent of liveAgents) {
+    const trackedAgent = agentStore.agents.find((agent) => agent.projectId === project.id && agent.name === liveAgent.name)
     agentStore.trackSpawnedAgent(
       liveAgent.name,
       project.id,
-      root.id,
+      trackedAgent?.rootId ?? root.id,
       liveAgent.cli || personaId,
-      root.path,
+      trackedAgent?.rootPath ?? root.path,
       {
         currentState: liveAgent.current_state,
         terminalMode: liveAgent.inboundDeliveryMode === 'manual_flush' ? 'drive' : 'passthrough',

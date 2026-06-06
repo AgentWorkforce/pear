@@ -23,7 +23,9 @@ export function SpawnAgentDialog(): React.ReactNode {
   const [selectedRootId, setSelectedRootId] = useState<string | null>(null)
   const project = useProjectStore((s) => s.getActiveProject())
   const defaultRoot = useProjectStore((s) => s.getActiveRoot())
-  const root: ProjectRoot | undefined = project?.roots.find((r) => r.id === selectedRootId) ?? defaultRoot
+  const selectedRoot = project?.roots.find((r) => r.id === selectedRootId)
+  const root: ProjectRoot | undefined = selectedRoot ?? defaultRoot
+  const safeSelectedRootId = project?.roots.some((r) => r.id === selectedRootId) ? selectedRootId ?? '' : root?.id ?? ''
   const closeDialog = useUIStore((s) => s.closeDialog)
   const openDialog = useUIStore((s) => s.openDialog)
   const dialogRef = useRef<HTMLDivElement>(null)
@@ -36,6 +38,12 @@ export function SpawnAgentDialog(): React.ReactNode {
     document.addEventListener('keydown', handleKeyDown)
     return () => document.removeEventListener('keydown', handleKeyDown)
   }, [closeDialog])
+
+  useEffect(() => {
+    if (selectedRootId && !project?.roots.some((r) => r.id === selectedRootId)) {
+      setSelectedRootId(root?.id ?? null)
+    }
+  }, [project, root?.id, selectedRootId])
 
   useEffect(() => {
     let cancelled = false
@@ -169,7 +177,7 @@ export function SpawnAgentDialog(): React.ReactNode {
                   </label>
                   <select
                     id="spawn-root-select"
-                    value={selectedRootId ?? root?.id ?? ''}
+                    value={safeSelectedRootId}
                     onChange={(e) => setSelectedRootId(e.target.value)}
                     disabled={spawning}
                     className="h-9 w-full rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 text-sm text-[var(--pear-text)] outline-none focus:border-[var(--pear-accent-dim)] disabled:opacity-50"

@@ -159,6 +159,7 @@ export function useTerminal(
   const onAutoHoldStartRef = useRef(onAutoHoldStart)
   const onAutoHoldReleaseRef = useRef(onAutoHoldRelease)
   const typingActiveRef = useRef(false)
+  const inputQueueRef = useRef<Promise<void>>(Promise.resolve())
   const theme = useUIStore((s) => s.theme)
   const activeDialog = useUIStore((s) => s.activeDialog)
 
@@ -198,7 +199,7 @@ export function useTerminal(
     let inputSrttMs: number | null = null
     let srttPoll: ReturnType<typeof setInterval> | null = null
 
-    const sendInput = async (data: string): Promise<void> => {
+    const sendInputNow = async (data: string): Promise<void> => {
       if (terminalModeRef.current === 'view') return
 
       // Auto-hold: on first keystroke with multiple agents running, switch to
@@ -226,6 +227,13 @@ export function useTerminal(
         typingActiveRef.current = false
         await onAutoHoldReleaseRef.current?.(true)
       }
+    }
+
+    const sendInput = (data: string): void => {
+      const next = inputQueueRef.current.then(() => sendInputNow(data))
+      inputQueueRef.current = next.catch((err) => {
+        console.warn('[terminal] input failed:', err)
+      })
     }
 
     const focusTerminal = (requireActive = false): void => {
@@ -370,7 +378,7 @@ export function useTerminal(
 
       // Forward keystrokes + terminal protocol responses to PTY
       term.onData((data) => {
-        void sendInput(data)
+        sendInput(data)
       })
 
       term.open(container)
@@ -468,7 +476,7 @@ export function useTerminal(
 
       event.preventDefault()
       event.stopPropagation()
-      void sendInput(data)
+      sendInput(data)
       focusTerminal()
     }
 
@@ -482,7 +490,7 @@ export function useTerminal(
 
       event.preventDefault()
       event.stopPropagation()
-      void sendInput(text)
+      sendInput(text)
       focusTerminal()
     }
 
@@ -548,7 +556,7 @@ export function useTerminal(
     if (!visible || !active || terminalMode === 'view' || !agentName || activeDialog) return
     const container = containerRef.current
 
-    const sendInput = async (data: string): Promise<void> => {
+    const sendInputNow = async (data: string): Promise<void> => {
       if (terminalModeRef.current === 'view') return
       const holdInput = autoHoldRef.current && typingActiveRef.current
       if (autoHoldRef.current && !typingActiveRef.current && terminalModeRef.current === 'passthrough') {
@@ -567,6 +575,13 @@ export function useTerminal(
         typingActiveRef.current = false
         await onAutoHoldReleaseRef.current?.(true)
       }
+    }
+
+    const sendInput = (data: string): void => {
+      const next = inputQueueRef.current.then(() => sendInputNow(data))
+      inputQueueRef.current = next.catch((err) => {
+        console.warn('[terminal] input failed:', err)
+      })
     }
 
     const handleGlobalKeyDown = (event: KeyboardEvent): void => {
@@ -589,7 +604,7 @@ export function useTerminal(
 
       event.preventDefault()
       event.stopPropagation()
-      void sendInput(data)
+      sendInput(data)
       setTimeout(() => term.focus(), 0)
     }
 
@@ -613,7 +628,7 @@ export function useTerminal(
 
       event.preventDefault()
       event.stopPropagation()
-      void sendInput(text)
+      sendInput(text)
       setTimeout(() => term.focus(), 0)
     }
 
