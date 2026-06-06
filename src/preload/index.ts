@@ -237,6 +237,8 @@ const api = {
       invoke<BrokerSpawnAgentResult>('broker:spawn-persona', projectId, personaId),
     attachTerminal: (input: BrokerAttachTerminalInput) =>
       invoke<BrokerAttachTerminalResult>('broker:attach-terminal', input),
+    sendInput: (projectId: string | undefined, name: string, data: string) =>
+      invoke<{ name: string; bytes_written: number }>('broker:send-input', projectId, name, data),
     sendInputFast: (projectId: string | undefined, name: string, data: string): void => {
       ipcRenderer.send('broker:send-input-fast', projectId, name, data)
     },

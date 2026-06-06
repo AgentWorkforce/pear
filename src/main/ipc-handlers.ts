@@ -180,9 +180,15 @@ export function registerIpcHandlers(): void {
       .replace(/[^a-z0-9]+/g, '-')
       .replace(/^-+|-+$/g, '')
       .slice(0, 40) || 'pear'
-    const branchName = `pear/${branchSlug}`
+    const projectSlug = projectId
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '')
+      .slice(0, 8)
+    const branchName = `pear/${branchSlug}${projectSlug ? `-${projectSlug}` : ''}`
 
-    await git.createWorktree(gitRoot, worktreePath, branchName)
+    if (!git.worktreeExists(worktreePath)) {
+      await git.createWorktree(gitRoot, worktreePath, branchName)
+    }
     return addProjectRoot(projectId, worktreePath, name || repoBasename)
   })
 
@@ -273,6 +279,10 @@ export function registerIpcHandlers(): void {
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win) throw new Error('No window')
     return brokerManager.connectCloud('cloud', win)
+  })
+
+  ipcMain.handle('broker:send-input', async (_, projectId: string | undefined, name: string, data: string) => {
+    return brokerManager.sendInput(projectId, name, data)
   })
 
   ipcMain.on('broker:send-input-fast', (_, projectId: string | undefined, name: string, data: string) => {

@@ -173,8 +173,8 @@ interface TerminalProjectProps {
   active: boolean
   onActivate: () => void
   autoHold?: boolean
-  onAutoHoldStart?: () => void
-  onAutoHoldRelease?: (flush: boolean) => void
+  onAutoHoldStart?: () => Promise<void> | void
+  onAutoHoldRelease?: (flush: boolean) => Promise<void> | void
 }
 
 function TerminalProject({
@@ -217,8 +217,8 @@ interface SplitTerminalTileProps {
   onDeliveryModeChange: (agent: Agent, mode: QueueDeliveryMode) => void
   onOpenBurn: (agent: Agent) => void
   autoHold?: boolean
-  onAutoHoldStart?: () => void
-  onAutoHoldRelease?: (flush: boolean) => void
+  onAutoHoldStart?: () => Promise<void> | void
+  onAutoHoldRelease?: (flush: boolean) => Promise<void> | void
 }
 
 function SplitTerminalTile({
@@ -365,7 +365,10 @@ interface SplitTerminalPageProps {
   onDeliveryModeChange: (agent: Agent, mode: QueueDeliveryMode) => void
   onOpenBurn: (agent: Agent) => void
   autoHold: boolean
-  makeAutoHoldHandlers: (agent: Agent) => { onAutoHoldStart: () => void; onAutoHoldRelease: (flush: boolean) => void }
+  makeAutoHoldHandlers: (agent: Agent) => {
+    onAutoHoldStart: () => Promise<void>
+    onAutoHoldRelease: (flush: boolean) => Promise<void>
+  }
 }
 
 function SplitTerminalPage({
@@ -522,17 +525,17 @@ export function TerminalPane(): React.ReactNode {
   }
 
   const makeAutoHoldHandlers = (agent: Agent): {
-    onAutoHoldStart: () => void
-    onAutoHoldRelease: (flush: boolean) => void
+    onAutoHoldStart: () => Promise<void>
+    onAutoHoldRelease: (flush: boolean) => Promise<void>
   } => ({
-    onAutoHoldStart: () => {
-      void handleDeliveryModeChange(agent, 'hold')
+    onAutoHoldStart: async () => {
+      await handleDeliveryModeChange(agent, 'drive')
     },
-    onAutoHoldRelease: (flush: boolean) => {
+    onAutoHoldRelease: async (flush: boolean) => {
       if (flush) {
-        void pear.broker.flushPending(agent.projectId, agent.name).catch(() => {})
+        await pear.broker.flushPending(agent.projectId, agent.name).catch(() => {})
       }
-      void handleDeliveryModeChange(agent, 'auto')
+      await handleDeliveryModeChange(agent, 'auto')
     }
   })
 

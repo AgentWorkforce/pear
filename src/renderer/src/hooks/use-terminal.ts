@@ -146,8 +146,8 @@ export function useTerminal(
   active: boolean = visible,
   terminalMode: TerminalAttachMode = 'drive',
   autoHold = false,
-  onAutoHoldStart?: () => void,
-  onAutoHoldRelease?: (flush: boolean) => void
+  onAutoHoldStart?: () => Promise<void> | void,
+  onAutoHoldRelease?: (flush: boolean) => Promise<void> | void
 ): Terminal | null {
   const termRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
@@ -198,26 +198,33 @@ export function useTerminal(
     let inputSrttMs: number | null = null
     let srttPoll: ReturnType<typeof setInterval> | null = null
 
-    const sendInput = (data: string): void => {
+    const sendInput = async (data: string): Promise<void> => {
       if (terminalModeRef.current === 'view') return
 
       // Auto-hold: on first keystroke with multiple agents running, switch to
       // drive mode so input is queued rather than immediately injected.
+      const holdInput = autoHoldRef.current && typingActiveRef.current
       if (autoHoldRef.current && !typingActiveRef.current && terminalModeRef.current === 'passthrough') {
         typingActiveRef.current = true
-        onAutoHoldStartRef.current?.()
+        await onAutoHoldStartRef.current?.()
       }
 
       // Optimistically echo before the round trip; the engine reconciles
       // against authoritative output and stays dormant on fast local links.
       predictiveEchoRef.current?.onUserInput(data)
       recordKeystrokeSent(data)
-      pear.broker.sendInputFast(projectId, agentName!, data)
+      if (holdInput || typingActiveRef.current) {
+        await pear.broker.sendInput(projectId, agentName!, data).catch((err) => {
+          console.warn('[terminal] held input failed:', err)
+        })
+      } else {
+        pear.broker.sendInputFast(projectId, agentName!, data)
+      }
 
       // On Enter, flush the queued input and return to live mode.
       if (typingActiveRef.current && data.includes('\r')) {
         typingActiveRef.current = false
-        onAutoHoldReleaseRef.current?.(true)
+        await onAutoHoldReleaseRef.current?.(true)
       }
     }
 
@@ -363,7 +370,7 @@ export function useTerminal(
 
       // Forward keystrokes + terminal protocol responses to PTY
       term.onData((data) => {
-        sendInput(data)
+        void sendInput(data)
       })
 
       term.open(container)
@@ -447,7 +454,7 @@ export function useTerminal(
     const handleBlur = (): void => {
       if (typingActiveRef.current) {
         typingActiveRef.current = false
-        onAutoHoldReleaseRef.current?.(false)
+        void onAutoHoldReleaseRef.current?.(false)
       }
     }
 
@@ -461,7 +468,7 @@ export function useTerminal(
 
       event.preventDefault()
       event.stopPropagation()
-      sendInput(data)
+      void sendInput(data)
       focusTerminal()
     }
 
@@ -475,7 +482,7 @@ export function useTerminal(
 
       event.preventDefault()
       event.stopPropagation()
-      sendInput(text)
+      void sendInput(text)
       focusTerminal()
     }
 
@@ -541,10 +548,25 @@ export function useTerminal(
     if (!visible || !active || terminalMode === 'view' || !agentName || activeDialog) return
     const container = containerRef.current
 
-    const sendInput = (data: string): void => {
+    const sendInput = async (data: string): Promise<void> => {
       if (terminalModeRef.current === 'view') return
+      const holdInput = autoHoldRef.current && typingActiveRef.current
+      if (autoHoldRef.current && !typingActiveRef.current && terminalModeRef.current === 'passthrough') {
+        typingActiveRef.current = true
+        await onAutoHoldStartRef.current?.()
+      }
       predictiveEchoRef.current?.onUserInput(data)
-      pear.broker.sendInputFast(projectId, agentName, data)
+      if (holdInput || typingActiveRef.current) {
+        await pear.broker.sendInput(projectId, agentName, data).catch((err) => {
+          console.warn('[terminal] held input failed:', err)
+        })
+      } else {
+        pear.broker.sendInputFast(projectId, agentName, data)
+      }
+      if (typingActiveRef.current && data.includes('\r')) {
+        typingActiveRef.current = false
+        await onAutoHoldReleaseRef.current?.(true)
+      }
     }
 
     const handleGlobalKeyDown = (event: KeyboardEvent): void => {
@@ -567,7 +589,7 @@ export function useTerminal(
 
       event.preventDefault()
       event.stopPropagation()
-      sendInput(data)
+      void sendInput(data)
       setTimeout(() => term.focus(), 0)
     }
 
@@ -591,7 +613,7 @@ export function useTerminal(
 
       event.preventDefault()
       event.stopPropagation()
-      sendInput(text)
+      void sendInput(text)
       setTimeout(() => term.focus(), 0)
     }
 

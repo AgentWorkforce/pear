@@ -1598,3 +1598,7 @@ export async function createWorktree(repoPath: string, worktreePath: string, bra
   mkdirSync(dirname(worktreePath), { recursive: true })
   await runGit(['worktree', 'add', '-b', branchName, worktreePath], repoPath)
 }
+
+export function worktreeExists(worktreePath: string): boolean {
+  return existsSync(join(worktreePath, '.git'))
+}

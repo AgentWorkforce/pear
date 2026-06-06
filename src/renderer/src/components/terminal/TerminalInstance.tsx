@@ -11,8 +11,8 @@ interface Props {
   mode: TerminalAttachMode
   onActivate?: () => void
   autoHold?: boolean
-  onAutoHoldStart?: () => void
-  onAutoHoldRelease?: (flush: boolean) => void
+  onAutoHoldStart?: () => Promise<void> | void
+  onAutoHoldRelease?: (flush: boolean) => Promise<void> | void
 }
 
 export function TerminalInstance({ agentName, projectId, visible, active, mode, onActivate, autoHold, onAutoHoldStart, onAutoHoldRelease }: Props): React.ReactNode {

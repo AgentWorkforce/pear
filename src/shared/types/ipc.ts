@@ -829,6 +829,11 @@ export interface PearAPI {
     listPersonas: (projectId: string) => Promise<WorkforcePersona[]>
     spawnPersona: (projectId: string, personaId: string) => Promise<BrokerSpawnAgentResult>
     attachTerminal: (input: BrokerAttachTerminalInput) => Promise<BrokerAttachTerminalResult>
+    sendInput: (
+      projectId: string | undefined,
+      name: string,
+      data: string
+    ) => Promise<{ name: string; bytes_written: number }>
     sendInputFast: (projectId: string | undefined, name: string, data: string) => void
     setTerminalMode: (
       projectId: string | undefined,
