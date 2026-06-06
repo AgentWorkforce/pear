@@ -30,7 +30,7 @@
     "@agent-relay/sdk": "^8.1.2",
     "@agentworkforce/deploy": "^3.0.50",
     "@relayburn/sdk": "^3.2.0",
-    "@relayfile/sdk": "^0.8.11",
+    "@relayfile/sdk": "^0.8.14",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/addon-webgl": "^0.18.0",
