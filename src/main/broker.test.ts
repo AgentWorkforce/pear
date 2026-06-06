@@ -517,6 +517,26 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('normalizes spawn results to structured-clone-safe data', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, [])
+    local.spawnPty.mockImplementationOnce(async (input: { name: string }) => {
+      local.agentNames.push(input.name)
+      return {
+        name: input.name,
+        runtime: 'pty',
+        client: () => undefined
+      }
+    })
+
+    const spawned = await manager.spawnAgent(PROJECT_ID, { name: 'worker', cli: 'fake-cli' })
+
+    expect(spawned).toEqual({ name: 'worker', runtime: 'pty' })
+    expect(() => structuredClone(spawned)).not.toThrow()
+
+    await manager.shutdown()
+  })
+
   it('coalesces concurrent duplicate spawn requests', async () => {
     const manager = new BrokerManager()
     const local = await startLocal(manager, [])

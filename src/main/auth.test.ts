@@ -493,3 +493,122 @@ describe('getAccessToken (refresh flow)', () => {
     expect(mock.fetchMock).toHaveBeenCalledTimes(1)
   })
 })
+
+describe('getAuthStatus', () => {
+  let userDataDir: string
+
+  beforeEach(() => {
+    userDataDir = mkdtempSync(join(tmpdir(), 'pear-auth-status-'))
+    mock.setUserDataDir(userDataDir)
+    mock.readStoredAuth.mockReset()
+    mock.readStoredAuth.mockResolvedValue(null)
+    mock.fetchMock.mockReset()
+    vi.stubGlobal('fetch', mock.fetchMock)
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    mock.clearUserDataDir()
+    rmSync(userDataDir, { recursive: true, force: true })
+  })
+
+  it('reports signed in from valid stored tokens even when profile fetch fails', async () => {
+    writeAuthJson(userDataDir, {
+      accessToken: 'cld_at_no_user',
+      refreshToken: 'cld_rt_no_user',
+      apiUrl: 'https://cloud.example'
+    })
+    mock.fetchMock.mockResolvedValue({
+      ok: false,
+      status: 401,
+      statusText: 'Unauthorized',
+      json: async () => ({ error: 'Unauthorized' })
+    })
+
+    const { getAuthStatus } = await import('./auth')
+
+    await expect(getAuthStatus()).resolves.toEqual({
+      loggedIn: true,
+      apiUrl: 'https://cloud.example',
+      user: undefined
+    })
+  })
+
+  it('reports signed in when whoami only returns a stable user id', async () => {
+    writeAuthJson(userDataDir, {
+      accessToken: 'cld_at_user_id',
+      refreshToken: 'cld_rt_user_id',
+      apiUrl: 'https://cloud.example'
+    })
+    mock.fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({ user: { id: 'user-1' } })
+    })
+
+    const { getAuthStatus } = await import('./auth')
+
+    await expect(getAuthStatus()).resolves.toEqual({
+      loggedIn: true,
+      apiUrl: 'https://cloud.example',
+      user: { username: 'user-1' }
+    })
+  })
+
+  it('hydrates a sparse stored profile from whoami', async () => {
+    writeAuthJson(userDataDir, {
+      accessToken: 'cld_at_sparse_user',
+      refreshToken: 'cld_rt_sparse_user',
+      apiUrl: 'https://cloud.example',
+      user: { username: 'user-1' }
+    })
+    mock.fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({
+        user: {
+          id: 'user-1',
+          name: 'Khaliq Gant',
+          email: 'khaliq@example.test',
+          avatarUrl: 'https://lh3.googleusercontent.com/a/avatar=s96-c'
+        }
+      })
+    })
+
+    const { getAuthStatus } = await import('./auth')
+
+    await expect(getAuthStatus()).resolves.toMatchObject({
+      loggedIn: true,
+      apiUrl: 'https://cloud.example',
+      user: {
+        username: 'user-1',
+        name: 'Khaliq Gant',
+        email: 'khaliq@example.test',
+        avatarUrl: 'https://lh3.googleusercontent.com/a/avatar=s96-c'
+      }
+    })
+    expect(mock.fetchMock).toHaveBeenCalledWith(
+      'https://cloud.example/api/v1/auth/whoami',
+      expect.objectContaining({
+        headers: { Authorization: 'Bearer cld_at_sparse_user' }
+      })
+    )
+  })
+
+  it('does not report signed in from auth metadata when stored tokens are invalid', async () => {
+    const configDir = join(userDataDir, 'config')
+    mkdirSync(configDir, { recursive: true })
+    writeFileSync(join(configDir, 'auth.json'), 'not-json')
+    writeFileSync(join(configDir, 'auth-meta.json'), JSON.stringify({
+      apiUrl: 'https://cloud.example',
+      user: { name: 'Stale User', email: 'stale@example.test' }
+    }))
+
+    const { getAuthStatus } = await import('./auth')
+
+    await expect(getAuthStatus()).resolves.toEqual({ loggedIn: false })
+  })
+})

@@ -61,9 +61,9 @@ function hasStoredTokens(): boolean {
   }
 }
 
-// The cloud API has historically returned the same logical field under several keys
-// (camelCase vs snake_case, sometimes nested inside a `github` block). We tolerate
-// all variants when normalizing, then validate the final shape with UserInfoSchema.
+// The cloud API has historically returned the same logical field under several
+// keys. We tolerate common camelCase/snake_case variants, then validate the
+// final shape with UserInfoSchema.
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
@@ -86,30 +86,14 @@ function firstObject(record: Record<string, unknown> | undefined, keys: string[]
   return undefined
 }
 
-const GITHUB_OBJECT_KEYS = [
-  'github',
-  'githubUser',
-  'github_user',
-  'githubProfile',
-  'github_profile',
-  'githubAccount',
-  'github_account'
-]
-
 function normalizeUserInfo(value: unknown): UserInfo | undefined {
   if (!isRecord(value)) return undefined
 
-  const githubRecord = firstObject(value, GITHUB_OBJECT_KEYS)
   const candidate = {
     name: firstString(value, ['name', 'displayName', 'display_name']),
     email: firstString(value, ['email']),
-    githubUsername:
-      firstString(value, ['githubUsername', 'github_username', 'githubLogin', 'github_login']) ||
-      firstString(githubRecord, ['githubUsername', 'github_username', 'username', 'login']) ||
-      firstString(value, ['username', 'login']),
+    username: firstString(value, ['username', 'id', 'userId', 'user_id']),
     avatarUrl:
-      firstString(value, ['githubAvatarUrl', 'github_avatar_url']) ||
-      firstString(githubRecord, ['avatarUrl', 'avatar_url', 'avatar', 'picture', 'image']) ||
       firstString(value, ['avatarUrl', 'avatar_url', 'avatar', 'picture', 'image']),
     cachedAvatarUrl: firstString(value, ['cachedAvatarUrl', 'cached_avatar_url']),
     organizationName: firstString(value, ['organizationName', 'organization_name']),
@@ -137,10 +121,7 @@ function mergeUserInfo(previous: UserInfo | undefined, next: UserInfo | undefine
 
 function hasAvatarIdentity(user: UserInfo | undefined): boolean {
   const normalized = normalizeUserInfo(user)
-  return !!(
-    normalized?.githubUsername ||
-    (normalized?.avatarUrl && isRemoteAvatarUrl(normalized.avatarUrl))
-  )
+  return !!(normalized?.avatarUrl && isRemoteAvatarUrl(normalized.avatarUrl))
 }
 
 function accountWorkspaceTokenHash(accessToken: string): string {
@@ -180,13 +161,8 @@ function loadAuthMeta(): AuthMeta {
   }
 }
 
-function githubAvatarUrl(user: UserInfo | undefined): string | undefined {
-  const githubUsername = user?.githubUsername?.trim()
-  return githubUsername ? `https://github.com/${encodeURIComponent(githubUsername)}.png?size=96` : undefined
-}
-
 function avatarSourceUrl(user: UserInfo | undefined): string | undefined {
-  return githubAvatarUrl(user) || (isRemoteAvatarUrl(user?.avatarUrl) ? user?.avatarUrl : undefined)
+  return isRemoteAvatarUrl(user?.avatarUrl) ? user?.avatarUrl : undefined
 }
 
 async function withCachedAvatar(user: UserInfo | undefined, waitForMissing: boolean): Promise<UserInfo | undefined> {
@@ -196,7 +172,6 @@ async function withCachedAvatar(user: UserInfo | undefined, waitForMissing: bool
   const sourceUrl = avatarSourceUrl(normalized)
   const cacheIdentity = {
     sourceUrl,
-    githubUsername: normalized.githubUsername,
     email: normalized.email,
     name: normalized.name
   }
@@ -316,12 +291,8 @@ async function fetchWhoami(apiUrl: string, accessToken: string): Promise<UserInf
     const userRecord = firstObject(record, ['user']) || record
     const organizationRecord = firstObject(record, ['organization', 'org'])
     const projectRecord = firstObject(record, ['project'])
-    const githubRecord =
-      firstObject(record, GITHUB_OBJECT_KEYS) || firstObject(userRecord, GITHUB_OBJECT_KEYS)
-
     return normalizeUserInfo({
       ...userRecord,
-      github: githubRecord,
       organizationName:
         firstString(userRecord, ['organizationName', 'organization_name']) ||
         firstString(record, ['organizationName', 'organization_name']) ||
@@ -381,7 +352,7 @@ export async function login(): Promise<AuthStatus> {
       resolve({ loggedIn: true, apiUrl, user })
     })
 
-    server.listen(0, '127.0.0.1', () => {
+    server.listen(0, '127.0.0.1', async () => {
       const addr = server.address()
       if (!addr || typeof addr === 'string') {
         reject(new Error('Failed to bind local auth server'))
@@ -394,7 +365,12 @@ export async function login(): Promise<AuthStatus> {
       const loginUrl = `${CLOUD_API_URL}/api/v1/cli/login?redirect_uri=${redirectUri}&state=${state}`
 
       console.log('[auth] Opening browser for login:', loginUrl)
-      shell.openExternal(loginUrl)
+      try {
+        await shell.openExternal(loginUrl)
+      } catch (error) {
+        server.close()
+        reject(error instanceof Error ? error : new Error(String(error)))
+      }
     })
 
     // Timeout after 5 minutes
@@ -436,8 +412,7 @@ export async function getAuthStatus(): Promise<AuthStatus> {
     return { loggedIn: true, apiUrl: usable.apiUrl, user }
   }
 
-  const meta = loadAuthMeta()
-  return { loggedIn: true, apiUrl: meta.apiUrl, user: meta.user }
+  return { loggedIn: false }
 }
 
 /**
@@ -659,7 +634,7 @@ export async function refreshCloudAuth(): Promise<CloudAuth | null> {
 export async function ensureAuthenticated(apiUrl?: string): Promise<AuthStatus> {
   const stored = loadTokens()
   if (stored && !isTokenExpired(stored)) {
-    return { loggedIn: true, apiUrl: stored.apiUrl, user: stored.user }
+    return { loggedIn: true, apiUrl: stored.apiUrl, user: normalizeUserInfo(stored.user) }
   }
   if (apiUrl && stored) {
     saveAuthMeta({ apiUrl, user: stored.user, accessToken: stored.accessToken })

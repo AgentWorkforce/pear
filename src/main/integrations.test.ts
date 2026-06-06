@@ -320,6 +320,27 @@ describe('IntegrationsManager', () => {
     )
   })
 
+  it('returns local settings integrations when signed in before the account workspace exists', async () => {
+    mock.getAccountWorkspaceId.mockRejectedValueOnce(new Error('account-workspace-required'))
+    const manager = new IntegrationsManager()
+
+    await expect(manager.listConnectedForSettings('project-1')).resolves.toEqual([
+      expect.objectContaining({
+        provider: 'slack',
+        integrationId: 'slack-integration-1'
+      })
+    ])
+
+    expect(mock.fetchCalls.some((call) => call.url.includes('/api/v1/workspaces/'))).toBe(false)
+  })
+
+  it('throws cloud-auth-required for settings integrations so the renderer can prompt sign-in', async () => {
+    mock.getAccountWorkspaceId.mockRejectedValueOnce(new Error('cloud-auth-required'))
+    const manager = new IntegrationsManager()
+
+    await expect(manager.listConnectedForSettings('project-1')).rejects.toThrow('cloud-auth-required')
+  })
+
   it('keeps local sync to discovery and narrow canonical writeback command roots while historical download is off', () => {
     expect(localSyncMountPathsForIntegration({
       provider: 'slack',

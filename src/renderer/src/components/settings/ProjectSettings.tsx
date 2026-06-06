@@ -18,6 +18,7 @@ import {
   Trash2,
   X
 } from 'lucide-react'
+import { CloudAuthRequired } from '@/components/agents/CloudAuthRequired'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
 import { ProactiveAgentsSection } from '@/components/proactive/ProactiveAgentsSection'
 import { pear, type ConnectedIntegration } from '@/lib/ipc'
@@ -351,6 +352,22 @@ function clearNotificationTargetScope(scope: Record<string, unknown>): Record<st
   return nextScope
 }
 
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (error && typeof error === 'object' && 'message' in error) {
+    return String((error as { message: unknown }).message)
+  }
+  return String(error)
+}
+
+function isIntegrationAuthRequired(error: unknown): boolean {
+  return /cloud-auth-required/i.test(getErrorMessage(error))
+}
+
+function isAccountWorkspaceRequired(error: unknown): boolean {
+  return /account-workspace-required/i.test(getErrorMessage(error))
+}
+
 function IntegrationVisibilitySection({
   projectId,
   channels,
@@ -362,6 +379,8 @@ function IntegrationVisibilitySection({
 }): React.ReactNode {
   const [integrations, setIntegrations] = useState<ConnectedIntegration[]>([])
   const [loading, setLoading] = useState(true)
+  const [authRequired, setAuthRequired] = useState(false)
+  const [workspaceRequired, setWorkspaceRequired] = useState(false)
   const [busyIntegrationId, setBusyIntegrationId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [scopeEditorIntegrationId, setScopeEditorIntegrationId] = useState<string | null>(null)
@@ -373,9 +392,29 @@ function IntegrationVisibilitySection({
     setError(null)
     setLoading(true)
     try {
+      const auth = await pear.auth.status()
+      if (!auth.loggedIn) {
+        setAuthRequired(true)
+        setWorkspaceRequired(false)
+        setIntegrations([])
+        return
+      }
+
+      setAuthRequired(false)
+      setWorkspaceRequired(false)
       setIntegrations(await pear.integrations.list(projectId))
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      if (isIntegrationAuthRequired(err)) {
+        setAuthRequired(true)
+        setWorkspaceRequired(false)
+        setIntegrations([])
+      } else if (isAccountWorkspaceRequired(err)) {
+        setAuthRequired(false)
+        setWorkspaceRequired(true)
+        setIntegrations([])
+      } else {
+        setError(getErrorMessage(err))
+      }
     } finally {
       setLoading(false)
     }
@@ -620,14 +659,43 @@ function IntegrationVisibilitySection({
   return (
     <Section
       title="Integration visibility"
-      action={loading ? <Loader2 size={13} className="animate-spin text-[var(--pear-text-faint)]" /> : null}
+      action={loading && !authRequired && !workspaceRequired ? <Loader2 size={13} className="animate-spin text-[var(--pear-text-faint)]" /> : null}
     >
-      {error && (
+      {authRequired ? (
+        <CloudAuthRequired
+          title="Sign in to manage integrations"
+          description="Pear needs your Agent Relay account to list connected integrations and control project visibility."
+          buttonLabel="Sign in"
+          onAuthenticated={() => {
+            setAuthRequired(false)
+            void load()
+          }}
+        />
+      ) : workspaceRequired ? (
+        <div className="rounded-lg border border-[var(--pear-yellow)]/20 bg-[var(--pear-yellow)]/10 px-4 py-3 text-sm text-[var(--pear-text-dim)]">
+          <div className="flex items-start gap-2">
+            <AlertTriangle size={15} className="mt-0.5 shrink-0 text-[var(--pear-yellow)]" />
+            <div className="min-w-0 flex-1">
+              <div className="font-medium text-[var(--pear-text)]">Cloud workspace unavailable</div>
+              <div className="mt-1 leading-5">
+                You are signed in, but Pear could not find an Agent Relay Cloud workspace for this account yet.
+              </div>
+              <button
+                type="button"
+                onClick={() => void load()}
+                className="mt-3 rounded-md border border-[var(--pear-border)] px-3 py-1.5 text-xs text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]"
+              >
+                Refresh
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : error && (
         <div className="mb-3 rounded-md border border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 px-3 py-2 text-sm text-[var(--pear-red)]">
           {error}
         </div>
       )}
-      <div className="space-y-2">
+      {!authRequired && !workspaceRequired && <div className="space-y-2">
         {loading && integrations.length === 0 ? (
           <div className="flex items-center gap-2 rounded-lg border border-dashed border-[var(--pear-border)] px-4 py-3 text-sm text-[var(--pear-text-faint)]">
             <Loader2 size={13} className="animate-spin" />
@@ -830,7 +898,7 @@ function IntegrationVisibilitySection({
             )
           })
         )}
-      </div>
+      </div>}
     </Section>
   )
 }

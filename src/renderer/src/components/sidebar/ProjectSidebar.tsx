@@ -6,6 +6,7 @@ import {
   FolderKanban,
   Hash,
   LayoutGrid,
+  LogIn,
   LogOut,
   MessageCircle,
   MessageSquare,
@@ -79,19 +80,14 @@ function userInitials(user?: AuthUser): string {
       .toUpperCase()
   }
 
-  return user?.email?.trim().charAt(0).toUpperCase() || '?'
+  return (
+    user?.email?.trim().charAt(0) ||
+    '?'
+  ).toUpperCase()
 }
 
-function githubUsernameFromEmail(email?: string): string {
-  const match = email?.trim().match(/^(?:\d+\+)?([^@]+)@users\.noreply\.github\.com$/i)
-  return match?.[1] || ''
-}
-
-function normalizeGithubUsername(value?: string): string {
-  return (value || '')
-    .trim()
-    .replace(/^@+/, '')
-    .replace(/[^A-Za-z0-9-]/g, '')
+function userDisplayName(user?: AuthUser): string {
+  return user?.name?.trim() || user?.email?.trim() || 'Signed in'
 }
 
 function isRemoteAvatarUrl(value: string): boolean {
@@ -103,20 +99,13 @@ function isRemoteAvatarUrl(value: string): boolean {
   }
 }
 
-function githubAvatarUrl(user?: AuthUser): string | null {
-  const username = normalizeGithubUsername(
-    user?.githubUsername || user?.username || githubUsernameFromEmail(user?.email)
-  )
-  return username ? `https://github.com/${encodeURIComponent(username)}.png?size=96` : null
-}
-
 function providedAvatarUrl(user?: AuthUser): string | null {
   const avatarUrl = user?.avatarUrl?.trim()
   return avatarUrl && isRemoteAvatarUrl(avatarUrl) ? avatarUrl : null
 }
 
 function avatarUrls(user?: AuthUser): string[] {
-  return Array.from(new Set([githubAvatarUrl(user), providedAvatarUrl(user), user?.cachedAvatarUrl]
+  return Array.from(new Set([user?.cachedAvatarUrl, providedAvatarUrl(user)]
     .map((url) => url?.trim())
     .filter((url): url is string => !!url)))
 }
@@ -135,8 +124,24 @@ function useAvatarUrl(urls: string[]): { src: string | undefined; onError: () =>
   }
 }
 
+function SignedOutAvatar({ loading }: { loading: boolean }): React.ReactNode {
+  return (
+    <div
+      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[var(--pear-border)] bg-[var(--pear-bg-overlay)] text-[var(--pear-text-faint)]"
+      title={loading ? 'Signing in...' : 'Not signed in'}
+      aria-label={loading ? 'Signing in...' : 'Not signed in'}
+    >
+      <LogIn size={13} />
+    </div>
+  )
+}
+
+function hasSignedInUser(auth: { loggedIn: boolean; user?: AuthUser }): boolean {
+  return auth.loggedIn
+}
+
 function UserAvatar({ user }: { user?: AuthUser }): React.ReactNode {
-  const label = user?.name || user?.email || 'User'
+  const label = userDisplayName(user)
   const avatar = useAvatarUrl(avatarUrls(user))
 
   if (avatar.src) {
@@ -197,7 +202,9 @@ function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNod
     setMenuOpen(false)
   }, [])
 
-  if (!auth.loggedIn) {
+  const signedIn = hasSignedInUser(auth)
+
+  if (!signedIn) {
     return (
       <button
         onClick={handleLogin}
@@ -208,10 +215,13 @@ function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNod
         title={loading ? 'Signing in...' : 'Sign in'}
         aria-label={loading ? 'Signing in...' : 'Sign in'}
       >
-        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-dashed border-[var(--pear-text-faint)] text-[10px] text-[var(--pear-text-faint)]">
-          ?
-        </div>
-        {!compact && <span className="truncate">{loading ? 'Signing in...' : 'Sign in'}</span>}
+        <SignedOutAvatar loading={loading} />
+        {!compact && (
+          <div className="min-w-0 flex-1 text-left">
+            <div className="truncate text-sm leading-tight">{loading ? 'Signing in...' : 'Sign in'}</div>
+            <div className="truncate text-[11px] leading-tight text-[var(--pear-text-faint)]">Not signed in</div>
+          </div>
+        )}
       </button>
     )
   }
@@ -223,13 +233,13 @@ function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNod
         className={`flex items-center gap-2.5 rounded-lg text-sm text-[var(--pear-text)] hover:bg-[var(--pear-bg-surface)] ${
           compact ? 'h-10 w-10 justify-center p-0' : 'w-full px-3 py-2.5'
         }`}
-        title={auth.user?.name || auth.user?.email || 'User'}
-        aria-label={auth.user?.name || auth.user?.email || 'User'}
+        title={userDisplayName(auth.user)}
+        aria-label={userDisplayName(auth.user)}
       >
         <UserAvatar user={auth.user} />
         {!compact && (
           <div className="min-w-0 flex-1 text-left">
-            <div className="truncate text-sm leading-tight">{auth.user?.name || auth.user?.email || 'User'}</div>
+            <div className="truncate text-sm leading-tight">{userDisplayName(auth.user)}</div>
             {auth.user?.organizationName && (
               <div className="truncate text-[11px] leading-tight text-[var(--pear-text-faint)]">{auth.user.organizationName}</div>
             )}

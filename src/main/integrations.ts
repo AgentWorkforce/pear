@@ -263,6 +263,14 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function isCloudAuthRequiredError(error: unknown): boolean {
+  return /cloud-auth-required/i.test(toErrorMessage(error))
+}
+
+function isAccountWorkspaceRequiredError(error: unknown): boolean {
+  return /account-workspace-required/i.test(toErrorMessage(error))
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
@@ -794,6 +802,14 @@ export class IntegrationsManager {
       }
       return this.withLocalMountPaths(await this.mergeCloudIntegrationsIntoProject(projectId, cloud))
     } catch (error) {
+      if (isAccountWorkspaceRequiredError(error)) {
+        console.warn(
+          `[integrations] Account workspace unavailable; returning local integrations only (${local.length} items)`
+        )
+        return this.withLocalMountPaths(local)
+      }
+      if (isCloudAuthRequiredError(error)) throw error
+
       // Surface the failure to the renderer instead of silently downgrading to
       // an empty list. The UI catches and renders this in the error banner so
       // the user can see "cloud-auth-required" (restart needed) vs "network"
@@ -1875,6 +1891,9 @@ export class IntegrationsManager {
       )
       return true
     } catch (error) {
+      if (isAccountWorkspaceRequiredError(error)) {
+        return false
+      }
       console.warn('[integrations] Failed to reconcile integration event subscriptions:', toErrorMessage(error))
       return false
     }

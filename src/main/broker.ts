@@ -2393,7 +2393,12 @@ export class BrokerManager {
         ).catch((err) => {
           console.warn('[burn-spawn-hook] post-spawn burn stamp failed:', err)
         })
-        return spawned
+        return {
+          name: spawnedName,
+          runtime: typeof spawned.runtime === 'string' && spawned.runtime.trim()
+            ? spawned.runtime
+            : 'pty'
+        }
       } catch (err) {
         if (!isAgentNameConflict(err)) {
           throw buildSpawnFailureError(err, nextInput, session.cloudSandboxId ? 'cloud' : 'local')
@@ -2490,8 +2495,15 @@ export class BrokerManager {
     for (let attempt = 0; attempt < 20; attempt += 1) {
       try {
         const spawned = await session.client.spawnPty(nextInput)
-        this.rememberAgentSession(spawned.name || nextInput.name, sessionKeyFor(session))
-        return { ...spawned, cli: input.resolvedHarness }
+        const spawnedName = spawned.name || nextInput.name
+        this.rememberAgentSession(spawnedName, sessionKeyFor(session))
+        return {
+          name: spawnedName,
+          runtime: typeof spawned.runtime === 'string' && spawned.runtime.trim()
+            ? spawned.runtime
+            : 'pty',
+          cli: input.resolvedHarness
+        }
       } catch (err) {
         if (!isAgentNameConflict(err)) {
           throw err

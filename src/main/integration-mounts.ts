@@ -45,6 +45,10 @@ function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function isAccountWorkspaceRequiredError(error: unknown): boolean {
+  return /account-workspace-required/i.test(toErrorMessage(error))
+}
+
 function isUnauthorizedError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false
   const status = (error as { httpStatus?: unknown; status?: unknown }).httpStatus ??
@@ -155,6 +159,7 @@ export class IntegrationMountManager {
     if (this.pending) return this.pending
     const pending = this.mount(mountPaths, new Set())
       .catch((error) => {
+        if (isAccountWorkspaceRequiredError(error)) return
         console.warn('[integration-mounts] Failed to reconcile Relayfile integration mounts:', toErrorMessage(error))
       })
       .finally(() => {

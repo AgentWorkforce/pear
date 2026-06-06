@@ -25,6 +25,7 @@ export const UserInfoSchema = z
     name: optionalTrimmedString,
     email: optionalTrimmedString,
     githubUsername: optionalTrimmedString,
+    username: optionalTrimmedString,
     avatarUrl: optionalTrimmedString,
     cachedAvatarUrl: optionalTrimmedString,
     organizationName: optionalTrimmedString,
