@@ -272,8 +272,9 @@ test('relayfile sdk path filters broaden partial-segment Slack DM globs', () => 
   ])
 })
 
-test('integration event remote stream keeps a refreshable relayfile token provider', () => {
-  const tokenProvider = async () => 'workspace-token'
+test('integration event remote stream keeps a refreshable relayfile token provider', async () => {
+  const tokens = ['workspace-token-v1', 'workspace-token-v2']
+  const tokenProvider = async () => tokens.shift()
   const options = integrationRelayFileSyncOptions({
     client: {} as never,
     workspaceId: 'workspace-id',
@@ -284,6 +285,60 @@ test('integration event remote stream keeps a refreshable relayfile token provid
   })
 
   assert.equal(options.token, tokenProvider)
+  const token = options.token
+  assert.equal(typeof token, 'function')
+  if (typeof token !== 'function') throw new Error('expected relayfile sync token provider')
+  assert.equal(await token(), 'workspace-token-v1')
+  assert.equal(await token(), 'workspace-token-v2')
+})
+
+test('integration event remote stream logs structured details for blank Error messages', async () => {
+  const syncs: FakeRelayFileSync[] = []
+  const warnCalls: unknown[][] = []
+  const originalWarn = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnCalls.push(args)
+  }
+
+  try {
+    const client = {
+      async getEvents() {
+        return { events: [], nextCursor: null }
+      },
+      async getResourceAtEvent() {
+        throw new Error('not used')
+      }
+    }
+    const eventClient = createWorkspaceScopedEventClient(
+      client as never,
+      'workspace-id',
+      async () => 'workspace-token',
+      'https://relayfile.example',
+      () => {
+        const sync = new FakeRelayFileSync()
+        syncs.push(sync)
+        return sync as never
+      }
+    )
+
+    const subscription = eventClient.subscribe(['/slack/channels/C123/**'], () => undefined, { coalesce: 'none' })
+    await waitUntil(() => syncs.length === 1)
+    const error = Object.assign(new Error(''), {
+      code: 'E_WS',
+      status: 503
+    })
+    syncs[0].emit('error', error)
+
+    const remoteStreamError = warnCalls.find((call) => call[0] === '[integration-events] remote stream error')
+    assert.ok(remoteStreamError)
+    const message = (remoteStreamError[1] as { error?: string }).error || ''
+    assert.match(message, /\bcode=E_WS\b/)
+    assert.match(message, /\bstatus=503\b/)
+
+    await subscription.unsubscribe()
+  } finally {
+    console.warn = originalWarn
+  }
 })
 
 test('integration event remote stream falls back to event feed polling after repeated stream errors', async () => {

@@ -15,7 +15,7 @@ import {
 } from '@relayfile/sdk'
 import type { ConnectedIntegration } from './integrations'
 // @ts-expect-error Node's strip-types test runner requires the explicit .ts extension.
-import { isSlackWritebackCommandRoot } from './slack-writeback-command-roots.ts'
+import { isSlackProvider, isSlackWritebackCommandRoot } from './slack-writeback-command-roots.ts'
 import type {
   IntegrationEventTelemetryCounters,
   IntegrationEventTelemetrySnapshot
@@ -281,7 +281,7 @@ export function integrationRelayFileSyncOptions(
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     const message = error.message.trim()
-    return message || error.name || error.constructor.name || 'Error'
+    if (message) return message
   }
   if (typeof error === 'string') {
     const message = error.trim()
@@ -345,11 +345,6 @@ function sameStringList(left: string[], right: string[]): boolean {
 function toRelayfileProvider(provider: string): string {
   const normalized = provider.trim().toLowerCase()
   return normalized === 'gmail' ? 'google-mail' : normalized
-}
-
-function isSlackProvider(provider: string): boolean {
-  const normalized = toRelayfileProvider(provider)
-  return normalized === 'slack' || normalized.startsWith('slack-')
 }
 
 function scopeBooleanDefault(scope: Record<string, unknown>, keys: string[], defaultValue: boolean): boolean {

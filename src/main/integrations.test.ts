@@ -336,6 +336,22 @@ describe('IntegrationsManager', () => {
     ])
   })
 
+  it('dedupes Slack-compatible writeback roots while historical download is off', () => {
+    expect(localSyncMountPathsForIntegration({
+      provider: 'slack-sage',
+      integrationId: 'slack-integration-1',
+      scope: {},
+      mountPaths: ['/slack/channels/C123', '/slack-sage/channels/C123/messages'],
+      connectedAt: '2026-06-05T00:00:00.000Z',
+      notifyAgent: true,
+      subscribeAgent: true,
+      downloadHistoricalData: false
+    })).toEqual([
+      '/discovery/slack-sage',
+      '/slack-sage/channels/C123/messages'
+    ])
+  })
+
   it('only includes narrow provider record paths when historical download is on', () => {
     expect(localSyncMountPathsForIntegration({
       provider: 'slack',

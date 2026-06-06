@@ -10,18 +10,25 @@ function normalizeRemotePath(path: string): string | null {
   return segments.length > 0 ? `/${segments.join('/')}` : '/'
 }
 
-function isSlackProvider(provider: string): boolean {
+export function isSlackProvider(provider: string): boolean {
   if (typeof provider !== 'string') return false
   const normalized = provider.trim().toLowerCase()
   return normalized === 'slack' || normalized.startsWith('slack-')
 }
 
-export function slackWritebackCommandMountPathFor(provider: string, mountPath: string): string | null {
+function normalizedProviderRoot(provider: string): string | null {
   if (!isSlackProvider(provider)) return null
+  const normalized = normalizeRemotePath(provider)
+  return normalized ? normalized.slice(1).toLowerCase() : null
+}
+
+export function slackWritebackCommandMountPathFor(provider: string, mountPath: string): string | null {
+  const providerRoot = normalizedProviderRoot(provider)
+  if (!providerRoot) return null
   const normalized = normalizeRemotePath(mountPath)
   if (!normalized) return null
-  const segments = normalized.split('/').filter(Boolean)
-  if (segments[0] !== 'slack') return null
+  const segments = normalized.split('/').slice(1)
+  if (segments[0]?.toLowerCase() !== providerRoot) return null
 
   const collection = segments[1]
   if (!SLACK_WRITEBACK_COLLECTIONS.has(collection)) return null
@@ -43,5 +50,8 @@ export function slackWritebackCommandMountPathFor(provider: string, mountPath: s
 
 export function isSlackWritebackCommandRoot(remotePath: string): boolean {
   const normalized = normalizeRemotePath(remotePath)
-  return normalized !== null && slackWritebackCommandMountPathFor('slack', remotePath) === normalized
+  const provider = normalized?.split('/').filter(Boolean)[0]
+  return normalized !== null &&
+    typeof provider === 'string' &&
+    slackWritebackCommandMountPathFor(provider, remotePath) === normalized
 }

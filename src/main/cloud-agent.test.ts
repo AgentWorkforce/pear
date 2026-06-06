@@ -20,11 +20,15 @@ const mock = vi.hoisted(() => {
     localLayout?: string
     syncMode?: string
     scopes?: string[]
+    launcher?: {
+      start?: (input: { env: Record<string, string>; readyTimeoutMs: number }) => Promise<unknown>
+    }
   }
 
   const fetchCalls: Array<{ url: string; init?: RequestInit }> = []
   const mountInputs: MountInput[] = []
   const boxResponses: Array<Record<string, unknown>> = []
+  const startMount = vi.fn(async () => undefined)
   let currentAuth: MockCloudAuth | null = null
 
   const project = {
@@ -51,6 +55,7 @@ const mock = vi.hoisted(() => {
     fetchCalls,
     mountInputs,
     boxResponses,
+    startMount,
     project,
     get currentAuth() {
       return currentAuth
@@ -200,7 +205,7 @@ vi.mock('./integrations', () => ({
 }))
 
 vi.mock('./relayfile-mount-launcher', () => ({
-  createPearMountLauncher: vi.fn(() => ({ start: vi.fn() }))
+  createPearMountLauncher: vi.fn(() => ({ start: mock.startMount }))
 }))
 
 import { CloudAgentManager } from './cloud-agent'
@@ -217,6 +222,7 @@ describe('CloudAgentManager', () => {
     mock.fetchCalls.splice(0)
     mock.mountInputs.splice(0)
     mock.boxResponses.splice(0)
+    mock.startMount.mockClear()
     mock.browserWindow.getAllWindows.mockClear()
     mock.brokerManager.onBrokerEvent.mockClear()
     mock.brokerManager.attachCloudSandbox.mockClear()
@@ -392,6 +398,21 @@ describe('CloudAgentManager', () => {
       syncMode: 'mirror',
       scopes: ['relayfile:fs:read:/**', 'relayfile:fs:write:/**']
     })
+
+    await mock.mountInputs[0]?.launcher?.start?.({
+      env: {
+        RELAYFILE_REMOTE_PATH: '/remote/project-1',
+        RELAYFILE_LOCAL_DIR: mock.project.rootPath
+      },
+      readyTimeoutMs: 1000
+    })
+    expect(mock.startMount).toHaveBeenCalledWith(expect.objectContaining({
+      env: expect.objectContaining({
+        RELAYFILE_MOUNT_LOCAL_LAYOUT: 'exact',
+        RELAYFILE_MOUNT_SYNC_MODE: 'mirror',
+        RELAYFILE_CONFLICT_POLICY: 'local-wins'
+      })
+    }))
   })
 
   it('mounts non-root sandbox relayfile paths at the project root without local double-pathing', async () => {

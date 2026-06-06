@@ -271,6 +271,24 @@ describe('IntegrationMountManager', () => {
     })
   })
 
+  it('uses write-only mode for Slack-compatible provider command roots', async () => {
+    const manager = new IntegrationMountManager()
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack-sage',
+        mountPaths: ['/slack/channels/C123/messages']
+      }
+    ])
+
+    expect(mock.mountInputs[0]).toMatchObject({
+      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/slack-sage/channels/C123/messages',
+      remotePath: '/slack-sage/channels/C123/messages',
+      localLayout: 'exact',
+      syncMode: 'write-only'
+    })
+  })
+
   it('rejects Slack command roots with traversal segments', async () => {
     const manager = new IntegrationMountManager()
 

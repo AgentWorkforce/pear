@@ -1231,6 +1231,7 @@ export class CloudAgentManager {
   private createConflictPolicyLauncher(projectId: string, policy: ConflictPolicy): MountLauncher {
     const launcher = createPearMountLauncher()
     return {
+      ...launcher,
       start: (input) => {
         return launcher.start({
           ...input,
