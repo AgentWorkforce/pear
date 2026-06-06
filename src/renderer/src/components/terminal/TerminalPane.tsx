@@ -532,10 +532,17 @@ export function TerminalPane(): React.ReactNode {
       await handleDeliveryModeChange(agent, 'drive')
     },
     onAutoHoldRelease: async (flush: boolean) => {
+      let flushError: unknown
       if (flush) {
-        await pear.broker.flushPending(agent.projectId, agent.name)
+        try {
+          await pear.broker.flushPending(agent.projectId, agent.name)
+        } catch (err) {
+          flushError = err
+          setSpawnError(err instanceof Error ? err.message : String(err))
+        }
       }
       await handleDeliveryModeChange(agent, 'auto')
+      if (flushError) throw flushError
     }
   })
 

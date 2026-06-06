@@ -21,7 +21,12 @@ function nextAgentName(cli: SpawnAgentCli, projectId: string, liveNames: string[
   return `${cli}-${index}`
 }
 
-async function ensureLocalBroker(project: Project, rootOverride?: ProjectRoot): Promise<void> {
+async function ensureLocalBroker(
+  project: Project,
+  rootOverride?: ProjectRoot,
+  options: { detachCloud?: boolean } = {}
+): Promise<void> {
+  const detachCloud = options.detachCloud ?? true
   const projectStore = useProjectStore.getState()
   if (projectStore.activeProjectId !== project.id) {
     await projectStore.setActiveProject(project.id)
@@ -30,9 +35,11 @@ async function ensureLocalBroker(project: Project, rootOverride?: ProjectRoot): 
     useProjectStore.getState().setActiveRoot(rootOverride.id)
   }
 
-  const cloudStatus = await pear.cloudAgent.status(project.id).catch(() => null)
-  if (cloudStatus) {
-    await pear.cloudAgent.detach(project.id)
+  if (detachCloud) {
+    const cloudStatus = await pear.cloudAgent.status(project.id).catch(() => null)
+    if (cloudStatus) {
+      await pear.cloudAgent.detach(project.id)
+    }
   }
 
   await useProjectStore.getState().ensureBroker()
@@ -103,7 +110,7 @@ export async function listProjectPersonas(project: Project, rootOverride?: Proje
   if (rootOverride && !rootOverride.pathExists) {
     return []
   }
-  await ensureLocalBroker(project, rootOverride)
+  await ensureLocalBroker(project, rootOverride, { detachCloud: false })
 
   const root = rootOverride ?? useProjectStore.getState().getActiveRoot()
   if (!root?.pathExists) {
