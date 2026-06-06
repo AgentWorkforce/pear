@@ -365,7 +365,7 @@ const MAX_BROKER_TIMEOUTS_BEFORE_REVIVE = 2
 const BROKER_REVIVE_TERM_GRACE_MS = 1_500
 const PERSONA_REGISTRATION_TIMEOUT_MS = 5_000
 const PERSONA_REGISTRATION_STABILITY_MS = 1_000
-const AGENTWORKFORCE_CLI_VERSION = '3.0.35'
+const AGENTWORKFORCE_CLI_VERSION = '3.0.50'
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
