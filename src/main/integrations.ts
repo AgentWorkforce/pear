@@ -98,6 +98,7 @@ export type IntegrationsEvent =
   | { type: 'integration-added'; projectId: string; integration: ConnectedIntegration }
   | { type: 'integration-removed'; projectId: string; integrationId: string }
   | { type: 'integration-error'; projectId: string; integrationId: string; message: string }
+  | { type: 'mount-auth-stall'; remotePath: string; status: string | null; pendingWriteback: number; message: string }
 
 type StoredIntegration = ProjectIntegration & Partial<ConnectedIntegration> & {
   provider?: string
@@ -724,6 +725,15 @@ export class IntegrationsManager {
   private catalogFetchedAt = 0
   private localMountCloudHydrationStartedAt = 0
   private localMountCloudHydrationPromise: Promise<void> | null = null
+
+  constructor() {
+    // Surface mount auth stalls (expired token + queued writeback) to the
+    // renderer; the mount manager restarts the mount itself, this is the
+    // user-visible signal that writebacks were paused meanwhile.
+    integrationMountManager.setHealthObserver((alert) => {
+      this.emit({ type: 'mount-auth-stall', ...alert })
+    })
+  }
 
   onEvent(handler: (event: IntegrationsEvent) => void): () => void {
     this.listeners.add(handler)

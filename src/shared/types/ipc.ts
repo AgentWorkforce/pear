@@ -708,6 +708,7 @@ export type IntegrationsEvent =
   | { type: 'integration-added'; projectId: string; integration: ConnectedIntegration }
   | { type: 'integration-removed'; projectId: string; integrationId: string }
   | { type: 'integration-error'; projectId: string; integrationId: string; message: string }
+  | { type: 'mount-auth-stall'; remotePath: string; status: string | null; pendingWriteback: number; message: string }
 
 export type IntegrationEventTelemetryCounters = {
   eventsReceived: number

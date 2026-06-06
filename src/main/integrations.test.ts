@@ -166,6 +166,7 @@ const mock = vi.hoisted(() => {
       ensureMounted: vi.fn(() => mountReconcilePromise),
       currentWorkspaceId: vi.fn(() => null),
       localPathsFor: vi.fn(() => []),
+      setHealthObserver: vi.fn(),
       stop: vi.fn(async () => undefined)
     },
     integrationEventBridge: {
@@ -265,6 +266,7 @@ describe('IntegrationsManager', () => {
     mock.integrationMountManager.ensureMounted.mockClear()
     mock.integrationMountManager.currentWorkspaceId.mockClear()
     mock.integrationMountManager.localPathsFor.mockClear()
+    mock.integrationMountManager.setHealthObserver.mockClear()
     mock.integrationMountManager.stop.mockClear()
     mock.integrationEventBridge.reconcile.mockClear()
     mock.integrationEventBridge.closeAll.mockClear()

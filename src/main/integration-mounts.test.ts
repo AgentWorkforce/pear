@@ -47,6 +47,7 @@ const mock = vi.hoisted(() => {
       if (mountDelay) await mountDelay
       return Promise.resolve({
         expiresAt: mountExpiresAt,
+        localDir: input.localDir,
         suggestedRefreshAt: mountSuggestedRefreshAt,
         stop: vi.fn(async () => undefined),
         status: vi.fn(async () => ({ ready: true }))
@@ -59,6 +60,7 @@ const mock = vi.hoisted(() => {
     startMount,
     mkdir: vi.fn(async () => undefined),
     chmod: vi.fn(async () => undefined),
+    readFile: vi.fn(async () => '{}'),
     rm: vi.fn(async () => undefined),
     RelayfileSetup,
     get currentAuth() {
@@ -94,6 +96,7 @@ const mock = vi.hoisted(() => {
 vi.mock('node:fs/promises', () => ({
   chmod: mock.chmod,
   mkdir: mock.mkdir,
+  readFile: mock.readFile,
   rm: mock.rm
 }))
 
@@ -122,6 +125,8 @@ describe('IntegrationMountManager', () => {
     mock.mountInputs.splice(0)
     mock.mkdir.mockClear()
     mock.chmod.mockClear()
+    mock.readFile.mockClear()
+    mock.readFile.mockResolvedValue('{}')
     mock.rm.mockClear()
     mock.startMount.mockClear()
     mock.currentAuth = {
@@ -408,5 +413,83 @@ describe('IntegrationMountManager', () => {
     await new Promise((resolve) => setTimeout(resolve, 0))
 
     expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels')).toHaveLength(2)
+  })
+
+  it('restarts and reports pending writeback after state polling sees an auth failure', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-06T14:00:00.000Z'))
+    const manager = new IntegrationMountManager()
+    const healthObserver = vi.fn()
+    manager.setHealthObserver(healthObserver)
+    mock.readFile.mockResolvedValue(JSON.stringify({
+      status: 'writeback-pending',
+      pendingWriteback: 1,
+      lastSuccessfulReconcileAt: '2026-06-06T13:59:00.000Z',
+      lastError: {
+        code: 'unauthorized',
+        statusCode: 401,
+        message: 'http 401 unauthorized: Token has expired',
+        at: '2026-06-06T14:00:30.000Z'
+      }
+    }))
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/channels/C123/messages']
+      }
+    ])
+
+    await vi.advanceTimersByTimeAsync(45_000)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mock.readFile).toHaveBeenCalledWith(
+      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/slack/channels/C123/messages/.relay/state.json',
+      'utf8'
+    )
+    expect(healthObserver).toHaveBeenCalledWith({
+      remotePath: '/slack/channels/C123/messages',
+      status: 'writeback-pending',
+      pendingWriteback: 1,
+      message: 'http 401 unauthorized: Token has expired'
+    })
+    expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/messages')).toHaveLength(2)
+  })
+
+  it('suppresses replayed state-poll auth alerts while a restart is throttled', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-06T14:00:00.000Z'))
+    const manager = new IntegrationMountManager()
+    const healthObserver = vi.fn()
+    manager.setHealthObserver(healthObserver)
+    mock.readFile.mockResolvedValue(JSON.stringify({
+      status: 'writeback-pending',
+      pendingWriteback: 1,
+      lastSuccessfulReconcileAt: '2026-06-06T13:59:00.000Z',
+      lastError: {
+        code: 'unauthorized',
+        statusCode: 401,
+        message: 'http 401 unauthorized: Token has expired',
+        at: '2026-06-06T14:00:30.000Z'
+      }
+    }))
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/channels/C123/messages']
+      }
+    ])
+
+    await vi.advanceTimersByTimeAsync(45_000)
+    await Promise.resolve()
+    await Promise.resolve()
+    await vi.advanceTimersByTimeAsync(45_000)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(healthObserver).toHaveBeenCalledTimes(1)
+    expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/messages')).toHaveLength(2)
   })
 })
