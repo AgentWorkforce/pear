@@ -34,7 +34,9 @@ async function runInstall(repoRoot: string, source: string) {
   })
 }
 
-test('installFromFile replaces the target instead of copying through an existing symlink', async () => {
+test('installFromFile replaces the target instead of copying through an existing symlink', {
+  skip: process.platform === 'win32' ? 'Symlinks on Windows require elevated privileges or Developer Mode' : false
+}, async () => {
   await withTempRepo(async (repoRoot) => {
     const source = join(repoRoot, 'source-relayfile-mount')
     const target = join(repoRoot, 'bin', 'relayfile-mount')
@@ -63,7 +65,7 @@ test('installFromFile removes the staged temp file when publish fails', async ()
     await writeFile(source, 'new-binary\n')
     await mkdir(target, { recursive: true })
 
-    await assert.rejects(runInstall(repoRoot, source), /EISDIR|ENOTDIR|directory/)
+    await assert.rejects(runInstall(repoRoot, source), /EISDIR|ENOTDIR|EPERM|EACCES|directory/)
 
     const binEntries = await readdir(join(repoRoot, 'bin'))
     assert.deepEqual(binEntries, ['relayfile-mount'])
