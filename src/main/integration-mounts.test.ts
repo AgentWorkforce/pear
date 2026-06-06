@@ -11,11 +11,14 @@ const mock = vi.hoisted(() => {
     localDir: string
     remotePath: string
     mode: string
+    localLayout?: string
+    syncMode?: string
     background: boolean
     agentName: string
     scopes?: string[]
     readyTimeoutMs: number
     launcher?: {
+      start?: (input: { env: Record<string, string> }) => Promise<unknown>
       __options?: {
         onEvent?: (event: { type: string; text?: string }) => void
       }
@@ -23,6 +26,7 @@ const mock = vi.hoisted(() => {
   }
 
   const mountInputs: MountInput[] = []
+  const startMount = vi.fn(async () => undefined)
   let currentAuth: MockCloudAuth | null = null
   let mountExpiresAt: string | null = null
   let mountSuggestedRefreshAt: string | null = null
@@ -52,6 +56,7 @@ const mock = vi.hoisted(() => {
 
   return {
     mountInputs,
+    startMount,
     mkdir: vi.fn(async () => undefined),
     chmod: vi.fn(async () => undefined),
     rm: vi.fn(async () => undefined),
@@ -107,7 +112,7 @@ vi.mock('./auth', () => ({
 }))
 
 vi.mock('./relayfile-mount-launcher', () => ({
-  createPearMountLauncher: vi.fn((options) => ({ start: vi.fn(), __options: options }))
+  createPearMountLauncher: vi.fn((options) => ({ start: mock.startMount, __options: options }))
 }))
 
 import { IntegrationMountManager } from './integration-mounts'
@@ -118,6 +123,7 @@ describe('IntegrationMountManager', () => {
     mock.mkdir.mockClear()
     mock.chmod.mockClear()
     mock.rm.mockClear()
+    mock.startMount.mockClear()
     mock.currentAuth = {
       apiUrl: 'https://cloud.example',
       accessToken: 'account-token'
@@ -154,6 +160,8 @@ describe('IntegrationMountManager', () => {
       workspaceId: 'account-workspace-id',
       localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/github/repos',
       remotePath: '/github/repos',
+      localLayout: 'exact',
+      syncMode: 'mirror',
       agentName: 'pear-integrations-github-repos',
       scopes: ['relayfile:fs:read:/github/repos/**', 'relayfile:fs:write:/github/repos/**']
     })
@@ -195,6 +203,8 @@ describe('IntegrationMountManager', () => {
     expect(mock.mountInputs[0]).toMatchObject({
       localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/discovery/slack',
       remotePath: '/discovery/slack',
+      localLayout: 'exact',
+      syncMode: 'mirror',
       agentName: 'pear-integrations-discovery-slack',
       scopes: ['relayfile:fs:read:/discovery/slack/**', 'relayfile:fs:write:/discovery/slack/**']
     })
@@ -204,6 +214,61 @@ describe('IntegrationMountManager', () => {
     })).toEqual([
       '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/discovery/slack'
     ])
+  })
+
+  it('mounts canonical Slack command roots exactly once in write-only mode', async () => {
+    const manager = new IntegrationMountManager()
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/channels/C123/messages']
+      }
+    ])
+
+    expect(mock.mountInputs).toHaveLength(1)
+    expect(mock.mountInputs[0]).toMatchObject({
+      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/slack/channels/C123/messages',
+      remotePath: '/slack/channels/C123/messages',
+      localLayout: 'exact',
+      syncMode: 'write-only',
+      scopes: ['relayfile:fs:read:/slack/channels/C123/messages/**', 'relayfile:fs:write:/slack/channels/C123/messages/**']
+    })
+    expect(mock.mountInputs[0]?.localDir).not.toContain('messages/slack/channels/C123/messages')
+
+    const launcher = mock.mountInputs[0]?.launcher
+    const started = await launcher?.start?.({
+      env: {
+        RELAYFILE_REMOTE_PATH: '/slack/channels/C123/messages',
+        RELAYFILE_LOCAL_DIR: '/tmp/root'
+      }
+    })
+
+    expect(started).toBeUndefined()
+    expect(mock.startMount).toHaveBeenCalledWith(expect.objectContaining({
+      env: expect.objectContaining({
+        RELAYFILE_MOUNT_LOCAL_LAYOUT: 'exact',
+        RELAYFILE_MOUNT_SYNC_MODE: 'write-only'
+      })
+    }))
+  })
+
+  it('uses the shared Slack command-root grammar for write-only mode', async () => {
+    const manager = new IntegrationMountManager()
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/users/U123/messages']
+      }
+    ])
+
+    expect(mock.mountInputs[0]).toMatchObject({
+      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/slack/users/U123/messages',
+      remotePath: '/slack/users/U123/messages',
+      localLayout: 'exact',
+      syncMode: 'write-only'
+    })
   })
 
   it('scopes bare discovery mounts to the integration provider', async () => {

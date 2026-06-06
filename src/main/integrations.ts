@@ -25,6 +25,7 @@ import {
   removeProjectIntegrationsLink
 } from './integration-symlinks'
 import { INTEGRATIONS_CATALOG } from './integrations.catalog'
+import { slackWritebackCommandMountPathFor } from './slack-writeback-command-roots'
 import { getRelayWorkspaceManager } from './relay-workspace'
 import { loadStore, saveStore, type ProjectIntegration } from './store'
 
@@ -343,15 +344,11 @@ function isDiscoveryMountPath(mountPath: string): boolean {
   return mountPath.split('/').filter(Boolean)[0] === 'discovery'
 }
 
-function outboxMountPathFor(mountPath: string): string {
-  const normalized = mountPath.trim().replace(/\/+$/u, '')
-  return `${normalized}/.outbox`
-}
-
 function writebackCommandMountPathsForIntegration(integration: ConnectedIntegration): string[] {
   return canonicalMountPathsForConnectedIntegration(integration)
     .filter(isNarrowHistoricalMountPath)
-    .map(outboxMountPathFor)
+    .map((mountPath) => slackWritebackCommandMountPathFor(toRelayfileProvider(integration.provider), mountPath))
+    .filter((mountPath): mountPath is string => !!mountPath)
 }
 
 export function localSyncMountPathsForIntegration(integration: ConnectedIntegration): string[] {

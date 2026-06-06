@@ -318,20 +318,21 @@ describe('IntegrationsManager', () => {
     )
   })
 
-  it('keeps local sync to discovery and narrow outbox command roots while historical download is off', () => {
+  it('keeps local sync to discovery and narrow canonical writeback command roots while historical download is off', () => {
     expect(localSyncMountPathsForIntegration({
       provider: 'slack',
       integrationId: 'slack-integration-1',
       scope: {},
-      mountPaths: ['/discovery/slack', '/slack/channels', '/slack/channels/C123', '/slack/dms/D123'],
+      mountPaths: ['/discovery/slack', '/slack/channels', '/slack/channels/C123', '/slack/dms/D123', '/slack/users/U123/messages'],
       connectedAt: '2026-06-05T00:00:00.000Z',
       notifyAgent: true,
       subscribeAgent: true,
       downloadHistoricalData: false
     })).toEqual([
       '/discovery/slack',
-      '/slack/channels/C123/.outbox',
-      '/slack/dms/D123/.outbox'
+      '/slack/channels/C123/messages',
+      '/slack/dms/D123/messages',
+      '/slack/users/U123/messages'
     ])
   })
 
@@ -348,7 +349,7 @@ describe('IntegrationsManager', () => {
     })).toEqual(['/discovery/slack', '/slack/channels/C123', '/slack/dms/D123'])
   })
 
-  it('names outbox command roots in agent guidance while historical download is off', () => {
+  it('names canonical writeback command roots in agent guidance while historical download is off', () => {
     const manager = new IntegrationsManager() as unknown as SystemMessageSnippetBuilder
 
     const message = manager.buildSystemMessageSnippet([{
@@ -362,8 +363,8 @@ describe('IntegrationsManager', () => {
       downloadHistoricalData: false
     }], true)
 
-    expect(message).toContain('create writeback files under .integrations/slack/channels/C123/.outbox')
-    expect(message).toContain('Writeback command roots are mounted at .integrations/slack/channels/C123/.outbox')
+    expect(message).toContain('create writeback files under .integrations/slack/channels/C123/messages')
+    expect(message).toContain('Writeback command roots are mounted at .integrations/slack/channels/C123/messages')
     expect(message).not.toContain('create writeback files under .integrations/slack/channels/C123, not under discovery')
   })
 
