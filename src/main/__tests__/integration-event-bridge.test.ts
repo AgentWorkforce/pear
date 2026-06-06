@@ -6,6 +6,7 @@ import type { ChangeEvent, Subscription } from '@relayfile/sdk'
 import {
   getIntegrationEventTelemetrySnapshot,
   IntegrationEventBridge,
+  createWorkspaceScopedEventClient,
   integrationSubscriptionSummaries,
   localWatchEventPathsForFilename,
   localWatchRootsFor,
@@ -13,6 +14,33 @@ import {
   resetIntegrationEventTelemetryForTests
 } from '../integration-event-bridge.ts'
 import type { ConnectedIntegration } from '../integrations.ts'
+
+type RelayFileSyncHandlerName = 'event' | 'error' | 'state' | 'open' | 'close' | 'pong'
+
+class FakeRelayFileSync {
+  handlers = new Map<RelayFileSyncHandlerName, Set<(payload: unknown) => void>>()
+  started = false
+  stopped = false
+
+  on(event: RelayFileSyncHandlerName, handler: (payload: unknown) => void): () => void {
+    const handlers = this.handlers.get(event) ?? new Set<(payload: unknown) => void>()
+    handlers.add(handler)
+    this.handlers.set(event, handlers)
+    return () => handlers.delete(handler)
+  }
+
+  start(): void {
+    this.started = true
+  }
+
+  async stop(): Promise<void> {
+    this.stopped = true
+  }
+
+  emit(event: RelayFileSyncHandlerName, payload: unknown): void {
+    for (const handler of this.handlers.get(event) ?? []) handler(payload)
+  }
+}
 
 type SentMessage = {
   projectId: string
@@ -241,6 +269,163 @@ test('relayfile sdk path filters broaden partial-segment Slack DM globs', () => 
     '/slack/dms/*/**',
     '/slack/users/*/messages/**'
   ])
+})
+
+test('integration event remote stream falls back to event feed polling after repeated stream errors', async () => {
+  const syncs: FakeRelayFileSync[] = []
+  const received: ChangeEvent[] = []
+  const getEventsCalls: Array<{ cursor?: string; limit?: number }> = []
+  const pollEvent = {
+    eventId: 'ws:file.created:/slack/channels/C123/messages/1780735314_000000/meta.json:rev-2:2026-06-06T08:41:00.000Z',
+    type: 'file.created',
+    path: '/slack/channels/C123/messages/1780735314_000000/meta.json',
+    revision: 'rev-2',
+    timestamp: '2026-06-06T08:41:00.000Z'
+  } as const
+  const client = {
+    async getEvents(_workspaceId: string, options: { cursor?: string; limit?: number }) {
+      getEventsCalls.push({ cursor: options.cursor, limit: options.limit })
+      return getEventsCalls.length === 1
+        ? { events: [pollEvent], nextCursor: null }
+        : { events: [], nextCursor: null }
+    },
+    async getResourceAtEvent() {
+      throw new Error('not used')
+    }
+  }
+  const eventClient = createWorkspaceScopedEventClient(
+    client as never,
+    'workspace-id',
+    async () => 'workspace-token',
+    'https://relayfile.example',
+    (options) => {
+      assert.equal(options.cursor, undefined)
+      const sync = new FakeRelayFileSync()
+      syncs.push(sync)
+      return sync as never
+    }
+  )
+
+  const subscription = eventClient.subscribe(
+    ['/slack/channels/C123/**'],
+    (event) => {
+      received.push(event)
+    },
+    { coalesce: 'none', from: 'legacy', pathScope: ['/slack/channels/C123/**'] }
+  )
+
+  await waitUntil(() => syncs.length === 1)
+  syncs[0].emit('event', {
+    eventId: 'ws:file.created:/slack/channels/C123/messages/1780735200_000000/meta.json:rev-1:2026-06-06T08:40:00.000Z',
+    type: 'file.created',
+    path: '/slack/channels/C123/messages/1780735200_000000/meta.json',
+    revision: 'rev-1',
+    timestamp: '2026-06-06T08:40:00.000Z'
+  })
+  await waitUntil(() => received.length === 1)
+
+  for (let index = 0; index < 5; index += 1) {
+    syncs[0].emit('error', new Error('websocket reconnect failed'))
+  }
+
+  await waitUntil(() => received.length === 2)
+  assert.equal(syncs[0].stopped, true)
+  assert.deepEqual(getEventsCalls[0], {
+    cursor: 'ws:file.created:/slack/channels/C123/messages/1780735200_000000/meta.json:rev-1:2026-06-06T08:40:00.000Z',
+    limit: 1000
+  })
+  assert.equal(received[1].resource.path, '/slack/channels/C123/messages/1780735314_000000/meta.json')
+
+  await subscription.unsubscribe()
+})
+
+test('integration event remote stream fallback replays the outage gap and logs non-empty error details', async () => {
+  const syncs: FakeRelayFileSync[] = []
+  const received: ChangeEvent[] = []
+  const warnCalls: unknown[][] = []
+  const originalWarn = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnCalls.push(args)
+  }
+
+  try {
+    const client = {
+      async getEvents(_workspaceId: string, options: { cursor?: string; limit?: number }) {
+        assert.equal(
+          options.cursor,
+          'ws:file.created:/slack/channels/C123/messages/1780735200_000000/meta.json:rev-1:2026-06-06T08:40:00.000Z'
+        )
+        return {
+          events: [
+            {
+              eventId: 'ws:file.created:/slack/channels/C123/messages/1780735250_000000/meta.json:rev-gap-1:2026-06-06T08:40:50.000Z',
+              type: 'file.created',
+              path: '/slack/channels/C123/messages/1780735250_000000/meta.json',
+              revision: 'rev-gap-1',
+              timestamp: '2026-06-06T08:40:50.000Z'
+            },
+            {
+              eventId: 'ws:file.created:/slack/channels/C123/messages/1780735314_000000/meta.json:rev-gap-2:2026-06-06T08:41:00.000Z',
+              type: 'file.created',
+              path: '/slack/channels/C123/messages/1780735314_000000/meta.json',
+              revision: 'rev-gap-2',
+              timestamp: '2026-06-06T08:41:00.000Z'
+            }
+          ],
+          nextCursor: null
+        }
+      },
+      async getResourceAtEvent() {
+        throw new Error('not used')
+      }
+    }
+    const eventClient = createWorkspaceScopedEventClient(
+      client as never,
+      'workspace-id',
+      async () => 'workspace-token',
+      'https://relayfile.example',
+      () => {
+        const sync = new FakeRelayFileSync()
+        syncs.push(sync)
+        return sync as never
+      }
+    )
+
+    const subscription = eventClient.subscribe(
+      ['/slack/channels/C123/**'],
+      (event) => {
+        received.push(event)
+      },
+      { coalesce: 'none', from: 'legacy', pathScope: ['/slack/channels/C123/**'] }
+    )
+
+    await waitUntil(() => syncs.length === 1)
+    syncs[0].emit('event', {
+      eventId: 'ws:file.created:/slack/channels/C123/messages/1780735200_000000/meta.json:rev-1:2026-06-06T08:40:00.000Z',
+      type: 'file.created',
+      path: '/slack/channels/C123/messages/1780735200_000000/meta.json',
+      revision: 'rev-1',
+      timestamp: '2026-06-06T08:40:00.000Z'
+    })
+    await waitUntil(() => received.length === 1)
+
+    for (let index = 0; index < 5; index += 1) {
+      syncs[0].emit('error', { type: 'error' })
+    }
+
+    await waitUntil(() => received.length === 3)
+    assert.deepEqual(received.slice(1).map((event) => event.resource.path), [
+      '/slack/channels/C123/messages/1780735250_000000/meta.json',
+      '/slack/channels/C123/messages/1780735314_000000/meta.json'
+    ])
+    const remoteStreamError = warnCalls.find((call) => call[0] === '[integration-events] remote stream error')
+    assert.ok(remoteStreamError)
+    assert.equal((remoteStreamError[1] as { error?: string }).error, 'type=error')
+
+    await subscription.unsubscribe()
+  } finally {
+    console.warn = originalWarn
+  }
 })
 
 async function waitForSent(harness: { sent: SentMessage[] }, count: number, timeoutMs = 1_000): Promise<void> {
