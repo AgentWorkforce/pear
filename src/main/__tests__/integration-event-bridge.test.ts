@@ -917,6 +917,28 @@ test('local fallback watchers reject non-canonical command-looking roots', () =>
   assert.deepEqual(roots, [])
 })
 
+test('local fallback watchers reject command roots with traversal segments', () => {
+  const roots = localWatchRootsFor(
+    'workspace-id',
+    [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC/../messages'],
+        downloadHistoricalData: true,
+        localMountPaths: [
+          join('/tmp', 'relayfile', 'workspaces', 'workspace-id', 'slack', 'channels', 'C123ABC', '..', 'messages')
+        ]
+      })
+    ],
+    [
+      '/slack/channels/C123ABC/../messages/**'
+    ]
+  )
+
+  assert.deepEqual(roots, [])
+})
+
 test('local fallback watchers do not watch broad provider history paths', () => {
   const roots = localWatchRootsFor(
     'workspace-id',
@@ -1380,7 +1402,10 @@ test('integration event delivery failures use aggregated warn cadence by default
     warnCalls.map((call) => (call[1] as { suppressedSinceLastLog: number }).suppressedSinceLastLog),
     [0, 24]
   )
-  assert.deepEqual(getIntegrationEventTelemetrySnapshot().projects['project-1'], {
+  const telemetry = getIntegrationEventTelemetrySnapshot().projects['project-1']
+  assert.ok(telemetry)
+  assert.equal(telemetry.brokerSendsDeferred >= 0, true)
+  assert.deepEqual({ ...telemetry, brokerSendsDeferred: 0 }, {
     eventsReceived: 26,
     eventsInjected: 0,
     eventsCoalesced: 0,
