@@ -278,20 +278,21 @@ export function integrationRelayFileSyncOptions(
 function toErrorMessage(error: unknown): string {
   if (error instanceof Error) return error.message
   if (isRecord(error)) {
-    const message = error.message
+    const record = error as Record<string, unknown>
+    const message = record.message
     if (typeof message === 'string' && message.trim()) return message.trim()
-    const reason = error.reason
+    const reason = record.reason
     if (typeof reason === 'string' && reason.trim()) return reason.trim()
-    const status = error.status ?? error.statusCode ?? error.httpStatus
-    const code = error.code
-    const type = error.type
+    const status = record.status ?? record.statusCode ?? record.httpStatus
+    const code = record.code
+    const type = record.type
     const parts = [
       typeof type === 'string' && type.trim() ? type.trim() : null,
       typeof code === 'string' && code.trim() ? `code=${code.trim()}` : typeof code === 'number' ? `code=${code}` : null,
       typeof status === 'string' && status.trim() ? `status=${status.trim()}` : typeof status === 'number' ? `status=${status}` : null
     ].filter((entry): entry is string => entry !== null)
     if (parts.length > 0) return parts.join(' ')
-    const constructorName = (error as { constructor?: { name?: string } }).constructor?.name
+    const constructorName = record.constructor?.name
     if (constructorName && constructorName !== 'Object') return constructorName
   }
   const text = String(error)

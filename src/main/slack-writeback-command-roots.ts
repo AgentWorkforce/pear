@@ -1,6 +1,7 @@
 const SLACK_WRITEBACK_COLLECTIONS = new Set(['channels', 'dms', 'users'])
 
 function normalizeRemotePath(path: string): string | null {
+  if (typeof path !== 'string') return null
   const segments = path
     .trim()
     .split(/[\\/]+/)
@@ -10,6 +11,7 @@ function normalizeRemotePath(path: string): string | null {
 }
 
 function isSlackProvider(provider: string): boolean {
+  if (typeof provider !== 'string') return false
   const normalized = provider.trim().toLowerCase()
   return normalized === 'slack' || normalized.startsWith('slack-')
 }
