@@ -323,7 +323,7 @@ describe('IntegrationsManager', () => {
       provider: 'slack',
       integrationId: 'slack-integration-1',
       scope: {},
-      mountPaths: ['/discovery/slack', '/slack/channels', '/slack/channels/C123', '/slack/dms/D123'],
+      mountPaths: ['/discovery/slack', '/slack/channels', '/slack/channels/C123', '/slack/dms/D123', '/slack/users/U123/messages'],
       connectedAt: '2026-06-05T00:00:00.000Z',
       notifyAgent: true,
       subscribeAgent: true,
@@ -331,7 +331,8 @@ describe('IntegrationsManager', () => {
     })).toEqual([
       '/discovery/slack',
       '/slack/channels/C123/messages',
-      '/slack/dms/D123/messages'
+      '/slack/dms/D123/messages',
+      '/slack/users/U123/messages'
     ])
   })
 
