@@ -158,6 +158,7 @@ function makeHarness(
       content: string
       encoding: 'utf-8' | 'base64'
     }
+    readFileFailuresBeforeSuccess?: number
     failReadFile?: boolean
     sendDelayMs?: number
     onSendStart?: (activeSends: number) => void
@@ -181,6 +182,7 @@ function makeHarness(
   const subscriptions: Subscription[] = []
   let unsubscribedCount = 0
   let activeSends = 0
+  let readFileAttempts = 0
 
   const bridge = new IntegrationEventBridge({
     getWorkspaceHandle: async () => ({
@@ -195,6 +197,10 @@ function makeHarness(
         },
         async readFile(workspaceId, path) {
           readFileCalls.push({ workspaceId, path })
+          readFileAttempts += 1
+          if (options.readFileFailuresBeforeSuccess && readFileAttempts <= options.readFileFailuresBeforeSuccess) {
+            throw new Error('remote file not ready')
+          }
           if (options.failReadFile) throw new Error('remote file not ready')
           return options.readFileResponse?.(workspaceId, path) ?? {
             path,
@@ -920,19 +926,87 @@ test('slack context falls back to expanded event data when targeted remote previ
       }
     })
   } as ChangeEvent)
-  await waitForSent(harness, 1)
+  await waitForSent(harness, 1, 2_500)
 
   assert.match(harness.sent[0].input.text, /Slack message event/u)
   assert.match(harness.sent[0].input.text, /Author: Khaliq/u)
   assert.match(harness.sent[0].input.text, /Message:\nexpanded Slack context/u)
-  assert.deepEqual(harness.readFileCalls, [
-    {
-      workspaceId: 'workspace-id',
-      path: messagePath
-    }
-  ])
+  assert.equal(harness.readFileCalls.length, 4)
+  assert.deepEqual(harness.readFileCalls[0], {
+    workspaceId: 'workspace-id',
+    path: messagePath
+  })
   assert.equal((harness.sent[0].input.data?.contextPreview as { kind?: string } | undefined)?.kind, 'text')
   assert.equal((harness.sent[0].input.data?.contextPreview as { content?: string } | undefined)?.content, undefined)
+})
+
+test('slack context retries targeted remote preview before falling back to sparse event data', async () => {
+  const harness = makeHarness(['alice'], { readFileFailuresBeforeSuccess: 1 })
+  const messagePath = '/slack/channels/D123ABC/messages/1780668000_000000/meta.json'
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        downloadHistoricalData: false,
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+  })
+
+  await harness.emit({
+    ...changeEvent(messagePath, 'slack'),
+    expand: async () => ({
+      level: 'full',
+      path: messagePath,
+      data: {
+        path: messagePath,
+        deleted: false
+      }
+    })
+  } as ChangeEvent)
+  await waitForSent(harness, 1)
+
+  assert.equal(harness.readFileCalls.length, 2)
+  assert.match(harness.sent[0].input.text, /Slack message event/u)
+  assert.match(harness.sent[0].input.text, /Message:\ntargeted Slack context/u)
+  assert.doesNotMatch(harness.sent[0].input.text, /"deleted": false/u)
+})
+
+test('slack context does not inject sparse relayfile pointer fallback as message content', async () => {
+  const harness = makeHarness(['alice'], { failReadFile: true })
+  const messagePath = '/slack/channels/D123ABC/messages/1780668000_000000/meta.json'
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        downloadHistoricalData: false,
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+  })
+
+  await harness.emit({
+    ...changeEvent(messagePath, 'slack'),
+    expand: async () => ({
+      level: 'full',
+      path: messagePath,
+      data: {
+        path: messagePath,
+        deleted: false
+      }
+    })
+  } as ChangeEvent)
+  await waitForSent(harness, 1, 2_500)
+
+  assert.match(harness.sent[0].input.text, /Message: unavailable; targeted context read did not return content\./u)
+  assert.doesNotMatch(harness.sent[0].input.text, /"path":/u)
+  assert.doesNotMatch(harness.sent[0].input.text, /"deleted": false/u)
 })
 
 test('integration event targeted context previews skip binary files', async () => {

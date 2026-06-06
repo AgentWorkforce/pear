@@ -44,6 +44,7 @@ const SLACK_DM_EVENT_GLOBS = [
   '/slack/users/*/messages/**'
 ]
 const MAX_EVENT_CONTEXT_PREVIEW_BYTES = 32 * 1024
+const EVENT_CONTEXT_READ_RETRY_DELAYS_MS = [150, 350, 750]
 const MAX_DISPATCH_QUEUE_EVENTS = 50
 const MAX_DISPATCH_SUMMARY_GROUPS = 10
 const MAX_DISPATCHED_EVENTS_PER_SECOND = 25
@@ -323,6 +324,10 @@ function isUnauthorizedError(error: unknown): boolean {
   if (status === 401 || status === 403) return true
   const message = (error as { message?: unknown }).message
   return typeof message === 'string' && /\b(401|403|unauthor|forbidden)\b/i.test(message)
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1542,8 +1547,19 @@ function eventContextPreviewFromBuffer(path: string, buffer: Buffer, contentType
 
 function eventContextPreviewFromData(path: string, data: unknown): EventContextPreview | undefined {
   if (data === undefined || data === null) return undefined
+  if (isSparseRelayfilePointerData(path, data)) return undefined
   const content = typeof data === 'string' ? data : JSON.stringify(data, null, 2)
   return eventContextPreviewFromBuffer(path, Buffer.from(content, 'utf8'), 'application/json')
+}
+
+function isSparseRelayfilePointerData(path: string, data: unknown): boolean {
+  if (!isRecord(data)) return false
+  const keys = Object.keys(data).sort()
+  if (keys.length === 1 && keys[0] === 'path') return data.path === path
+  if (keys.length === 2 && keys[0] === 'deleted' && keys[1] === 'path') {
+    return data.path === path && typeof data.deleted === 'boolean'
+  }
+  return false
 }
 
 function eventContextPreviewMetadata(preview: EventContextPreview): EventContextPreviewMetadata {
@@ -1691,14 +1707,11 @@ function formatSlackIntegrationEventMessage(
   const author = slackPreviewAuthor(contextPreview)
   const lines = [
     '<integration-event>',
-    'Slack message event',
-    `Event id: ${event.id}`,
-    `Occurred at: ${event.occurredAt}`
+    'Slack message event'
   ]
 
   if (scopeLabel) lines.push(`Location: ${scopeLabel}`)
   if (author) lines.push(`Author: ${author}`)
-  lines.push(`Path: ${projectPath}`)
   if (messageText) {
     lines.push('Message:', messageText)
   } else if (contextPreview?.kind === 'too-large') {
@@ -1708,6 +1721,7 @@ function formatSlackIntegrationEventMessage(
   } else {
     lines.push('Message: unavailable; targeted context read did not return content.')
   }
+  lines.push(`Path: ${projectPath}`)
   lines.push('</integration-event>')
   return lines.join('\n')
 }
@@ -2233,10 +2247,19 @@ export class IntegrationEventBridge {
 
     let readFileError: unknown
     try {
+      const readDelays = slackEventContextPath(path) ? [0, ...EVENT_CONTEXT_READ_RETRY_DELAYS_MS] : [0]
       const handle = await this.getWorkspaceHandle()
       const client = handle.client()
       if (typeof client.readFile === 'function') {
-        return eventContextPreviewFromFile(await client.readFile(handle.workspaceId, path))
+        for (const [index, delayMs] of readDelays.entries()) {
+          if (delayMs > 0) await delay(delayMs)
+          try {
+            return eventContextPreviewFromFile(await client.readFile(handle.workspaceId, path))
+          } catch (error) {
+            readFileError = error
+            if (index === readDelays.length - 1) break
+          }
+        }
       }
     } catch (error) {
       readFileError = error
