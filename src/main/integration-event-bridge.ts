@@ -10,6 +10,7 @@ import {
   type ChangeEvent,
   type FileReadResponse,
   type FilesystemEvent,
+  type RelayFileSyncOptions,
   type Subscription
 } from '@relayfile/sdk'
 import type { ConnectedIntegration } from './integrations'
@@ -180,6 +181,10 @@ type RelayfileWorkspaceHandle = {
 
 type TokenProvider = () => Promise<string | undefined>
 
+type IntegrationRelayFileSyncOptionsInput = Omit<RelayFileSyncOptions, 'token'> & {
+  tokenProvider: TokenProvider
+}
+
 type IntegrationEventBridgeDeps = {
   broker?: BrokerEventBridge
   getWorkspaceHandle?: () => Promise<RelayfileWorkspaceHandle>
@@ -260,8 +265,37 @@ export function resetIntegrationEventTelemetryForTests(): void {
   aggregatedWarnings.clear()
 }
 
+export function integrationRelayFileSyncOptions(
+  input: IntegrationRelayFileSyncOptionsInput
+): RelayFileSyncOptions {
+  const { tokenProvider, ...options } = input
+  return {
+    ...options,
+    token: tokenProvider
+  }
+}
+
 function toErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
+  if (error instanceof Error) return error.message
+  if (isRecord(error)) {
+    const message = error.message
+    if (typeof message === 'string' && message.trim()) return message.trim()
+    const reason = error.reason
+    if (typeof reason === 'string' && reason.trim()) return reason.trim()
+    const status = error.status ?? error.statusCode ?? error.httpStatus
+    const code = error.code
+    const type = error.type
+    const parts = [
+      typeof type === 'string' && type.trim() ? type.trim() : null,
+      typeof code === 'string' && code.trim() ? `code=${code.trim()}` : typeof code === 'number' ? `code=${code}` : null,
+      typeof status === 'string' && status.trim() ? `status=${status.trim()}` : typeof status === 'number' ? `status=${status}` : null
+    ].filter((entry): entry is string => entry !== null)
+    if (parts.length > 0) return parts.join(' ')
+    const constructorName = (error as { constructor?: { name?: string } }).constructor?.name
+    if (constructorName && constructorName !== 'Object') return constructorName
+  }
+  const text = String(error)
+  return text === '[object Object]' ? 'unknown object error' : text
 }
 
 function isUnauthorizedError(error: unknown): boolean {
@@ -653,11 +687,11 @@ function createWorkspaceScopedEventClient(
             from: options?.from ?? 'now',
             transport: baseUrl ? 'websocket' : 'polling'
           })
-          sync = new RelayFileSync({
+          sync = new RelayFileSync(integrationRelayFileSyncOptions({
             client,
             workspaceId,
             baseUrl,
-            token,
+            tokenProvider,
             from: options?.from ?? 'now',
             paths: relayfilePathFilters,
             onPollingFallback: (info) => {
@@ -670,7 +704,7 @@ function createWorkspaceScopedEventClient(
                 }
               )
             }
-          })
+          }))
           sync.on('event', handleEvent)
           sync.on('state', (state) => {
             logIntegrationEvent('remote stream state', {

@@ -7,6 +7,7 @@ import {
   getIntegrationEventTelemetrySnapshot,
   IntegrationEventBridge,
   integrationSubscriptionSummaries,
+  integrationRelayFileSyncOptions,
   localWatchEventPathsForFilename,
   localWatchRootsFor,
   relayfileSdkPathFiltersFor,
@@ -241,6 +242,20 @@ test('relayfile sdk path filters broaden partial-segment Slack DM globs', () => 
     '/slack/dms/*/**',
     '/slack/users/*/messages/**'
   ])
+})
+
+test('integration event remote stream keeps a refreshable relayfile token provider', () => {
+  const tokenProvider = async () => 'workspace-token'
+  const options = integrationRelayFileSyncOptions({
+    client: {} as never,
+    workspaceId: 'workspace-id',
+    baseUrl: 'https://relayfile.example',
+    tokenProvider,
+    from: 'legacy',
+    paths: ['/slack/channels/*/**']
+  })
+
+  assert.equal(options.token, tokenProvider)
 })
 
 async function waitForSent(harness: { sent: SentMessage[] }, count: number, timeoutMs = 1_000): Promise<void> {
