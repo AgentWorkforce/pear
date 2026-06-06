@@ -158,6 +158,7 @@ function makeHarness(
       content: string
       encoding: 'utf-8' | 'base64'
     }
+    readFileFailuresBeforeSuccess?: number
     failReadFile?: boolean
     sendDelayMs?: number
     onSendStart?: (activeSends: number) => void
@@ -181,6 +182,7 @@ function makeHarness(
   const subscriptions: Subscription[] = []
   let unsubscribedCount = 0
   let activeSends = 0
+  let readFileAttempts = 0
 
   const bridge = new IntegrationEventBridge({
     getWorkspaceHandle: async () => ({
@@ -195,6 +197,10 @@ function makeHarness(
         },
         async readFile(workspaceId, path) {
           readFileCalls.push({ workspaceId, path })
+          readFileAttempts += 1
+          if (options.readFileFailuresBeforeSuccess && readFileAttempts <= options.readFileFailuresBeforeSuccess) {
+            throw new Error('remote file not ready')
+          }
           if (options.failReadFile) throw new Error('remote file not ready')
           return options.readFileResponse?.(workspaceId, path) ?? {
             path,
@@ -448,13 +454,15 @@ async function waitForSent(harness: { sent: SentMessage[] }, count: number, time
   while (harness.sent.length < count && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
+  assert.equal(harness.sent.length >= count, true)
 }
 
-async function waitForDropped(projectId: string, count: number): Promise<void> {
-  const deadline = Date.now() + 1_000
+async function waitForDropped(projectId: string, count: number, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
   while ((getIntegrationEventTelemetrySnapshot().projects[projectId]?.eventsDropped || 0) < count && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
+  assert.equal((getIntegrationEventTelemetrySnapshot().projects[projectId]?.eventsDropped || 0) >= count, true)
 }
 
 test('integration events route only to the targets for the matching integration path', async () => {
@@ -695,6 +703,15 @@ test('slack raw-id and slug alias paths with distinct revisions inject once per 
   await waitForSent(harness, 2)
   assert.match(harness.sent[1].input.text, /Message:\nedited Slack message/u)
 
+  slackText = 'original Slack message'
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json',
+    'slack',
+    { digest: 'revision:slug-copy-replay' }
+  ))
+  await waitForDropped('project-1', 2)
+  assert.equal(harness.sent.length, 2)
+
   // A different logical message via either alias form still injects.
   await harness.emit(changeEvent(
     '/slack/channels/C123ABC__proj-cloud/messages/1780668060_000000/meta.json',
@@ -703,6 +720,60 @@ test('slack raw-id and slug alias paths with distinct revisions inject once per 
   ))
   await waitForSent(harness, 3)
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'alice', 'alice'])
+})
+
+test('slack raw-id and slug alias duplicates suppress when one context read is sparse', async () => {
+  const harness = makeHarness(['alice'], {
+    readFileResponse: (_workspaceId, path) => {
+      if (path.includes('__proj-cloud')) throw new Error('remote file not ready')
+      return {
+        path,
+        revision: 'rev-context',
+        contentType: 'application/json',
+        content: JSON.stringify({ provider: 'slack', text: 'readable Slack message' }),
+        encoding: 'utf-8'
+      }
+    }
+  })
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        downloadHistoricalData: false,
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+  })
+
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC/messages/1780668000_000000/meta.json',
+    'slack',
+    { digest: 'revision:raw-copy' }
+  ))
+  await waitForSent(harness, 1)
+
+  await harness.emit({
+    ...changeEvent(
+      '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json',
+      'slack',
+      { digest: 'revision:slug-copy' }
+    ),
+    expand: async () => ({
+      level: 'full',
+      path: '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json',
+      data: {
+        path: '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json',
+        deleted: false
+      }
+    })
+  } as ChangeEvent)
+  await waitForDropped('project-1', 1, 2_500)
+
+  assert.equal(harness.sent.length, 1)
+  assert.match(harness.sent[0].input.text, /Message:\nreadable Slack message/u)
 })
 
 test('remote replayed events older than the subscription session are dropped by default', async () => {
@@ -920,19 +991,87 @@ test('slack context falls back to expanded event data when targeted remote previ
       }
     })
   } as ChangeEvent)
-  await waitForSent(harness, 1)
+  await waitForSent(harness, 1, 2_500)
 
   assert.match(harness.sent[0].input.text, /Slack message event/u)
   assert.match(harness.sent[0].input.text, /Author: Khaliq/u)
   assert.match(harness.sent[0].input.text, /Message:\nexpanded Slack context/u)
-  assert.deepEqual(harness.readFileCalls, [
-    {
-      workspaceId: 'workspace-id',
-      path: messagePath
-    }
-  ])
+  assert.equal(harness.readFileCalls.length, 4)
+  assert.deepEqual(harness.readFileCalls[0], {
+    workspaceId: 'workspace-id',
+    path: messagePath
+  })
   assert.equal((harness.sent[0].input.data?.contextPreview as { kind?: string } | undefined)?.kind, 'text')
   assert.equal((harness.sent[0].input.data?.contextPreview as { content?: string } | undefined)?.content, undefined)
+})
+
+test('slack context retries targeted remote preview before falling back to sparse event data', async () => {
+  const harness = makeHarness(['alice'], { readFileFailuresBeforeSuccess: 1 })
+  const messagePath = '/slack/channels/D123ABC/messages/1780668000_000000/meta.json'
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        downloadHistoricalData: false,
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+  })
+
+  await harness.emit({
+    ...changeEvent(messagePath, 'slack'),
+    expand: async () => ({
+      level: 'full',
+      path: messagePath,
+      data: {
+        path: messagePath,
+        deleted: false
+      }
+    })
+  } as ChangeEvent)
+  await waitForSent(harness, 1)
+
+  assert.equal(harness.readFileCalls.length, 2)
+  assert.match(harness.sent[0].input.text, /Slack message event/u)
+  assert.match(harness.sent[0].input.text, /Message:\ntargeted Slack context/u)
+  assert.doesNotMatch(harness.sent[0].input.text, /"deleted": false/u)
+})
+
+test('slack context does not inject sparse relayfile pointer fallback as message content', async () => {
+  const harness = makeHarness(['alice'], { failReadFile: true })
+  const messagePath = '/slack/channels/D123ABC/messages/1780668000_000000/meta.json'
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        downloadHistoricalData: false,
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+  })
+
+  await harness.emit({
+    ...changeEvent(messagePath, 'slack'),
+    expand: async () => ({
+      level: 'full',
+      path: messagePath,
+      data: {
+        path: messagePath,
+        deleted: false
+      }
+    })
+  } as ChangeEvent)
+  await waitForSent(harness, 1, 2_500)
+
+  assert.match(harness.sent[0].input.text, /Message: unavailable; targeted context read did not return content\./u)
+  assert.doesNotMatch(harness.sent[0].input.text, /"path":/u)
+  assert.doesNotMatch(harness.sent[0].input.text, /"deleted": false/u)
 })
 
 test('integration event targeted context previews skip binary files', async () => {

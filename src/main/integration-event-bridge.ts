@@ -44,6 +44,7 @@ const SLACK_DM_EVENT_GLOBS = [
   '/slack/users/*/messages/**'
 ]
 const MAX_EVENT_CONTEXT_PREVIEW_BYTES = 32 * 1024
+const EVENT_CONTEXT_READ_RETRY_DELAYS_MS = [150, 350, 750]
 const MAX_DISPATCH_QUEUE_EVENTS = 50
 const MAX_DISPATCH_SUMMARY_GROUPS = 10
 const MAX_DISPATCHED_EVENTS_PER_SECOND = 25
@@ -95,6 +96,11 @@ type EventContextPreview = {
 }
 
 type EventContextPreviewMetadata = Omit<EventContextPreview, 'content'>
+
+type SlackLogicalInjectionState = {
+  expiresAt: number
+  contentHashes?: Set<string>
+}
 
 type DispatchItem = {
   event: ChangeEvent
@@ -323,6 +329,10 @@ function isUnauthorizedError(error: unknown): boolean {
   if (status === 401 || status === 403) return true
   const message = (error as { message?: unknown }).message
   return typeof message === 'string' && /\b(401|403|unauthor|forbidden)\b/i.test(message)
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1290,8 +1300,7 @@ function stableContentFingerprint(content: string): string {
 
 function eventDedupeKeyWithFingerprint(
   duplicateKey: string,
-  fingerprint: string | null,
-  contextPreview?: EventContextPreview
+  fingerprint: string | null
 ): { key: string; ttlMs: number } {
   if (!fingerprint) {
     return {
@@ -1301,11 +1310,8 @@ function eventDedupeKeyWithFingerprint(
   }
 
   if (fingerprint.startsWith('slack:')) {
-    const contentAwareFingerprint = contextPreview?.kind === 'text'
-      ? `${fingerprint}:content:${stableContentFingerprint(contextPreview.content)}`
-      : fingerprint
     return {
-      key: `${duplicateKey}:change:${contentAwareFingerprint}`,
+      key: `${duplicateKey}:change:${fingerprint}`,
       ttlMs: SLACK_RECORD_REPLAY_TTL_MS
     }
   }
@@ -1542,8 +1548,19 @@ function eventContextPreviewFromBuffer(path: string, buffer: Buffer, contentType
 
 function eventContextPreviewFromData(path: string, data: unknown): EventContextPreview | undefined {
   if (data === undefined || data === null) return undefined
+  if (isSparseRelayfilePointerData(path, data)) return undefined
   const content = typeof data === 'string' ? data : JSON.stringify(data, null, 2)
   return eventContextPreviewFromBuffer(path, Buffer.from(content, 'utf8'), 'application/json')
+}
+
+function isSparseRelayfilePointerData(path: string, data: unknown): boolean {
+  if (!isRecord(data)) return false
+  const keys = Object.keys(data).sort()
+  if (keys.length === 1 && keys[0] === 'path') return data.path === path
+  if (keys.length === 2 && keys[0] === 'deleted' && keys[1] === 'path') {
+    return data.path === path && typeof data.deleted === 'boolean'
+  }
+  return false
 }
 
 function eventContextPreviewMetadata(preview: EventContextPreview): EventContextPreviewMetadata {
@@ -1691,14 +1708,11 @@ function formatSlackIntegrationEventMessage(
   const author = slackPreviewAuthor(contextPreview)
   const lines = [
     '<integration-event>',
-    'Slack message event',
-    `Event id: ${event.id}`,
-    `Occurred at: ${event.occurredAt}`
+    'Slack message event'
   ]
 
   if (scopeLabel) lines.push(`Location: ${scopeLabel}`)
   if (author) lines.push(`Author: ${author}`)
-  lines.push(`Path: ${projectPath}`)
   if (messageText) {
     lines.push('Message:', messageText)
   } else if (contextPreview?.kind === 'too-large') {
@@ -1708,6 +1722,7 @@ function formatSlackIntegrationEventMessage(
   } else {
     lines.push('Message: unavailable; targeted context read did not return content.')
   }
+  lines.push(`Path: ${projectPath}`)
   lines.push('</integration-event>')
   return lines.join('\n')
 }
@@ -2027,6 +2042,7 @@ export class IntegrationEventBridge {
   private subscriptions = new Map<string, ProjectSubscription>()
   private dispatchers = new Map<string, ProjectEventDispatcher>()
   private recentInjections = new Map<string, number>()
+  private slackLogicalInjections = new Map<string, SlackLogicalInjectionState>()
   private projectAgentRecipientCache = new Map<string, ProjectAgentRecipientCacheEntry>()
   private notificationTargetCache = new Map<string, NotificationTargetCacheEntry>()
   private brokerSendPacers = new Map<string, ProjectBrokerSendPacer>()
@@ -2233,10 +2249,19 @@ export class IntegrationEventBridge {
 
     let readFileError: unknown
     try {
+      const readDelays = slackEventContextPath(path) ? [0, ...EVENT_CONTEXT_READ_RETRY_DELAYS_MS] : [0]
       const handle = await this.getWorkspaceHandle()
       const client = handle.client()
       if (typeof client.readFile === 'function') {
-        return eventContextPreviewFromFile(await client.readFile(handle.workspaceId, path))
+        for (const [index, delayMs] of readDelays.entries()) {
+          if (delayMs > 0) await delay(delayMs)
+          try {
+            return eventContextPreviewFromFile(await client.readFile(handle.workspaceId, path))
+          } catch (error) {
+            readFileError = error
+            if (index === readDelays.length - 1) break
+          }
+        }
       }
     } catch (error) {
       readFileError = error
@@ -2346,7 +2371,7 @@ export class IntegrationEventBridge {
       // Release the dedupe key: a duplicate of this event (remote copy of a
       // local change, coalesced update) must be allowed to retry once a
       // recipient registers; otherwise the event is suppressed for the TTL.
-      if (dedupeClaimed) this.recentInjections.delete(dedupe.key)
+      if (dedupeClaimed) this.releaseDedupeKey(dedupe.key, needsSlackContentAwareDedupe)
       incrementIntegrationEventCounter(projectId, 'eventsDropped')
       warnIntegrationEventAggregated(
         `skipped no recipients:${projectId}`,
@@ -2363,8 +2388,8 @@ export class IntegrationEventBridge {
     const eventMetadata = integrationEventMetadata(event)
     const contextPreview = await this.readEventContextPreview(projectId, event)
     if (needsSlackContentAwareDedupe) {
-      dedupe = eventDedupeKeyWithFingerprint(duplicateKey, fingerprint, contextPreview)
-      if (this.wasRecentlyInjected(dedupe.key, dedupe.ttlMs)) {
+      dedupe = eventDedupeKeyWithFingerprint(duplicateKey, fingerprint)
+      if (!this.claimSlackLogicalInjection(dedupe.key, contextPreview, dedupe.ttlMs)) {
         incrementIntegrationEventCounter(projectId, 'eventsDropped')
         logIntegrationEvent('skipped duplicate path', {
           projectId,
@@ -2415,7 +2440,7 @@ export class IntegrationEventBridge {
       // No recipient got the event. Release the dedupe key so a duplicate of
       // this event (remote copy of a local change, coalesced update) retries
       // delivery instead of being dropped as a recent injection.
-      if (dedupeClaimed) this.recentInjections.delete(dedupe.key)
+      if (dedupeClaimed) this.releaseDedupeKey(dedupe.key, needsSlackContentAwareDedupe)
       throw sendErrors[0].error
     }
     if (sendErrors.length > 0) {
@@ -2539,6 +2564,44 @@ export class IntegrationEventBridge {
     if (this.recentInjections.has(key)) return true
     this.recentInjections.set(key, now + ttlMs)
     return false
+  }
+
+  private claimSlackLogicalInjection(
+    key: string,
+    contextPreview: EventContextPreview | undefined,
+    ttlMs: number
+  ): boolean {
+    const now = Date.now()
+    for (const [entryKey, entry] of this.slackLogicalInjections.entries()) {
+      if (entry.expiresAt <= now) this.slackLogicalInjections.delete(entryKey)
+    }
+
+    const contentHash = contextPreview?.kind === 'text'
+      ? stableContentFingerprint(contextPreview.content)
+      : undefined
+    const existing = this.slackLogicalInjections.get(key)
+    if (existing) {
+      if (!contentHash || !existing.contentHashes || existing.contentHashes.has(contentHash)) {
+        return false
+      }
+      existing.contentHashes.add(contentHash)
+      existing.expiresAt = now + ttlMs
+      return true
+    }
+
+    this.slackLogicalInjections.set(key, {
+      expiresAt: now + ttlMs,
+      contentHashes: contentHash ? new Set([contentHash]) : undefined
+    })
+    return true
+  }
+
+  private releaseDedupeKey(key: string, isSlackLogicalKey: boolean): void {
+    if (isSlackLogicalKey) {
+      this.slackLogicalInjections.delete(key)
+    } else {
+      this.recentInjections.delete(key)
+    }
   }
 
   private async getWorkspaceHandle(): Promise<RelayfileWorkspaceHandle> {
