@@ -456,8 +456,8 @@ async function waitForSent(harness: { sent: SentMessage[] }, count: number, time
   }
 }
 
-async function waitForDropped(projectId: string, count: number): Promise<void> {
-  const deadline = Date.now() + 1_000
+async function waitForDropped(projectId: string, count: number, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
   while ((getIntegrationEventTelemetrySnapshot().projects[projectId]?.eventsDropped || 0) < count && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
@@ -763,6 +763,76 @@ test('slack raw-id and slug alias duplicates suppress when one context read is s
 
   assert.equal(harness.sent.length, 1)
   assert.match(harness.sent[0].input.text, /Message:\nreadable Slack message/u)
+})
+
+test('slack edits after a blind alias claim still inject once the content changes', async () => {
+  let messageText = 'original Slack message'
+  const harness = makeHarness(['alice'], {
+    readFileResponse: (_workspaceId, path) => {
+      if (!path.includes('__proj-cloud')) throw new Error('remote file not ready')
+      return {
+        path,
+        revision: 'rev-context',
+        contentType: 'application/json',
+        content: JSON.stringify({ provider: 'slack', text: messageText }),
+        encoding: 'utf-8'
+      }
+    }
+  })
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        downloadHistoricalData: false,
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+  })
+
+  // Raw-id copy first: every targeted read fails and the expanded event only
+  // carries the sparse relayfile pointer, so the injection is blind.
+  await harness.emit({
+    ...changeEvent(
+      '/slack/channels/C123ABC/messages/1780668000_000000/meta.json',
+      'slack',
+      { digest: 'revision:raw-copy' }
+    ),
+    expand: async () => ({
+      level: 'full',
+      path: '/slack/channels/C123ABC/messages/1780668000_000000/meta.json',
+      data: {
+        path: '/slack/channels/C123ABC/messages/1780668000_000000/meta.json',
+        deleted: false
+      }
+    })
+  } as ChangeEvent)
+  await waitForSent(harness, 1, 2_500)
+  assert.equal(harness.sent.length, 1)
+  assert.match(harness.sent[0].input.text, /Message: unavailable; targeted context read did not return content\./u)
+
+  // The slug alias copy of the same record carries content: suppressed as a
+  // duplicate, but the claim learns the content hash.
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json',
+    'slack',
+    { digest: 'revision:slug-copy' }
+  ))
+  await waitForDropped('project-1', 1, 2_500)
+  assert.equal(harness.sent.length, 1)
+
+  // A genuine edit changes the content hash and must inject again.
+  messageText = 'edited Slack message'
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json',
+    'slack',
+    { digest: 'revision:slug-edit' }
+  ))
+  await waitForSent(harness, 2)
+  assert.equal(harness.sent.length, 2)
+  assert.match(harness.sent[1].input.text, /Message:\nedited Slack message/u)
 })
 
 test('remote replayed events older than the subscription session are dropped by default', async () => {
