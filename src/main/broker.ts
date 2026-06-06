@@ -393,6 +393,30 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
 
+type BrokerSpawnResult = {
+  name: string
+  runtime: string
+  cli?: string
+}
+
+function normalizeSpawnPtyResult(value: unknown, fallbackName: string, cli?: string): BrokerSpawnResult {
+  const record = isRecord(value) ? value : {}
+  const name = typeof record.name === 'string' && record.name.trim()
+    ? record.name.trim()
+    : fallbackName
+  const runtime = typeof record.runtime === 'string' && record.runtime.trim()
+    ? record.runtime.trim()
+    : 'pty'
+  const result: BrokerSpawnResult = { name, runtime }
+  const resolvedCli = typeof cli === 'string' && cli.trim()
+    ? cli.trim()
+    : typeof record.cli === 'string' && record.cli.trim()
+      ? record.cli.trim()
+      : undefined
+  if (resolvedCli) result.cli = resolvedCli
+  return result
+}
+
 function brokerEventString(event: BrokerEvent, key: string): string | undefined {
   const value = (event as unknown as Record<string, unknown>)[key]
   return typeof value === 'string' ? value : undefined
@@ -2306,12 +2330,12 @@ export class BrokerManager {
     projectId: string,
     spawnInput: SpawnPtyInput & { broker?: 'local' | 'cloud' },
     options: { parentAgentName?: string } = {}
-  ): Promise<{ name: string; runtime: string }> {
+  ): Promise<BrokerSpawnResult> {
     const requestKey = spawnRequestKey(projectId, spawnInput, options)
     const inFlight = this.inFlightSpawnRequests.get(requestKey)
     if (inFlight) return inFlight
 
-    let promise!: Promise<{ name: string; runtime: string }>
+    let promise!: Promise<BrokerSpawnResult>
     promise = this.spawnAgentOnce(projectId, spawnInput, options).finally(() => {
       if (this.inFlightSpawnRequests.get(requestKey) === promise) {
         this.inFlightSpawnRequests.delete(requestKey)
@@ -2325,7 +2349,7 @@ export class BrokerManager {
     projectId: string,
     spawnInput: SpawnPtyInput & { broker?: 'local' | 'cloud' },
     options: { parentAgentName?: string } = {}
-  ): Promise<{ name: string; runtime: string }> {
+  ): Promise<BrokerSpawnResult> {
     // `broker` selects which of the project's sessions the agent spawns on.
     // Default: local-first via getSessionForProject (cloud only when no local
     // broker is running, preserving the cloud-only flow).
@@ -2377,7 +2401,8 @@ export class BrokerManager {
           )
         }
         const spawned = await session.client.spawnPty(nextInput)
-        const spawnedName = spawned.name || nextInput.name
+        const safeSpawned = normalizeSpawnPtyResult(spawned, nextInput.name)
+        const spawnedName = safeSpawned.name
         this.rememberAgentSession(spawnedName, sessionKeyFor(session))
         const burnInput = { ...nextInput, name: spawnedName }
         const lineage = session.pearLineage.get(spawnedName)
@@ -2393,12 +2418,7 @@ export class BrokerManager {
         ).catch((err) => {
           console.warn('[burn-spawn-hook] post-spawn burn stamp failed:', err)
         })
-        return {
-          name: spawnedName,
-          runtime: typeof spawned.runtime === 'string' && spawned.runtime.trim()
-            ? spawned.runtime
-            : 'pty'
-        }
+        return safeSpawned
       } catch (err) {
         if (!isAgentNameConflict(err)) {
           throw buildSpawnFailureError(err, nextInput, session.cloudSandboxId ? 'cloud' : 'local')
@@ -2425,7 +2445,7 @@ export class BrokerManager {
     }
   }
 
-  async spawnPersona(projectId: string, personaId: string): Promise<{ name: string; runtime: string; cli?: string }> {
+  async spawnPersona(projectId: string, personaId: string): Promise<BrokerSpawnResult> {
     const session = this.getSessionForProject(projectId)
     const trimmedPersonaId = personaId.trim()
     if (!trimmedPersonaId) {
@@ -2478,7 +2498,7 @@ export class BrokerManager {
       command: { cli: string; args: string[] }
       resolvedHarness: string
     }
-  ): Promise<{ name: string; runtime: string; cli?: string }> {
+  ): Promise<BrokerSpawnResult> {
     const existingNames = new Set(
       (await session.client.listAgents()).map((agent) => agent.name)
     )
@@ -2495,15 +2515,9 @@ export class BrokerManager {
     for (let attempt = 0; attempt < 20; attempt += 1) {
       try {
         const spawned = await session.client.spawnPty(nextInput)
-        const spawnedName = spawned.name || nextInput.name
-        this.rememberAgentSession(spawnedName, sessionKeyFor(session))
-        return {
-          name: spawnedName,
-          runtime: typeof spawned.runtime === 'string' && spawned.runtime.trim()
-            ? spawned.runtime
-            : 'pty',
-          cli: input.resolvedHarness
-        }
+        const safeSpawned = normalizeSpawnPtyResult(spawned, nextInput.name, input.resolvedHarness)
+        this.rememberAgentSession(safeSpawned.name, sessionKeyFor(session))
+        return safeSpawned
       } catch (err) {
         if (!isAgentNameConflict(err)) {
           throw err

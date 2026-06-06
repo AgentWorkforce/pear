@@ -565,6 +565,55 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('returns a clone-safe payload when spawning a workforce persona', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'pear-persona-spawn-'))
+    const binaryName = process.platform === 'win32' ? 'agentworkforce.cmd' : 'agentworkforce'
+    const agentworkforceBin = join(tempDir, 'node_modules', '.bin', binaryName)
+    await mkdir(dirname(agentworkforceBin), { recursive: true })
+    await writeFile(
+      agentworkforceBin,
+      [
+        '#!/usr/bin/env node',
+        'const command = process.argv[2]',
+        "if (command === 'show') {",
+        "  console.log(JSON.stringify({ spec: { id: 'autonomous-actor', harness: 'claude' } }))",
+        '} else {',
+        "  console.log(JSON.stringify({ personas: [{ persona: 'autonomous-actor', harness: 'claude' }] }))",
+        '}'
+      ].join('\n')
+    )
+    await chmod(agentworkforceBin, 0o755)
+
+    try {
+      const manager = new BrokerManager()
+      mock.state.nextLocalAgents = []
+      await manager.start(PROJECT_ID, tempDir, 'pear-project-1', undefined as never, [])
+      const local = lastSpawned()
+      local.spawnPty.mockImplementationOnce(async (input: { name: string }) => {
+        local.agentNames.push(input.name)
+        return {
+          name: input.name,
+          runtime: 'pty',
+          cli: 'agentworkforce',
+          nonCloneable: () => undefined
+        }
+      })
+
+      const result = await manager.spawnPersona(PROJECT_ID, 'autonomous-actor')
+
+      expect(result).toEqual({
+        name: 'autonomous-actor',
+        runtime: 'pty',
+        cli: 'claude'
+      })
+      expect(() => structuredClone(result)).not.toThrow()
+
+      await manager.shutdown()
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it('spawning with broker: cloud fails clearly when no sandbox is attached', async () => {
     const manager = new BrokerManager()
     await startLocal(manager)
