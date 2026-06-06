@@ -1212,6 +1212,8 @@ export class CloudAgentManager {
       localDir: project.rootPath,
       remotePath: sandbox.relayfileMountPath,
       mode: 'poll' as const,
+      localLayout: 'exact' as const,
+      syncMode: 'mirror' as const,
       background: true,
       agentName: `pear-${project.id}`,
       scopes: ['relayfile:fs:read:/**', 'relayfile:fs:write:/**'],
@@ -1234,6 +1236,8 @@ export class CloudAgentManager {
           ...input,
           env: {
             ...input.env,
+            RELAYFILE_MOUNT_LOCAL_LAYOUT: 'exact',
+            RELAYFILE_MOUNT_SYNC_MODE: 'mirror',
             RELAYFILE_CONFLICT_POLICY: policy
           },
           onEvent: (event) => {

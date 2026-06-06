@@ -17,6 +17,8 @@ const mock = vi.hoisted(() => {
     workspaceId: string
     localDir: string
     remotePath: string
+    localLayout?: string
+    syncMode?: string
     scopes?: string[]
   }
 
@@ -386,8 +388,31 @@ describe('CloudAgentManager', () => {
       workspaceId: 'relay-workspace-id',
       localDir: mock.project.rootPath,
       remotePath: '/remote/project-1',
+      localLayout: 'exact',
+      syncMode: 'mirror',
       scopes: ['relayfile:fs:read:/**', 'relayfile:fs:write:/**']
     })
+  })
+
+  it('mounts non-root sandbox relayfile paths at the project root without local double-pathing', async () => {
+    mock.boxResponses.push({
+      sandboxId: 'sandbox-1',
+      execUrl: 'https://sandbox.example',
+      relayfileToken: 'relayfile-token',
+      relayfileMountPath: '/workspace/project-1',
+      status: 'ready'
+    })
+    const manager = new CloudAgentManager()
+
+    await manager.attach('project-1', 'cloud-agent-1')
+
+    expect(mock.mountInputs[0]).toMatchObject({
+      localDir: '/tmp/project-1',
+      remotePath: '/workspace/project-1',
+      localLayout: 'exact',
+      syncMode: 'mirror'
+    })
+    expect(mock.mountInputs[0]?.localDir).not.toContain('/workspace/project-1')
   })
 
   it('keeps git-overlay clone source for dirty ssh-remote projects', async () => {
