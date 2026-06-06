@@ -789,6 +789,7 @@ export type UpdaterState =
 
 export interface ProjectRootConflict {
   kind: 'conflict'
+  projectId: string
   existingProjectId: string
   existingProjectName: string
   path: string

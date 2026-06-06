@@ -1027,7 +1027,7 @@ export function ProjectSettings(): React.ReactNode {
                 }}
               />
             ))}
-            {pendingRootConflict && (
+            {pendingRootConflict?.projectId === project.id && (
               <div className="rounded-lg border border-[var(--pear-yellow,#f59e0b)]/30 bg-[var(--pear-yellow,#f59e0b)]/10 p-4 text-sm">
                 <p className="mb-1 font-medium text-[var(--pear-text)]">Repo already in another project</p>
                 <p className="mb-3 text-[var(--pear-text-dim)]">

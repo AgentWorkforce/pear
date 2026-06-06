@@ -58,7 +58,7 @@ export function SpawnAgentDialog(): React.ReactNode {
 
       setLoadingPersonas(true)
       try {
-        const discovered = await listProjectPersonas(project)
+        const discovered = await listProjectPersonas(project, root)
         if (cancelled) return
         setError(null)
         setPersonas(discovered)

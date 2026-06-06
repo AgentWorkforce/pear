@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef } from 'react'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
 import { WebLinksAddon } from '@xterm/addon-web-links'
@@ -182,6 +182,44 @@ export function useTerminal(
     })
   }, [agentName, projectId, terminalMode])
 
+  const sendInputNow = useCallback(async (data: string): Promise<void> => {
+    if (!agentName || terminalModeRef.current === 'view') return
+
+    // Auto-hold: on first keystroke with multiple agents running, switch to
+    // drive mode so input is queued rather than immediately injected.
+    const holdInput = autoHoldRef.current && typingActiveRef.current
+    if (autoHoldRef.current && !typingActiveRef.current && terminalModeRef.current === 'passthrough') {
+      typingActiveRef.current = true
+      await onAutoHoldStartRef.current?.()
+    }
+
+    // Optimistically echo before the round trip; the engine reconciles
+    // against authoritative output and stays dormant on fast local links.
+    predictiveEchoRef.current?.onUserInput(data)
+    recordKeystrokeSent(data)
+    if (holdInput || typingActiveRef.current) {
+      await pear.broker.sendInput(projectId, agentName, data).catch((err) => {
+        console.warn('[terminal] held input failed:', err)
+        throw err
+      })
+    } else {
+      pear.broker.sendInputFast(projectId, agentName, data)
+    }
+
+    // On Enter, flush the queued input and return to live mode.
+    if (typingActiveRef.current && data.includes('\r')) {
+      typingActiveRef.current = false
+      await onAutoHoldReleaseRef.current?.(true)
+    }
+  }, [agentName, projectId])
+
+  const sendInput = useCallback((data: string): void => {
+    const next = inputQueueRef.current.then(() => sendInputNow(data))
+    inputQueueRef.current = next.catch((err) => {
+      console.warn('[terminal] input failed:', err)
+    })
+  }, [sendInputNow])
+
   useEffect(() => {
     if (!containerRef.current || !agentName) return
 
@@ -198,44 +236,6 @@ export function useTerminal(
     // poll is responsive enough and cheap.
     let inputSrttMs: number | null = null
     let srttPoll: ReturnType<typeof setInterval> | null = null
-
-    const sendInputNow = async (data: string): Promise<void> => {
-      if (terminalModeRef.current === 'view') return
-
-      // Auto-hold: on first keystroke with multiple agents running, switch to
-      // drive mode so input is queued rather than immediately injected.
-      const holdInput = autoHoldRef.current && typingActiveRef.current
-      if (autoHoldRef.current && !typingActiveRef.current && terminalModeRef.current === 'passthrough') {
-        typingActiveRef.current = true
-        await onAutoHoldStartRef.current?.()
-      }
-
-      // Optimistically echo before the round trip; the engine reconciles
-      // against authoritative output and stays dormant on fast local links.
-      predictiveEchoRef.current?.onUserInput(data)
-      recordKeystrokeSent(data)
-      if (holdInput || typingActiveRef.current) {
-        await pear.broker.sendInput(projectId, agentName!, data).catch((err) => {
-          console.warn('[terminal] held input failed:', err)
-          throw err
-        })
-      } else {
-        pear.broker.sendInputFast(projectId, agentName!, data)
-      }
-
-      // On Enter, flush the queued input and return to live mode.
-      if (typingActiveRef.current && data.includes('\r')) {
-        typingActiveRef.current = false
-        await onAutoHoldReleaseRef.current?.(true)
-      }
-    }
-
-    const sendInput = (data: string): void => {
-      const next = inputQueueRef.current.then(() => sendInputNow(data))
-      inputQueueRef.current = next.catch((err) => {
-        console.warn('[terminal] input failed:', err)
-      })
-    }
 
     const focusTerminal = (requireActive = false): void => {
       if (!term) return
@@ -517,7 +517,7 @@ export function useTerminal(
       fitAddonRef.current = null
       writtenChunksRef.current = 0
     }
-  }, [containerRef, agentName, projectId])
+  }, [containerRef, agentName, projectId, sendInput])
 
   useEffect(() => {
     if (termRef.current) {
@@ -556,35 +556,6 @@ export function useTerminal(
   useEffect(() => {
     if (!visible || !active || terminalMode === 'view' || !agentName || activeDialog) return
     const container = containerRef.current
-
-    const sendInputNow = async (data: string): Promise<void> => {
-      if (terminalModeRef.current === 'view') return
-      const holdInput = autoHoldRef.current && typingActiveRef.current
-      if (autoHoldRef.current && !typingActiveRef.current && terminalModeRef.current === 'passthrough') {
-        typingActiveRef.current = true
-        await onAutoHoldStartRef.current?.()
-      }
-      predictiveEchoRef.current?.onUserInput(data)
-      if (holdInput || typingActiveRef.current) {
-        await pear.broker.sendInput(projectId, agentName, data).catch((err) => {
-          console.warn('[terminal] held input failed:', err)
-          throw err
-        })
-      } else {
-        pear.broker.sendInputFast(projectId, agentName, data)
-      }
-      if (typingActiveRef.current && data.includes('\r')) {
-        typingActiveRef.current = false
-        await onAutoHoldReleaseRef.current?.(true)
-      }
-    }
-
-    const sendInput = (data: string): void => {
-      const next = inputQueueRef.current.then(() => sendInputNow(data))
-      inputQueueRef.current = next.catch((err) => {
-        console.warn('[terminal] input failed:', err)
-      })
-    }
 
     const handleGlobalKeyDown = (event: KeyboardEvent): void => {
       const term = termRef.current
@@ -641,7 +612,7 @@ export function useTerminal(
       window.removeEventListener('keydown', handleGlobalKeyDown, true)
       window.removeEventListener('paste', handleGlobalPaste, true)
     }
-  }, [visible, active, terminalMode, agentName, projectId, activeDialog, containerRef])
+  }, [visible, active, terminalMode, agentName, projectId, activeDialog, containerRef, sendInput])
 
   return termRef.current
 }

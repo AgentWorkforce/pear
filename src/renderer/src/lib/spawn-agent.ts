@@ -99,15 +99,13 @@ export async function spawnProjectAgent(
   return name
 }
 
-export async function listProjectPersonas(project: Project): Promise<WorkforcePersona[]> {
-  const projectStore = useProjectStore.getState()
-  if (projectStore.activeProjectId !== project.id) {
-    await projectStore.setActiveProject(project.id)
-  } else {
-    await projectStore.ensureBroker()
+export async function listProjectPersonas(project: Project, rootOverride?: ProjectRoot): Promise<WorkforcePersona[]> {
+  if (rootOverride && !rootOverride.pathExists) {
+    return []
   }
+  await ensureLocalBroker(project, rootOverride)
 
-  const root = useProjectStore.getState().getActiveRoot()
+  const root = rootOverride ?? useProjectStore.getState().getActiveRoot()
   if (!root?.pathExists) {
     return []
   }

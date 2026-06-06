@@ -163,7 +163,7 @@ export function registerIpcHandlers(): void {
 
     const conflict = findProjectsWithPath(path).find((p) => p.id !== projectId)
     if (conflict) {
-      return { kind: 'conflict', existingProjectId: conflict.id, existingProjectName: conflict.name, path }
+      return { kind: 'conflict', projectId, existingProjectId: conflict.id, existingProjectName: conflict.name, path }
     }
 
     return { kind: 'added', root: addProjectRoot(projectId, path, name) }

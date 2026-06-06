@@ -533,7 +533,7 @@ export function TerminalPane(): React.ReactNode {
     },
     onAutoHoldRelease: async (flush: boolean) => {
       if (flush) {
-        await pear.broker.flushPending(agent.projectId, agent.name).catch(() => {})
+        await pear.broker.flushPending(agent.projectId, agent.name)
       }
       await handleDeliveryModeChange(agent, 'auto')
     }
