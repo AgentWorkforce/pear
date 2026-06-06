@@ -1304,12 +1304,18 @@ export class BrokerManager {
         console.warn('[broker] Agent Relay MCP command could not be resolved; broker will use its default MCP command')
       }
 
-      const opts: AgentRelaySpawnOptions = {
+      // Phase 1 of #125: the local broker stays the workspace creator, so the
+      // key is only threaded when explicitly pinned via env. The intersection
+      // type is the single cast site until @agent-relay/harness-driver ships
+      // workspaceKey in RuntimeSpawnOptions (T3) — drop it once published.
+      const explicitWorkspaceKey = process.env.AGENT_RELAY_WORKSPACE_KEY?.trim() || undefined
+      const opts: AgentRelaySpawnOptions & { workspaceKey?: string } = {
         cwd,
         brokerName: name,
         channels: nextChannels,
         binaryArgs: { persist: true },
         binaryPath: resolveBundledBrokerBinary(),
+        ...(explicitWorkspaceKey ? { workspaceKey: explicitWorkspaceKey } : {}),
         env: {
           PATH: augmentedPath(),
           ...(agentRelayMcpCommand ? { AGENT_RELAY_MCP_COMMAND: agentRelayMcpCommand } : {})
@@ -1457,6 +1463,27 @@ export class BrokerManager {
     await delay(250)
     await this.start(normalizedProjectId, cwd, name, win, channels)
     return { removed }
+  }
+
+  /**
+   * The local broker creates the project's relay workspace; its workspace_key
+   * is what cloud sandbox brokers must join so local and cloud agents share
+   * one workspace (#125). Non-throwing: resolves undefined until a local
+   * session exists and exposes a key, so provisioning can proceed without it.
+   */
+  async workspaceKeyForProject(projectId: string): Promise<string | undefined> {
+    const normalizedProjectId = projectId.trim()
+    if (!normalizedProjectId) return undefined
+    const startPromise = this.startPromises.get(normalizedProjectId)
+    if (startPromise) await startPromise.catch(() => undefined)
+    const session = this.sessions.get(normalizedProjectId)
+    if (!session) return undefined
+    try {
+      const metadata = await session.client.getSession()
+      return metadata.workspace_key || undefined
+    } catch {
+      return undefined
+    }
   }
 
   /**

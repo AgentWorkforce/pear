@@ -375,6 +375,48 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('passes an explicit workspace key env pin to local broker spawn options', async () => {
+    const previousWorkspaceKey = process.env.AGENT_RELAY_WORKSPACE_KEY
+    process.env.AGENT_RELAY_WORKSPACE_KEY = 'rk_live_pinned'
+    const manager = new BrokerManager()
+
+    try {
+      await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', undefined as never, [])
+
+      expect(mock.HarnessDriverClient.spawn).toHaveBeenCalledWith(expect.objectContaining({
+        brokerName: 'pear-project-1',
+        workspaceKey: 'rk_live_pinned'
+      }))
+    } finally {
+      if (previousWorkspaceKey === undefined) {
+        delete process.env.AGENT_RELAY_WORKSPACE_KEY
+      } else {
+        process.env.AGENT_RELAY_WORKSPACE_KEY = previousWorkspaceKey
+      }
+      await manager.shutdown()
+    }
+  })
+
+  it('reads the local broker workspace key for cloud provisioning', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager)
+    local.getSession.mockResolvedValueOnce({ workspace_key: 'rk_live_project' })
+
+    await expect(manager.workspaceKeyForProject(PROJECT_ID)).resolves.toBe('rk_live_project')
+
+    await manager.shutdown()
+  })
+
+  it('omits the project workspace key when no local broker exposes one', async () => {
+    const manager = new BrokerManager()
+    await startLocal(manager)
+
+    await expect(manager.workspaceKeyForProject(PROJECT_ID)).resolves.toBeUndefined()
+    await expect(manager.workspaceKeyForProject('missing-project')).resolves.toBeUndefined()
+
+    await manager.shutdown()
+  })
+
   it('reuses current harness-driver connection files instead of spawning another broker', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'pear-current-connection-'))
     const connectionPath = join(tempDir, '.agentworkforce', 'relay', 'connection.json')

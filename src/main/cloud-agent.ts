@@ -88,6 +88,7 @@ type CloudBrokerAdapter = {
   connectCloudSandbox?: (projectId: string, sandbox: CloudAgentSandbox, win?: BrowserWindow) => Promise<unknown>
   detachCloudSandbox?: (projectId: string) => Promise<void>
   onBrokerEvent?: (handler: (projectId: string, event: BrokerEvent) => void) => () => void
+  workspaceKeyForProject?: (projectId: string) => Promise<string | undefined>
 }
 
 type CloudBrokerSystemMessageAdapter = {
@@ -1077,7 +1078,18 @@ export class CloudAgentManager {
       ? integrationMountPaths
       : [SANDBOX_WORKSPACE_PATH, ...integrationMountPaths]
     const url = `${auth.apiUrl}/api/v1/workspaces/${encodeURIComponent(workspaceId)}/cloud-agents/${encodeURIComponent(cloudAgentId)}/box`
-    let sandbox = await this.fetchBox(url, auth.accessToken, 'POST', mountPaths, workspaceSource)
+    // #125: the sandbox broker joins the project's local relay workspace
+    // under a name pear knows ahead of time (cloud injects both verbatim as
+    // AGENT_RELAY_WORKSPACE_KEY / AGENT_RELAY_BROKER_NAME). The key is
+    // best-effort: without a local session the sandbox keeps creating its own
+    // workspace, exactly as before.
+    const workspaceKey = await (brokerManager as unknown as CloudBrokerAdapter)
+      .workspaceKeyForProject?.(projectId)
+    const relayBroker = {
+      ...(workspaceKey ? { workspaceKey } : {}),
+      brokerName: `cloud-${cloudAgentId.slice(0, 8)}`
+    }
+    let sandbox = await this.fetchBox(url, auth.accessToken, 'POST', mountPaths, workspaceSource, relayBroker)
     options.onSandbox?.(sandbox)
     if (options.isCancelled?.()) {
       await this.deleteBox(toBinding(projectId, cloudAgentId, sandbox)).catch(() => undefined)
@@ -1139,12 +1151,17 @@ export class CloudAgentManager {
     accessToken: string,
     method: 'GET' | 'POST',
     mountPaths?: string[],
-    workspaceSource?: CloudAgentWorkspaceSource
+    workspaceSource?: CloudAgentWorkspaceSource,
+    relayBroker?: { workspaceKey?: string; brokerName?: string }
   ): Promise<CloudAgentSandbox> {
+    // Broker identity is provision-time only: POST carries it, PATCH/GET never
+    // do (cloud preserves the injected env across mount-path rewrites).
     const body = method === 'POST'
       ? JSON.stringify({
         relayfileMountPaths: normalizeMountPaths(mountPaths || []),
-        ...(workspaceSource && workspaceSource.kind !== 'relayfile' ? { workspaceSource } : {})
+        ...(workspaceSource && workspaceSource.kind !== 'relayfile' ? { workspaceSource } : {}),
+        ...(relayBroker?.workspaceKey ? { workspaceKey: relayBroker.workspaceKey } : {}),
+        ...(relayBroker?.brokerName ? { brokerName: relayBroker.brokerName } : {})
       })
       : undefined
     const requestUrl = method === 'POST' ? withAsyncWarm(url) : url
