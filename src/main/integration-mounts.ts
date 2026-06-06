@@ -3,6 +3,8 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
   RelayfileSetup,
+  type MountLauncher,
+  type MountLauncherStart,
   type MountedWorkspaceHandle
 } from '@relayfile/sdk'
 import { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, refreshCloudAuth, resolveCloudAuth } from './auth'
@@ -22,6 +24,8 @@ type IntegrationMountInput = {
 type IntegrationMountSpec = {
   remotePath: string
   localDir: string
+  localLayout: 'exact'
+  syncMode: 'mirror' | 'write-only'
   agentName: string
   scopes: string[]
 }
@@ -278,24 +282,29 @@ export class IntegrationMountManager {
 
       await ensureProtectedDirectory(spec.localDir)
       try {
-        const startMount = async (): Promise<MountedWorkspaceHandle> => setup.mountWorkspace({
-          workspaceId,
-          localDir: spec.localDir,
-          remotePath: spec.remotePath,
-          mode: 'poll',
-          background: true,
-          agentName: spec.agentName,
-          scopes: spec.scopes,
-          launcher: createPearMountLauncher({
-            onEvent: (event) => {
-              const text = typeof event.text === 'string' ? event.text : ''
-              if (isMountAuthExpiredOutput(text)) {
-                this.queueForcedRestart(spec.remotePath, 'auth failure')
+        const startMount = async (): Promise<MountedWorkspaceHandle> => {
+          const mountInput = {
+            workspaceId,
+            localDir: spec.localDir,
+            remotePath: spec.remotePath,
+            mode: 'poll' as const,
+            localLayout: spec.localLayout,
+            syncMode: spec.syncMode,
+            background: true,
+            agentName: spec.agentName,
+            scopes: spec.scopes,
+            launcher: this.createContractLauncher(spec, createPearMountLauncher({
+              onEvent: (event) => {
+                const text = typeof event.text === 'string' ? event.text : ''
+                if (isMountAuthExpiredOutput(text)) {
+                  this.queueForcedRestart(spec.remotePath, 'auth failure')
+                }
               }
-            }
-          }),
-          readyTimeoutMs: MOUNT_READY_TIMEOUT_MS
-        })
+            })),
+            readyTimeoutMs: MOUNT_READY_TIMEOUT_MS
+          }
+          return setup.mountWorkspace(mountInput)
+        }
         let handle: MountedWorkspaceHandle
         try {
           handle = await startMount()
@@ -337,6 +346,8 @@ export class IntegrationMountManager {
       return {
         remotePath: mountPath,
         localDir: join(mountRoot, ...remotePathSegments(mountPath)),
+        localLayout: 'exact',
+        syncMode: isWriteOnlyCommandMountPath(mountPath) ? 'write-only' : 'mirror',
         agentName: `pear-integrations-${agentSegment}`,
         scopes: [
           `relayfile:fs:read:${mountPath}/**`,
@@ -346,6 +357,21 @@ export class IntegrationMountManager {
     })
 
     return specs.sort((a, b) => a.remotePath.localeCompare(b.remotePath))
+  }
+
+  private createContractLauncher(spec: IntegrationMountSpec, launcher: MountLauncher): MountLauncher {
+    return Object.assign({
+      start: (input: MountLauncherStart) => launcher.start({
+        ...input,
+        env: {
+          ...input.env,
+          RELAYFILE_MOUNT_LOCAL_LAYOUT: spec.localLayout,
+          RELAYFILE_MOUNT_SYNC_MODE: spec.syncMode
+        }
+      })
+    }, {
+      __options: (launcher as { __options?: unknown }).__options
+    }) as MountLauncher
   }
 
   private async removeLegacyIntegrationMountRoot(mountRoot: string): Promise<void> {
@@ -376,6 +402,13 @@ function refreshTimeFor(handle: MountedWorkspaceHandle): number | null {
 
 function isMountAuthExpiredOutput(text: string): boolean {
   return /(?:401|unauthorized|token has expired|invalid jwt)/iu.test(text)
+}
+
+function isWriteOnlyCommandMountPath(mountPath: string): boolean {
+  const segments = remotePathSegments(mountPath)
+  return segments[0] === 'slack' &&
+    (segments[1] === 'channels' || segments[1] === 'dms') &&
+    (segments[3] === 'messages' || segments[5] === 'replies')
 }
 
 function mountPathsForIntegrations(integrations: IntegrationMountInput[]): string[] {

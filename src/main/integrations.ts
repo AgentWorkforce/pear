@@ -343,15 +343,31 @@ function isDiscoveryMountPath(mountPath: string): boolean {
   return mountPath.split('/').filter(Boolean)[0] === 'discovery'
 }
 
-function outboxMountPathFor(mountPath: string): string {
+function writebackCommandMountPathFor(provider: string, mountPath: string): string | null {
   const normalized = mountPath.trim().replace(/\/+$/u, '')
-  return `${normalized}/.outbox`
+  const segments = normalized.split('/').filter(Boolean)
+  if (toRelayfileProvider(provider) === 'slack') {
+    if (segments[0] !== 'slack') return null
+    const collection = segments[1]
+    if ((collection === 'channels' || collection === 'dms') && segments.length === 3) {
+      return `${normalized}/messages`
+    }
+    if ((collection === 'channels' || collection === 'dms') && segments[3] === 'threads' && segments.length === 5) {
+      return `${normalized}/replies`
+    }
+    const lastSegment = segments[segments.length - 1]
+    if (lastSegment === 'messages' || lastSegment === 'replies') {
+      return normalized
+    }
+  }
+  return null
 }
 
 function writebackCommandMountPathsForIntegration(integration: ConnectedIntegration): string[] {
   return canonicalMountPathsForConnectedIntegration(integration)
     .filter(isNarrowHistoricalMountPath)
-    .map(outboxMountPathFor)
+    .map((mountPath) => writebackCommandMountPathFor(integration.provider, mountPath))
+    .filter((mountPath): mountPath is string => !!mountPath)
 }
 
 export function localSyncMountPathsForIntegration(integration: ConnectedIntegration): string[] {
