@@ -110,14 +110,21 @@ jobs:
           echo "release failed after 3 attempts"
           exit 1
 
-      - name: Publish changelog to GitHub Release
+      # electron-builder uploads to a DRAFT (releaseType: draft) so all assets
+      # land atomically. Set the notes/title and then flip it live in one go:
+      # marking it the latest published release is what makes
+      # releases/latest/download/pear-arm64.dmg (the /pear/download target) and
+      # electron-updater pick it up — drafts are invisible to both.
+      - name: Publish GitHub Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release edit "${{ steps.changelog.outputs.tag }}" \
             --repo "${GITHUB_REPOSITORY}" \
             --title "${{ steps.changelog.outputs.version }}" \
-            --notes-file "${{ steps.changelog.outputs.notes_file }}"
+            --notes-file "${{ steps.changelog.outputs.notes_file }}" \
+            --draft=false \
+            --latest
 
       - name: Upload macOS build artifacts
         if: always()

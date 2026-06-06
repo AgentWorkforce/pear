@@ -99,7 +99,7 @@ type EventContextPreviewMetadata = Omit<EventContextPreview, 'content'>
 
 type SlackLogicalInjectionState = {
   expiresAt: number
-  contentHash?: string
+  contentHashes?: Set<string>
 }
 
 type DispatchItem = {
@@ -2581,21 +2581,27 @@ export class IntegrationEventBridge {
       : undefined
     const existing = this.slackLogicalInjections.get(key)
     if (existing) {
-      if (!existing.contentHash && contentHash) {
+      if (!contentHash) {
+        return false
+      }
+      if (!existing.contentHashes) {
         // A blind claim (context read returned nothing) suppresses the late
         // content-bearing alias copy, but must learn its hash so a genuine
         // edit afterwards still injects instead of matching the blind claim.
-        existing.contentHash = contentHash
+        existing.contentHashes = new Set([contentHash])
         return false
       }
-      if (!contentHash || existing.contentHash === contentHash) {
+      if (existing.contentHashes.has(contentHash)) {
         return false
       }
+      existing.contentHashes.add(contentHash)
+      existing.expiresAt = now + ttlMs
+      return true
     }
 
     this.slackLogicalInjections.set(key, {
       expiresAt: now + ttlMs,
-      contentHash
+      contentHashes: contentHash ? new Set([contentHash]) : undefined
     })
     return true
   }
