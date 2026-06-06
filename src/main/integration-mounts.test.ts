@@ -253,6 +253,24 @@ describe('IntegrationMountManager', () => {
     }))
   })
 
+  it('uses the shared Slack command-root grammar for write-only mode', async () => {
+    const manager = new IntegrationMountManager()
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/users/U123/messages']
+      }
+    ])
+
+    expect(mock.mountInputs[0]).toMatchObject({
+      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/slack/users/U123/messages',
+      remotePath: '/slack/users/U123/messages',
+      localLayout: 'exact',
+      syncMode: 'write-only'
+    })
+  })
+
   it('scopes bare discovery mounts to the integration provider', async () => {
     const manager = new IntegrationMountManager()
 

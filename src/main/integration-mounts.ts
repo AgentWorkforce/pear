@@ -9,6 +9,7 @@ import {
 } from '@relayfile/sdk'
 import { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, refreshCloudAuth, resolveCloudAuth } from './auth'
 import { createPearMountLauncher } from './relayfile-mount-launcher'
+import { isSlackWritebackCommandRoot } from './slack-writeback-command-roots'
 
 const MOUNT_READY_TIMEOUT_MS = 60_000
 const MOUNT_REFRESH_FALLBACK_MARGIN_MS = 5 * 60_000
@@ -347,7 +348,7 @@ export class IntegrationMountManager {
         remotePath: mountPath,
         localDir: join(mountRoot, ...remotePathSegments(mountPath)),
         localLayout: 'exact',
-        syncMode: isWriteOnlyCommandMountPath(mountPath) ? 'write-only' : 'mirror',
+        syncMode: isSlackWritebackCommandRoot(mountPath) ? 'write-only' : 'mirror',
         agentName: `pear-integrations-${agentSegment}`,
         scopes: [
           `relayfile:fs:read:${mountPath}/**`,
@@ -402,13 +403,6 @@ function refreshTimeFor(handle: MountedWorkspaceHandle): number | null {
 
 function isMountAuthExpiredOutput(text: string): boolean {
   return /(?:401|unauthorized|token has expired|invalid jwt)/iu.test(text)
-}
-
-function isWriteOnlyCommandMountPath(mountPath: string): boolean {
-  const segments = remotePathSegments(mountPath)
-  return segments[0] === 'slack' &&
-    (segments[1] === 'channels' || segments[1] === 'dms') &&
-    (segments[3] === 'messages' || segments[5] === 'replies')
 }
 
 function mountPathsForIntegrations(integrations: IntegrationMountInput[]): string[] {

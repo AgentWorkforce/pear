@@ -880,22 +880,22 @@ test('local fallback watchers require historical download even for command roots
       integration({
         provider: 'slack',
         integrationId: 'slack-1',
-        mountPaths: ['/slack/.outbox'],
+        mountPaths: ['/slack/channels/C123ABC/messages'],
         downloadHistoricalData: false,
         localMountPaths: [
-          join('/tmp', 'relayfile', 'workspaces', 'workspace-id', 'slack', '.outbox')
+          join('/tmp', 'relayfile', 'workspaces', 'workspace-id', 'slack', 'channels', 'C123ABC', 'messages')
         ]
       })
     ],
     [
-      '/slack/.outbox/**'
+      '/slack/channels/C123ABC/messages/**'
     ]
   )
 
   assert.deepEqual(roots, [])
 })
 
-test('local fallback watchers reject bare outbox command roots', () => {
+test('local fallback watchers reject non-canonical command-looking roots', () => {
   const roots = localWatchRootsFor(
     'workspace-id',
     [
@@ -947,15 +947,15 @@ test('local fallback watchers are limited to bounded command roots when historic
       integration({
         provider: 'slack',
         integrationId: 'slack-1',
-        mountPaths: ['/slack/.outbox'],
+        mountPaths: ['/slack/channels/C123ABC/messages'],
         downloadHistoricalData: true,
         localMountPaths: [
-          join('/tmp', 'relayfile', 'workspaces', 'workspace-id', 'slack', '.outbox')
+          join('/tmp', 'relayfile', 'workspaces', 'workspace-id', 'slack', 'channels', 'C123ABC', 'messages')
         ]
       })
     ],
     [
-      '/slack/.outbox/**',
+      '/slack/channels/C123ABC/messages/**',
       '/slack/channels/C123ABC/**'
     ]
   )
@@ -963,10 +963,10 @@ test('local fallback watchers are limited to bounded command roots when historic
   const byRemoteRoot = new Map(roots.map((root) => [root.remoteRoot, root.localRoot]))
 
   assert.equal(
-    byRemoteRoot.get('/slack/.outbox')?.endsWith(join('workspace-id', 'slack', '.outbox')),
+    byRemoteRoot.get('/slack/channels/C123ABC/messages')?.endsWith(join('workspace-id', 'slack', 'channels', 'C123ABC', 'messages')),
     true
   )
-  assert.deepEqual(Array.from(byRemoteRoot.keys()), ['/slack/.outbox'])
+  assert.deepEqual(Array.from(byRemoteRoot.keys()), ['/slack/channels/C123ABC/messages'])
 })
 
 test('local fallback watchers accept legacy integration command mount paths', () => {
@@ -976,19 +976,47 @@ test('local fallback watchers accept legacy integration command mount paths', ()
       integration({
         provider: 'slack',
         integrationId: 'slack-1',
-        mountPaths: ['/integrations/slack/.outbox'],
+        mountPaths: ['/integrations/slack/channels/C123ABC/messages'],
         downloadHistoricalData: true,
         localMountPaths: [
-          join('/tmp', 'relayfile', 'workspaces', 'workspace-id', 'slack', '.outbox')
+          join('/tmp', 'relayfile', 'workspaces', 'workspace-id', 'slack', 'channels', 'C123ABC', 'messages')
         ]
       })
     ],
     [
-      '/slack/.outbox/**'
+      '/slack/channels/C123ABC/messages/**'
     ]
   )
 
-  assert.equal(roots.some((root) => root.remoteRoot === '/slack/.outbox'), true)
+  assert.equal(roots.some((root) => root.remoteRoot === '/slack/channels/C123ABC/messages'), true)
+})
+
+test('local fallback watchers use the shared Slack users command-root grammar', () => {
+  const roots = localWatchRootsFor(
+    'workspace-id',
+    [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/users/U123/messages'],
+        downloadHistoricalData: true,
+        localMountPaths: [
+          join('/tmp', 'relayfile', 'workspaces', 'workspace-id', 'slack', 'users', 'U123', 'messages')
+        ]
+      })
+    ],
+    [
+      '/slack/users/U123/messages/**'
+    ]
+  )
+
+  assert.equal(
+    roots.some((root) =>
+      root.remoteRoot === '/slack/users/U123/messages' &&
+      root.localRoot === join('/tmp', 'relayfile', 'workspaces', 'workspace-id', 'slack', 'users', 'U123', 'messages')
+    ),
+    true
+  )
 })
 
 test('local watcher path construction does not duplicate remote path segments', () => {

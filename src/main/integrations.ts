@@ -25,6 +25,7 @@ import {
   removeProjectIntegrationsLink
 } from './integration-symlinks'
 import { INTEGRATIONS_CATALOG } from './integrations.catalog'
+import { slackWritebackCommandMountPathFor } from './slack-writeback-command-roots'
 import { getRelayWorkspaceManager } from './relay-workspace'
 import { loadStore, saveStore, type ProjectIntegration } from './store'
 
@@ -343,30 +344,10 @@ function isDiscoveryMountPath(mountPath: string): boolean {
   return mountPath.split('/').filter(Boolean)[0] === 'discovery'
 }
 
-function writebackCommandMountPathFor(provider: string, mountPath: string): string | null {
-  const normalized = mountPath.trim().replace(/\/+$/u, '')
-  const segments = normalized.split('/').filter(Boolean)
-  if (toRelayfileProvider(provider) === 'slack') {
-    if (segments[0] !== 'slack') return null
-    const collection = segments[1]
-    if ((collection === 'channels' || collection === 'dms') && segments.length === 3) {
-      return `${normalized}/messages`
-    }
-    if ((collection === 'channels' || collection === 'dms') && segments[3] === 'threads' && segments.length === 5) {
-      return `${normalized}/replies`
-    }
-    const lastSegment = segments[segments.length - 1]
-    if (lastSegment === 'messages' || lastSegment === 'replies') {
-      return normalized
-    }
-  }
-  return null
-}
-
 function writebackCommandMountPathsForIntegration(integration: ConnectedIntegration): string[] {
   return canonicalMountPathsForConnectedIntegration(integration)
     .filter(isNarrowHistoricalMountPath)
-    .map((mountPath) => writebackCommandMountPathFor(integration.provider, mountPath))
+    .map((mountPath) => slackWritebackCommandMountPathFor(toRelayfileProvider(integration.provider), mountPath))
     .filter((mountPath): mountPath is string => !!mountPath)
 }
 

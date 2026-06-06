@@ -13,6 +13,8 @@ import {
   type Subscription
 } from '@relayfile/sdk'
 import type { ConnectedIntegration } from './integrations'
+// @ts-expect-error Node's strip-types test runner requires the explicit .ts extension.
+import { isSlackWritebackCommandRoot } from './slack-writeback-command-roots.ts'
 import type {
   IntegrationEventTelemetryCounters,
   IntegrationEventTelemetrySnapshot
@@ -744,9 +746,7 @@ function allowsLocalMountWatching(integration: ConnectedIntegration): boolean {
 }
 
 function isBoundedLocalCommandRoot(remoteRoot: string): boolean {
-  const segments = pathSegments(remoteRoot)
-  if (segments.length === 0) return false
-  return segments.some((segment) => segment === '.outbox')
+  return isSlackWritebackCommandRoot(remoteRoot)
 }
 
 function watchableLocalIntegrations(integrations: ConnectedIntegration[]): ConnectedIntegration[] {
