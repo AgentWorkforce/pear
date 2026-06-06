@@ -139,6 +139,18 @@ export function resolveAgentRelayMcpCommand(): string | undefined {
   })
 }
 
+// Strict-join failures from the broker (#125): an explicitly pinned workspace
+// key never falls back to creating a fresh workspace. Auth rejection (401/403,
+// "was rejected") is fatal — the key is bad or revoked; rate limiting (429,
+// "was rate-limited") is retryable. Contract strings from agent-relay-broker
+// relaycast/auth.rs, verified in the T3 review.
+export function classifyWorkspaceJoinFailure(err: unknown): 'rejected' | 'rate-limited' | null {
+  const message = toErrorMessage(err)
+  if (/explicit workspace key .* was rate-limited/iu.test(message)) return 'rate-limited'
+  if (/explicit workspace key .* was rejected/iu.test(message)) return 'rejected'
+  return null
+}
+
 function parseAgentWorkforceJson<T>(output: string, label: string): T {
   try {
     return JSON.parse(output) as T
@@ -1306,8 +1318,10 @@ export class BrokerManager {
 
       // Phase 1 of #125: the local broker stays the workspace creator, so the
       // key is only threaded when explicitly pinned via env. The intersection
-      // type is the single cast site until @agent-relay/harness-driver ships
-      // workspaceKey in RuntimeSpawnOptions (T3) — drop it once published.
+      // type is the single cast site until @agent-relay/harness-driver
+      // PUBLISHES workspaceKey in RuntimeSpawnOptions (landed relay-side in
+      // 6419d59c; verified against the built 8.3.0+T3 dist locally) — the
+      // intersection erases to a no-op then and drops with the version bump.
       const explicitWorkspaceKey = process.env.AGENT_RELAY_WORKSPACE_KEY?.trim() || undefined
       const opts: AgentRelaySpawnOptions & { workspaceKey?: string } = {
         cwd,
@@ -1362,7 +1376,13 @@ export class BrokerManager {
       return await startPromise
     } catch (err) {
       console.error(`[broker] Failed to start for project ${normalizedProjectId}:`, err)
-      this.sendStatusToWindow(win, normalizedProjectId, 'error', String(err))
+      const joinFailure = classifyWorkspaceJoinFailure(err)
+      const statusMessage = joinFailure === 'rate-limited'
+        ? `Workspace join rate-limited (retryable): ${String(err)}`
+        : joinFailure === 'rejected'
+          ? `Workspace key rejected — broker refused to create a fresh workspace: ${String(err)}`
+          : String(err)
+      this.sendStatusToWindow(win, normalizedProjectId, 'error', statusMessage)
       throw err
     } finally {
       if (this.startPromises.get(normalizedProjectId) === startPromise) {
