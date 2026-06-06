@@ -25,6 +25,7 @@ export const UserInfoSchema = z
     name: optionalTrimmedString,
     email: optionalTrimmedString,
     githubUsername: optionalTrimmedString,
+    username: optionalTrimmedString,
     avatarUrl: optionalTrimmedString,
     cachedAvatarUrl: optionalTrimmedString,
     organizationName: optionalTrimmedString,
@@ -52,7 +53,8 @@ export const AuthMetaSchema = z
     user: UserInfoSchema.optional(),
     accountWorkspace: z
       .object({
-        tokenHash: trimmedString,
+        accountKey: optionalTrimmedString,
+        tokenHash: optionalTrimmedString,
         workspaceId: trimmedString
       })
       .optional()

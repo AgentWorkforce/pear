@@ -320,6 +320,173 @@ describe('IntegrationsManager', () => {
     )
   })
 
+  it('returns local settings integrations and sets recovery when signed in before the account workspace exists', async () => {
+    mock.getAccountWorkspaceId.mockRejectedValueOnce(new Error('account-workspace-required'))
+    const manager = new IntegrationsManager()
+
+    await expect(manager.listConnectedForSettings('project-1')).resolves.toEqual([
+      expect.objectContaining({
+        provider: 'slack',
+        integrationId: 'slack-integration-1'
+      })
+    ])
+
+    expect(mock.fetchCalls.some((call) => call.url.includes('/api/v1/workspaces/'))).toBe(false)
+    expect(manager.getAuthRecoveryState()).toMatchObject({
+      reason: 'account-workspace-required',
+      message: 'account-workspace-required'
+    })
+  })
+
+  it('throws cloud-auth-required for settings integrations so the renderer can prompt sign-in', async () => {
+    mock.getAccountWorkspaceId.mockRejectedValueOnce(new Error('cloud-auth-required'))
+    const manager = new IntegrationsManager()
+
+    await expect(manager.listConnectedForSettings('project-1')).rejects.toThrow('cloud-auth-required')
+  })
+
+  it('emits auth recovery and returns local integrations when local mount startup cannot resolve an account workspace', async () => {
+    const manager = new IntegrationsManager()
+    const events: unknown[] = []
+    manager.onEvent((event) => events.push(event))
+    mock.integrationMountManager.ensureMounted.mockRejectedValueOnce(new Error('account-workspace-required'))
+
+    await expect(manager.listConnectedForSettings('project-1')).resolves.toEqual([
+      expect.objectContaining({
+        provider: 'slack',
+        integrationId: 'slack-integration-1'
+      })
+    ])
+
+    expect(events).toContainEqual({
+      type: 'integration-auth-required',
+      reason: 'account-workspace-required',
+      message: 'account-workspace-required'
+    })
+  })
+
+  it('keeps boot-time auth recovery queryable after the event is missed by renderer listeners', () => {
+    const manager = new IntegrationsManager()
+    const observer = mock.integrationMountManager.setHealthObserver.mock.calls.at(-1)?.[0]
+
+    observer?.({
+      type: 'auth-required',
+      reason: 'cloud-auth-required',
+      message: 'cloud-auth-required'
+    })
+
+    const lateEvents: unknown[] = []
+    manager.onEvent((event) => lateEvents.push(event))
+
+    expect(lateEvents).toEqual([])
+    expect(manager.getAuthRecoveryState()).toMatchObject({
+      reason: 'cloud-auth-required',
+      message: 'cloud-auth-required'
+    })
+  })
+
+  it('clears sticky auth recovery state after the all-dead recovery retry respawns mounts', async () => {
+    vi.useFakeTimers()
+    const manager = new IntegrationsManager()
+    const events: unknown[] = []
+    manager.onEvent((event) => events.push(event))
+    mock.integrationMountManager.ensureMounted.mockRejectedValueOnce(new Error('account-workspace-required:whoami-http-500'))
+
+    await expect(manager.listConnectedForSettings('project-1')).resolves.toEqual([
+      expect.objectContaining({
+        provider: 'slack',
+        integrationId: 'slack-integration-1'
+      })
+    ])
+    expect(manager.getAuthRecoveryState()).toMatchObject({
+      reason: 'account-workspace-required',
+      failureClass: 'whoami-http-500',
+      message: 'account-workspace-required:whoami-http-500'
+    })
+    expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    await Promise.resolve()
+
+    expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalledTimes(2)
+    expect(manager.getAuthRecoveryState()).toBeNull()
+    expect(events).toContainEqual({ type: 'integration-auth-recovered' })
+  })
+
+  it('keeps sticky auth recovery state when a retry hits a non-auth mount failure', async () => {
+    vi.useFakeTimers()
+    const manager = new IntegrationsManager()
+    mock.integrationMountManager.ensureMounted
+      .mockRejectedValueOnce(new Error('account-workspace-required:whoami-http-500'))
+      .mockRejectedValueOnce(new Error('spawn failed'))
+
+    await expect(manager.listConnectedForSettings('project-1')).resolves.toEqual([
+      expect.objectContaining({
+        provider: 'slack',
+        integrationId: 'slack-integration-1'
+      })
+    ])
+    expect(manager.getAuthRecoveryState()).toMatchObject({
+      reason: 'account-workspace-required',
+      failureClass: 'whoami-http-500'
+    })
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    await Promise.resolve()
+
+    expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalledTimes(2)
+    expect(manager.getAuthRecoveryState()).toMatchObject({
+      reason: 'account-workspace-required',
+      failureClass: 'whoami-http-500'
+    })
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    await Promise.resolve()
+
+    expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalledTimes(3)
+    expect(manager.getAuthRecoveryState()).toBeNull()
+  })
+
+  it('classifies stale workspace integration access as sign-in recovery', async () => {
+    mock.fetch.mockImplementationOnce(async () => ({
+      ok: false,
+      status: 403,
+      statusText: 'Forbidden',
+      json: async () => ({ error: 'Forbidden' })
+    }))
+    const manager = new IntegrationsManager()
+
+    await expect(manager.listConnectedForSettings('project-1'))
+      .rejects.toThrow('cloud-auth-required:workspace-access-revoked')
+
+    expect(manager.getAuthRecoveryState()).toMatchObject({
+      reason: 'cloud-auth-required',
+      failureClass: 'workspace-access-revoked',
+      message: 'cloud-auth-required:workspace-access-revoked'
+    })
+  })
+
+  it('relays mount-manager auth recovery alerts to renderer integration events', () => {
+    const manager = new IntegrationsManager()
+    const events: unknown[] = []
+    manager.onEvent((event) => events.push(event))
+
+    const observer = mock.integrationMountManager.setHealthObserver.mock.calls.at(-1)?.[0]
+    observer?.({
+      type: 'auth-required',
+      reason: 'cloud-auth-required',
+      message: 'cloud-auth-required'
+    })
+
+    expect(events).toEqual([
+      {
+        type: 'integration-auth-required',
+        reason: 'cloud-auth-required',
+        message: 'cloud-auth-required'
+      }
+    ])
+  })
+
   it('keeps local sync to discovery and narrow canonical writeback command roots while historical download is off', () => {
     expect(localSyncMountPathsForIntegration({
       provider: 'slack',

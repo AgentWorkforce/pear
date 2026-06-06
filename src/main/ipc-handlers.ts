@@ -30,8 +30,16 @@ import { burnManager, type BurnAgentInput, type BurnProjectInput, type BurnSessi
 import { resetRelayWorkspaceManager } from './relay-workspace'
 import { assertDirectory, isDirectory } from './path-utils'
 import { findProjectForPath } from './cli'
-import type { BrokerReconcileMessagesInput } from '../shared/types/ipc'
+import type { BrokerReconcileMessagesInput, BrokerSpawnAgentResult } from '../shared/types/ipc'
 import type { ProactiveAgentDraft } from './proactive-agent.types'
+
+function toBrokerSpawnAgentResult(result: BrokerSpawnAgentResult): BrokerSpawnAgentResult {
+  return {
+    name: result.name,
+    runtime: result.runtime,
+    ...(result.cli ? { cli: result.cli } : {})
+  }
+}
 
 function getProjectIdForPath(targetPath: string): string | null {
   const resolved = resolve(targetPath)
@@ -254,7 +262,7 @@ export function registerIpcHandlers(): void {
         }
       : input)
     integrationEventBridge.invalidateProjectAgentCache(projectId)
-    return result
+    return toBrokerSpawnAgentResult(result)
   })
 
   ipcMain.handle('broker:list-personas', async (_, projectId: string) => {
@@ -264,7 +272,7 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('broker:spawn-persona', async (_, projectId: string, personaId: string) => {
     const result = await brokerManager.spawnPersona(projectId, personaId)
     integrationEventBridge.invalidateProjectAgentCache(projectId)
-    return result
+    return toBrokerSpawnAgentResult(result)
   })
 
   ipcMain.handle('broker:attach-terminal', async (_, input: {
@@ -623,6 +631,10 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('integrations:list', async (_, projectId: string) => {
     return integrationsManager.listConnectedForSettings(projectId)
+  })
+
+  ipcMain.handle('integrations:auth-recovery-state', () => {
+    return integrationsManager.getAuthRecoveryState()
   })
 
   ipcMain.handle('integrations:telemetry', () => {

@@ -170,3 +170,30 @@ describe('registerIpcHandlers broker:start', () => {
     expect(mock.integrationsManager.notifyAgentState).toHaveBeenCalledWith('project-1')
   })
 })
+
+describe('registerIpcHandlers broker:spawn-agent', () => {
+  beforeEach(() => {
+    mock.handlers.clear()
+    mock.ipcMain.handle.mockClear()
+    mock.ipcMain.on.mockClear()
+    mock.brokerManager.spawnAgent.mockReset()
+    mock.integrationsManager.initialSpawnInstructions.mockReset()
+    registerIpcHandlers()
+  })
+
+  it('returns a structured-clone-safe spawn result', async () => {
+    const handler = mock.handlers.get('broker:spawn-agent')
+    expect(handler).toBeTypeOf('function')
+    const raw = {
+      name: 'worker',
+      runtime: 'pty',
+      client: () => undefined
+    }
+    mock.brokerManager.spawnAgent.mockResolvedValueOnce(raw)
+
+    const result = await handler?.({}, 'project-1', { name: 'worker', cli: 'codex' })
+
+    expect(result).toEqual({ name: 'worker', runtime: 'pty' })
+    expect(() => structuredClone(result)).not.toThrow()
+  })
+})

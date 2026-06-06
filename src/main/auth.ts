@@ -18,6 +18,7 @@ const CLOUD_API_URL = process.env.RELAY_CLOUD_URL || 'https://agentrelay.dev/clo
 const TOKEN_EXPIRY_BUFFER_MS = 60_000
 const ACCOUNT_WORKSPACE_RETRY_ATTEMPTS = 8
 const ACCOUNT_WORKSPACE_RETRY_DELAY_MS = 500
+const warnedWhoamiWorkspaceFailures = new Set<string>()
 
 interface AuthStatus {
   loggedIn: boolean
@@ -26,7 +27,8 @@ interface AuthStatus {
 }
 
 type AccountWorkspaceCache = {
-  tokenHash: string
+  accountKey?: string
+  tokenHash?: string
   workspaceId: string
 }
 
@@ -61,9 +63,9 @@ function hasStoredTokens(): boolean {
   }
 }
 
-// The cloud API has historically returned the same logical field under several keys
-// (camelCase vs snake_case, sometimes nested inside a `github` block). We tolerate
-// all variants when normalizing, then validate the final shape with UserInfoSchema.
+// The cloud API has historically returned the same logical field under several
+// keys. We tolerate common camelCase/snake_case variants, then validate the
+// final shape with UserInfoSchema.
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
@@ -86,30 +88,14 @@ function firstObject(record: Record<string, unknown> | undefined, keys: string[]
   return undefined
 }
 
-const GITHUB_OBJECT_KEYS = [
-  'github',
-  'githubUser',
-  'github_user',
-  'githubProfile',
-  'github_profile',
-  'githubAccount',
-  'github_account'
-]
-
 function normalizeUserInfo(value: unknown): UserInfo | undefined {
   if (!isRecord(value)) return undefined
 
-  const githubRecord = firstObject(value, GITHUB_OBJECT_KEYS)
   const candidate = {
     name: firstString(value, ['name', 'displayName', 'display_name']),
     email: firstString(value, ['email']),
-    githubUsername:
-      firstString(value, ['githubUsername', 'github_username', 'githubLogin', 'github_login']) ||
-      firstString(githubRecord, ['githubUsername', 'github_username', 'username', 'login']) ||
-      firstString(value, ['username', 'login']),
+    username: firstString(value, ['username', 'id', 'userId', 'user_id']),
     avatarUrl:
-      firstString(value, ['githubAvatarUrl', 'github_avatar_url']) ||
-      firstString(githubRecord, ['avatarUrl', 'avatar_url', 'avatar', 'picture', 'image']) ||
       firstString(value, ['avatarUrl', 'avatar_url', 'avatar', 'picture', 'image']),
     cachedAvatarUrl: firstString(value, ['cachedAvatarUrl', 'cached_avatar_url']),
     organizationName: firstString(value, ['organizationName', 'organization_name']),
@@ -137,14 +123,20 @@ function mergeUserInfo(previous: UserInfo | undefined, next: UserInfo | undefine
 
 function hasAvatarIdentity(user: UserInfo | undefined): boolean {
   const normalized = normalizeUserInfo(user)
-  return !!(
-    normalized?.githubUsername ||
-    (normalized?.avatarUrl && isRemoteAvatarUrl(normalized.avatarUrl))
-  )
+  return !!(normalized?.avatarUrl && isRemoteAvatarUrl(normalized.avatarUrl))
 }
 
 function accountWorkspaceTokenHash(accessToken: string): string {
   return createHash('sha256').update(accessToken).digest('hex')
+}
+
+function accountWorkspaceCacheMatches(
+  cached: AccountWorkspaceCache | undefined,
+  auth: Pick<CloudAuth, 'accountKey' | 'accessToken'>
+): boolean {
+  if (!cached?.workspaceId.trim()) return false
+  return cached.accountKey === auth.accountKey ||
+    cached.tokenHash === accountWorkspaceTokenHash(auth.accessToken)
 }
 
 function delay(ms: number): Promise<void> {
@@ -153,10 +145,20 @@ function delay(ms: number): Promise<void> {
 
 function saveAuthMeta(tokens: Pick<StoredTokens, 'apiUrl' | 'user'> & Partial<Pick<StoredTokens, 'accessToken'>>): void {
   const previous = loadAuthMeta()
+  const accountKey = tokens.accessToken
+    ? deriveCloudAuthAccountKey(tokens.apiUrl, tokens.accessToken, tokens.user)
+    : undefined
   const tokenHash = tokens.accessToken ? accountWorkspaceTokenHash(tokens.accessToken) : undefined
   const accountWorkspace =
-    tokenHash && previous.accountWorkspace?.tokenHash === tokenHash
-      ? previous.accountWorkspace
+    accountKey && accountWorkspaceCacheMatches(previous.accountWorkspace, {
+      accountKey,
+      accessToken: tokens.accessToken || ''
+    })
+      ? {
+          ...previous.accountWorkspace,
+          accountKey,
+          ...(tokenHash ? { tokenHash } : {})
+        }
       : undefined
   const meta = {
     apiUrl: tokens.apiUrl,
@@ -180,13 +182,8 @@ function loadAuthMeta(): AuthMeta {
   }
 }
 
-function githubAvatarUrl(user: UserInfo | undefined): string | undefined {
-  const githubUsername = user?.githubUsername?.trim()
-  return githubUsername ? `https://github.com/${encodeURIComponent(githubUsername)}.png?size=96` : undefined
-}
-
 function avatarSourceUrl(user: UserInfo | undefined): string | undefined {
-  return githubAvatarUrl(user) || (isRemoteAvatarUrl(user?.avatarUrl) ? user?.avatarUrl : undefined)
+  return isRemoteAvatarUrl(user?.avatarUrl) ? user?.avatarUrl : undefined
 }
 
 async function withCachedAvatar(user: UserInfo | undefined, waitForMissing: boolean): Promise<UserInfo | undefined> {
@@ -196,7 +193,6 @@ async function withCachedAvatar(user: UserInfo | undefined, waitForMissing: bool
   const sourceUrl = avatarSourceUrl(normalized)
   const cacheIdentity = {
     sourceUrl,
-    githubUsername: normalized.githubUsername,
     email: normalized.email,
     name: normalized.name
   }
@@ -265,7 +261,21 @@ function clearTokens(): void {
   }
 }
 
-async function fetchWhoamiPayload(apiUrl: string, accessToken: string): Promise<unknown | undefined> {
+type WhoamiPayloadResult =
+  | { ok: true; data: unknown }
+  | { ok: false; failureClass: string; status?: number }
+
+function whoamiFailureClassForStatus(status: number): string {
+  return `whoami-http-${status}`
+}
+
+function warnWhoamiWorkspaceFailure(failureClass: string): void {
+  if (warnedWhoamiWorkspaceFailures.has(failureClass)) return
+  warnedWhoamiWorkspaceFailures.add(failureClass)
+  console.warn('[auth] Account workspace whoami lookup failed:', { failureClass })
+}
+
+async function fetchWhoamiPayload(apiUrl: string, accessToken: string): Promise<WhoamiPayloadResult> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), 2500)
 
@@ -274,10 +284,21 @@ async function fetchWhoamiPayload(apiUrl: string, accessToken: string): Promise<
       headers: { Authorization: `Bearer ${accessToken}` },
       signal: controller.signal
     })
-    if (!res.ok) return undefined
-    return await res.json() as unknown
-  } catch {
-    return undefined
+    if (!res.ok) {
+      return {
+        ok: false,
+        status: res.status,
+        failureClass: whoamiFailureClassForStatus(res.status)
+      }
+    }
+    return { ok: true, data: await res.json() as unknown }
+  } catch (error) {
+    return {
+      ok: false,
+      failureClass: error instanceof Error && error.name === 'AbortError'
+        ? 'whoami-timeout'
+        : 'whoami-network'
+    }
   } finally {
     clearTimeout(timeout)
   }
@@ -302,6 +323,7 @@ function saveAccountWorkspaceCache(auth: CloudAuth, workspaceId: string): void {
     apiUrl: auth.apiUrl || previous.apiUrl?.trim() || CLOUD_API_URL,
     user: previous.user,
     accountWorkspace: {
+      accountKey: auth.accountKey,
       tokenHash: accountWorkspaceTokenHash(auth.accessToken),
       workspaceId
     }
@@ -311,17 +333,15 @@ function saveAccountWorkspaceCache(auth: CloudAuth, workspaceId: string): void {
 
 async function fetchWhoami(apiUrl: string, accessToken: string): Promise<UserInfo | undefined> {
   try {
-    const data = await fetchWhoamiPayload(apiUrl, accessToken)
+    const payload = await fetchWhoamiPayload(apiUrl, accessToken)
+    if (!payload.ok) return undefined
+    const data = payload.data
     const record = isRecord(data) ? data : {}
     const userRecord = firstObject(record, ['user']) || record
     const organizationRecord = firstObject(record, ['organization', 'org'])
     const projectRecord = firstObject(record, ['project'])
-    const githubRecord =
-      firstObject(record, GITHUB_OBJECT_KEYS) || firstObject(userRecord, GITHUB_OBJECT_KEYS)
-
     return normalizeUserInfo({
       ...userRecord,
-      github: githubRecord,
       organizationName:
         firstString(userRecord, ['organizationName', 'organization_name']) ||
         firstString(record, ['organizationName', 'organization_name']) ||
@@ -381,7 +401,7 @@ export async function login(): Promise<AuthStatus> {
       resolve({ loggedIn: true, apiUrl, user })
     })
 
-    server.listen(0, '127.0.0.1', () => {
+    server.listen(0, '127.0.0.1', async () => {
       const addr = server.address()
       if (!addr || typeof addr === 'string') {
         reject(new Error('Failed to bind local auth server'))
@@ -394,7 +414,12 @@ export async function login(): Promise<AuthStatus> {
       const loginUrl = `${CLOUD_API_URL}/api/v1/cli/login?redirect_uri=${redirectUri}&state=${state}`
 
       console.log('[auth] Opening browser for login:', loginUrl)
-      shell.openExternal(loginUrl)
+      try {
+        await shell.openExternal(loginUrl)
+      } catch (error) {
+        server.close()
+        reject(error instanceof Error ? error : new Error(String(error)))
+      }
     })
 
     // Timeout after 5 minutes
@@ -436,8 +461,7 @@ export async function getAuthStatus(): Promise<AuthStatus> {
     return { loggedIn: true, apiUrl: usable.apiUrl, user }
   }
 
-  const meta = loadAuthMeta()
-  return { loggedIn: true, apiUrl: meta.apiUrl, user: meta.user }
+  return { loggedIn: false }
 }
 
 /**
@@ -659,7 +683,7 @@ export async function refreshCloudAuth(): Promise<CloudAuth | null> {
 export async function ensureAuthenticated(apiUrl?: string): Promise<AuthStatus> {
   const stored = loadTokens()
   if (stored && !isTokenExpired(stored)) {
-    return { loggedIn: true, apiUrl: stored.apiUrl, user: stored.user }
+    return { loggedIn: true, apiUrl: stored.apiUrl, user: normalizeUserInfo(stored.user) }
   }
   if (apiUrl && stored) {
     saveAuthMeta({ apiUrl, user: stored.user, accessToken: stored.accessToken })
@@ -671,24 +695,36 @@ export async function getAccountWorkspaceId(options: AccountWorkspaceIdOptions =
   const auth = await resolveCloudAuth()
   if (!auth) throw new Error('cloud-auth-required')
 
-  const tokenHash = accountWorkspaceTokenHash(auth.accessToken)
   const cached = loadAuthMeta().accountWorkspace
-  if (cached?.tokenHash === tokenHash && cached.workspaceId.trim()) {
+  if (accountWorkspaceCacheMatches(cached, auth)) {
     return cached.workspaceId.trim()
   }
 
   const retryAttempts = Math.max(1, Math.floor(options.retryAttempts ?? 1))
   const retryDelayMs = Math.max(0, Math.floor(options.retryDelayMs ?? ACCOUNT_WORKSPACE_RETRY_DELAY_MS))
   let workspaceId: string | undefined
+  let failureClass = 'whoami-no-workspace-in-payload'
 
   for (let attempt = 1; attempt <= retryAttempts; attempt += 1) {
-    const data = await fetchWhoamiPayload(auth.apiUrl, auth.accessToken)
-    workspaceId = accountWorkspaceIdFromWhoami(data)
+    const payload = await fetchWhoamiPayload(auth.apiUrl, auth.accessToken)
+    if (!payload.ok) {
+      failureClass = payload.failureClass
+      if (payload.status === 401 || payload.status === 403) {
+        warnWhoamiWorkspaceFailure(failureClass)
+        throw new Error(`cloud-auth-required:${failureClass}`)
+      }
+    } else {
+      workspaceId = accountWorkspaceIdFromWhoami(payload.data)
+      failureClass = workspaceId ? '' : 'whoami-no-workspace-in-payload'
+    }
     if (workspaceId) break
     if (attempt < retryAttempts) await delay(retryDelayMs)
   }
 
-  if (!workspaceId) throw new Error('account-workspace-required')
+  if (!workspaceId) {
+    warnWhoamiWorkspaceFailure(failureClass)
+    throw new Error(`account-workspace-required:${failureClass}`)
+  }
 
   saveAccountWorkspaceCache(auth, workspaceId)
   return workspaceId

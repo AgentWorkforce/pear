@@ -91,6 +91,17 @@ function tokenHash(accessToken: string): string {
   return createHash('sha256').update(accessToken).digest('hex')
 }
 
+function accountKeyForToken(apiUrl: string, accessToken: string, subject: string): string {
+  return createHash('sha256')
+    .update(`${apiUrl}\0token-subject:${subject}`)
+    .digest('hex')
+}
+
+function jwtWithSubject(subject: string, nonce: string): string {
+  const encode = (value: unknown): string => Buffer.from(JSON.stringify(value), 'utf8').toString('base64url')
+  return `${encode({ alg: 'none' })}.${encode({ sub: subject, nonce })}.sig`
+}
+
 describe('getAccountWorkspaceId', () => {
   let userDataDir: string
 
@@ -138,7 +149,8 @@ describe('getAccountWorkspaceId', () => {
     expect(String(calledUrl)).toBe('https://cloud.example/api/v1/auth/whoami')
 
     const meta = readMeta(userDataDir)
-    expect(meta?.accountWorkspace).toEqual({
+    expect(meta?.accountWorkspace).toMatchObject({
+      accountKey: expect.any(String),
       tokenHash: tokenHash('cld_at_abc'),
       workspaceId: 'ws-from-current'
     })
@@ -205,6 +217,40 @@ describe('getAccountWorkspaceId', () => {
 
     expect(id).toBe('ws-cached')
     expect(mock.fetchMock).not.toHaveBeenCalled()
+    expect(readMeta(userDataDir)?.accountWorkspace).toMatchObject({
+      accountKey: expect.any(String),
+      tokenHash: tokenHash('cld_at_cached'),
+      workspaceId: 'ws-cached'
+    })
+  })
+
+  it('uses the cached workspace id across token rotation for the same account subject', async () => {
+    const oldToken = jwtWithSubject('user-1', 'old')
+    const newToken = jwtWithSubject('user-1', 'new')
+    writeAuthJson(userDataDir, {
+      accessToken: newToken,
+      refreshToken: 'cld_rt_rotated',
+      apiUrl: 'https://cloud.example'
+    })
+    const configDir = join(userDataDir, 'config')
+    mkdirSync(configDir, { recursive: true })
+    writeFileSync(
+      join(configDir, 'auth-meta.json'),
+      JSON.stringify({
+        apiUrl: 'https://cloud.example',
+        accountWorkspace: {
+          accountKey: accountKeyForToken('https://cloud.example', oldToken, 'user-1'),
+          tokenHash: tokenHash(oldToken),
+          workspaceId: 'ws-cached'
+        }
+      })
+    )
+
+    const { getAccountWorkspaceId } = await import('./auth')
+    const id = await getAccountWorkspaceId()
+
+    expect(id).toBe('ws-cached')
+    expect(mock.fetchMock).not.toHaveBeenCalled()
   })
 
   it('refetches when the cached token hash no longer matches the current token', async () => {
@@ -239,7 +285,8 @@ describe('getAccountWorkspaceId', () => {
     expect(mock.fetchMock).toHaveBeenCalledTimes(1)
 
     const meta = readMeta(userDataDir)
-    expect(meta?.accountWorkspace).toEqual({
+    expect(meta?.accountWorkspace).toMatchObject({
+      accountKey: expect.any(String),
       tokenHash: tokenHash('cld_at_new'),
       workspaceId: 'ws-fresh'
     })
@@ -288,7 +335,7 @@ describe('getAccountWorkspaceId', () => {
     expect(mock.fetchMock).toHaveBeenCalledTimes(2)
   })
 
-  it('throws account-workspace-required when whoami responds with a non-OK status', async () => {
+  it('throws cloud-auth-required when whoami rejects the access token', async () => {
     writeAuthJson(userDataDir, {
       accessToken: 'cld_at_401',
       refreshToken: 'cld_rt_401',
@@ -302,7 +349,25 @@ describe('getAccountWorkspaceId', () => {
     })
 
     const { getAccountWorkspaceId } = await import('./auth')
-    await expect(getAccountWorkspaceId()).rejects.toThrowError('account-workspace-required')
+    await expect(getAccountWorkspaceId()).rejects.toThrowError('cloud-auth-required:whoami-http-401')
+  })
+
+  it('throws account-workspace-required with a failure class when whoami returns a server error', async () => {
+    writeAuthJson(userDataDir, {
+      accessToken: 'cld_at_500',
+      refreshToken: 'cld_rt_500',
+      apiUrl: 'https://cloud.example'
+    })
+    mock.fetchMock.mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: 'Internal Server Error',
+      json: async () => ({ error: 'No active workspace' })
+    })
+
+    const { getAccountWorkspaceId } = await import('./auth')
+    await expect(getAccountWorkspaceId({ retryAttempts: 1, retryDelayMs: 0 }))
+      .rejects.toThrowError('account-workspace-required:whoami-http-500')
   })
 })
 
@@ -491,5 +556,124 @@ describe('getAccessToken (refresh flow)', () => {
     await expect(a).resolves.toBe('cld_at_new')
     await expect(b).resolves.toBe('cld_at_new')
     expect(mock.fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('getAuthStatus', () => {
+  let userDataDir: string
+
+  beforeEach(() => {
+    userDataDir = mkdtempSync(join(tmpdir(), 'pear-auth-status-'))
+    mock.setUserDataDir(userDataDir)
+    mock.readStoredAuth.mockReset()
+    mock.readStoredAuth.mockResolvedValue(null)
+    mock.fetchMock.mockReset()
+    vi.stubGlobal('fetch', mock.fetchMock)
+    vi.resetModules()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    mock.clearUserDataDir()
+    rmSync(userDataDir, { recursive: true, force: true })
+  })
+
+  it('reports signed in from valid stored tokens even when profile fetch fails', async () => {
+    writeAuthJson(userDataDir, {
+      accessToken: 'cld_at_no_user',
+      refreshToken: 'cld_rt_no_user',
+      apiUrl: 'https://cloud.example'
+    })
+    mock.fetchMock.mockResolvedValue({
+      ok: false,
+      status: 401,
+      statusText: 'Unauthorized',
+      json: async () => ({ error: 'Unauthorized' })
+    })
+
+    const { getAuthStatus } = await import('./auth')
+
+    await expect(getAuthStatus()).resolves.toEqual({
+      loggedIn: true,
+      apiUrl: 'https://cloud.example',
+      user: undefined
+    })
+  })
+
+  it('reports signed in when whoami only returns a stable user id', async () => {
+    writeAuthJson(userDataDir, {
+      accessToken: 'cld_at_user_id',
+      refreshToken: 'cld_rt_user_id',
+      apiUrl: 'https://cloud.example'
+    })
+    mock.fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({ user: { id: 'user-1' } })
+    })
+
+    const { getAuthStatus } = await import('./auth')
+
+    await expect(getAuthStatus()).resolves.toEqual({
+      loggedIn: true,
+      apiUrl: 'https://cloud.example',
+      user: { username: 'user-1' }
+    })
+  })
+
+  it('hydrates a sparse stored profile from whoami', async () => {
+    writeAuthJson(userDataDir, {
+      accessToken: 'cld_at_sparse_user',
+      refreshToken: 'cld_rt_sparse_user',
+      apiUrl: 'https://cloud.example',
+      user: { username: 'user-1' }
+    })
+    mock.fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({
+        user: {
+          id: 'user-1',
+          name: 'Khaliq Gant',
+          email: 'khaliq@example.test',
+          avatarUrl: 'https://lh3.googleusercontent.com/a/avatar=s96-c'
+        }
+      })
+    })
+
+    const { getAuthStatus } = await import('./auth')
+
+    await expect(getAuthStatus()).resolves.toMatchObject({
+      loggedIn: true,
+      apiUrl: 'https://cloud.example',
+      user: {
+        username: 'user-1',
+        name: 'Khaliq Gant',
+        email: 'khaliq@example.test',
+        avatarUrl: 'https://lh3.googleusercontent.com/a/avatar=s96-c'
+      }
+    })
+    expect(mock.fetchMock).toHaveBeenCalledWith(
+      'https://cloud.example/api/v1/auth/whoami',
+      expect.objectContaining({
+        headers: { Authorization: 'Bearer cld_at_sparse_user' }
+      })
+    )
+  })
+
+  it('does not report signed in from auth metadata when stored tokens are invalid', async () => {
+    const configDir = join(userDataDir, 'config')
+    mkdirSync(configDir, { recursive: true })
+    writeFileSync(join(configDir, 'auth.json'), 'not-json')
+    writeFileSync(join(configDir, 'auth-meta.json'), JSON.stringify({
+      apiUrl: 'https://cloud.example',
+      user: { name: 'Stale User', email: 'stale@example.test' }
+    }))
+
+    const { getAuthStatus } = await import('./auth')
+
+    await expect(getAuthStatus()).resolves.toEqual({ loggedIn: false })
   })
 })

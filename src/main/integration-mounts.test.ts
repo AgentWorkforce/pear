@@ -449,6 +449,7 @@ describe('IntegrationMountManager', () => {
       'utf8'
     )
     expect(healthObserver).toHaveBeenCalledWith({
+      type: 'auth-stall',
       remotePath: '/slack/channels/C123/messages',
       status: 'writeback-pending',
       pendingWriteback: 1,
@@ -491,5 +492,69 @@ describe('IntegrationMountManager', () => {
 
     expect(healthObserver).toHaveBeenCalledTimes(1)
     expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/messages')).toHaveLength(2)
+  })
+
+  it('rejects and reports cloud auth recovery when startup has no usable tokens', async () => {
+    mock.currentAuth = null
+    const manager = new IntegrationMountManager()
+    const healthObserver = vi.fn()
+    manager.setHealthObserver(healthObserver)
+
+    await expect(manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/channels/C123/messages']
+      }
+    ])).rejects.toThrow('cloud-auth-required')
+
+    expect(mock.mountInputs).toHaveLength(0)
+    expect(healthObserver).toHaveBeenCalledWith({
+      type: 'auth-required',
+      reason: 'cloud-auth-required',
+      message: 'cloud-auth-required'
+    })
+  })
+
+  it('rejects and reports workspace recovery when whoami lacks an account workspace', async () => {
+    mock.getAccountWorkspaceId.mockRejectedValueOnce(new Error('account-workspace-required'))
+    const manager = new IntegrationMountManager()
+    const healthObserver = vi.fn()
+    manager.setHealthObserver(healthObserver)
+
+    await expect(manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/channels/C123/messages']
+      }
+    ])).rejects.toThrow('account-workspace-required')
+
+    expect(mock.mountInputs).toHaveLength(0)
+    expect(healthObserver).toHaveBeenCalledWith({
+      type: 'auth-required',
+      reason: 'account-workspace-required',
+      message: 'account-workspace-required'
+    })
+  })
+
+  it('does not depend on missing state files to report startup auth recovery', async () => {
+    mock.getAccountWorkspaceId.mockRejectedValueOnce(new Error('account-workspace-required'))
+    mock.readFile.mockRejectedValue(new Error('ENOENT'))
+    const manager = new IntegrationMountManager()
+    const healthObserver = vi.fn()
+    manager.setHealthObserver(healthObserver)
+
+    await expect(manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/channels/C123/messages']
+      }
+    ])).rejects.toThrow('account-workspace-required')
+
+    expect(mock.readFile).not.toHaveBeenCalled()
+    expect(healthObserver).toHaveBeenCalledWith({
+      type: 'auth-required',
+      reason: 'account-workspace-required',
+      message: 'account-workspace-required'
+    })
   })
 })

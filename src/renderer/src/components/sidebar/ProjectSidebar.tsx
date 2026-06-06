@@ -3,9 +3,11 @@ import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import {
   ChevronDown,
   ChevronUp,
+  AlertTriangle,
   FolderKanban,
   Hash,
   LayoutGrid,
+  LogIn,
   LogOut,
   MessageCircle,
   MessageSquare,
@@ -26,7 +28,7 @@ import { getAgentKeyForAgent, useAgentStore, type Agent } from '@/stores/agent-s
 import { useIsAgentTyping } from '@/stores/typing-store'
 import { useProjectStore, type Project } from '@/stores/project-store'
 import { useUIStore, type AppTab, type AppTabInput } from '@/stores/ui-store'
-import { pear, type AuthUser } from '@/lib/ipc'
+import { pear, type AuthUser, type IntegrationAuthRecoveryState } from '@/lib/ipc'
 
 function AgentRelayLogo(): React.ReactNode {
   return (
@@ -79,19 +81,14 @@ function userInitials(user?: AuthUser): string {
       .toUpperCase()
   }
 
-  return user?.email?.trim().charAt(0).toUpperCase() || '?'
+  return (
+    user?.email?.trim().charAt(0) ||
+    '?'
+  ).toUpperCase()
 }
 
-function githubUsernameFromEmail(email?: string): string {
-  const match = email?.trim().match(/^(?:\d+\+)?([^@]+)@users\.noreply\.github\.com$/i)
-  return match?.[1] || ''
-}
-
-function normalizeGithubUsername(value?: string): string {
-  return (value || '')
-    .trim()
-    .replace(/^@+/, '')
-    .replace(/[^A-Za-z0-9-]/g, '')
+function userDisplayName(user?: AuthUser): string {
+  return user?.name?.trim() || user?.email?.trim() || 'Signed in'
 }
 
 function isRemoteAvatarUrl(value: string): boolean {
@@ -103,20 +100,13 @@ function isRemoteAvatarUrl(value: string): boolean {
   }
 }
 
-function githubAvatarUrl(user?: AuthUser): string | null {
-  const username = normalizeGithubUsername(
-    user?.githubUsername || user?.username || githubUsernameFromEmail(user?.email)
-  )
-  return username ? `https://github.com/${encodeURIComponent(username)}.png?size=96` : null
-}
-
 function providedAvatarUrl(user?: AuthUser): string | null {
   const avatarUrl = user?.avatarUrl?.trim()
   return avatarUrl && isRemoteAvatarUrl(avatarUrl) ? avatarUrl : null
 }
 
 function avatarUrls(user?: AuthUser): string[] {
-  return Array.from(new Set([githubAvatarUrl(user), providedAvatarUrl(user), user?.cachedAvatarUrl]
+  return Array.from(new Set([user?.cachedAvatarUrl, providedAvatarUrl(user)]
     .map((url) => url?.trim())
     .filter((url): url is string => !!url)))
 }
@@ -135,8 +125,31 @@ function useAvatarUrl(urls: string[]): { src: string | undefined; onError: () =>
   }
 }
 
+function SignedOutAvatar({ loading }: { loading: boolean }): React.ReactNode {
+  return (
+    <div
+      className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-[var(--pear-border)] bg-[var(--pear-bg-overlay)] text-[var(--pear-text-faint)]"
+      title={loading ? 'Signing in...' : 'Not signed in'}
+      aria-label={loading ? 'Signing in...' : 'Not signed in'}
+    >
+      <LogIn size={13} />
+    </div>
+  )
+}
+
+function hasSignedInUser(auth: { loggedIn: boolean; user?: AuthUser }): boolean {
+  return auth.loggedIn
+}
+
+function recoverySummary(state: IntegrationAuthRecoveryState | null): string | null {
+  if (!state) return null
+  if (state.reason === 'cloud-auth-required') return 'Cloud sign-in required'
+  if (state.failureClass) return `Workspace unavailable: ${state.failureClass}`
+  return 'Workspace unavailable'
+}
+
 function UserAvatar({ user }: { user?: AuthUser }): React.ReactNode {
-  const label = user?.name || user?.email || 'User'
+  const label = userDisplayName(user)
   const avatar = useAvatarUrl(avatarUrls(user))
 
   if (avatar.src) {
@@ -166,11 +179,30 @@ function UserAvatar({ user }: { user?: AuthUser }): React.ReactNode {
 function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNode {
   const openTab = useUIStore((s) => s.openTab)
   const [auth, setAuth] = useState<{ loggedIn: boolean; user?: AuthUser }>({ loggedIn: false })
+  const [authRecovery, setAuthRecovery] = useState<IntegrationAuthRecoveryState | null>(null)
   const [loading, setLoading] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
 
   useEffect(() => {
     pear.auth.status().then(setAuth)
+    pear.integrations.authRecoveryState().then(setAuthRecovery).catch(() => undefined)
+  }, [])
+
+  useEffect(() => {
+    return pear.integrations.onEvent((event) => {
+      if (event.type === 'integration-auth-recovered') {
+        setAuthRecovery(null)
+        return
+      }
+      if (event.type !== 'integration-auth-required') return
+      pear.integrations.authRecoveryState().then(setAuthRecovery).catch(() => {
+        setAuthRecovery({
+          reason: event.reason,
+          since: Date.now(),
+          message: event.message
+        })
+      })
+    })
   }, [])
 
   const handleLogin = useCallback(async () => {
@@ -178,6 +210,7 @@ function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNod
     try {
       const result = await pear.auth.login()
       setAuth(result.loggedIn ? await pear.auth.status() : result)
+      setAuthRecovery(await pear.integrations.authRecoveryState().catch(() => null))
     } finally {
       setLoading(false)
     }
@@ -197,7 +230,10 @@ function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNod
     setMenuOpen(false)
   }, [])
 
-  if (!auth.loggedIn) {
+  const signedIn = hasSignedInUser(auth)
+  const recovery = recoverySummary(authRecovery)
+
+  if (!signedIn) {
     return (
       <button
         onClick={handleLogin}
@@ -208,10 +244,13 @@ function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNod
         title={loading ? 'Signing in...' : 'Sign in'}
         aria-label={loading ? 'Signing in...' : 'Sign in'}
       >
-        <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-dashed border-[var(--pear-text-faint)] text-[10px] text-[var(--pear-text-faint)]">
-          ?
-        </div>
-        {!compact && <span className="truncate">{loading ? 'Signing in...' : 'Sign in'}</span>}
+        <SignedOutAvatar loading={loading} />
+        {!compact && (
+          <div className="min-w-0 flex-1 text-left">
+            <div className="truncate text-sm leading-tight">{loading ? 'Signing in...' : 'Sign in'}</div>
+            <div className="truncate text-[11px] leading-tight text-[var(--pear-text-faint)]">Not signed in</div>
+          </div>
+        )}
       </button>
     )
   }
@@ -223,14 +262,19 @@ function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNod
         className={`flex items-center gap-2.5 rounded-lg text-sm text-[var(--pear-text)] hover:bg-[var(--pear-bg-surface)] ${
           compact ? 'h-10 w-10 justify-center p-0' : 'w-full px-3 py-2.5'
         }`}
-        title={auth.user?.name || auth.user?.email || 'User'}
-        aria-label={auth.user?.name || auth.user?.email || 'User'}
+        title={userDisplayName(auth.user)}
+        aria-label={userDisplayName(auth.user)}
       >
         <UserAvatar user={auth.user} />
         {!compact && (
           <div className="min-w-0 flex-1 text-left">
-            <div className="truncate text-sm leading-tight">{auth.user?.name || auth.user?.email || 'User'}</div>
-            {auth.user?.organizationName && (
+            <div className="truncate text-sm leading-tight">{userDisplayName(auth.user)}</div>
+            {recovery ? (
+              <div className="flex min-w-0 items-center gap-1 truncate text-[11px] leading-tight text-[var(--pear-yellow)]">
+                <AlertTriangle size={10} className="shrink-0" />
+                <span className="truncate">{recovery}</span>
+              </div>
+            ) : auth.user?.organizationName && (
               <div className="truncate text-[11px] leading-tight text-[var(--pear-text-faint)]">{auth.user.organizationName}</div>
             )}
           </div>
@@ -251,6 +295,29 @@ function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNod
               <Settings size={13} />
               <span>Account settings</span>
             </button>
+            {authRecovery && (
+              <div className="border-t border-[var(--pear-border-subtle)] px-3 py-2 text-xs leading-4 text-[var(--pear-text-dim)]">
+                <div className="font-medium text-[var(--pear-text)]">
+                  {authRecovery.reason === 'cloud-auth-required' ? 'Sign-in needed' : 'Workspace unavailable'}
+                </div>
+                <div className="mt-1 break-words">
+                  {authRecovery.reason === 'cloud-auth-required'
+                    ? 'Reconnect Agent Relay Cloud to resume integration mounts.'
+                    : 'Pear cannot resolve the Agent Relay Cloud workspace for integration writebacks.'}
+                </div>
+                {authRecovery.reason === 'cloud-auth-required' && (
+                  <button
+                    type="button"
+                    onClick={() => void handleLogin()}
+                    disabled={loading}
+                    className="mt-2 inline-flex h-7 items-center gap-1.5 rounded-md border border-[var(--pear-border)] px-2 text-[11px] text-[var(--pear-text)] hover:border-[var(--pear-accent-dim)] disabled:opacity-40"
+                  >
+                    <LogIn size={11} />
+                    <span>Sign in again</span>
+                  </button>
+                )}
+              </div>
+            )}
             <button
               type="button"
               onClick={handleLogout}

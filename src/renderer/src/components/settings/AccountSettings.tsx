@@ -1,6 +1,7 @@
 import type React from 'react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  AlertTriangle,
   CheckCircle2,
   ChevronDown,
   ChevronRight,
@@ -24,6 +25,7 @@ import {
   type IntegrationAdapter,
   type IntegrationConnectSession
 } from '@/lib/ipc'
+import { CloudAuthRequired } from '@/components/agents/CloudAuthRequired'
 import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 
@@ -142,6 +144,22 @@ function relativeMountPath(root: string | null, path: string | null): string {
 
 function canBrowseSyncedData(integration: ConnectedIntegration): boolean {
   return integration.downloadHistoricalData === true
+}
+
+function getErrorMessage(error: unknown): string {
+  if (error instanceof Error) return error.message
+  if (error && typeof error === 'object' && 'message' in error) {
+    return String((error as { message: unknown }).message)
+  }
+  return String(error)
+}
+
+function isIntegrationAuthRequired(error: unknown): boolean {
+  return /cloud-auth-required/i.test(getErrorMessage(error))
+}
+
+function isAccountWorkspaceRequired(error: unknown): boolean {
+  return /account-workspace-required/i.test(getErrorMessage(error))
 }
 
 function localPathSegments(path: string): string[] {
@@ -301,6 +319,8 @@ export function AccountSettings(): React.ReactNode {
   const [connected, setConnected] = useState<ConnectedIntegration[]>([])
   const [session, setSession] = useState<IntegrationConnectSession | null>(null)
   const [loading, setLoading] = useState(true)
+  const [authRequired, setAuthRequired] = useState(false)
+  const [workspaceRequired, setWorkspaceRequired] = useState(false)
   const [busyProvider, setBusyProvider] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [expandedIntegrationId, setExpandedIntegrationId] = useState<string | null>(null)
@@ -334,7 +354,33 @@ export function AccountSettings(): React.ReactNode {
       setConnected([])
       return
     }
-    setConnected(await pear.integrations.list(activeProjectId))
+    const auth = await pear.auth.status()
+    if (!auth.loggedIn) {
+      setAuthRequired(true)
+      setWorkspaceRequired(false)
+      setConnected([])
+      return
+    }
+
+    try {
+      setAuthRequired(false)
+      setWorkspaceRequired(false)
+      setConnected(await pear.integrations.list(activeProjectId))
+    } catch (err) {
+      if (isIntegrationAuthRequired(err)) {
+        setAuthRequired(true)
+        setWorkspaceRequired(false)
+        setConnected([])
+        return
+      }
+      if (isAccountWorkspaceRequired(err)) {
+        setAuthRequired(false)
+        setWorkspaceRequired(true)
+        setConnected([])
+        return
+      }
+      throw err
+    }
   }, [activeProjectId])
 
   const load = useCallback(async () => {
@@ -347,7 +393,17 @@ export function AccountSettings(): React.ReactNode {
       ])
       setCatalog(nextCatalog)
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err))
+      if (isIntegrationAuthRequired(err)) {
+        setAuthRequired(true)
+        setWorkspaceRequired(false)
+        setConnected([])
+      } else if (isAccountWorkspaceRequired(err)) {
+        setAuthRequired(false)
+        setWorkspaceRequired(true)
+        setConnected([])
+      } else {
+        setError(getErrorMessage(err))
+      }
     } finally {
       setLoading(false)
     }
@@ -385,6 +441,20 @@ export function AccountSettings(): React.ReactNode {
 
   useEffect(() => {
     return pear.integrations.onEvent((event) => {
+      if (event.type === 'integration-auth-recovered') {
+        setAuthRequired(false)
+        setWorkspaceRequired(false)
+        void load()
+        return
+      }
+
+      if (event.type === 'integration-auth-required') {
+        setAuthRequired(event.reason === 'cloud-auth-required')
+        setWorkspaceRequired(event.reason === 'account-workspace-required')
+        setConnected([])
+        return
+      }
+
       if (event.type === 'session-update') {
         const pendingConnect = pendingConnectRef.current
         if (!pendingConnect || pendingConnect.sessionId !== event.sessionId) return
@@ -585,6 +655,40 @@ export function AccountSettings(): React.ReactNode {
         {error && (
           <div className="rounded-md border border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 px-3 py-2 text-sm text-[var(--pear-red)]">
             {error}
+          </div>
+        )}
+
+        {authRequired && (
+          <CloudAuthRequired
+            title="Sign in to manage integrations"
+            description="Pear needs your Agent Relay account to list connected integrations and connect new providers."
+            buttonLabel="Sign in"
+            onAuthenticated={() => {
+              setAuthRequired(false)
+              setWorkspaceRequired(false)
+              void load()
+            }}
+          />
+        )}
+
+        {workspaceRequired && (
+          <div className="rounded-lg border border-[var(--pear-yellow)]/20 bg-[var(--pear-yellow)]/10 px-4 py-3 text-sm text-[var(--pear-text-dim)]">
+            <div className="flex items-start gap-2">
+              <AlertTriangle size={15} className="mt-0.5 shrink-0 text-[var(--pear-yellow)]" />
+              <div className="min-w-0 flex-1">
+                <div className="font-medium text-[var(--pear-text)]">Cloud workspace unavailable</div>
+                <div className="mt-1 leading-5">
+                  You are signed in, but Pear could not find an Agent Relay Cloud workspace for this account yet.
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void load()}
+                  className="mt-3 rounded-md border border-[var(--pear-border)] px-3 py-1.5 text-xs text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]"
+                >
+                  Refresh
+                </button>
+              </div>
+            </div>
           </div>
         )}
 

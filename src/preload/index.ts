@@ -53,6 +53,7 @@ import type {
   GitPullRequest,
   GitSummary,
   IntegrationAdapter,
+  IntegrationAuthRecoveryState,
   IntegrationConnectSession,
   IntegrationEventTelemetrySnapshot,
   IntegrationOption,
@@ -142,6 +143,7 @@ export type {
   InboundDeliveryMode,
   IntegrationAdapter,
   IntegrationAuthMethod,
+  IntegrationAuthRecoveryState,
   IntegrationCapabilities,
   IntegrationConnectSession,
   IntegrationConnectStatus,
@@ -387,6 +389,7 @@ const api = {
   integrations: {
     catalog: () => invoke<IntegrationAdapter[]>('integrations:catalog'),
     list: (projectId: string) => invoke<ConnectedIntegration[]>('integrations:list', projectId),
+    authRecoveryState: () => invoke<IntegrationAuthRecoveryState | null>('integrations:auth-recovery-state'),
     telemetry: () => invoke<IntegrationEventTelemetrySnapshot>('integrations:telemetry'),
     listMountDir: (projectId: string, integrationId: string, dirPath: string) =>
       invoke<FsDirEntry[]>('integrations:list-mount-dir', projectId, integrationId, dirPath),

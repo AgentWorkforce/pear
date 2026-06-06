@@ -233,18 +233,6 @@ function userInitials(user: AuthUser | null): string {
   return user?.email?.trim().charAt(0).toUpperCase() || '?'
 }
 
-function githubUsernameFromEmail(email?: string): string {
-  const match = email?.trim().match(/^(?:\d+\+)?([^@]+)@users\.noreply\.github\.com$/i)
-  return match?.[1] || ''
-}
-
-function normalizeGithubUsername(value?: string): string {
-  return (value || '')
-    .trim()
-    .replace(/^@+/, '')
-    .replace(/[^A-Za-z0-9-]/g, '')
-}
-
 function isRemoteAvatarUrl(value: string): boolean {
   try {
     const url = new URL(value)
@@ -252,13 +240,6 @@ function isRemoteAvatarUrl(value: string): boolean {
   } catch {
     return false
   }
-}
-
-function githubAvatarUrl(user: AuthUser | null): string | null {
-  const username = normalizeGithubUsername(
-    user?.githubUsername || user?.username || githubUsernameFromEmail(user?.email)
-  )
-  return username ? `https://github.com/${encodeURIComponent(username)}.png?size=96` : null
 }
 
 function providedAvatarUrl(user: AuthUser | null): string | null {
@@ -272,9 +253,8 @@ function uniqueAvatarUrls(urls: Array<string | null | undefined>): string[] {
 
 function userAvatarUrls(user: AuthUser | null): string[] {
   return uniqueAvatarUrls([
-    githubAvatarUrl(user),
-    providedAvatarUrl(user),
-    user?.cachedAvatarUrl
+    user?.cachedAvatarUrl,
+    providedAvatarUrl(user)
   ])
 }
 

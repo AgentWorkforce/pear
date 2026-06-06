@@ -26,11 +26,18 @@ type IntegrationMountInput = {
 }
 
 export type MountHealthAlert = {
+  type: 'auth-stall'
   remotePath: string
   status: string | null
   pendingWriteback: number
   message: string
+} | {
+  type: 'auth-required'
+  reason: MountAuthRequiredReason
+  message: string
 }
+
+type MountAuthRequiredReason = 'cloud-auth-required' | 'account-workspace-required'
 
 type IntegrationMountSpec = {
   remotePath: string
@@ -43,6 +50,14 @@ type IntegrationMountSpec = {
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+function isAccountWorkspaceRequiredError(error: unknown): boolean {
+  return /account-workspace-required/i.test(toErrorMessage(error))
+}
+
+function isCloudAuthRequiredError(error: unknown): boolean {
+  return /cloud-auth-required/i.test(toErrorMessage(error))
 }
 
 function isUnauthorizedError(error: unknown): boolean {
@@ -138,6 +153,7 @@ export class IntegrationMountManager {
   private healthPollTimer: ReturnType<typeof setInterval> | null = null
   private healthObserver: ((alert: MountHealthAlert) => void) | null = null
   private handledHealthErrorKeys = new Map<string, string>()
+  private lastAuthRequiredReason: MountAuthRequiredReason | null = null
 
   setHealthObserver(observer: ((alert: MountHealthAlert) => void) | null): void {
     this.healthObserver = observer
@@ -155,6 +171,10 @@ export class IntegrationMountManager {
     if (this.pending) return this.pending
     const pending = this.mount(mountPaths, new Set())
       .catch((error) => {
+        if (isCloudAuthRequiredError(error) || isAccountWorkspaceRequiredError(error)) {
+          this.reportAuthRequired(error)
+          throw error
+        }
         console.warn('[integration-mounts] Failed to reconcile Relayfile integration mounts:', toErrorMessage(error))
       })
       .finally(() => {
@@ -178,6 +198,7 @@ export class IntegrationMountManager {
     this.refreshTimers.clear()
     this.authRestartedAt.clear()
     this.handledHealthErrorKeys.clear()
+    this.lastAuthRequiredReason = null
     const roots = Array.from(this.handles.keys())
     for (const root of roots) {
       await this.stopHandle(root)
@@ -272,6 +293,7 @@ export class IntegrationMountManager {
           { pendingWriteback, error: message || 'unauthorized' }
         )
         this.healthObserver?.({
+          type: 'auth-stall',
           remotePath,
           status: typeof state.status === 'string' ? state.status : null,
           pendingWriteback,
@@ -325,7 +347,7 @@ export class IntegrationMountManager {
     const auth = await resolveCloudAuth()
     if (!auth) {
       await this.stopAll()
-      return
+      throw new Error('cloud-auth-required')
     }
 
     // Integrations are bound to the account (app) workspace UUID on cloud —
@@ -410,6 +432,9 @@ export class IntegrationMountManager {
         this.handles.set(spec.remotePath, handle)
         this.scheduleRefresh(spec.remotePath, handle)
       } catch (error) {
+        if (isUnauthorizedError(error)) {
+          throw new Error('cloud-auth-required')
+        }
         console.warn(
           `[integration-mounts] Failed to start Relayfile mount for ${spec.remotePath}:`,
           toErrorMessage(error)
@@ -418,7 +443,22 @@ export class IntegrationMountManager {
     }
 
     await this.removeLegacyIntegrationMountRoot(mountRoot)
+    this.lastAuthRequiredReason = null
     this.ensureHealthPolling()
+  }
+
+  private reportAuthRequired(error: unknown): void {
+    const reason: MountAuthRequiredReason = isAccountWorkspaceRequiredError(error)
+      ? 'account-workspace-required'
+      : 'cloud-auth-required'
+    if (this.lastAuthRequiredReason === reason) return
+    this.lastAuthRequiredReason = reason
+    console.warn('[integration-mounts] Relayfile integration mounts require auth recovery:', { reason })
+    this.healthObserver?.({
+      type: 'auth-required',
+      reason,
+      message: reason
+    })
   }
 
   private createSetup(auth: { apiUrl: string; accessToken: string }): RelayfileSetup {
