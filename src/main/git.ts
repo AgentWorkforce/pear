@@ -1,8 +1,8 @@
 import { spawn } from 'child_process'
 import { createHash } from 'crypto'
-import { existsSync } from 'fs'
+import { existsSync, mkdirSync } from 'fs'
 import { appendFile, mkdtemp, readFile, rm, stat } from 'fs/promises'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { tmpdir } from 'os'
 import { assertDirectory } from './path-utils'
 import { cacheAvatarFromUrl, cachedAvatarUrl } from './avatar-cache'
@@ -1583,4 +1583,22 @@ export async function getSelectedDiff(path: string, input: { wholeFiles: string[
   )
   const patch = input.patch?.trim() ? input.patch.trim() : ''
   return [...diffs, patch].filter(Boolean).join('\n')
+}
+
+export async function getGitRoot(path: string): Promise<string | null> {
+  try {
+    const result = await runGit(['rev-parse', '--show-toplevel'], path)
+    return result.trim()
+  } catch {
+    return null
+  }
+}
+
+export async function createWorktree(repoPath: string, worktreePath: string, branchName: string): Promise<void> {
+  mkdirSync(dirname(worktreePath), { recursive: true })
+  await runGit(['worktree', 'add', '-b', branchName, worktreePath], repoPath)
+}
+
+export function worktreeExists(worktreePath: string): boolean {
+  return existsSync(join(worktreePath, '.git'))
 }

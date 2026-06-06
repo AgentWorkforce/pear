@@ -1,6 +1,6 @@
 import { pear, type WorkforcePersona } from '@/lib/ipc'
 import { getAgentKey, useAgentStore } from '@/stores/agent-store'
-import { useProjectStore, type Project } from '@/stores/project-store'
+import { useProjectStore, type Project, type ProjectRoot } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 
 export type SpawnAgentCli = 'claude' | 'codex'
@@ -21,15 +21,25 @@ function nextAgentName(cli: SpawnAgentCli, projectId: string, liveNames: string[
   return `${cli}-${index}`
 }
 
-async function ensureLocalBroker(project: Project): Promise<void> {
+async function ensureLocalBroker(
+  project: Project,
+  rootOverride?: ProjectRoot,
+  options: { detachCloud?: boolean } = {}
+): Promise<void> {
+  const detachCloud = options.detachCloud ?? true
   const projectStore = useProjectStore.getState()
   if (projectStore.activeProjectId !== project.id) {
     await projectStore.setActiveProject(project.id)
   }
+  if (rootOverride) {
+    useProjectStore.getState().setActiveRoot(rootOverride.id)
+  }
 
-  const cloudStatus = await pear.cloudAgent.status(project.id).catch(() => null)
-  if (cloudStatus) {
-    await pear.cloudAgent.detach(project.id)
+  if (detachCloud) {
+    const cloudStatus = await pear.cloudAgent.status(project.id).catch(() => null)
+    if (cloudStatus) {
+      await pear.cloudAgent.detach(project.id)
+    }
   }
 
   await useProjectStore.getState().ensureBroker()
@@ -38,11 +48,15 @@ async function ensureLocalBroker(project: Project): Promise<void> {
 export async function spawnProjectAgent(
   project: Project,
   cli: SpawnAgentCli,
-  customName?: string
+  customName?: string,
+  rootOverride?: ProjectRoot
 ): Promise<string> {
-  await ensureLocalBroker(project)
+  if (rootOverride && !rootOverride.pathExists) {
+    throw new Error(`Project root not found: ${rootOverride.path || project.rootPath}`)
+  }
+  await ensureLocalBroker(project, rootOverride)
 
-  const root = useProjectStore.getState().getActiveRoot()
+  const root = rootOverride ?? useProjectStore.getState().getActiveRoot()
   if (!root?.pathExists) {
     throw new Error(`Project root not found: ${root?.path || project.rootPath}`)
   }
@@ -50,12 +64,13 @@ export async function spawnProjectAgent(
   const liveAgents = await pear.broker.listAgents(project.id)
   const agentStore = useAgentStore.getState()
   for (const liveAgent of liveAgents) {
+    const trackedAgent = agentStore.agents.find((agent) => agent.projectId === project.id && agent.name === liveAgent.name)
     agentStore.trackSpawnedAgent(
       liveAgent.name,
       project.id,
-      root.id,
+      trackedAgent?.rootId ?? root.id,
       liveAgent.cli || cli,
-      root.path,
+      trackedAgent?.rootPath ?? root.path,
       {
         currentState: liveAgent.current_state,
         terminalMode: liveAgent.inboundDeliveryMode === 'manual_flush' ? 'drive' : 'passthrough',
@@ -91,15 +106,13 @@ export async function spawnProjectAgent(
   return name
 }
 
-export async function listProjectPersonas(project: Project): Promise<WorkforcePersona[]> {
-  const projectStore = useProjectStore.getState()
-  if (projectStore.activeProjectId !== project.id) {
-    await projectStore.setActiveProject(project.id)
-  } else {
-    await projectStore.ensureBroker()
+export async function listProjectPersonas(project: Project, rootOverride?: ProjectRoot): Promise<WorkforcePersona[]> {
+  if (rootOverride && !rootOverride.pathExists) {
+    return []
   }
+  await ensureLocalBroker(project, rootOverride, { detachCloud: false })
 
-  const root = useProjectStore.getState().getActiveRoot()
+  const root = rootOverride ?? useProjectStore.getState().getActiveRoot()
   if (!root?.pathExists) {
     return []
   }
@@ -107,10 +120,13 @@ export async function listProjectPersonas(project: Project): Promise<WorkforcePe
   return pear.broker.listPersonas(project.id)
 }
 
-export async function spawnProjectPersona(project: Project, personaId: string): Promise<string> {
-  await ensureLocalBroker(project)
+export async function spawnProjectPersona(project: Project, personaId: string, rootOverride?: ProjectRoot): Promise<string> {
+  if (rootOverride && !rootOverride.pathExists) {
+    throw new Error(`Project root not found: ${rootOverride.path || project.rootPath}`)
+  }
+  await ensureLocalBroker(project, rootOverride)
 
-  const root = useProjectStore.getState().getActiveRoot()
+  const root = rootOverride ?? useProjectStore.getState().getActiveRoot()
   if (!root?.pathExists) {
     throw new Error(`Project root not found: ${root?.path || project.rootPath}`)
   }
@@ -118,12 +134,13 @@ export async function spawnProjectPersona(project: Project, personaId: string): 
   const liveAgents = await pear.broker.listAgents(project.id)
   const agentStore = useAgentStore.getState()
   for (const liveAgent of liveAgents) {
+    const trackedAgent = agentStore.agents.find((agent) => agent.projectId === project.id && agent.name === liveAgent.name)
     agentStore.trackSpawnedAgent(
       liveAgent.name,
       project.id,
-      root.id,
+      trackedAgent?.rootId ?? root.id,
       liveAgent.cli || personaId,
-      root.path,
+      trackedAgent?.rootPath ?? root.path,
       {
         currentState: liveAgent.current_state,
         terminalMode: liveAgent.inboundDeliveryMode === 'manual_flush' ? 'drive' : 'passthrough',

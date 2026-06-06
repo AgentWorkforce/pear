@@ -1,6 +1,6 @@
 import { app } from 'electron'
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'fs'
-import { basename, join } from 'path'
+import { basename, join, resolve } from 'path'
 import { z } from 'zod'
 import type { ProactiveAgentBinding, ProactiveAgentDraft } from './proactive-agent.types'
 import {
@@ -191,6 +191,14 @@ export function setProjectChannelPeople(projectId: string, channelName: string, 
   }
   saveStore(data)
   return normalizedPeople
+}
+
+export function findProjectsWithPath(rootPath: string): Array<{ id: string; name: string }> {
+  const data = loadStore()
+  const normalizedRootPath = resolve(rootPath)
+  return data.projects
+    .filter((p) => p.roots.some((r) => resolve(r.path) === normalizedRootPath))
+    .map((p) => ({ id: p.id, name: p.name }))
 }
 
 export function addProjectRoot(projectId: string, rootPath: string, name?: string): ProjectRoot {

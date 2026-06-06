@@ -4,7 +4,7 @@ import { Loader2, X } from 'lucide-react'
 import { ClaudeIcon, CodexIcon } from '@/components/common/AgentIcons'
 import { listProjectPersonas, spawnProjectAgent, spawnProjectPersona, type SpawnAgentCli } from '@/lib/spawn-agent'
 import type { WorkforcePersona } from '@/lib/ipc'
-import { useProjectStore } from '@/stores/project-store'
+import { useProjectStore, type ProjectRoot } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 
 const AGENT_OPTIONS: Array<{ cli: SpawnAgentCli; label: string; Icon: typeof ClaudeIcon }> = [
@@ -20,8 +20,12 @@ export function SpawnAgentDialog(): React.ReactNode {
   const [selectedPersonaId, setSelectedPersonaId] = useState('')
   const [customName, setCustomName] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [selectedRootId, setSelectedRootId] = useState<string | null>(null)
   const project = useProjectStore((s) => s.getActiveProject())
-  const root = useProjectStore((s) => s.getActiveRoot())
+  const defaultRoot = useProjectStore((s) => s.getActiveRoot())
+  const selectedRoot = project?.roots.find((r) => r.id === selectedRootId)
+  const root: ProjectRoot | undefined = selectedRoot ?? defaultRoot
+  const safeSelectedRootId = project?.roots.some((r) => r.id === selectedRootId) ? selectedRootId ?? '' : root?.id ?? ''
   const closeDialog = useUIStore((s) => s.closeDialog)
   const openDialog = useUIStore((s) => s.openDialog)
   const dialogRef = useRef<HTMLDivElement>(null)
@@ -36,6 +40,12 @@ export function SpawnAgentDialog(): React.ReactNode {
   }, [closeDialog])
 
   useEffect(() => {
+    if (selectedRootId && !project?.roots.some((r) => r.id === selectedRootId)) {
+      setSelectedRootId(root?.id ?? null)
+    }
+  }, [project, root?.id, selectedRootId])
+
+  useEffect(() => {
     let cancelled = false
 
     async function loadPersonas(): Promise<void> {
@@ -48,7 +58,7 @@ export function SpawnAgentDialog(): React.ReactNode {
 
       setLoadingPersonas(true)
       try {
-        const discovered = await listProjectPersonas(project)
+        const discovered = await listProjectPersonas(project, root)
         if (cancelled) return
         setError(null)
         setPersonas(discovered)
@@ -104,7 +114,7 @@ export function SpawnAgentDialog(): React.ReactNode {
     setError(null)
     setSpawningCli(cli)
     try {
-      await spawnProjectAgent(project, cli, customName)
+      await spawnProjectAgent(project, cli, customName, root)
       closeDialog()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -127,7 +137,7 @@ export function SpawnAgentDialog(): React.ReactNode {
     setError(null)
     setSpawningPersona(true)
     try {
-      await spawnProjectPersona(project, selectedPersonaId)
+      await spawnProjectPersona(project, selectedPersonaId, root)
       closeDialog()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -160,6 +170,26 @@ export function SpawnAgentDialog(): React.ReactNode {
         <div className="px-5 py-5">
           {project ? (
             <div className="space-y-3">
+              {project.roots.length > 1 && (
+                <div>
+                  <label htmlFor="spawn-root-select" className="mb-1 block text-xs font-medium text-[var(--pear-text-dim)]">
+                    Spawn into
+                  </label>
+                  <select
+                    id="spawn-root-select"
+                    value={safeSelectedRootId}
+                    onChange={(e) => setSelectedRootId(e.target.value)}
+                    disabled={spawning}
+                    className="h-9 w-full rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 text-sm text-[var(--pear-text)] outline-none focus:border-[var(--pear-accent-dim)] disabled:opacity-50"
+                  >
+                    {project.roots.map((r) => (
+                      <option key={r.id} value={r.id}>
+                        {r.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div className="truncate text-xs text-[var(--pear-text-faint)]">{root?.path || project.rootPath}</div>
               <div>
                 <label htmlFor="spawn-agent-name" className="mb-1 block text-xs font-medium text-[var(--pear-text-dim)]">

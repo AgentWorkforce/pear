@@ -1,5 +1,6 @@
 import { app, ipcMain, dialog, BrowserWindow, shell } from 'electron'
-import { resolve } from 'path'
+import { createHash } from 'crypto'
+import { basename, join, resolve } from 'path'
 import type { SpawnPtyInput, SendMessageInput } from '@agent-relay/harness-driver'
 import {
   loadStore,
@@ -12,6 +13,7 @@ import {
   setProjectChannelPeople,
   addProjectRoot,
   removeProjectRoot,
+  findProjectsWithPath,
   addProjectIntegration,
   removeProjectIntegration
 } from './store'
@@ -158,7 +160,38 @@ export function registerIpcHandlers(): void {
       if (result.canceled || !result.filePaths[0]) return null
       path = result.filePaths[0]
     }
-    return addProjectRoot(projectId, path, name)
+
+    const conflict = findProjectsWithPath(path).find((p) => p.id !== projectId)
+    if (conflict) {
+      return { kind: 'conflict', projectId, existingProjectId: conflict.id, existingProjectName: conflict.name, path }
+    }
+
+    return { kind: 'added', root: addProjectRoot(projectId, path, name) }
+  })
+
+  ipcMain.handle('project:create-worktree-root', async (_, projectId: string, repoPath: string, projectName: string, name?: string) => {
+    const gitRoot = await git.getGitRoot(repoPath)
+    if (!gitRoot) throw new Error(`Not a git repository: ${repoPath}`)
+
+    const repoBasename = basename(gitRoot)
+    const repoHash = createHash('sha1').update(gitRoot).digest('hex').slice(0, 8)
+    const worktreePath = join(app.getPath('userData'), 'worktrees', projectId, `${repoBasename}-${repoHash}`)
+
+    const branchSlug = projectName
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40) || 'pear'
+    const projectSlug = projectId
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '')
+      .slice(0, 8)
+    const branchName = `pear/${branchSlug}${projectSlug ? `-${projectSlug}` : ''}`
+
+    if (!git.worktreeExists(worktreePath)) {
+      await git.createWorktree(gitRoot, worktreePath, branchName)
+    }
+    return addProjectRoot(projectId, worktreePath, name || repoBasename)
   })
 
   ipcMain.handle('project:remove-root', (_, projectId: string, rootId: string) => {
@@ -248,6 +281,10 @@ export function registerIpcHandlers(): void {
     const win = BrowserWindow.fromWebContents(event.sender)
     if (!win) throw new Error('No window')
     return brokerManager.connectCloud('cloud', win)
+  })
+
+  ipcMain.handle('broker:send-input', async (_, projectId: string | undefined, name: string, data: string) => {
+    return brokerManager.sendInput(projectId, name, data)
   })
 
   ipcMain.on('broker:send-input-fast', (_, projectId: string | undefined, name: string, data: string) => {

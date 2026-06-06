@@ -787,6 +787,35 @@ export type UpdaterState =
   | { kind: 'downloaded'; version: string }
   | { kind: 'error'; message: string }
 
+export interface ProjectRootConflict {
+  kind: 'conflict'
+  projectId: string
+  existingProjectId: string
+  existingProjectName: string
+  path: string
+}
+
+export interface ProjectRootRecord {
+  id: string
+  name: string
+  path: string
+  pathExists?: boolean
+}
+
+export interface ProjectRootAdded {
+  kind: 'added'
+  root: ProjectRootRecord
+}
+
+export type AddRootResult = ProjectRootAdded | ProjectRootConflict
+
+export interface ProjectIntegrationResult {
+  id: string
+  name: string
+  type: string
+  [key: string]: unknown
+}
+
 export interface PearAPI {
   app: {
     confirmQuit: () => Promise<boolean>
@@ -801,9 +830,10 @@ export interface PearAPI {
     addChannel: (projectId: string, name: string) => Promise<void>
     removeChannel: (projectId: string, name: string) => Promise<void>
     setChannelPeople: (projectId: string, channelName: string, people: string[]) => Promise<string[]>
-    addRoot: (projectId: string, name?: string, rootPath?: string) => Promise<unknown>
+    addRoot: (projectId: string, name?: string, rootPath?: string) => Promise<AddRootResult | null>
     removeRoot: (projectId: string, rootId: string) => Promise<void>
-    addIntegration: (projectId: string, name: string, type?: string) => Promise<unknown>
+    createWorktreeRoot: (projectId: string, repoPath: string, projectName: string, name?: string) => Promise<ProjectRootRecord>
+    addIntegration: (projectId: string, name: string, type?: string) => Promise<ProjectIntegrationResult>
     removeIntegration: (projectId: string, integrationId: string) => Promise<void>
   }
   broker: {
@@ -821,6 +851,11 @@ export interface PearAPI {
     listPersonas: (projectId: string) => Promise<WorkforcePersona[]>
     spawnPersona: (projectId: string, personaId: string) => Promise<BrokerSpawnAgentResult>
     attachTerminal: (input: BrokerAttachTerminalInput) => Promise<BrokerAttachTerminalResult>
+    sendInput: (
+      projectId: string | undefined,
+      name: string,
+      data: string
+    ) => Promise<{ name: string; bytes_written: number }>
     sendInputFast: (projectId: string | undefined, name: string, data: string) => void
     setTerminalMode: (
       projectId: string | undefined,
