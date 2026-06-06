@@ -10,11 +10,14 @@ interface Props {
   active: boolean
   mode: TerminalAttachMode
   onActivate?: () => void
+  autoHold?: boolean
+  onAutoHoldStart?: () => void
+  onAutoHoldRelease?: (flush: boolean) => void
 }
 
-export function TerminalInstance({ agentName, projectId, visible, active, mode, onActivate }: Props): React.ReactNode {
+export function TerminalInstance({ agentName, projectId, visible, active, mode, onActivate, autoHold, onAutoHoldStart, onAutoHoldRelease }: Props): React.ReactNode {
   const containerRef = useRef<HTMLDivElement>(null)
-  useTerminal(containerRef, agentName, projectId, visible, active, mode)
+  useTerminal(containerRef, agentName, projectId, visible, active, mode, autoHold, onAutoHoldStart, onAutoHoldRelease)
 
   return (
     <div

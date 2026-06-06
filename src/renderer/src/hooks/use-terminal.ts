@@ -144,7 +144,10 @@ export function useTerminal(
   projectId: string | undefined,
   visible: boolean,
   active: boolean = visible,
-  terminalMode: TerminalAttachMode = 'drive'
+  terminalMode: TerminalAttachMode = 'drive',
+  autoHold = false,
+  onAutoHoldStart?: () => void,
+  onAutoHoldRelease?: (flush: boolean) => void
 ): Terminal | null {
   const termRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
@@ -152,8 +155,16 @@ export function useTerminal(
   const writtenChunksRef = useRef<number>(0)
   const activeRef = useRef(active)
   const terminalModeRef = useRef<TerminalAttachMode>(terminalMode)
+  const autoHoldRef = useRef(autoHold)
+  const onAutoHoldStartRef = useRef(onAutoHoldStart)
+  const onAutoHoldReleaseRef = useRef(onAutoHoldRelease)
+  const typingActiveRef = useRef(false)
   const theme = useUIStore((s) => s.theme)
   const activeDialog = useUIStore((s) => s.activeDialog)
+
+  useEffect(() => { autoHoldRef.current = autoHold }, [autoHold])
+  useEffect(() => { onAutoHoldStartRef.current = onAutoHoldStart }, [onAutoHoldStart])
+  useEffect(() => { onAutoHoldReleaseRef.current = onAutoHoldRelease }, [onAutoHoldRelease])
 
   useEffect(() => {
     activeRef.current = active
@@ -189,11 +200,25 @@ export function useTerminal(
 
     const sendInput = (data: string): void => {
       if (terminalModeRef.current === 'view') return
+
+      // Auto-hold: on first keystroke with multiple agents running, switch to
+      // drive mode so input is queued rather than immediately injected.
+      if (autoHoldRef.current && !typingActiveRef.current && terminalModeRef.current === 'passthrough') {
+        typingActiveRef.current = true
+        onAutoHoldStartRef.current?.()
+      }
+
       // Optimistically echo before the round trip; the engine reconciles
       // against authoritative output and stays dormant on fast local links.
       predictiveEchoRef.current?.onUserInput(data)
       recordKeystrokeSent(data)
       pear.broker.sendInputFast(projectId, agentName!, data)
+
+      // On Enter, flush the queued input and return to live mode.
+      if (typingActiveRef.current && data.includes('\r')) {
+        typingActiveRef.current = false
+        onAutoHoldReleaseRef.current?.(true)
+      }
     }
 
     const focusTerminal = (requireActive = false): void => {
@@ -419,6 +444,13 @@ export function useTerminal(
       focusTerminal()
     }
 
+    const handleBlur = (): void => {
+      if (typingActiveRef.current) {
+        typingActiveRef.current = false
+        onAutoHoldReleaseRef.current?.(false)
+      }
+    }
+
     const handleKeyDown = (event: KeyboardEvent): void => {
       if (event.isComposing || event.target === term?.textarea) {
         return
@@ -450,6 +482,7 @@ export function useTerminal(
     container.addEventListener('pointerdown', handlePointerDown)
     container.addEventListener('keydown', handleKeyDown)
     container.addEventListener('paste', handlePaste)
+    container.addEventListener('blur', handleBlur, true)
 
     return () => {
       disposed = true
@@ -458,6 +491,7 @@ export function useTerminal(
       container.removeEventListener('pointerdown', handlePointerDown)
       container.removeEventListener('keydown', handleKeyDown)
       container.removeEventListener('paste', handlePaste)
+      container.removeEventListener('blur', handleBlur, true)
       resizeObserver?.disconnect()
       if (srttPoll) clearInterval(srttPoll)
       disposePredictiveEcho?.()
