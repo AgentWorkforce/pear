@@ -59,7 +59,7 @@ export type BeforeAgentSpawnHandler = (
   ctx: BeforeAgentSpawnContext
 ) => void | SpawnPatch | Promise<void | SpawnPatch>
 
-type Harness = 'claude' | 'codex' | 'opencode' | 'grok'
+type Harness = 'claude' | 'codex' | 'opencode'
 
 const CODEX_SESSION_LOOKBACK_MS = 10_000
 const CODEX_SESSION_LOOKAHEAD_MS = 10 * 60_000
@@ -88,7 +88,6 @@ function inferHarness(input: SpawnPtyInput | SpawnProviderInput): Harness | 'unk
   if (launcher === 'claude') return 'claude'
   if (launcher === 'codex') return 'codex'
   if (launcher === 'opencode') return 'opencode'
-  if (launcher === 'grok') return 'grok'
   return 'unknown'
 }
 
