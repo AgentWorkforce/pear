@@ -606,25 +606,16 @@ test('integration events watch selected relayfile mount paths', async () => {
 
   assert.deepEqual(harness.subscribeCalls[0].globs, [
     '/slack/channels/C123ABC/**',
-    '/slack/channels/C123ABC__proj-cloud/**',
-    '/slack/channels/D*/**',
-    '/slack/dms/*/**',
-    '/slack/users/*/messages/**'
+    '/slack/channels/C123ABC__proj-cloud/**'
   ])
   assert.deepEqual(harness.subscribeCalls[0].options?.pathScope, [
     '/slack/channels/C123ABC/**',
-    '/slack/channels/C123ABC__proj-cloud/**',
-    '/slack/channels/D*/**',
-    '/slack/dms/*/**',
-    '/slack/users/*/messages/**'
+    '/slack/channels/C123ABC__proj-cloud/**'
   ])
   assert.equal(harness.subscribeCalls[0].options?.from, 'legacy')
   assert.deepEqual(integrationSubscriptionSummaries([slackIntegration])[0].watches, [
     '.integrations/slack/channels/C123ABC/**',
-    '.integrations/slack/channels/C123ABC__proj-cloud/**',
-    '.integrations/slack/channels/D*/**',
-    '.integrations/slack/dms/*/**',
-    '.integrations/slack/users/*/messages/**'
+    '.integrations/slack/channels/C123ABC__proj-cloud/**'
   ])
 
   const selectedPath = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
@@ -669,8 +660,7 @@ test('integration events watch selected relayfile mount paths', async () => {
   assert.deepEqual(harness.sent, [])
 
   await harness.emit(changeEvent('/slack/channels/D123ABC/messages/1780668180_000000/meta.json', 'slack'))
-  await waitForSent(harness, 1)
-  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
+  assert.deepEqual(harness.sent, [])
 })
 
 test('slack raw-id and slug alias paths with distinct revisions inject once per logical message', async () => {
@@ -800,7 +790,7 @@ test('slack raw-id and slug alias duplicates suppress when one context read is s
   assert.match(harness.sent[0].input.text, /Message:\nreadable Slack message/u)
 })
 
-test('slack edits after a blind alias claim still inject once the content changes', async () => {
+test('slack raw-id event resolves context through mounted slug alias', async () => {
   let messageText = 'original Slack message'
   const harness = makeHarness(['alice'], {
     readFileResponse: (_workspaceId, path) => {
@@ -827,8 +817,8 @@ test('slack edits after a blind alias claim still inject once the content change
     ])
   })
 
-  // Raw-id copy first: every targeted read fails and the expanded event only
-  // carries the sparse relayfile pointer, so the injection is blind.
+  // Raw-id copy first: the raw targeted read fails, then the bridge retries the
+  // selected mounted slug alias so the injection has usable context.
   await harness.emit({
     ...changeEvent(
       '/slack/channels/C123ABC/messages/1780668000_000000/meta.json',
@@ -846,10 +836,21 @@ test('slack edits after a blind alias claim still inject once the content change
   } as ChangeEvent)
   await waitForSent(harness, 1, 2_500)
   assert.equal(harness.sent.length, 1)
-  assert.match(harness.sent[0].input.text, /Message: unavailable; targeted context read did not return content\./u)
+  assert.match(harness.sent[0].input.text, /Message:\noriginal Slack message/u)
+  assert.match(harness.sent[0].input.text, /Path: \.integrations\/slack\/channels\/C123ABC__proj-cloud\/messages\/1780668000_000000\/meta\.json/u)
+  assert.deepEqual(harness.readFileCalls.slice(0, 2), [
+    {
+      workspaceId: 'workspace-id',
+      path: '/slack/channels/C123ABC/messages/1780668000_000000/meta.json'
+    },
+    {
+      workspaceId: 'workspace-id',
+      path: '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
+    }
+  ])
 
-  // The slug alias copy of the same record carries content: suppressed as a
-  // duplicate, but the claim learns the content hash.
+  // The slug alias copy of the same record is now a duplicate of the
+  // content-bearing raw delivery.
   await harness.emit(changeEvent(
     '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json',
     'slack',
@@ -1052,7 +1053,7 @@ test('historical download subscriptions can receive older remote events', async 
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
 })
 
-test('slack direct message event scope can be disabled', async () => {
+test('slack direct message event scope is opt-in', async () => {
   const harness = makeHarness()
   const slackIntegration = integration({
     provider: 'slack',
@@ -1173,11 +1174,17 @@ test('slack context falls back to expanded event data when targeted remote previ
   assert.match(harness.sent[0].input.text, /Slack message event/u)
   assert.match(harness.sent[0].input.text, /Author: Khaliq/u)
   assert.match(harness.sent[0].input.text, /Message:\nexpanded Slack context/u)
-  assert.equal(harness.readFileCalls.length, 4)
-  assert.deepEqual(harness.readFileCalls[0], {
-    workspaceId: 'workspace-id',
-    path: messagePath
-  })
+  assert.equal(harness.readFileCalls.length, 8)
+  assert.deepEqual(harness.readFileCalls.slice(0, 2), [
+    {
+      workspaceId: 'workspace-id',
+      path: messagePath
+    },
+    {
+      workspaceId: 'workspace-id',
+      path: '/slack/channels/C123ABC/messages/1780668000_000000/meta.json'
+    }
+  ])
   assert.equal((harness.sent[0].input.data?.contextPreview as { kind?: string } | undefined)?.kind, 'text')
   assert.equal((harness.sent[0].input.data?.contextPreview as { content?: string } | undefined)?.content, undefined)
 })
@@ -1193,7 +1200,7 @@ test('slack context retries targeted remote preview before falling back to spars
         integrationId: 'slack-1',
         mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
         downloadHistoricalData: false,
-        scope: { notifyAgents: ['alice'] }
+        scope: { listenDms: true, notifyAgents: ['alice'] }
       })
     ])
   })
@@ -1228,7 +1235,7 @@ test('slack context does not inject sparse relayfile pointer fallback as message
         integrationId: 'slack-1',
         mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
         downloadHistoricalData: false,
-        scope: { notifyAgents: ['alice'] }
+        scope: { listenDms: true, notifyAgents: ['alice'] }
       })
     ])
   })
@@ -1600,16 +1607,10 @@ test('integration events preserve discovery mount paths', async () => {
   await harness.bridge.reconcile('project-1', [slackIntegration])
 
   assert.deepEqual(harness.subscribeCalls[0].globs, [
-    '/discovery/slack/**',
-    '/slack/channels/D*/**',
-    '/slack/dms/*/**',
-    '/slack/users/*/messages/**'
+    '/discovery/slack/**'
   ])
   assert.deepEqual(integrationSubscriptionSummaries([slackIntegration])[0].watches, [
-    '.integrations/discovery/slack/**',
-    '.integrations/slack/channels/D*/**',
-    '.integrations/slack/dms/*/**',
-    '.integrations/slack/users/*/messages/**'
+    '.integrations/discovery/slack/**'
   ])
 
   await harness.emit(changeEvent('/discovery/slack/actions/create-message/.schema.json', 'slack'))
