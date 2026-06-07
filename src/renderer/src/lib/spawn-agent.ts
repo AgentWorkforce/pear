@@ -3,7 +3,7 @@ import { getAgentKey, useAgentStore } from '@/stores/agent-store'
 import { useProjectStore, type Project, type ProjectRoot } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 
-export type SpawnAgentCli = 'claude' | 'codex'
+export type SpawnAgentCli = 'claude' | 'codex' | 'opencode'
 
 function nextAgentName(cli: SpawnAgentCli, projectId: string, liveNames: string[]): string {
   const existingNames = new Set([
