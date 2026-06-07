@@ -1079,8 +1079,12 @@ export function TerminalPane(): React.ReactNode {
             return (
               <div
                 key={agentKey}
-                className="absolute inset-0"
-                style={{ display: active ? 'block' : 'none' }}
+                className="absolute inset-0 transition-opacity duration-150 ease-out"
+                style={{
+                  opacity: active ? 1 : 0,
+                  pointerEvents: active ? 'auto' : 'none'
+                }}
+                aria-hidden={!active}
               >
                 <TerminalProject
                   agent={agent}
