@@ -2403,10 +2403,10 @@ export class BrokerManager {
             nextInput.cli
           )
         }
-        // Claude and Codex expose structured output streams; run them headless
-        // so relay reads the app-server/stream-json channel instead of a PTY.
+        // Claude, Codex, and OpenCode expose structured output streams; run them
+        // headless so relay reads the app-server channel instead of a PTY.
         // worker_stream chunks still flow to broker:pty-chunk → xterm for V1.
-        const useHeadless = !shellSession && ['claude', 'codex'].includes(spawnCliLabel(nextInput.cli))
+        const useHeadless = !shellSession && ['claude', 'codex', 'opencode'].includes(spawnCliLabel(nextInput.cli))
         const headlessClient = session.client as AgentRelayClient & {
           spawnCli(input: SpawnCliInput): Promise<{ name: string; runtime: string }>
         }
