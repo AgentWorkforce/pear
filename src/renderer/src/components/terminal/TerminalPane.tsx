@@ -565,13 +565,15 @@ export function TerminalPane(): React.ReactNode {
   }
 
   useEffect(() => {
+    let cancelled = false
     const clis: SpawnAgentCli[] = ['claude', 'codex', 'grok', 'opencode']
     void Promise.all(clis.map(async (cli) => {
       const available = await pear.broker.checkCliAvailable(cli).catch(() => false)
       return [cli, available] as const
     })).then((results) => {
-      setCliAvailability(Object.fromEntries(results))
+      if (!cancelled) setCliAvailability(Object.fromEntries(results))
     })
+    return () => { cancelled = true }
   }, [])
 
   useEffect(() => {
