@@ -144,10 +144,7 @@ export function useTerminal(
   projectId: string | undefined,
   visible: boolean,
   active: boolean = visible,
-  terminalMode: TerminalAttachMode = 'drive',
-  autoHold = false,
-  onAutoHoldStart?: () => Promise<void> | void,
-  onAutoHoldRelease?: (flush: boolean) => Promise<void> | void
+  terminalMode: TerminalAttachMode = 'drive'
 ): Terminal | null {
   const termRef = useRef<Terminal | null>(null)
   const fitAddonRef = useRef<FitAddon | null>(null)
@@ -155,17 +152,8 @@ export function useTerminal(
   const writtenChunksRef = useRef<number>(0)
   const activeRef = useRef(active)
   const terminalModeRef = useRef<TerminalAttachMode>(terminalMode)
-  const autoHoldRef = useRef(autoHold)
-  const onAutoHoldStartRef = useRef(onAutoHoldStart)
-  const onAutoHoldReleaseRef = useRef(onAutoHoldRelease)
-  const typingActiveRef = useRef(false)
-  const inputQueueRef = useRef<Promise<void>>(Promise.resolve())
   const theme = useUIStore((s) => s.theme)
   const activeDialog = useUIStore((s) => s.activeDialog)
-
-  useEffect(() => { autoHoldRef.current = autoHold }, [autoHold])
-  useEffect(() => { onAutoHoldStartRef.current = onAutoHoldStart }, [onAutoHoldStart])
-  useEffect(() => { onAutoHoldReleaseRef.current = onAutoHoldRelease }, [onAutoHoldRelease])
 
   useEffect(() => {
     activeRef.current = active
@@ -182,43 +170,15 @@ export function useTerminal(
     })
   }, [agentName, projectId, terminalMode])
 
-  const sendInputNow = useCallback(async (data: string): Promise<void> => {
+  const sendInput = useCallback((data: string): void => {
     if (!agentName || terminalModeRef.current === 'view') return
-
-    // Auto-hold: on first keystroke with multiple agents running, switch to
-    // drive mode so input is queued rather than immediately injected.
-    const holdInput = autoHoldRef.current && typingActiveRef.current
-    if (autoHoldRef.current && !typingActiveRef.current && terminalModeRef.current === 'passthrough') {
-      typingActiveRef.current = true
-      await onAutoHoldStartRef.current?.()
-    }
 
     // Optimistically echo before the round trip; the engine reconciles
     // against authoritative output and stays dormant on fast local links.
     predictiveEchoRef.current?.onUserInput(data)
     recordKeystrokeSent(data)
-    if (holdInput || typingActiveRef.current) {
-      await pear.broker.sendInput(projectId, agentName, data).catch((err) => {
-        console.warn('[terminal] held input failed:', err)
-        throw err
-      })
-    } else {
-      pear.broker.sendInputFast(projectId, agentName, data)
-    }
-
-    // On Enter, flush the queued input and return to live mode.
-    if (typingActiveRef.current && data.includes('\r')) {
-      typingActiveRef.current = false
-      await onAutoHoldReleaseRef.current?.(true)
-    }
+    pear.broker.sendInputFast(projectId, agentName, data)
   }, [agentName, projectId])
-
-  const sendInput = useCallback((data: string): void => {
-    const next = inputQueueRef.current.then(() => sendInputNow(data))
-    inputQueueRef.current = next.catch((err) => {
-      console.warn('[terminal] input failed:', err)
-    })
-  }, [sendInputNow])
 
   useEffect(() => {
     if (!containerRef.current || !agentName) return
@@ -460,13 +420,6 @@ export function useTerminal(
       focusTerminal()
     }
 
-    const handleBlur = (): void => {
-      if (typingActiveRef.current) {
-        typingActiveRef.current = false
-        void onAutoHoldReleaseRef.current?.(false)
-      }
-    }
-
     const handleKeyDown = (event: KeyboardEvent): void => {
       if (event.isComposing || event.target === term?.textarea) {
         return
@@ -498,7 +451,6 @@ export function useTerminal(
     container.addEventListener('pointerdown', handlePointerDown)
     container.addEventListener('keydown', handleKeyDown)
     container.addEventListener('paste', handlePaste)
-    container.addEventListener('blur', handleBlur, true)
 
     return () => {
       disposed = true
@@ -507,7 +459,6 @@ export function useTerminal(
       container.removeEventListener('pointerdown', handlePointerDown)
       container.removeEventListener('keydown', handleKeyDown)
       container.removeEventListener('paste', handlePaste)
-      container.removeEventListener('blur', handleBlur, true)
       resizeObserver?.disconnect()
       if (srttPoll) clearInterval(srttPoll)
       disposePredictiveEcho?.()

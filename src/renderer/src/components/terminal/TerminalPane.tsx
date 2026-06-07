@@ -172,19 +172,13 @@ interface TerminalProjectProps {
   visible: boolean
   active: boolean
   onActivate: () => void
-  autoHold?: boolean
-  onAutoHoldStart?: () => Promise<void> | void
-  onAutoHoldRelease?: (flush: boolean) => Promise<void> | void
 }
 
 function TerminalProject({
   agent,
   visible,
   active,
-  onActivate,
-  autoHold,
-  onAutoHoldStart,
-  onAutoHoldRelease
+  onActivate
 }: TerminalProjectProps): React.ReactNode {
   const terminalMode = getTerminalMode(agent)
 
@@ -198,9 +192,6 @@ function TerminalProject({
           active={active}
           mode={terminalMode}
           onActivate={onActivate}
-          autoHold={autoHold}
-          onAutoHoldStart={onAutoHoldStart}
-          onAutoHoldRelease={onAutoHoldRelease}
         />
       </div>
     </div>
@@ -216,9 +207,6 @@ interface SplitTerminalTileProps {
   onActivate: () => void
   onDeliveryModeChange: (agent: Agent, mode: QueueDeliveryMode) => void
   onOpenBurn: (agent: Agent) => void
-  autoHold?: boolean
-  onAutoHoldStart?: () => Promise<void> | void
-  onAutoHoldRelease?: (flush: boolean) => Promise<void> | void
 }
 
 function SplitTerminalTile({
@@ -229,10 +217,7 @@ function SplitTerminalTile({
   className = '',
   onActivate,
   onDeliveryModeChange,
-  onOpenBurn,
-  autoHold,
-  onAutoHoldStart,
-  onAutoHoldRelease
+  onOpenBurn
 }: SplitTerminalTileProps): React.ReactNode {
   const typing = useIsAgentTyping(agent)
   return (
@@ -284,9 +269,6 @@ function SplitTerminalTile({
           visible={visible}
           active={active}
           onActivate={onActivate}
-          autoHold={autoHold}
-          onAutoHoldStart={onAutoHoldStart}
-          onAutoHoldRelease={onAutoHoldRelease}
         />
       </div>
     </div>
@@ -364,11 +346,6 @@ interface SplitTerminalPageProps {
   onActivateAgent: (key: string) => void
   onDeliveryModeChange: (agent: Agent, mode: QueueDeliveryMode) => void
   onOpenBurn: (agent: Agent) => void
-  autoHold: boolean
-  makeAutoHoldHandlers: (agent: Agent) => {
-    onAutoHoldStart: () => Promise<void>
-    onAutoHoldRelease: (flush: boolean) => Promise<void>
-  }
 }
 
 function SplitTerminalPage({
@@ -378,16 +355,13 @@ function SplitTerminalPage({
   activeAgentKey,
   onActivateAgent,
   onDeliveryModeChange,
-  onOpenBurn,
-  autoHold,
-  makeAutoHoldHandlers
+  onOpenBurn
 }: SplitTerminalPageProps): React.ReactNode {
   return (
     <div className={`grid h-full gap-1 p-1 ${getSplitPageGridClass(agents.length)}`}>
       {agents.map((agent, index) => {
         const agentKey = getAgentKeyForAgent(agent)
         const active = visible && agentKey === activeAgentKey
-        const { onAutoHoldStart, onAutoHoldRelease } = makeAutoHoldHandlers(agent)
         return (
           <SplitTerminalTile
             key={agentKey}
@@ -399,9 +373,6 @@ function SplitTerminalPage({
             onActivate={() => onActivateAgent(agentKey)}
             onDeliveryModeChange={onDeliveryModeChange}
             onOpenBurn={onOpenBurn}
-            autoHold={autoHold}
-            onAutoHoldStart={onAutoHoldStart}
-            onAutoHoldRelease={onAutoHoldRelease}
           />
         )
       })}
@@ -523,31 +494,6 @@ export function TerminalPane(): React.ReactNode {
       setSpawnError(err instanceof Error ? err.message : String(err))
     }
   }
-
-  const makeAutoHoldHandlers = (agent: Agent): {
-    onAutoHoldStart: () => Promise<void>
-    onAutoHoldRelease: (flush: boolean) => Promise<void>
-  } => ({
-    onAutoHoldStart: async () => {
-      await handleDeliveryModeChange(agent, 'drive')
-    },
-    onAutoHoldRelease: async (flush: boolean) => {
-      let flushError: unknown
-      if (flush) {
-        try {
-          await pear.broker.flushPending(agent.projectId, agent.name)
-        } catch (err) {
-          flushError = err
-          setSpawnError(err instanceof Error ? err.message : String(err))
-        }
-      }
-      await handleDeliveryModeChange(agent, 'auto')
-      if (flushError) throw flushError
-    }
-  })
-
-  const runningAgentCount = agents.filter((a) => a.status === 'running').length
-  const autoHold = runningAgentCount > 1
 
   const goToSplitPage = (page: number): void => {
     const clampedPage = Math.max(0, Math.min(page, splitPageCount - 1))
@@ -1020,8 +966,6 @@ export function TerminalPane(): React.ReactNode {
                   onActivateAgent={setActiveAgentKey}
                   onDeliveryModeChange={(agent, mode) => void handleDeliveryModeChange(agent, mode)}
                   onOpenBurn={openBurnDetails}
-                  autoHold={autoHold}
-                  makeAutoHoldHandlers={makeAutoHoldHandlers}
                 />
               </div>
             )
@@ -1087,8 +1031,6 @@ export function TerminalPane(): React.ReactNode {
                   visible={active}
                   active={active}
                   onActivate={() => setActiveAgentKey(agentKey)}
-                  autoHold={autoHold}
-                  {...makeAutoHoldHandlers(agent)}
                 />
               </div>
             )
