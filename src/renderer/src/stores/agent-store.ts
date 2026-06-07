@@ -35,6 +35,10 @@ export interface Agent {
   pendingDeliveryIds: string[]
 }
 
+function normalizeAgentRuntime(runtime: unknown): Agent['runtime'] {
+  return runtime === 'pty' || runtime === 'headless' ? runtime : undefined
+}
+
 export interface ChatMessage {
   id: string
   kind?: 'message' | 'notice'
@@ -712,6 +716,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
         const channels = normalizeChannelList(event.channels)
         const existingAgent = state.agents.find((a) => matchesAgent(a, projectId, event.name!))
         const existingChannels = existingAgent?.channels || []
+        const runtime = normalizeAgentRuntime(event.runtime)
         const notices = channels
           ? channels
               .filter((channel) => !existingChannels.includes(channel))
@@ -727,7 +732,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
                       ...a,
                       cli: event.cli || a.cli,
                       model: event.model || a.model,
-                      runtime: (event.runtime as 'pty' | 'headless' | undefined) ?? a.runtime,
+                      runtime: runtime ?? a.runtime,
                       status: 'running',
                       activity: activityFromCurrentState(currentState),
                       currentState,
@@ -746,7 +751,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
                   name: event.name!,
                   cli: event.cli || 'unknown',
                   model: event.model,
-                  runtime: event.runtime as 'pty' | 'headless' | undefined,
+                  runtime,
                   status: 'running',
                   activity: activityFromCurrentState(currentState),
                   currentState,

@@ -1092,8 +1092,7 @@ export function TerminalPane(): React.ReactNode {
                 className="absolute inset-0 transition-opacity duration-150 ease-out"
                 style={{
                   opacity: active ? 1 : 0,
-                  pointerEvents: active ? 'auto' : 'none',
-                  visibility: active ? 'visible' : 'hidden'
+                  pointerEvents: active ? 'auto' : 'none'
                 }}
                 aria-hidden={!active}
               >
