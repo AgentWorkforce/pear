@@ -5,11 +5,15 @@ under `workforce/personas/`.
 
 ## Package-sourced personas
 
-`workforce/personas/autonomous-actor.json` is **sourced from the published
-persona pack**
-[`@agentworkforce/persona-autonomous-actor`](https://www.npmjs.com/package/@agentworkforce/persona-autonomous-actor)
-— it is not hand-maintained. It is materialized here so the persona is available
-to pear's local workforce tooling.
+The following personas are **sourced from published persona packs** — they are
+not hand-maintained. They are materialized here so the personas are available to
+pear's local workforce tooling.
+
+- `workforce/personas/autonomous-actor.json` from
+  [`@agentworkforce/persona-autonomous-actor`](https://www.npmjs.com/package/@agentworkforce/persona-autonomous-actor)
+- `workforce/personas/slack-comms.json` and
+  `workforce/personas/__assets/slack-comms/slack-comms.md` from
+  [`@agentworkforce/persona-slack-comms`](https://www.npmjs.com/package/@agentworkforce/persona-slack-comms)
 
 Refresh it from the latest published pack (copies the spec into
 `workforce/personas/`) with:
@@ -18,11 +22,9 @@ Refresh it from the latest published pack (copies the spec into
 npm run personas:refresh
 ```
 
-which runs `agentworkforce install @agentworkforce/persona-autonomous-actor
---overwrite`. (Requires the pack at `>=0.1.2`, which ships the
-`agentworkforce.personas` layout.) To change the persona, edit it in the
-package, republish, then re-run the refresh — do not hand-edit
-`autonomous-actor.json`. Commit the resulting diff.
+which installs both published persona packs with `--overwrite`. To change these
+personas, edit them in their package, republish, then re-run the refresh — do
+not hand-edit the materialized specs or assets. Commit the resulting diff.
 
 Other personas in `workforce/personas/` (e.g. `settings-panel-hero.json`) are
 repo-local and unaffected.

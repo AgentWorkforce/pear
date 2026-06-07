@@ -38,7 +38,7 @@ path, never by calling an API:
 ```
 
 - **Threaded reply** (the default): write to
-  `threads/<thread_ts>/replies/<name>.json` and include a `thread_ts` field.
+  `messages/<thread_ts>/replies/<name>.json` and include a `thread_ts` field.
 - **Top-level post** (new announcement only): write to `messages/<name>.json`
   with **no** `thread_ts`.
 - Message schema is roughly `{ channelId, thread_ts?, text }`, plus
