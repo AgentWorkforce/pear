@@ -682,6 +682,32 @@ describe('getAuthStatus', () => {
     })
   })
 
+  it('canonicalizes legacy agentrelay.dev stored tokens before refreshing auth status', async () => {
+    writeAuthJson(userDataDir, {
+      accessToken: 'cld_at_legacy_status',
+      refreshToken: 'cld_rt_legacy_status',
+      apiUrl: 'https://agentrelay.dev/cloud'
+    })
+    mock.fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({ user: { id: 'user-legacy' } })
+    })
+
+    const { getAuthStatus } = await import('./auth')
+
+    await expect(getAuthStatus()).resolves.toEqual({
+      loggedIn: true,
+      apiUrl: 'https://agentrelay.com/cloud',
+      user: { username: 'user-legacy' }
+    })
+    expect(mock.fetchMock).toHaveBeenCalledWith(
+      'https://agentrelay.com/cloud/api/v1/auth/whoami',
+      expect.any(Object)
+    )
+  })
+
   it('hydrates a sparse stored profile from whoami', async () => {
     writeAuthJson(userDataDir, {
       accessToken: 'cld_at_sparse_user',

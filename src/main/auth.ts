@@ -229,8 +229,9 @@ function loadTokens(): StoredTokens | null {
     const decrypted = safeStorage.decryptString(raw)
     const parsed = StoredTokensSchema.safeParse(JSON.parse(decrypted))
     if (!parsed.success) return null
-    saveAuthMeta(parsed.data)
-    return parsed.data
+    const tokens = { ...parsed.data, apiUrl: normalizeCloudApiUrl(parsed.data.apiUrl) }
+    saveAuthMeta(tokens)
+    return tokens
   } catch {
     return null
   }
@@ -602,7 +603,7 @@ function cloudAuthFromStored(tokens: StoredTokens): CloudAuth {
 }
 
 function normalizeCloudApiUrl(url: string | undefined): string {
-  const normalized = (url || getApiUrl()).trim().replace(/\/+$/, '')
+  const normalized = (url || CLOUD_API_URL).trim().replace(/\/+$/, '')
   if (normalized === LEGACY_CLOUD_API_URL) return CLOUD_API_URL
   return normalized
 }
