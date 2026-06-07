@@ -36,16 +36,19 @@ type MockClient = {
 
 const mock = vi.hoisted(() => {
   function createMockClient(agentNames: string[] = []): MockClient {
+    const agentRuntimes = new Map<string, 'pty' | 'headless'>()
     const client: MockClient = {
       agentNames: [...agentNames],
       getSession: vi.fn(async () => ({})),
-      listAgents: vi.fn(async () => client.agentNames.map((name) => ({ name, runtime: 'pty', channels: [] }))),
+      listAgents: vi.fn(async () => client.agentNames.map((name) => ({ name, runtime: agentRuntimes.get(name) ?? 'pty', channels: [] }))),
       getInboundDeliveryMode: vi.fn(async () => 'passthrough'),
       spawnPty: vi.fn(async (input: { name: string }) => {
+        agentRuntimes.set(input.name, 'pty')
         client.agentNames.push(input.name)
         return { name: input.name, runtime: 'pty' }
       }),
       spawnCli: vi.fn(async (input: { name: string }) => {
+        agentRuntimes.set(input.name, 'headless')
         client.agentNames.push(input.name)
         return { name: input.name, runtime: 'headless' }
       }),
@@ -54,7 +57,7 @@ const mock = vi.hoisted(() => {
       resizePty: vi.fn(async () => undefined),
       getPending: vi.fn(async () => []),
       getStatus: vi.fn(async () => ({
-        agents: client.agentNames.map((name) => ({ name, runtime: 'pty', channels: [] })),
+        agents: client.agentNames.map((name) => ({ name, runtime: agentRuntimes.get(name) ?? 'pty', channels: [] })),
         pending_delivery_count: 0
       })),
       onEvent: vi.fn(() => () => undefined),

@@ -9,6 +9,7 @@ import {
   HarnessDriverClient as AgentRelayClient,
   type RuntimeSpawnOptions as AgentRelaySpawnOptions,
   type SpawnPtyInput,
+  type SpawnCliInput,
   type SendMessageInput,
   type BrokerEvent,
   type BrokerStatus,
@@ -2415,9 +2416,9 @@ export class BrokerManager {
         const spawnedName = spawned.name || nextInput.name
         const resolvedRuntime: 'pty' | 'headless' =
           spawned.runtime === 'headless' || (useHeadless && !spawned.runtime) ? 'headless' : 'pty'
-        // Set immediately so attachTerminal sees the correct runtime before the
-        // async agent_spawned event fires.
-        this.agentRuntimes.set(spawnedName, resolvedRuntime)
+        // Set immediately using the composite key so attachTerminal's lookup
+        // hits before the async agent_spawned event fires.
+        this.agentRuntimes.set(this.getAgentRuntimeKey(sessionKeyFor(session), spawnedName), resolvedRuntime)
         this.rememberAgentSession(spawnedName, sessionKeyFor(session))
         const burnInput = { ...nextInput, name: spawnedName }
         const lineage = session.pearLineage.get(spawnedName)
