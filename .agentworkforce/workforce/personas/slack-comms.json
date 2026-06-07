@@ -44,9 +44,9 @@
   },
   "inputs": {
     "TASK_DESCRIPTION": {
-      "description": "Optional kickoff instruction. When launched directly the agent loads AGENTS.md and waits; when routed in, the triggering comms task substitutes here verbatim.",
+      "description": "Optional kickoff instruction. When launched directly the agent loads CLAUDE.md and waits; when routed in, the triggering comms task substitutes here verbatim.",
       "optional": true
     }
   },
-  "agentsMd": "__assets/slack-comms/slack-comms.md"
+  "claudeMd": "__assets/slack-comms/slack-comms.md"
 }
