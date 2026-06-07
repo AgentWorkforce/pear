@@ -2385,8 +2385,22 @@ export class BrokerManager {
             nextInput.cli
           )
         }
-        const spawned = await session.client.spawnPty(nextInput)
+        // Known agent CLIs run headless: relay connects to each agent's app-server
+        // and forwards worker_stream chunks, which flow to xterm via broker:pty-chunk.
+        // Shell commands and unknown CLIs still use PTY.
+        const useHeadless = !shellSession && ['claude', 'codex', 'opencode', 'grok'].includes(spawnCliLabel(nextInput.cli))
+        const headlessClient = session.client as AgentRelayClient & {
+          spawnCli(input: SpawnCliInput): Promise<{ name: string; runtime: string }>
+        }
+        const spawned = useHeadless
+          ? await headlessClient.spawnCli({ ...nextInput, transport: 'headless' } as SpawnCliInput)
+          : await session.client.spawnPty(nextInput)
         const spawnedName = spawned.name || nextInput.name
+        const resolvedRuntime: 'pty' | 'headless' =
+          spawned.runtime === 'headless' || (useHeadless && !spawned.runtime) ? 'headless' : 'pty'
+        // Set immediately so attachTerminal sees the correct runtime before the
+        // async agent_spawned event fires.
+        this.agentRuntimes.set(spawnedName, resolvedRuntime)
         this.rememberAgentSession(spawnedName, sessionKeyFor(session))
         const burnInput = { ...nextInput, name: spawnedName }
         const lineage = session.pearLineage.get(spawnedName)
@@ -2402,12 +2416,7 @@ export class BrokerManager {
         ).catch((err) => {
           console.warn('[burn-spawn-hook] post-spawn burn stamp failed:', err)
         })
-        return {
-          name: spawnedName,
-          runtime: typeof spawned.runtime === 'string' && spawned.runtime.trim()
-            ? spawned.runtime
-            : 'pty'
-        }
+        return { name: spawnedName, runtime: resolvedRuntime }
       } catch (err) {
         if (!isAgentNameConflict(err)) {
           throw buildSpawnFailureError(err, nextInput, session.cloudSandboxId ? 'cloud' : 'local')
