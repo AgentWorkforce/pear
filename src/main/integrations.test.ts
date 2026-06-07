@@ -580,6 +580,16 @@ describe('IntegrationsManager', () => {
     await vi.waitFor(() => {
       expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalled()
     })
+    expect(mock.integrationMountManager.ensureMounted).toHaveBeenLastCalledWith([
+      {
+        provider: 'slack',
+        mountPaths: [
+          '/discovery/slack',
+          '/slack/channels/C123/messages',
+          '/slack/channels/C123/threads'
+        ]
+      }
+    ])
 
     finishMountReconcile()
   })

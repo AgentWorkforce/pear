@@ -82,7 +82,7 @@ function defaultScope(adapter: IntegrationAdapter): Record<string, unknown> {
   return {
     provider: adapter.provider,
     scopes: adapter.requiredScopes || [],
-    ...(canonicalProviderKey(adapter.provider) === 'slack' ? { listenDms: true } : {})
+    ...(canonicalProviderKey(adapter.provider) === 'slack' ? { listenDms: false } : {})
   }
 }
 

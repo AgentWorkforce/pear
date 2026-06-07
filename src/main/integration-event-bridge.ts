@@ -2335,6 +2335,7 @@ export class IntegrationEventBridge {
               return eventContextPreviewFromFile(await client.readFile(handle.workspaceId, candidatePath))
             } catch (error) {
               readFileError = error
+              if (isUnauthorizedError(error)) throw error
             }
           }
         }

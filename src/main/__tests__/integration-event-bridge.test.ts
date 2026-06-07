@@ -160,6 +160,7 @@ function makeHarness(
     }
     readFileFailuresBeforeSuccess?: number
     failReadFile?: boolean
+    readFileError?: Error
     sendDelayMs?: number
     onSendStart?: (activeSends: number) => void
     waitForDeliveryNeverSettles?: boolean
@@ -205,6 +206,7 @@ function makeHarness(
           if (options.readFileFailuresBeforeSuccess && readFileAttempts <= options.readFileFailuresBeforeSuccess) {
             throw new Error('remote file not ready')
           }
+          if (options.readFileError) throw options.readFileError
           if (options.failReadFile) throw new Error('remote file not ready')
           return options.readFileResponse?.(workspaceId, path) ?? {
             path,
@@ -1222,6 +1224,45 @@ test('slack context retries targeted remote preview before falling back to spars
   assert.match(harness.sent[0].input.text, /Slack message event/u)
   assert.match(harness.sent[0].input.text, /Message:\ntargeted Slack context/u)
   assert.doesNotMatch(harness.sent[0].input.text, /"deleted": false/u)
+})
+
+test('slack context stops targeted remote preview retries on auth failures', async () => {
+  const error = new Error('http 403 forbidden') as Error & { status: number }
+  error.status = 403
+  const harness = makeHarness(['alice'], { readFileError: error })
+  const messagePath = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        downloadHistoricalData: false,
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+  })
+
+  await harness.emit({
+    ...changeEvent(messagePath, 'slack'),
+    expand: async () => ({
+      level: 'full',
+      path: messagePath,
+      data: {
+        text: 'expanded Slack context'
+      }
+    })
+  } as ChangeEvent)
+  await waitForSent(harness, 1, 2_500)
+
+  assert.deepEqual(harness.readFileCalls, [
+    {
+      workspaceId: 'workspace-id',
+      path: messagePath
+    }
+  ])
+  assert.match(harness.sent[0].input.text, /Message:\nexpanded Slack context/u)
 })
 
 test('slack context does not inject sparse relayfile pointer fallback as message content', async () => {

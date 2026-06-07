@@ -236,7 +236,7 @@ function scopeBooleanDefault(scope: Record<string, unknown>, keys: string[], def
 }
 
 function slackListenDmsFromScope(scope: Record<string, unknown>): boolean {
-  return scopeBooleanDefault(scope, ['listenDms', 'listenDirectMessages', 'directMessages'], true)
+  return scopeBooleanDefault(scope, ['listenDms', 'listenDirectMessages', 'directMessages'], false)
 }
 
 function localPathSegments(path: string): string[] {
