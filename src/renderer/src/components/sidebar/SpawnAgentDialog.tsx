@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { Loader2, X } from 'lucide-react'
 import { ClaudeIcon, CodexIcon, GrokIcon, OpenCodeIcon } from '@/components/common/AgentIcons'
 import { listProjectPersonas, spawnProjectAgent, spawnProjectPersona, type SpawnAgentCli } from '@/lib/spawn-agent'
-import type { WorkforcePersona } from '@/lib/ipc'
+import { pear, type WorkforcePersona } from '@/lib/ipc'
 import { useProjectStore, type ProjectRoot } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 
@@ -22,6 +22,7 @@ export function SpawnAgentDialog(): React.ReactNode {
   const [selectedPersonaId, setSelectedPersonaId] = useState('')
   const [customName, setCustomName] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [cliAvailability, setCliAvailability] = useState<Partial<Record<SpawnAgentCli, boolean>>>({})
   const [selectedRootId, setSelectedRootId] = useState<string | null>(null)
   const project = useProjectStore((s) => s.getActiveProject())
   const defaultRoot = useProjectStore((s) => s.getActiveRoot())
@@ -46,6 +47,16 @@ export function SpawnAgentDialog(): React.ReactNode {
       setSelectedRootId(root?.id ?? null)
     }
   }, [project, root?.id, selectedRootId])
+
+  useEffect(() => {
+    const clis: SpawnAgentCli[] = ['claude', 'codex', 'opencode']
+    void Promise.all(clis.map(async (cli) => {
+      const available = await pear.broker.checkCliAvailable(cli).catch(() => false)
+      return [cli, available] as const
+    })).then((results) => {
+      setCliAvailability(Object.fromEntries(results))
+    })
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -216,9 +227,13 @@ export function SpawnAgentDialog(): React.ReactNode {
                     type="button"
                     autoFocus={cli === 'claude'}
                     onClick={() => handleSpawn(cli)}
-                    disabled={!root?.pathExists || spawning}
+                    disabled={!root?.pathExists || spawning || cliAvailability[cli] === false}
                     className="flex min-h-[92px] flex-col items-center justify-center gap-2 rounded-lg border border-[var(--pear-border)] text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:cursor-not-allowed disabled:opacity-40"
-                    title={root?.pathExists ? `Spawn ${label}` : `Path not found: ${root?.path || project.rootPath}`}
+                    title={
+                      !root?.pathExists ? `Path not found: ${root?.path || project.rootPath}`
+                      : cliAvailability[cli] === false ? `${label} is not installed — run: npm install -g ${cli}`
+                      : `Spawn ${label}`
+                    }
                   >
                     <Icon className="h-6 w-6" />
                     <span>{spawningCli === cli ? 'Starting' : label}</span>

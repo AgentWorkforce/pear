@@ -17,7 +17,7 @@ import {
   addProjectIntegration,
   removeProjectIntegration
 } from './store'
-import { brokerManager } from './broker'
+import { brokerManager, resolveCommandWithAugmentedPath } from './broker'
 import * as git from './git'
 import * as filesystem from './filesystem'
 import * as auth from './auth'
@@ -384,6 +384,10 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('broker:list-agents', async (_, projectId?: string) => {
     return brokerManager.listAgents(projectId)
+  })
+
+  ipcMain.handle('broker:check-cli-available', (_, cli: string) => {
+    return Boolean(resolveCommandWithAugmentedPath(cli))
   })
 
   ipcMain.handle('broker:list-details', async () => {

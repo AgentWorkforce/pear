@@ -99,7 +99,7 @@ function augmentedPath(): string {
   return Array.from(entries).join(delimiter)
 }
 
-function resolveCommandWithAugmentedPath(command: string): string | undefined {
+export function resolveCommandWithAugmentedPath(command: string): string | undefined {
   const resolved = resolveCommandOnPath(command)
   if (resolved) return resolved
 

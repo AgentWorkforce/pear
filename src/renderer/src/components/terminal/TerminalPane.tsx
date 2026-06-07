@@ -455,6 +455,7 @@ export function TerminalPane(): React.ReactNode {
   const setTerminalLayout = useUIStore((s) => s.setTerminalLayout)
   const [spawningCli, setSpawningCli] = useState<SpawnAgentCli | null>(null)
   const [spawnError, setSpawnError] = useState<string | null>(null)
+  const [cliAvailability, setCliAvailability] = useState<Partial<Record<SpawnAgentCli, boolean>>>({})
   const spawnRequestRef = useRef(false)
   const [burnSummariesByAgentKey, setBurnSummariesByAgentKey] = useState<Record<string, BurnAgentSummary>>({})
   const [splitPage, setSplitPage] = useState(0)
@@ -562,6 +563,16 @@ export function TerminalPane(): React.ReactNode {
       burnAgent: getBurnInputForAgent(agent)
     })
   }
+
+  useEffect(() => {
+    const clis: SpawnAgentCli[] = ['claude', 'codex', 'grok', 'opencode']
+    void Promise.all(clis.map(async (cli) => {
+      const available = await pear.broker.checkCliAvailable(cli).catch(() => false)
+      return [cli, available] as const
+    })).then((results) => {
+      setCliAvailability(Object.fromEntries(results))
+    })
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -778,46 +789,28 @@ export function TerminalPane(): React.ReactNode {
         </p>
         {activeProject ? (
           <div className="mt-4 grid w-full max-w-[560px] grid-cols-4 gap-3">
-            <button
-              type="button"
-              onClick={() => handleSpawn('claude')}
-              disabled={!activeRoot?.pathExists || spawningCli !== null}
-              className="flex items-center justify-center gap-2 rounded-lg border border-[var(--pear-border)] px-4 py-3 text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:cursor-not-allowed disabled:opacity-40"
-              title={activeRoot?.pathExists ? 'Spawn Claude' : `Path not found: ${activeRoot?.path || activeProject.rootPath}`}
-            >
-              <ClaudeIcon className="h-4 w-4" />
-              <span>{spawningCli === 'claude' ? 'Starting' : 'Claude'}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => handleSpawn('codex')}
-              disabled={!activeRoot?.pathExists || spawningCli !== null}
-              className="flex items-center justify-center gap-2 rounded-lg border border-[var(--pear-border)] px-4 py-3 text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:cursor-not-allowed disabled:opacity-40"
-              title={activeRoot?.pathExists ? 'Spawn Codex' : `Path not found: ${activeRoot?.path || activeProject.rootPath}`}
-            >
-              <CodexIcon className="h-4 w-4" />
-              <span>{spawningCli === 'codex' ? 'Starting' : 'Codex'}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => handleSpawn('grok')}
-              disabled={!activeRoot?.pathExists || spawningCli !== null}
-              className="flex items-center justify-center gap-2 rounded-lg border border-[var(--pear-border)] px-4 py-3 text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:cursor-not-allowed disabled:opacity-40"
-              title={activeRoot?.pathExists ? 'Spawn Grok' : `Path not found: ${activeRoot?.path || activeProject.rootPath}`}
-            >
-              <GrokIcon className="h-4 w-4" />
-              <span>{spawningCli === 'grok' ? 'Starting' : 'Grok'}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => handleSpawn('opencode')}
-              disabled={!activeRoot?.pathExists || spawningCli !== null}
-              className="flex items-center justify-center gap-2 rounded-lg border border-[var(--pear-border)] px-4 py-3 text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:cursor-not-allowed disabled:opacity-40"
-              title={activeRoot?.pathExists ? 'Spawn OpenCode' : `Path not found: ${activeRoot?.path || activeProject.rootPath}`}
-            >
-              <OpenCodeIcon className="h-4 w-4" />
-              <span>{spawningCli === 'opencode' ? 'Starting' : 'OpenCode'}</span>
-            </button>
+            {([
+              { cli: 'claude', label: 'Claude', Icon: ClaudeIcon },
+              { cli: 'codex', label: 'Codex', Icon: CodexIcon },
+              { cli: 'grok', label: 'Grok', Icon: GrokIcon },
+              { cli: 'opencode', label: 'OpenCode', Icon: OpenCodeIcon }
+            ] as const).map(({ cli, label, Icon }) => (
+              <button
+                key={cli}
+                type="button"
+                onClick={() => handleSpawn(cli)}
+                disabled={!activeRoot?.pathExists || spawningCli !== null || cliAvailability[cli] === false}
+                className="flex items-center justify-center gap-2 rounded-lg border border-[var(--pear-border)] px-4 py-3 text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:cursor-not-allowed disabled:opacity-40"
+                title={
+                  !activeRoot?.pathExists ? `Path not found: ${activeRoot?.path || activeProject.rootPath}`
+                  : cliAvailability[cli] === false ? `${label} is not installed`
+                  : `Spawn ${label}`
+                }
+              >
+                <Icon className="h-4 w-4" />
+                <span>{spawningCli === cli ? 'Starting' : label}</span>
+              </button>
+            ))}
           </div>
         ) : (
           <button

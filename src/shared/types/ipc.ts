@@ -945,6 +945,7 @@ export interface PearAPI {
     unsubscribeAgentChannel: (projectId: string | undefined, name: string, channel: string) => Promise<void>
     releaseAgent: (projectId: string | undefined, name: string) => Promise<void>
     listAgents: (projectId?: string) => Promise<BrokerListAgent[]>
+    checkCliAvailable: (cli: string) => Promise<boolean>
     listDetails: () => Promise<BrokerDetails[]>
     listEvents: () => Promise<BrokerEventRecord[]>
     shutdown: () => Promise<void>
