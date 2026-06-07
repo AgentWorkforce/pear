@@ -276,6 +276,24 @@ describe('IntegrationMountManager', () => {
     })
   })
 
+  it('mounts Slack thread context roots in mirror mode', async () => {
+    const manager = new IntegrationMountManager()
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/channels/C123/threads']
+      }
+    ])
+
+    expect(mock.mountInputs[0]).toMatchObject({
+      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/slack/channels/C123/threads',
+      remotePath: '/slack/channels/C123/threads',
+      localLayout: 'exact',
+      syncMode: 'mirror'
+    })
+  })
+
   it('rejects Slack command roots with traversal segments', async () => {
     const manager = new IntegrationMountManager()
 

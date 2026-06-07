@@ -376,6 +376,18 @@ function dedupeStrings(values: string[]): string[] {
   return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean))).sort()
 }
 
+function dedupeStringsInOrder(values: string[]): string[] {
+  const seen = new Set<string>()
+  const deduped: string[] = []
+  for (const value of values) {
+    const trimmed = value.trim()
+    if (!trimmed || seen.has(trimmed)) continue
+    seen.add(trimmed)
+    deduped.push(trimmed)
+  }
+  return deduped
+}
+
 function sameStringList(left: string[], right: string[]): boolean {
   return left.length === right.length && left.every((value, index) => value === right[index])
 }
@@ -400,7 +412,7 @@ function scopeBooleanDefault(scope: Record<string, unknown>, keys: string[], def
 
 function slackListenDms(integration: ConnectedIntegration): boolean {
   if (!isSlackProvider(integration.provider)) return false
-  return scopeBooleanDefault(integration.scope, ['listenDms', 'listenDirectMessages', 'directMessages'], true)
+  return scopeBooleanDefault(integration.scope, ['listenDms', 'listenDirectMessages', 'directMessages'], false)
 }
 
 function pathSegments(path: string): string[] {
@@ -1708,6 +1720,32 @@ function slackEventContextPath(path: string): boolean {
   return /^\/slack\/(?:channels|dms|users)\/[^/]+\/(?:messages|threads)\/.+\.json$/u.test(path)
 }
 
+function slackContextReadCandidatePaths(path: string, specs: SubscriptionSpec[]): string[] {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`
+  if (!slackEventContextPath(normalizedPath)) return [normalizedPath]
+
+  const match = normalizedPath.match(/^\/slack\/channels\/([^/]+)(\/(?:messages|threads)\/.+\.json)$/u)
+  if (!match?.[1] || !match[2]) return [normalizedPath]
+
+  const currentChannel = match[1]
+  const channelId = canonicalSlackChannelSegment(currentChannel)
+  const tail = match[2]
+  const candidates = [normalizedPath]
+
+  for (const spec of specs) {
+    for (const mountPath of spec.mountPaths) {
+      const mountMatch = mountPath.match(/^\/slack\/channels\/([^/]+)(?:\/|$)/u)
+      const mountedChannel = mountMatch?.[1]
+      if (!mountedChannel || canonicalSlackChannelSegment(mountedChannel) !== channelId) {
+        continue
+      }
+      candidates.push(`/slack/channels/${mountedChannel}${tail}`)
+    }
+  }
+
+  return dedupeStringsInOrder(candidates)
+}
+
 function slackScopeLabel(path: string): string | undefined {
   const segments = pathSegments(path)
   const channelIndex = segments.indexOf('channels')
@@ -1730,8 +1768,9 @@ function formatSlackIntegrationEventMessage(
   const relayfilePath = eventSummaryValue(resource.path)
   if (provider !== 'slack' || !relayfilePath || !slackEventContextPath(relayfilePath)) return null
 
-  const projectPath = projectIntegrationPathForRelayfilePath(relayfilePath)
-  const scopeLabel = slackScopeLabel(relayfilePath)
+  const contextPath = contextPreview?.path || relayfilePath
+  const projectPath = projectIntegrationPathForRelayfilePath(contextPath)
+  const scopeLabel = slackScopeLabel(contextPath)
   const messageText = slackPreviewText(contextPreview)
   const author = slackPreviewAuthor(contextPreview)
   const lines = [
@@ -2271,7 +2310,11 @@ export class IntegrationEventBridge {
     )
   }
 
-  private async readEventContextPreview(projectId: string, event: ChangeEvent): Promise<EventContextPreview | undefined> {
+  private async readEventContextPreview(
+    projectId: string,
+    event: ChangeEvent,
+    matchedSpecs: SubscriptionSpec[]
+  ): Promise<EventContextPreview | undefined> {
     if (event.type === 'file.deleted' || event.type === 'relayfile.changed.summary') return undefined
     const path = eventSummaryValue(event.resource.path)
     if (!path) return undefined
@@ -2281,14 +2324,19 @@ export class IntegrationEventBridge {
       const readDelays = slackEventContextPath(path) ? [0, ...EVENT_CONTEXT_READ_RETRY_DELAYS_MS] : [0]
       const handle = await this.getWorkspaceHandle()
       const client = handle.client()
+      const candidatePaths = slackEventContextPath(path)
+        ? slackContextReadCandidatePaths(path, matchedSpecs)
+        : [path]
       if (typeof client.readFile === 'function') {
         for (const [index, delayMs] of readDelays.entries()) {
           if (delayMs > 0) await delay(delayMs)
-          try {
-            return eventContextPreviewFromFile(await client.readFile(handle.workspaceId, path))
-          } catch (error) {
-            readFileError = error
-            if (index === readDelays.length - 1) break
+          for (const candidatePath of candidatePaths) {
+            try {
+              return eventContextPreviewFromFile(await client.readFile(handle.workspaceId, candidatePath))
+            } catch (error) {
+              readFileError = error
+              if (isUnauthorizedError(error)) throw error
+            }
           }
         }
       }
@@ -2401,7 +2449,7 @@ export class IntegrationEventBridge {
     }
 
     const eventMetadata = integrationEventMetadata(event)
-    const contextPreview = await this.readEventContextPreview(projectId, event)
+    const contextPreview = await this.readEventContextPreview(projectId, event, matchedSpecs)
     const usesConcreteAgentTargets = uniqueRecipients.every((recipient) => !recipient.startsWith('#'))
     const canTrackInjectedDelivery = usesConcreteAgentTargets && typeof bridge.sendMessageAndWaitForInjected === 'function'
     const shouldTrackDedupe = canTrackInjectedDelivery

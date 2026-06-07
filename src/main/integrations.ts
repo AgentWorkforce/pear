@@ -395,12 +395,29 @@ function writebackCommandMountPathsForIntegration(integration: ConnectedIntegrat
     .filter((mountPath): mountPath is string => !!mountPath)
 }
 
+function slackThreadContextMountPathsForIntegration(integration: ConnectedIntegration): string[] {
+  if (toRelayfileProvider(integration.provider) !== 'slack') return []
+  return canonicalMountPathsForConnectedIntegration(integration)
+    .filter(isNarrowHistoricalMountPath)
+    .flatMap((mountPath) => {
+      const segments = mountPath.split('/').filter(Boolean)
+      if (segments[0] !== 'slack') return []
+      const collection = segments[1]
+      if (!['channels', 'dms', 'users'].includes(collection || '')) return []
+      if (segments.length === 3) return [`${mountPath}/threads`]
+      return []
+    })
+}
+
 export function localSyncMountPathsForIntegration(integration: ConnectedIntegration): string[] {
   const discoveryPath = discoveryMountPathForProvider(integration.provider)
   const historicalPaths = integration.downloadHistoricalData === true
     ? canonicalMountPathsForConnectedIntegration(integration).filter(isNarrowHistoricalMountPath)
     : writebackCommandMountPathsForIntegration(integration)
-  return dedupeStrings([discoveryPath, ...historicalPaths])
+  const liveContextPaths = integration.downloadHistoricalData === true
+    ? []
+    : slackThreadContextMountPathsForIntegration(integration)
+  return dedupeStrings([discoveryPath, ...historicalPaths, ...liveContextPaths])
 }
 
 function skippedHistoricalMountPathsForIntegration(integration: ConnectedIntegration): string[] {
@@ -1829,6 +1846,10 @@ export class IntegrationsManager {
         const discoveryPath = projectIntegrationPathForRelayfilePath(discoveryMountPathForProvider(integration.provider))
         const writebackCommandPaths = writebackCommandMountPathsForIntegration(integration)
           .map(projectIntegrationPathForRelayfilePath)
+        const liveContextPaths = integration.downloadHistoricalData === true
+          ? []
+          : slackThreadContextMountPathsForIntegration(integration)
+            .map(projectIntegrationPathForRelayfilePath)
         const historyEnabled = integration.downloadHistoricalData === true
         const writebackPaths = historyEnabled
           ? mountPaths.join(', ') || 'the configured provider paths'
@@ -1849,7 +1870,7 @@ export class IntegrationsManager {
             ? ` Historical download is enabled, but these provider paths are not locally poll-mounted: ${skippedLocalPaths.join(', ')}. Select fewer or narrower resources to download local history.`
             : ` Historical provider records are available at ${writebackPaths}.`
           : writebackPaths
-            ? ` Local historical provider records are not downloaded. Writeback command roots are mounted at ${writebackPaths}; provider context should be read on demand or through incoming events.`
+            ? ` Local historical provider records are not broadly downloaded. Writeback command roots are mounted at ${writebackPaths}${liveContextPaths.length > 0 ? `, and live thread context roots are mounted at ${liveContextPaths.join(', ')}` : ''}; provider context should be read on demand or through incoming events.`
             : ` Local historical provider records are not downloaded. No narrow writeback command roots are mounted; select narrower resources to enable local writeback transport.`
         lines.push(
           `- ${integration.provider}: ${scopeSummary}${scopeClause}. Writeback schemas and examples are available at ${discoveryPath}; ${writebackInstruction}. ${historyClause}`

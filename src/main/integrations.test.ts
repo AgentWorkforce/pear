@@ -500,7 +500,9 @@ describe('IntegrationsManager', () => {
     })).toEqual([
       '/discovery/slack',
       '/slack/channels/C123/messages',
+      '/slack/channels/C123/threads',
       '/slack/dms/D123/messages',
+      '/slack/dms/D123/threads',
       '/slack/users/U123/messages'
     ])
   })
@@ -534,6 +536,7 @@ describe('IntegrationsManager', () => {
 
     expect(message).toContain('create writeback files under .integrations/slack/channels/C123/messages')
     expect(message).toContain('Writeback command roots are mounted at .integrations/slack/channels/C123/messages')
+    expect(message).toContain('live thread context roots are mounted at .integrations/slack/channels/C123/threads')
     expect(message).not.toContain('create writeback files under .integrations/slack/channels/C123, not under discovery')
   })
 
@@ -577,6 +580,16 @@ describe('IntegrationsManager', () => {
     await vi.waitFor(() => {
       expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalled()
     })
+    expect(mock.integrationMountManager.ensureMounted).toHaveBeenLastCalledWith([
+      {
+        provider: 'slack',
+        mountPaths: [
+          '/discovery/slack',
+          '/slack/channels/C123/messages',
+          '/slack/channels/C123/threads'
+        ]
+      }
+    ])
 
     finishMountReconcile()
   })
