@@ -22,7 +22,7 @@
     "verify:mcp-spawn": "node scripts/verify-mcp-spawn.mjs",
     "release:mac": "npm run icons:macos && npm run relayfile-mount:install:release && RELAYFILE_MOUNT_INSTALL_SOURCE=release npm run build && electron-builder --mac --publish always",
     "test": "node --experimental-strip-types --no-warnings --test 'src/main/__tests__/*.test.ts'",
-    "personas:refresh": "npx --yes agentworkforce install @agentworkforce/persona-autonomous-actor --overwrite"
+    "personas:refresh": "npx --yes agentworkforce install @agentworkforce/persona-autonomous-actor --overwrite && npx --yes agentworkforce install @agentworkforce/persona-slack-comms --overwrite"
   },
   "dependencies": {
     "@agent-relay/cloud": "^8.1.2",
