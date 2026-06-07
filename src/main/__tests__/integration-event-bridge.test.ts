@@ -944,6 +944,71 @@ test('slack raw-id event falls back to matched local suffixed mount when remote 
   }
 })
 
+test('slack local context fallback rejects traversal outside matched mount root', async () => {
+  const tempRoot = await mkdtemp(join(tmpdir(), 'pear-slack-local-traversal-'))
+  const localRoot = join(tempRoot, 'workspace-id', 'slack', 'channels', 'C123ABC__proj-cloud')
+  const escapedRoot = join(tempRoot, 'workspace-id', 'slack', 'leaked')
+  const remotePath = '/slack/channels/C123ABC/messages/1780668000_000000/../../../../leaked/meta.json'
+  const localRemotePath = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/../../../../leaked/meta.json'
+
+  try {
+    await mkdir(escapedRoot, { recursive: true })
+    await writeFile(
+      join(escapedRoot, 'meta.json'),
+      JSON.stringify({ provider: 'slack', text: 'escaped Slack message' })
+    )
+    const harness = makeHarness(['alice'], {
+      failReadFile: true
+    })
+
+    await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+      await harness.bridge.reconcile('project-1', [
+        integration({
+          provider: 'slack',
+          integrationId: 'slack-1',
+          mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+          localMountPaths: [localRoot],
+          downloadHistoricalData: false,
+          scope: { notifyAgents: ['alice'] }
+        })
+      ])
+    })
+
+    await harness.emit({
+      ...changeEvent(
+        remotePath,
+        'slack',
+        { digest: 'revision:traversal-copy' }
+      ),
+      expand: async () => ({
+        level: 'full',
+        path: remotePath,
+        data: {
+          path: remotePath,
+          deleted: false
+        }
+      })
+    } as ChangeEvent)
+    await waitForSent(harness, 1, 2_500)
+
+    assert.doesNotMatch(harness.sent[0].input.text, /escaped Slack message/u)
+    assert.match(harness.sent[0].input.text, /Message: unavailable/u)
+    assert.equal(harness.sent[0].input.data?.contextPreview, undefined)
+    assert.deepEqual(harness.readFileCalls.slice(0, 2), [
+      {
+        workspaceId: 'workspace-id',
+        path: remotePath
+      },
+      {
+        workspaceId: 'workspace-id',
+        path: localRemotePath
+      }
+    ])
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true })
+  }
+})
+
 test('slack unchanged-content replay re-drives after injected delivery is not confirmed', async () => {
   const options = { failInjected: true }
   const harness = makeHarness(['alice'], options)

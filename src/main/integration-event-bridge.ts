@@ -1069,6 +1069,11 @@ function localPathForRemotePathInsideRoot(localRoot: string, remoteRoot: string,
   return tail === '/' ? resolve(localRoot) : join(resolve(localRoot), ...pathSegments(tail))
 }
 
+function localPathIsInsideRoot(localRoot: string, localPath: string): boolean {
+  const relativePath = relative(resolve(localRoot), resolve(localPath))
+  return relativePath === '' || (!!relativePath && !relativePath.startsWith('..') && !isAbsolute(relativePath))
+}
+
 export function localWatchEventPathsForFilename(
   localRoot: string,
   remoteRoot: string,
@@ -1820,6 +1825,7 @@ async function readLocalEventContextPreview(
     for (const root of spec.localMountRoots) {
       if (!pathIsInsideMount(remotePath, root.remoteRoot)) continue
       const localPath = localPathForRemotePathInsideRoot(root.localRoot, root.remoteRoot, remotePath)
+      if (!localPathIsInsideRoot(root.localRoot, localPath)) continue
       const stats = await stat(localPath).catch(() => null)
       if (!stats || stats.isDirectory()) continue
       try {
