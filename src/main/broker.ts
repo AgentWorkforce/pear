@@ -2385,10 +2385,11 @@ export class BrokerManager {
             nextInput.cli
           )
         }
-        // Known agent CLIs run headless: relay connects to each agent's app-server
-        // and forwards worker_stream chunks, which flow to xterm via broker:pty-chunk.
-        // Shell commands and unknown CLIs still use PTY.
-        const useHeadless = !shellSession && ['claude', 'codex', 'opencode', 'grok'].includes(spawnCliLabel(nextInput.cli))
+        // Claude, Codex, and OpenCode expose structured output channels; run them
+        // headless so relay reads the app-server stream instead of a PTY.
+        // Grok headless support is pending relay confirmation — it stays on PTY.
+        // Shell commands and unknown CLIs also stay on PTY.
+        const useHeadless = !shellSession && ['claude', 'codex', 'opencode'].includes(spawnCliLabel(nextInput.cli))
         const headlessClient = session.client as AgentRelayClient & {
           spawnCli(input: SpawnCliInput): Promise<{ name: string; runtime: string }>
         }
