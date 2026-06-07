@@ -2402,8 +2402,22 @@ export class BrokerManager {
             nextInput.cli
           )
         }
-        const spawned = await session.client.spawnPty(nextInput)
+        // Claude and Codex expose structured output streams; run them headless
+        // so relay reads the app-server/stream-json channel instead of a PTY.
+        // worker_stream chunks still flow to broker:pty-chunk → xterm for V1.
+        const useHeadless = !shellSession && ['claude', 'codex'].includes(spawnCliLabel(nextInput.cli))
+        const headlessClient = session.client as AgentRelayClient & {
+          spawnCli(input: SpawnCliInput): Promise<{ name: string; runtime: string }>
+        }
+        const spawned = useHeadless
+          ? await headlessClient.spawnCli({ ...nextInput, transport: 'headless' } as SpawnCliInput)
+          : await session.client.spawnPty(nextInput)
         const spawnedName = spawned.name || nextInput.name
+        const resolvedRuntime: 'pty' | 'headless' =
+          spawned.runtime === 'headless' || (useHeadless && !spawned.runtime) ? 'headless' : 'pty'
+        // Set immediately so attachTerminal sees the correct runtime before the
+        // async agent_spawned event fires.
+        this.agentRuntimes.set(spawnedName, resolvedRuntime)
         this.rememberAgentSession(spawnedName, sessionKeyFor(session))
         const burnInput = { ...nextInput, name: spawnedName }
         const lineage = session.pearLineage.get(spawnedName)
@@ -2419,12 +2433,7 @@ export class BrokerManager {
         ).catch((err) => {
           console.warn('[burn-spawn-hook] post-spawn burn stamp failed:', err)
         })
-        return {
-          name: spawnedName,
-          runtime: typeof spawned.runtime === 'string' && spawned.runtime.trim()
-            ? spawned.runtime
-            : 'pty'
-        }
+        return { name: spawnedName, runtime: resolvedRuntime }
       } catch (err) {
         if (!isAgentNameConflict(err)) {
           throw buildSpawnFailureError(err, nextInput, session.cloudSandboxId ? 'cloud' : 'local')

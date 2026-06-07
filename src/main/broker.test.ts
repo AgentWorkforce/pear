@@ -16,6 +16,7 @@ type MockClient = {
   resizePty: ReturnType<typeof vi.fn>
   getPending: ReturnType<typeof vi.fn>
   spawnPty: ReturnType<typeof vi.fn>
+  spawnCli: ReturnType<typeof vi.fn>
   onEvent: ReturnType<typeof vi.fn>
   addListener: ReturnType<typeof vi.fn>
   connectEvents: ReturnType<typeof vi.fn>
@@ -43,6 +44,10 @@ const mock = vi.hoisted(() => {
       spawnPty: vi.fn(async (input: { name: string }) => {
         client.agentNames.push(input.name)
         return { name: input.name, runtime: 'pty' }
+      }),
+      spawnCli: vi.fn(async (input: { name: string }) => {
+        client.agentNames.push(input.name)
+        return { name: input.name, runtime: 'headless' }
       }),
       setInboundDeliveryMode: vi.fn(async (_name: string, mode: string) => ({ mode, flushed: 0 })),
       snapshot: vi.fn(async () => ({ rows: 24, cols: 80, cursor: { x: 0, y: 0 }, screen: 'aGVsbG8=' })),
