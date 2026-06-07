@@ -389,6 +389,13 @@ function spawnRequestKey(
   })
 }
 
+function personaSpawnRequestKey(projectId: string, personaId: string): string {
+  return JSON.stringify({
+    projectId,
+    personaId
+  })
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
@@ -1200,7 +1207,7 @@ export class BrokerManager {
   private sessions = new Map<string, BrokerSession>()
   private startPromises = new Map<string, Promise<boolean | void>>()
   private revivePromises = new Map<string, Promise<boolean>>()
-  private inFlightSpawnRequests = new Map<string, Promise<{ name: string; runtime: string }>>()
+  private inFlightSpawnRequests = new Map<string, Promise<BrokerSpawnResult>>()
   // Which broker sessions (by session key) an agent name is registered on.
   // Both a project's local and cloud brokers join the same relay workspace,
   // so agent names are project-unique in practice — the set tracks which
@@ -2446,11 +2453,27 @@ export class BrokerManager {
   }
 
   async spawnPersona(projectId: string, personaId: string): Promise<BrokerSpawnResult> {
-    const session = this.getSessionForProject(projectId)
     const trimmedPersonaId = personaId.trim()
     if (!trimmedPersonaId) {
       throw new Error('Persona id is required')
     }
+
+    const requestKey = personaSpawnRequestKey(projectId, trimmedPersonaId)
+    const inFlight = this.inFlightSpawnRequests.get(requestKey)
+    if (inFlight) return inFlight
+
+    let promise!: Promise<BrokerSpawnResult>
+    promise = this.spawnPersonaOnce(projectId, trimmedPersonaId).finally(() => {
+      if (this.inFlightSpawnRequests.get(requestKey) === promise) {
+        this.inFlightSpawnRequests.delete(requestKey)
+      }
+    })
+    this.inFlightSpawnRequests.set(requestKey, promise)
+    return promise
+  }
+
+  private async spawnPersonaOnce(projectId: string, trimmedPersonaId: string): Promise<BrokerSpawnResult> {
+    const session = this.getSessionForProject(projectId)
 
     const command = resolveAgentWorkforceCommand(session.cwd)
     const persona = findWorkforcePersona(session.cwd, trimmedPersonaId, command)

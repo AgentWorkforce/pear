@@ -220,6 +220,29 @@ async function attachCloud(manager: BrokerManager, agents: string[] = []): Promi
   return lastConstructed()
 }
 
+async function writeAgentWorkforceFixture(projectDir: string): Promise<void> {
+  const binDir = join(projectDir, 'node_modules', '.bin')
+  const posixBin = join(binDir, 'agentworkforce')
+  const winBin = join(binDir, 'agentworkforce.cmd')
+  const jsBin = join(binDir, 'agentworkforce.js')
+  const script = [
+    'const command = process.argv[2]',
+    "if (command === 'show') {",
+    "  console.log(JSON.stringify({ spec: { id: 'autonomous-actor', harness: 'claude' } }))",
+    '} else {',
+    "  console.log(JSON.stringify({ personas: [{ persona: 'autonomous-actor', harness: 'claude' }] }))",
+    '}'
+  ].join('\n')
+
+  await mkdir(binDir, { recursive: true })
+  await writeFile(jsBin, script)
+  await writeFile(posixBin, `#!/usr/bin/env node\n${script}\n`)
+  await writeFile(winBin, `@echo off\r\nnode "%~dp0agentworkforce.js" %*\r\n`)
+  await chmod(jsBin, 0o755)
+  await chmod(posixBin, 0o755)
+  await chmod(winBin, 0o755)
+}
+
 describe('resolveAgentRelayMcpCommand', () => {
   let tempDir: string | null = null
   let extraTempDir: string | null = null
@@ -328,6 +351,8 @@ describe('resolveAgentRelayMcpCommand', () => {
 })
 
 describe('BrokerManager local + cloud coexistence', () => {
+  let personaTempDir: string | null = null
+
   beforeEach(() => {
     mock.state.spawnedClients.length = 0
     mock.state.constructedClients.length = 0
@@ -338,6 +363,11 @@ describe('BrokerManager local + cloud coexistence', () => {
     mock.state.nextConnectedSessionErrors = []
     mock.HarnessDriverClient.spawn.mockClear()
     mock.HarnessDriverClient.connect.mockClear()
+  })
+
+  afterEach(async () => {
+    if (personaTempDir) await rm(personaTempDir, { recursive: true, force: true })
+    personaTempDir = null
   })
 
   it('keeps the local session alive when a cloud sandbox attaches', async () => {
@@ -566,52 +596,75 @@ describe('BrokerManager local + cloud coexistence', () => {
   })
 
   it('returns a clone-safe payload when spawning a workforce persona', async () => {
-    const tempDir = await mkdtemp(join(tmpdir(), 'pear-persona-spawn-'))
-    const binaryName = process.platform === 'win32' ? 'agentworkforce.cmd' : 'agentworkforce'
-    const agentworkforceBin = join(tempDir, 'node_modules', '.bin', binaryName)
-    await mkdir(dirname(agentworkforceBin), { recursive: true })
-    await writeFile(
-      agentworkforceBin,
-      [
-        '#!/usr/bin/env node',
-        'const command = process.argv[2]',
-        "if (command === 'show') {",
-        "  console.log(JSON.stringify({ spec: { id: 'autonomous-actor', harness: 'claude' } }))",
-        '} else {',
-        "  console.log(JSON.stringify({ personas: [{ persona: 'autonomous-actor', harness: 'claude' }] }))",
-        '}'
-      ].join('\n')
-    )
-    await chmod(agentworkforceBin, 0o755)
+    personaTempDir = await mkdtemp(join(tmpdir(), 'pear-persona-spawn-'))
+    await writeAgentWorkforceFixture(personaTempDir)
 
-    try {
-      const manager = new BrokerManager()
-      mock.state.nextLocalAgents = []
-      await manager.start(PROJECT_ID, tempDir, 'pear-project-1', undefined as never, [])
-      const local = lastSpawned()
-      local.spawnPty.mockImplementationOnce(async (input: { name: string }) => {
-        local.agentNames.push(input.name)
-        return {
-          name: input.name,
-          runtime: 'pty',
-          cli: 'agentworkforce',
-          nonCloneable: () => undefined
-        }
-      })
-
-      const result = await manager.spawnPersona(PROJECT_ID, 'autonomous-actor')
-
-      expect(result).toEqual({
-        name: 'autonomous-actor',
+    const manager = new BrokerManager()
+    mock.state.nextLocalAgents = []
+    await manager.start(PROJECT_ID, personaTempDir, 'pear-project-1', undefined as never, [])
+    const local = lastSpawned()
+    local.spawnPty.mockImplementationOnce(async (input: { name: string }) => {
+      local.agentNames.push(input.name)
+      return {
+        name: input.name,
         runtime: 'pty',
-        cli: 'claude'
-      })
-      expect(() => structuredClone(result)).not.toThrow()
+        cli: 'agentworkforce',
+        nonCloneable: () => undefined
+      }
+    })
 
-      await manager.shutdown()
-    } finally {
-      await rm(tempDir, { recursive: true, force: true })
-    }
+    const result = await manager.spawnPersona(PROJECT_ID, 'autonomous-actor')
+
+    expect(result).toEqual({
+      name: 'autonomous-actor',
+      runtime: 'pty',
+      cli: 'claude'
+    })
+    expect(() => structuredClone(result)).not.toThrow()
+
+    await manager.shutdown()
+  })
+
+  it('coalesces concurrent duplicate workforce persona spawn requests', async () => {
+    personaTempDir = await mkdtemp(join(tmpdir(), 'pear-persona-spawn-'))
+    await writeAgentWorkforceFixture(personaTempDir)
+
+    const manager = new BrokerManager()
+    mock.state.nextLocalAgents = []
+    await manager.start(PROJECT_ID, personaTempDir, 'pear-project-1', undefined as never, [])
+    const local = lastSpawned()
+    let releaseSpawn!: () => void
+    local.spawnPty.mockImplementationOnce(async (input: { name: string }) => {
+      await new Promise<void>((resolve) => {
+        releaseSpawn = resolve
+      })
+      local.agentNames.push(input.name)
+      return {
+        name: input.name,
+        runtime: 'pty',
+        cli: 'agentworkforce',
+        nonCloneable: () => undefined
+      }
+    })
+
+    const first = manager.spawnPersona(PROJECT_ID, 'autonomous-actor')
+    const second = manager.spawnPersona(PROJECT_ID, 'autonomous-actor')
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(local.spawnPty).toHaveBeenCalledTimes(1)
+    releaseSpawn()
+    const results = await Promise.all([first, second])
+
+    expect(results).toEqual([
+      { name: 'autonomous-actor', runtime: 'pty', cli: 'claude' },
+      { name: 'autonomous-actor', runtime: 'pty', cli: 'claude' }
+    ])
+    expect(() => structuredClone(results[0])).not.toThrow()
+    expect(() => structuredClone(results[1])).not.toThrow()
+    expect(local.agentNames).toEqual(['autonomous-actor'])
+
+    await manager.shutdown()
   })
 
   it('spawning with broker: cloud fails clearly when no sandbox is attached', async () => {
