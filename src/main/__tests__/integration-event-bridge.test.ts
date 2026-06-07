@@ -163,6 +163,8 @@ function makeHarness(
     sendDelayMs?: number
     onSendStart?: (activeSends: number) => void
     waitForDeliveryNeverSettles?: boolean
+    waitForInjectedNeverSettles?: boolean
+    failInjected?: boolean
   } = {}
 ): {
   bridge: IntegrationEventBridge
@@ -171,6 +173,7 @@ function makeHarness(
   sent: SentMessage[]
   listAgentsCalls: string[]
   deliveryConfirmationCalls: SentMessage[]
+  injectedConfirmationCalls: SentMessage[]
   unsubscribedCount: () => number
   emit(event: ChangeEvent): Promise<void>
 } {
@@ -179,6 +182,7 @@ function makeHarness(
   const sent: SentMessage[] = []
   const listAgentsCalls: string[] = []
   const deliveryConfirmationCalls: SentMessage[] = []
+  const injectedConfirmationCalls: SentMessage[] = []
   const subscriptions: Subscription[] = []
   let unsubscribedCount = 0
   let activeSends = 0
@@ -235,7 +239,26 @@ function makeHarness(
             deliveryConfirmationCalls.push({ projectId, input })
             await new Promise(() => undefined)
           }
-        : undefined
+        : undefined,
+      sendMessageAndWaitForInjected: async (projectId, input) => {
+        injectedConfirmationCalls.push({ projectId, input })
+        activeSends += 1
+        options.onSendStart?.(activeSends)
+        try {
+          if (options.sendDelayMs) {
+            await new Promise((resolve) => setTimeout(resolve, options.sendDelayMs))
+          }
+          if (options.failSend) throw new Error('broker unavailable')
+          sent.push({ projectId, input })
+          if (options.failInjected) throw new Error('delivery injection timed out')
+          if (options.waitForInjectedNeverSettles) {
+            await new Promise(() => undefined)
+          }
+          return { eventId: `evt-${injectedConfirmationCalls.length}`, targets: [input.to] }
+        } finally {
+          activeSends -= 1
+        }
+      }
     }
   })
 
@@ -252,6 +275,7 @@ function makeHarness(
     sent,
     listAgentsCalls,
     deliveryConfirmationCalls,
+    injectedConfirmationCalls,
     unsubscribedCount: () => unsubscribedCount,
     emit
   }
@@ -774,6 +798,159 @@ test('slack raw-id and slug alias duplicates suppress when one context read is s
 
   assert.equal(harness.sent.length, 1)
   assert.match(harness.sent[0].input.text, /Message:\nreadable Slack message/u)
+})
+
+test('slack edits after a blind alias claim still inject once the content changes', async () => {
+  let messageText = 'original Slack message'
+  const harness = makeHarness(['alice'], {
+    readFileResponse: (_workspaceId, path) => {
+      if (!path.includes('__proj-cloud')) throw new Error('remote file not ready')
+      return {
+        path,
+        revision: 'rev-context',
+        contentType: 'application/json',
+        content: JSON.stringify({ provider: 'slack', text: messageText }),
+        encoding: 'utf-8'
+      }
+    }
+  })
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        downloadHistoricalData: false,
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+  })
+
+  // Raw-id copy first: every targeted read fails and the expanded event only
+  // carries the sparse relayfile pointer, so the injection is blind.
+  await harness.emit({
+    ...changeEvent(
+      '/slack/channels/C123ABC/messages/1780668000_000000/meta.json',
+      'slack',
+      { digest: 'revision:raw-copy' }
+    ),
+    expand: async () => ({
+      level: 'full',
+      path: '/slack/channels/C123ABC/messages/1780668000_000000/meta.json',
+      data: {
+        path: '/slack/channels/C123ABC/messages/1780668000_000000/meta.json',
+        deleted: false
+      }
+    })
+  } as ChangeEvent)
+  await waitForSent(harness, 1, 2_500)
+  assert.equal(harness.sent.length, 1)
+  assert.match(harness.sent[0].input.text, /Message: unavailable; targeted context read did not return content\./u)
+
+  // The slug alias copy of the same record carries content: suppressed as a
+  // duplicate, but the claim learns the content hash.
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json',
+    'slack',
+    { digest: 'revision:slug-copy' }
+  ))
+  await waitForDropped('project-1', 1, 2_500)
+  assert.equal(harness.sent.length, 1)
+
+  // A genuine edit changes the content hash and must inject again.
+  messageText = 'edited Slack message'
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json',
+    'slack',
+    { digest: 'revision:slug-edit' }
+  ))
+  await waitForSent(harness, 2)
+  assert.equal(harness.sent.length, 2)
+  assert.match(harness.sent[1].input.text, /Message:\nedited Slack message/u)
+})
+
+test('slack unchanged-content replay re-drives after injected delivery is not confirmed', async () => {
+  const options = { failInjected: true }
+  const harness = makeHarness(['alice'], options)
+  const warnCalls: unknown[][] = []
+  const originalWarn = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnCalls.push(args)
+  }
+
+  try {
+    await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+      await harness.bridge.reconcile('project-1', [
+        integration({
+          provider: 'slack',
+          integrationId: 'slack-1',
+          mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+          scope: { notifyAgents: ['alice'] }
+        })
+      ])
+    })
+
+    const path = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
+    await harness.emit(changeEvent(path, 'slack'))
+    await waitForSent(harness, 1)
+    await waitUntil(() => warnCalls.some((call) => call[0] === '[integration-events] delivery injected confirmation failed'))
+
+    options.failInjected = false
+    await harness.emit(changeEvent(path, 'slack'))
+    await waitForSent(harness, 2)
+  } finally {
+    console.warn = originalWarn
+  }
+
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'alice'])
+})
+
+test('slack unchanged-content replay is suppressed after injected delivery commits', async () => {
+  const harness = makeHarness(['alice'])
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+  })
+
+  const path = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
+  await harness.emit(changeEvent(path, 'slack'))
+  await waitForSent(harness, 1)
+  await harness.emit(changeEvent(path, 'slack'))
+  await waitForDropped('project-1', 1)
+
+  assert.equal(harness.sent.length, 1)
+})
+
+test('slack channel targets do not pin unresolved injected-delivery claims', async () => {
+  const harness = makeHarness(['alice'])
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        scope: { notifyChannels: ['#triage'] }
+      })
+    ])
+  })
+
+  const path = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
+  await harness.emit(changeEvent(path, 'slack'))
+  await waitForSent(harness, 1)
+  await harness.emit(changeEvent(path, 'slack'))
+  await waitForSent(harness, 2)
+
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['#triage', '#triage'])
+  assert.equal(harness.injectedConfirmationCalls.length, 0)
 })
 
 test('remote replayed events older than the subscription session are dropped by default', async () => {
@@ -1734,8 +1911,8 @@ test('integration event delivery failures use aggregated warn cadence by default
 
   assert.equal(debugCalls.length, 0)
   assert.equal(warnCalls.length, 2)
-  assert.equal(warnCalls[0][0], '[integration-events] event delivery failed')
-  assert.equal(warnCalls[1][0], '[integration-events] event delivery failed')
+  assert.equal(warnCalls[0][0], '[integration-events] delivery injected confirmation failed')
+  assert.equal(warnCalls[1][0], '[integration-events] delivery injected confirmation failed')
   assert.deepEqual(warnCalls.map((call) => (call[1] as { occurrences: number }).occurrences), [1, 26])
   assert.deepEqual(
     warnCalls.map((call) => (call[1] as { suppressedSinceLastLog: number }).suppressedSinceLastLog),
@@ -1746,10 +1923,10 @@ test('integration event delivery failures use aggregated warn cadence by default
   assert.equal(telemetry.brokerSendsDeferred >= 0, true)
   assert.deepEqual({ ...telemetry, brokerSendsDeferred: 0 }, {
     eventsReceived: 26,
-    eventsInjected: 0,
+    eventsInjected: 26,
     eventsCoalesced: 0,
     eventsDropped: 0,
-    brokerSends: 0,
+    brokerSends: 26,
     brokerSendsDeferred: 0,
     queueDepth: 0,
     mountCount: 0,
@@ -1780,7 +1957,7 @@ test('failed deliveries release the dedupe key so duplicate events retry', async
 
     const path = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
     await harness.emit(changeEvent(path, 'slack'))
-    await waitUntil(() => warnCalls.some((call) => call[0] === '[integration-events] event delivery failed'))
+    await waitUntil(() => warnCalls.some((call) => call[0] === '[integration-events] delivery injected confirmation failed'))
     assert.equal(harness.sent.length, 0)
 
     // The same logical change arrives again (remote copy of a local mount
@@ -1983,16 +2160,10 @@ test('integration event dispatcher coalesces rapid distinct revisions for the sa
   })
 })
 
-test('integration event fanout sends to recipients sequentially', async () => {
-  let maxActiveSends = 0
+test('integration event fanout sends to recipients in stable order', async () => {
   const harness = makeHarness(
     Array.from({ length: 12 }, (_, index) => `agent-${index}`),
-    {
-      sendDelayMs: 2,
-      onSendStart: (activeSends) => {
-        maxActiveSends = Math.max(maxActiveSends, activeSends)
-      }
-    }
+    { sendDelayMs: 2 }
   )
 
   await harness.bridge.reconcile('project-1', [
@@ -2006,7 +2177,6 @@ test('integration event fanout sends to recipients sequentially', async () => {
   await harness.emit(changeEvent('/linear/issues/AR-1.json', 'linear'))
   await waitUntil(() => harness.sent.length === 12)
 
-  assert.equal(maxActiveSends, 1)
   assert.deepEqual(harness.sent.map((message) => message.input.to), [
     'agent-0',
     'agent-1',

@@ -1084,6 +1084,167 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('waits for injection using the addressed agent when broker send result omits targets', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, ['claude-1'])
+    local.sendMessage.mockResolvedValueOnce({ event_id: 'evt-injected' })
+    local.onEvent.mockImplementationOnce((listener) => {
+      setImmediate(() => {
+        listener({
+          kind: 'delivery_injected',
+          event_id: 'evt-injected',
+          name: 'claude-1'
+        })
+      })
+      return () => undefined
+    })
+
+    await expect(manager.sendMessageAndWaitForInjected(PROJECT_ID, {
+      to: 'claude-1',
+      text: '<integration-event>ping</integration-event>'
+    })).resolves.toEqual({
+      eventId: 'evt-injected',
+      targets: ['claude-1']
+    })
+
+    await manager.shutdown()
+  })
+
+  it('does not treat delivery ack or verification as an injection confirmation', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, ['claude-1'])
+    local.sendMessage.mockResolvedValueOnce({ event_id: 'evt-not-injected' })
+    local.onEvent.mockImplementationOnce((listener) => {
+      setImmediate(() => {
+        listener({
+          kind: 'delivery_ack',
+          event_id: 'evt-not-injected',
+          name: 'claude-1'
+        })
+        listener({
+          kind: 'delivery_verified',
+          event_id: 'evt-not-injected',
+          name: 'claude-1'
+        })
+      })
+      return () => undefined
+    })
+
+    await expect(manager.sendMessageAndWaitForInjected(PROJECT_ID, {
+      to: 'claude-1',
+      text: '<integration-event>ping</integration-event>'
+    }, { timeoutMs: 10 })).rejects.toThrow(
+      'Timed out waiting for delivery injection for evt-not-injected (claude-1)'
+    )
+
+    await manager.shutdown()
+  })
+
+  it.each([
+    ['delivery_failed', 'PTY write failed'],
+    ['message_delivery_failed', 'broker send failed']
+  ] as const)('rejects injection wait on %s', async (kind, reason) => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, ['claude-1'])
+    local.sendMessage.mockResolvedValueOnce({ event_id: `evt-${kind}` })
+    local.onEvent.mockImplementationOnce((listener) => {
+      setImmediate(() => {
+        listener({
+          kind,
+          event_id: `evt-${kind}`,
+          name: 'claude-1',
+          reason
+        })
+      })
+      return () => undefined
+    })
+
+    await expect(manager.sendMessageAndWaitForInjected(PROJECT_ID, {
+      to: 'claude-1',
+      text: '<integration-event>ping</integration-event>'
+    })).rejects.toThrow(reason)
+
+    await manager.shutdown()
+  })
+
+  it('waits for every reported target before confirming injection', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, ['claude-1', 'codex-1'])
+    local.sendMessage.mockResolvedValueOnce({
+      event_id: 'evt-multi-injected',
+      targets: ['claude-1', 'codex-1']
+    })
+    local.onEvent.mockImplementationOnce((listener) => {
+      setImmediate(() => {
+        listener({
+          kind: 'delivery_injected',
+          event_id: 'evt-multi-injected',
+          name: 'claude-1'
+        })
+        listener({
+          kind: 'delivery_injected',
+          event_id: 'evt-multi-injected',
+          name: 'codex-1'
+        })
+      })
+      return () => undefined
+    })
+
+    await expect(manager.sendMessageAndWaitForInjected(PROJECT_ID, {
+      to: 'claude-1',
+      text: '<integration-event>ping</integration-event>'
+    })).resolves.toEqual({
+      eventId: 'evt-multi-injected',
+      targets: ['claude-1', 'codex-1']
+    })
+
+    await manager.shutdown()
+  })
+
+  it('returns without waiting for injection when a channel send has no concrete targets', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, ['claude-1'])
+    local.sendMessage.mockResolvedValueOnce({ event_id: 'evt-channel', targets: [] })
+
+    await expect(manager.sendMessageAndWaitForInjected(PROJECT_ID, {
+      to: '#general',
+      text: '<integration-event>ping</integration-event>'
+    }, { timeoutMs: 1 })).resolves.toEqual({
+      eventId: 'evt-channel',
+      targets: []
+    })
+
+    await manager.shutdown()
+  })
+
+  it('replays injection events observed before sendMessage resolves', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, ['claude-1'])
+    let eventListener: ((event: unknown) => void) | undefined
+    local.onEvent.mockImplementationOnce((listener) => {
+      eventListener = listener
+      return () => undefined
+    })
+    local.sendMessage.mockImplementationOnce(async () => {
+      eventListener?.({
+        kind: 'delivery_injected',
+        event_id: 'evt-early-injected',
+        name: 'claude-1'
+      })
+      return { event_id: 'evt-early-injected' }
+    })
+
+    await expect(manager.sendMessageAndWaitForInjected(PROJECT_ID, {
+      to: 'claude-1',
+      text: '<integration-event>ping</integration-event>'
+    })).resolves.toEqual({
+      eventId: 'evt-early-injected',
+      targets: ['claude-1']
+    })
+
+    await manager.shutdown()
+  })
+
   it('keeps repeated no-identity PTY chunks after intervening output', async () => {
     const manager = new BrokerManager()
     const win = createMockWindow()

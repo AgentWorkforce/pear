@@ -50,6 +50,7 @@ const MAX_DISPATCH_SUMMARY_GROUPS = 10
 const MAX_DISPATCHED_EVENTS_PER_SECOND = 25
 const PROJECT_AGENT_RECIPIENT_CACHE_TTL_MS = 2_000
 const MAX_BROKER_SENDS_PER_SECOND = 25
+const DELIVERY_INJECTED_CONFIRMATION_TIMEOUT_MS = 5_000
 const REMOTE_STREAM_ERROR_POLLING_FALLBACK_THRESHOLD = 5
 const REMOTE_STREAM_POLL_INTERVAL_MS = 5_000
 
@@ -99,7 +100,22 @@ type EventContextPreviewMetadata = Omit<EventContextPreview, 'content'>
 
 type SlackLogicalInjectionState = {
   expiresAt: number
-  contentHashes?: Set<string>
+  committedBlind: boolean
+  committedContentHashes: Set<string>
+  provisionalBlind: boolean
+  provisionalContentHashes: Set<string>
+}
+
+type RecentInjectionState = {
+  expiresAt: number
+  provisional: boolean
+}
+
+type DeliveryDedupeClaim = {
+  key: string
+  isSlackLogicalKey: boolean
+  ttlMs: number
+  contentHash?: string
 }
 
 type DispatchItem = {
@@ -163,6 +179,18 @@ type BrokerEventBridge = {
     },
     options?: { timeoutMs?: number }
   ) => Promise<unknown>
+  sendMessageAndWaitForInjected?: (
+    projectId: string,
+    input: {
+      to: string
+      text: string
+      from?: string
+      data?: Record<string, unknown>
+      priority?: number
+      mode?: 'wait' | 'steer'
+    },
+    options?: { timeoutMs?: number }
+  ) => Promise<{ eventId: string; targets: string[] }>
 }
 
 type RelayfileEventClient = {
@@ -1947,6 +1975,7 @@ class ProjectEventDispatcher {
 class ProjectBrokerSendPacer {
   private readonly queue: Array<{
     input: BrokerMessageInput
+    send?: (input: BrokerMessageInput) => Promise<void>
     resolve: () => void
     reject: (error: unknown) => void
   }> = []
@@ -1963,12 +1992,12 @@ class ProjectBrokerSendPacer {
     this.send = send
   }
 
-  enqueue(input: BrokerMessageInput): Promise<void> {
+  enqueue(input: BrokerMessageInput, send?: (input: BrokerMessageInput) => Promise<void>): Promise<void> {
     if (!this.active) return Promise.resolve()
     const deferred = this.queue.length > 0 || this.nextRateLimitDelayMs() > 0 || this.draining
     if (deferred) incrementIntegrationEventCounter(this.projectId, 'brokerSendsDeferred')
     return new Promise((resolveSend, rejectSend) => {
-      this.queue.push({ input, resolve: resolveSend, reject: rejectSend })
+      this.queue.push({ input, send, resolve: resolveSend, reject: rejectSend })
       this.updateDepthGauge()
       this.scheduleDrain(0)
     })
@@ -2007,7 +2036,7 @@ class ProjectBrokerSendPacer {
         this.updateDepthGauge()
         this.sentInWindow += 1
         try {
-          await this.send(item.input)
+          await (item.send ?? this.send)(item.input)
           incrementIntegrationEventCounter(this.projectId, 'brokerSends')
           item.resolve()
         } catch (error) {
@@ -2041,7 +2070,7 @@ class ProjectBrokerSendPacer {
 export class IntegrationEventBridge {
   private subscriptions = new Map<string, ProjectSubscription>()
   private dispatchers = new Map<string, ProjectEventDispatcher>()
-  private recentInjections = new Map<string, number>()
+  private recentInjections = new Map<string, RecentInjectionState>()
   private slackLogicalInjections = new Map<string, SlackLogicalInjectionState>()
   private projectAgentRecipientCache = new Map<string, ProjectAgentRecipientCacheEntry>()
   private notificationTargetCache = new Map<string, NotificationTargetCacheEntry>()
@@ -2351,20 +2380,6 @@ export class IntegrationEventBridge {
     let dedupe = eventDedupeKeyWithFingerprint(duplicateKey, fingerprint)
     let dedupeClaimed = false
 
-    if (!needsSlackContentAwareDedupe) {
-      if (this.wasRecentlyInjected(dedupe.key, dedupe.ttlMs)) {
-        incrementIntegrationEventCounter(projectId, 'eventsDropped')
-        logIntegrationEvent('skipped duplicate path', {
-          projectId,
-          eventId: event.id,
-          path: event.resource.path,
-          duplicateKey: dedupe.key
-        })
-        return
-      }
-      dedupeClaimed = true
-    }
-
     const bridge = await this.bridge()
     const uniqueRecipients = await this.recipientsForMatchedSpecs(projectId, matchedSpecs, bridge)
     if (uniqueRecipients.length === 0) {
@@ -2387,9 +2402,49 @@ export class IntegrationEventBridge {
 
     const eventMetadata = integrationEventMetadata(event)
     const contextPreview = await this.readEventContextPreview(projectId, event)
-    if (needsSlackContentAwareDedupe) {
+    const usesConcreteAgentTargets = uniqueRecipients.every((recipient) => !recipient.startsWith('#'))
+    const canTrackInjectedDelivery = usesConcreteAgentTargets && typeof bridge.sendMessageAndWaitForInjected === 'function'
+    const shouldTrackDedupe = canTrackInjectedDelivery
+    if (!usesConcreteAgentTargets) {
+      warnIntegrationEventAggregated(
+        `delivery injected tracking skipped for channel targets:${projectId}`,
+        'delivery injected tracking skipped for channel targets',
+        {
+          projectId,
+          eventId: event.id,
+          path: event.resource.path,
+          recipients: uniqueRecipients
+        }
+      )
+    } else if (!canTrackInjectedDelivery) {
+      throw new Error('Broker delivery_injected confirmation is unavailable')
+    }
+
+    let deliveryClaim: DeliveryDedupeClaim | undefined
+    if (needsSlackContentAwareDedupe && shouldTrackDedupe) {
       dedupe = eventDedupeKeyWithFingerprint(duplicateKey, fingerprint)
-      if (!this.claimSlackLogicalInjection(dedupe.key, contextPreview, dedupe.ttlMs)) {
+      const slackClaim = this.claimSlackLogicalInjection(dedupe.key, contextPreview, dedupe.ttlMs, shouldTrackDedupe)
+      if (!slackClaim.claimed) {
+        incrementIntegrationEventCounter(projectId, 'eventsDropped')
+        logIntegrationEvent('skipped duplicate path', {
+          projectId,
+          eventId: event.id,
+          path: event.resource.path,
+          duplicateKey: dedupe.key
+        })
+        return
+      }
+      dedupeClaimed = shouldTrackDedupe
+      if (shouldTrackDedupe) {
+        deliveryClaim = {
+          key: dedupe.key,
+          isSlackLogicalKey: true,
+          ttlMs: dedupe.ttlMs,
+          contentHash: slackClaim.contentHash
+        }
+      }
+    } else if (shouldTrackDedupe) {
+      if (!this.claimRecentInjection(dedupe.key, dedupe.ttlMs, true)) {
         incrementIntegrationEventCounter(projectId, 'eventsDropped')
         logIntegrationEvent('skipped duplicate path', {
           projectId,
@@ -2400,6 +2455,16 @@ export class IntegrationEventBridge {
         return
       }
       dedupeClaimed = true
+      deliveryClaim = {
+        key: dedupe.key,
+        isSlackLogicalKey: false,
+        ttlMs: dedupe.ttlMs
+      }
+    } else if (!needsSlackContentAwareDedupe) {
+      // Channel/untracked targets must not be falsely committed based on an
+      // unresolved target list. Keep delivery flowing and leave dedupe to
+      // relay/replay identity rather than pinning a local claim.
+      dedupeClaimed = false
     }
     const contextPreviewData = contextPreview ? eventContextPreviewMetadata(contextPreview) : undefined
     logIntegrationEvent('injecting', {
@@ -2410,6 +2475,7 @@ export class IntegrationEventBridge {
     })
     let deliveredCount = 0
     const sendErrors: Array<{ recipient: string; error: unknown }> = []
+    const injectedConfirmations: Array<Promise<unknown>> = []
     for (const recipient of uniqueRecipients) {
       const input = {
         to: recipient,
@@ -2430,7 +2496,10 @@ export class IntegrationEventBridge {
         }
       } as const
       try {
-        await this.sendBrokerMessage(projectId, input, bridge)
+        const sendResult = await this.sendBrokerMessage(projectId, input, bridge, {
+          waitForInjected: canTrackInjectedDelivery
+        })
+        if (sendResult.injectedConfirmation) injectedConfirmations.push(sendResult.injectedConfirmation)
         deliveredCount += 1
       } catch (error) {
         sendErrors.push({ recipient, error })
@@ -2455,6 +2524,28 @@ export class IntegrationEventBridge {
           error: toErrorMessage(sendErrors[0].error)
         }
       )
+    }
+    if (deliveryClaim && injectedConfirmations.length > 0) {
+      Promise.all(injectedConfirmations)
+        .then(() => {
+          this.commitDedupeKey(deliveryClaim)
+        })
+        .catch((error) => {
+          this.releaseDedupeKey(deliveryClaim.key, deliveryClaim.isSlackLogicalKey, deliveryClaim.contentHash)
+          warnIntegrationEventAggregated(
+            `delivery injected confirmation failed:${projectId}`,
+            'delivery injected confirmation failed',
+            {
+              projectId,
+              eventId: event.id,
+              path: event.resource.path,
+              duplicateKey: deliveryClaim.key,
+              error: toErrorMessage(error)
+            }
+          )
+        })
+    } else if (deliveryClaim) {
+      this.releaseDedupeKey(deliveryClaim.key, deliveryClaim.isSlackLogicalKey, deliveryClaim.contentHash)
     }
     incrementIntegrationEventCounter(projectId, 'eventsInjected')
   }
@@ -2541,8 +2632,9 @@ export class IntegrationEventBridge {
   private async sendBrokerMessage(
     projectId: string,
     input: BrokerMessageInput,
-    bridge: BrokerEventBridge
-  ): Promise<void> {
+    bridge: BrokerEventBridge,
+    options: { waitForInjected?: boolean } = {}
+  ): Promise<{ injectedConfirmation?: Promise<unknown> }> {
     let pacer = this.brokerSendPacers.get(projectId)
     if (!pacer) {
       // Integration-event delivery is paced on broker send acceptance. Waiting
@@ -2553,24 +2645,43 @@ export class IntegrationEventBridge {
       )
       this.brokerSendPacers.set(projectId, pacer)
     }
-    await pacer.enqueue(input)
+    if (!options.waitForInjected) {
+      await pacer.enqueue(input)
+      return {}
+    }
+
+    if (!bridge.sendMessageAndWaitForInjected) {
+      throw new Error('Broker delivery_injected confirmation is unavailable')
+    }
+
+    let injectedConfirmation: Promise<unknown> | undefined
+    await pacer.enqueue(input, (message) => {
+      injectedConfirmation = bridge.sendMessageAndWaitForInjected!(
+        projectId,
+        message,
+        { timeoutMs: DELIVERY_INJECTED_CONFIRMATION_TIMEOUT_MS }
+      )
+      return Promise.resolve()
+    })
+    return injectedConfirmation ? { injectedConfirmation } : {}
   }
 
-  private wasRecentlyInjected(key: string, ttlMs = RECENT_INJECTION_TTL_MS): boolean {
+  private claimRecentInjection(key: string, ttlMs = RECENT_INJECTION_TTL_MS, provisional = false): boolean {
     const now = Date.now()
-    for (const [entryKey, expiresAt] of this.recentInjections.entries()) {
-      if (expiresAt <= now) this.recentInjections.delete(entryKey)
+    for (const [entryKey, entry] of this.recentInjections.entries()) {
+      if (entry.expiresAt <= now) this.recentInjections.delete(entryKey)
     }
-    if (this.recentInjections.has(key)) return true
-    this.recentInjections.set(key, now + ttlMs)
-    return false
+    if (this.recentInjections.has(key)) return false
+    this.recentInjections.set(key, { expiresAt: now + ttlMs, provisional })
+    return true
   }
 
   private claimSlackLogicalInjection(
     key: string,
     contextPreview: EventContextPreview | undefined,
-    ttlMs: number
-  ): boolean {
+    ttlMs: number,
+    provisional: boolean
+  ): { claimed: boolean; contentHash?: string } {
     const now = Date.now()
     for (const [entryKey, entry] of this.slackLogicalInjections.entries()) {
       if (entry.expiresAt <= now) this.slackLogicalInjections.delete(entryKey)
@@ -2581,24 +2692,107 @@ export class IntegrationEventBridge {
       : undefined
     const existing = this.slackLogicalInjections.get(key)
     if (existing) {
-      if (!contentHash || !existing.contentHashes || existing.contentHashes.has(contentHash)) {
-        return false
+      if (!contentHash) {
+        if (
+          existing.committedBlind ||
+          existing.provisionalBlind ||
+          existing.committedContentHashes.size > 0 ||
+          existing.provisionalContentHashes.size > 0
+        ) {
+          return { claimed: false }
+        }
+        existing.provisionalBlind = provisional
+        existing.committedBlind = !provisional
+        existing.expiresAt = now + ttlMs
+        return { claimed: true }
       }
-      existing.contentHashes.add(contentHash)
+      if (
+        (existing.committedBlind || existing.provisionalBlind) &&
+        existing.committedContentHashes.size === 0 &&
+        existing.provisionalContentHashes.size === 0
+      ) {
+        // A blind claim (context read returned nothing) suppresses the late
+        // content-bearing alias copy, but must learn its hash so a genuine
+        // edit afterwards still injects instead of matching the blind claim.
+        if (existing.provisionalBlind) {
+          existing.provisionalContentHashes.add(contentHash)
+        } else {
+          existing.committedContentHashes.add(contentHash)
+        }
+        existing.expiresAt = now + ttlMs
+        return { claimed: false }
+      }
+      if (
+        existing.committedContentHashes.has(contentHash) ||
+        existing.provisionalContentHashes.has(contentHash)
+      ) {
+        return { claimed: false }
+      }
+      if (provisional) {
+        existing.provisionalContentHashes.add(contentHash)
+      } else {
+        existing.committedContentHashes.add(contentHash)
+      }
       existing.expiresAt = now + ttlMs
-      return true
+      return { claimed: true, contentHash }
     }
 
     this.slackLogicalInjections.set(key, {
       expiresAt: now + ttlMs,
-      contentHashes: contentHash ? new Set([contentHash]) : undefined
+      committedBlind: !contentHash && !provisional,
+      committedContentHashes: !provisional && contentHash ? new Set([contentHash]) : new Set(),
+      provisionalBlind: !contentHash && provisional,
+      provisionalContentHashes: provisional && contentHash ? new Set([contentHash]) : new Set()
     })
-    return true
+    return { claimed: true, contentHash }
   }
 
-  private releaseDedupeKey(key: string, isSlackLogicalKey: boolean): void {
+  private commitDedupeKey(claim: DeliveryDedupeClaim): void {
+    const now = Date.now()
+    if (!claim.isSlackLogicalKey) {
+      const entry = this.recentInjections.get(claim.key)
+      if (entry) {
+        entry.provisional = false
+        entry.expiresAt = now + claim.ttlMs
+      }
+      return
+    }
+
+    const entry = this.slackLogicalInjections.get(claim.key)
+    if (!entry) return
+    if (claim.contentHash) {
+      if (entry.provisionalContentHashes.delete(claim.contentHash)) {
+        entry.committedContentHashes.add(claim.contentHash)
+      }
+    } else if (entry.provisionalBlind) {
+      entry.provisionalBlind = false
+      entry.committedBlind = true
+      for (const contentHash of entry.provisionalContentHashes) {
+        entry.committedContentHashes.add(contentHash)
+      }
+      entry.provisionalContentHashes.clear()
+    }
+    entry.expiresAt = now + claim.ttlMs
+  }
+
+  private releaseDedupeKey(key: string, isSlackLogicalKey: boolean, contentHash?: string): void {
     if (isSlackLogicalKey) {
-      this.slackLogicalInjections.delete(key)
+      const entry = this.slackLogicalInjections.get(key)
+      if (!entry) return
+      if (contentHash) {
+        entry.provisionalContentHashes.delete(contentHash)
+      } else {
+        entry.provisionalBlind = false
+        entry.provisionalContentHashes.clear()
+      }
+      if (
+        !entry.committedBlind &&
+        !entry.provisionalBlind &&
+        entry.committedContentHashes.size === 0 &&
+        entry.provisionalContentHashes.size === 0
+      ) {
+        this.slackLogicalInjections.delete(key)
+      }
     } else {
       this.recentInjections.delete(key)
     }

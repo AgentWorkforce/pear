@@ -429,17 +429,20 @@ function brokerEventString(event: BrokerEvent, key: string): string | undefined 
   return typeof value === 'string' ? value : undefined
 }
 
-function isDeliveryEventForMessage(event: BrokerEvent, eventId: string, targets: string[]): boolean {
-  const kind = brokerEventString(event, 'kind')
-  if (![
+function isDeliveryEventForMessage(
+  event: BrokerEvent,
+  eventId: string,
+  targets: string[],
+  allowedKinds: string[] = [
     'delivery_ack',
     'delivery_verified',
     'delivery_failed',
     'message_delivery_confirmed',
     'message_delivery_failed'
-  ].includes(kind || '')) {
-    return false
-  }
+  ]
+): boolean {
+  const kind = brokerEventString(event, 'kind')
+  if (!allowedKinds.includes(kind || '')) return false
   if (brokerEventString(event, 'event_id') !== eventId) return false
   const name = brokerEventString(event, 'name')
   return !name || targets.length === 0 || targets.includes(name)
@@ -3099,6 +3102,99 @@ export class BrokerManager {
         if (settled) break
       }
       await waitForConfirmation
+      return { eventId, targets }
+    } finally {
+      if (timer) clearTimeout(timer)
+      unsubscribe()
+    }
+  }
+
+  async sendMessageAndWaitForInjected(
+    projectId: string | undefined,
+    input: SendMessageInput,
+    options: { timeoutMs?: number } = {}
+  ): Promise<DeliveryConfirmationResult> {
+    const session = input.to.startsWith('#')
+      ? this.getSessionForProject(projectId || '')
+      : this.getSessionForAgent(input.to, projectId)
+    const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS)
+    const observedEvents: BrokerEvent[] = []
+    let eventId: string | undefined
+    let targets: string[] = []
+    let pendingTargets = new Set<string>()
+    let settled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let resolveWait: (() => void) | undefined
+    let rejectWait: ((error: Error) => void) | undefined
+
+    const waitForInjection = new Promise<void>((resolve, reject) => {
+      resolveWait = resolve
+      rejectWait = reject
+      timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        const pending = Array.from(pendingTargets)
+        const targetSummary = pending.length > 0 ? ` (${pending.join(', ')})` : ''
+        reject(new Error(`Timed out waiting for delivery injection for ${eventId || input.to}${targetSummary}`))
+      }, timeoutMs)
+    })
+
+    const maybeComplete = (event: BrokerEvent): void => {
+      if (settled || !eventId) return
+      if (!isDeliveryEventForMessage(event, eventId, targets, [
+        'delivery_injected',
+        'delivery_failed',
+        'message_delivery_failed'
+      ])) {
+        return
+      }
+      const name = brokerEventString(event, 'name')
+
+      if (event.kind === 'delivery_injected') {
+        if (!name || pendingTargets.size === 0) {
+          settled = true
+          resolveWait?.()
+          return
+        }
+        pendingTargets.delete(name)
+        if (pendingTargets.size === 0) {
+          settled = true
+          resolveWait?.()
+        }
+        return
+      }
+
+      if (event.kind === 'delivery_failed' || event.kind === 'message_delivery_failed') {
+        settled = true
+        rejectWait?.(new Error(deliveryFailureMessage(event)))
+      }
+    }
+
+    const unsubscribe = session.client.onEvent((event) => {
+      observedEvents.push(event)
+      maybeComplete(event)
+    })
+
+    try {
+      const rawResult = await session.client.sendMessage(input) as unknown
+      const result = isRecord(rawResult) ? rawResult : {}
+      eventId = typeof result.event_id === 'string' ? result.event_id : 'unsupported_operation'
+      const reportedTargets = Array.isArray(result.targets)
+        ? result.targets.filter((target): target is string => typeof target === 'string' && target.trim().length > 0)
+        : []
+      targets = reportedTargets.length > 0 || input.to.startsWith('#')
+        ? reportedTargets
+        : [input.to]
+      pendingTargets = new Set(targets)
+      if (targets.length === 0 || eventId === 'unsupported_operation') {
+        settled = true
+        return { eventId, targets }
+      }
+      for (const event of observedEvents) {
+        maybeComplete(event)
+        if (settled) break
+      }
+      await waitForInjection
       return { eventId, targets }
     } finally {
       if (timer) clearTimeout(timer)
