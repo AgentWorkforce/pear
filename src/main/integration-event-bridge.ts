@@ -2581,7 +2581,17 @@ export class IntegrationEventBridge {
       : undefined
     const existing = this.slackLogicalInjections.get(key)
     if (existing) {
-      if (!contentHash || !existing.contentHashes || existing.contentHashes.has(contentHash)) {
+      if (!contentHash) {
+        return false
+      }
+      if (!existing.contentHashes) {
+        // A blind claim (context read returned nothing) suppresses the late
+        // content-bearing alias copy, but must learn its hash so a genuine
+        // edit afterwards still injects instead of matching the blind claim.
+        existing.contentHashes = new Set([contentHash])
+        return false
+      }
+      if (existing.contentHashes.has(contentHash)) {
         return false
       }
       existing.contentHashes.add(contentHash)
