@@ -2210,6 +2210,7 @@ export class BrokerManager {
     sessionKeys.delete(sessionKey)
     if (sessionKeys.size === 0) {
       this.agentSessions.delete(name)
+      this.agentRuntimes.delete(name)
     }
   }
 
@@ -3488,6 +3489,7 @@ export class BrokerManager {
       sessionKeys.delete(sessionKey)
       if (sessionKeys.size === 0) {
         this.agentSessions.delete(agentName)
+        this.agentRuntimes.delete(agentName)
       }
     }
   }

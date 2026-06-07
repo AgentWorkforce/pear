@@ -32,13 +32,15 @@ type MockClient = {
   brokerPid?: number
   baseUrl?: string
   agentNames: string[]
+  agentRuntimes: Record<string, 'pty' | 'headless'>
 }
 
 const mock = vi.hoisted(() => {
   function createMockClient(agentNames: string[] = []): MockClient {
-    const agentRuntimes = new Map<string, 'pty' | 'headless'>()
+    const agentRuntimes = new Map<string, 'pty' | 'headless'>(agentNames.map((name) => [name, 'pty']))
     const client: MockClient = {
       agentNames: [...agentNames],
+      agentRuntimes: Object.fromEntries(agentRuntimes) as Record<string, 'pty' | 'headless'>,
       getSession: vi.fn(async () => ({})),
       listAgents: vi.fn(async () => client.agentNames.map((name) => ({ name, runtime: agentRuntimes.get(name) ?? 'pty', channels: [] }))),
       getInboundDeliveryMode: vi.fn(async () => 'passthrough'),
@@ -541,6 +543,60 @@ describe('BrokerManager local + cloud coexistence', () => {
 
     expect(spawned).toEqual({ name: 'worker', runtime: 'pty' })
     expect(() => structuredClone(spawned)).not.toThrow()
+
+    await manager.shutdown()
+  })
+
+  it('spawns OpenCode with headless runtime and skips PTY attach operations', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, [])
+
+    const spawned = await manager.spawnAgent(PROJECT_ID, { name: 'opencode-1', cli: 'opencode' })
+    const attached = await manager.attachTerminal(PROJECT_ID, {
+      name: spawned.name,
+      mode: 'passthrough',
+      rows: 24,
+      cols: 80
+    })
+
+    expect(spawned).toEqual({ name: 'opencode-1', runtime: 'headless' })
+    expect(local.spawnCli).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'opencode-1',
+      cli: expect.stringContaining('opencode'),
+      transport: 'headless'
+    }))
+    expect(local.spawnPty).not.toHaveBeenCalled()
+    expect(local.resizePty).not.toHaveBeenCalled()
+    expect(local.snapshot).not.toHaveBeenCalled()
+    expect(attached).toEqual({
+      name: 'opencode-1',
+      mode: 'auto_inject',
+      previousMode: 'passthrough',
+      pending: 0,
+      runtime: 'headless'
+    })
+
+    await manager.shutdown()
+  })
+
+  it('remembers headless runtime from discovered agents before attaching', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, [])
+    local.listAgents.mockResolvedValue([
+      { name: 'opencode-1', runtime: 'headless', channels: [] }
+    ])
+
+    const attached = await manager.attachTerminal(PROJECT_ID, {
+      name: 'opencode-1',
+      mode: 'passthrough',
+      rows: 24,
+      cols: 80
+    })
+
+    expect(local.setInboundDeliveryMode).toHaveBeenCalledWith('opencode-1', 'auto_inject')
+    expect(local.resizePty).not.toHaveBeenCalled()
+    expect(local.snapshot).not.toHaveBeenCalled()
+    expect(attached.runtime).toBe('headless')
 
     await manager.shutdown()
   })
