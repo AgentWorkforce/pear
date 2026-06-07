@@ -1085,6 +1085,7 @@ export function TerminalPane(): React.ReactNode {
                   pointerEvents: active ? 'auto' : 'none'
                 }}
                 aria-hidden={!active}
+                inert={!active}
               >
                 <TerminalProject
                   agent={agent}
