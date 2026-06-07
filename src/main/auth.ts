@@ -15,6 +15,7 @@ import {
 } from './schemas'
 
 const CLOUD_API_URL = process.env.RELAY_CLOUD_URL || 'https://agentrelay.com/cloud'
+const LEGACY_CLOUD_API_URL = 'https://agentrelay.dev/cloud'
 const TOKEN_EXPIRY_BUFFER_MS = 60_000
 const WHOAMI_REQUEST_TIMEOUT_MS = 10_000
 const ACCOUNT_WORKSPACE_RETRY_ATTEMPTS = 8
@@ -146,8 +147,9 @@ function delay(ms: number): Promise<void> {
 
 function saveAuthMeta(tokens: Pick<StoredTokens, 'apiUrl' | 'user'> & Partial<Pick<StoredTokens, 'accessToken'>>): void {
   const previous = loadAuthMeta()
+  const apiUrl = normalizeCloudApiUrl(tokens.apiUrl)
   const accountKey = tokens.accessToken
-    ? deriveCloudAuthAccountKey(tokens.apiUrl, tokens.accessToken, tokens.user)
+    ? deriveCloudAuthAccountKey(apiUrl, tokens.accessToken, tokens.user)
     : undefined
   const tokenHash = tokens.accessToken ? accountWorkspaceTokenHash(tokens.accessToken) : undefined
   const accountWorkspace =
@@ -162,7 +164,7 @@ function saveAuthMeta(tokens: Pick<StoredTokens, 'apiUrl' | 'user'> & Partial<Pi
         }
       : undefined
   const meta = {
-    apiUrl: tokens.apiUrl,
+    apiUrl,
     user: tokens.user,
     ...(accountWorkspace ? { accountWorkspace } : {})
   }
@@ -173,8 +175,9 @@ function loadAuthMeta(): AuthMeta {
   try {
     const parsed = AuthMetaSchema.safeParse(JSON.parse(readFileSync(getAuthMetaPath(), 'utf8')))
     if (!parsed.success) return { apiUrl: CLOUD_API_URL }
+    const apiUrl = (parsed.data.apiUrl?.trim() || CLOUD_API_URL).replace(/\/+$/, '')
     return {
-      apiUrl: parsed.data.apiUrl?.trim() || CLOUD_API_URL,
+      apiUrl: apiUrl === LEGACY_CLOUD_API_URL ? CLOUD_API_URL : apiUrl,
       user: parsed.data.user,
       accountWorkspace: parsed.data.accountWorkspace
     }
@@ -321,7 +324,7 @@ function accountWorkspaceIdFromWhoami(value: unknown): string | undefined {
 function saveAccountWorkspaceCache(auth: CloudAuth, workspaceId: string): void {
   const previous = loadAuthMeta()
   const meta = {
-    apiUrl: auth.apiUrl || previous.apiUrl?.trim() || CLOUD_API_URL,
+    apiUrl: normalizeCloudApiUrl(auth.apiUrl || previous.apiUrl),
     user: previous.user,
     accountWorkspace: {
       accountKey: auth.accountKey,
@@ -578,7 +581,7 @@ async function performTokenRefresh(stored: StoredTokens): Promise<StoredTokens |
 
 export function getApiUrl(): string {
   if (hasStoredTokens()) {
-    return loadAuthMeta().apiUrl || CLOUD_API_URL
+    return normalizeCloudApiUrl(loadAuthMeta().apiUrl)
   }
   return CLOUD_API_URL
 }
@@ -600,7 +603,7 @@ function cloudAuthFromStored(tokens: StoredTokens): CloudAuth {
 
 function normalizeCloudApiUrl(url: string | undefined): string {
   const normalized = (url || getApiUrl()).trim().replace(/\/+$/, '')
-  if (normalized === 'https://agentrelay.dev/cloud') return CLOUD_API_URL
+  if (normalized === LEGACY_CLOUD_API_URL) return CLOUD_API_URL
   return normalized
 }
 
@@ -699,8 +702,9 @@ export async function getAccountWorkspaceId(options: AccountWorkspaceIdOptions =
   if (!auth) throw new Error('cloud-auth-required')
 
   const cached = loadAuthMeta().accountWorkspace
-  if (accountWorkspaceCacheMatches(cached, auth)) {
-    return cached.workspaceId.trim()
+  const cachedWorkspaceId = cached?.workspaceId.trim()
+  if (cachedWorkspaceId && accountWorkspaceCacheMatches(cached, auth)) {
+    return cachedWorkspaceId
   }
 
   const retryAttempts = Math.max(1, Math.floor(options.retryAttempts ?? 1))

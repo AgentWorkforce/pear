@@ -381,6 +381,20 @@ describe('getAccountWorkspaceId', () => {
     )
   })
 
+  it('canonicalizes legacy agentrelay.dev metadata used by getApiUrl callers', async () => {
+    writeAuthJson(userDataDir, {
+      accessToken: 'cld_at_legacy_meta',
+      refreshToken: 'cld_rt_legacy_meta',
+      apiUrl: 'https://agentrelay.dev/cloud'
+    })
+
+    const { getAccessToken, getApiUrl } = await import('./auth')
+    await expect(getAccessToken()).resolves.toBe('cld_at_legacy_meta')
+
+    expect(getApiUrl()).toBe('https://agentrelay.com/cloud')
+    expect(readMeta(userDataDir)?.apiUrl).toBe('https://agentrelay.com/cloud')
+  })
+
   it('throws cloud-auth-required when whoami rejects the access token', async () => {
     writeAuthJson(userDataDir, {
       accessToken: 'cld_at_401',
