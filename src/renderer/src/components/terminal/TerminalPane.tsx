@@ -1,7 +1,7 @@
 import type React from 'react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, ChevronLeft, ChevronRight, Columns2, CornerUpLeft, Loader2, Network, PanelTop, X } from 'lucide-react'
-import { AgentHarnessIcon, ClaudeIcon, CodexIcon, GrokIcon } from '@/components/common/AgentIcons'
+import { AgentHarnessIcon, ClaudeIcon, CodexIcon, GrokIcon, OpenCodeIcon } from '@/components/common/AgentIcons'
 import { ChatComposerInput } from '@/components/chat/ChatComposerInput'
 import { spawnProjectAgent, type SpawnAgentCli } from '@/lib/spawn-agent'
 import { formatTokenCount } from '@/lib/format'
@@ -777,7 +777,7 @@ export function TerminalPane(): React.ReactNode {
           {activeProject ? 'No agents running' : 'No project selected'}
         </p>
         {activeProject ? (
-          <div className="mt-4 grid w-full max-w-[420px] grid-cols-3 gap-3">
+          <div className="mt-4 grid w-full max-w-[560px] grid-cols-4 gap-3">
             <button
               type="button"
               onClick={() => handleSpawn('claude')}
@@ -807,6 +807,16 @@ export function TerminalPane(): React.ReactNode {
             >
               <GrokIcon className="h-4 w-4" />
               <span>{spawningCli === 'grok' ? 'Starting' : 'Grok'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSpawn('opencode')}
+              disabled={!activeRoot?.pathExists || spawningCli !== null}
+              className="flex items-center justify-center gap-2 rounded-lg border border-[var(--pear-border)] px-4 py-3 text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:cursor-not-allowed disabled:opacity-40"
+              title={activeRoot?.pathExists ? 'Spawn OpenCode' : `Path not found: ${activeRoot?.path || activeProject.rootPath}`}
+            >
+              <OpenCodeIcon className="h-4 w-4" />
+              <span>{spawningCli === 'opencode' ? 'Starting' : 'OpenCode'}</span>
             </button>
           </div>
         ) : (

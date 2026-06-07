@@ -1,7 +1,7 @@
 import type React from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Loader2, X } from 'lucide-react'
-import { ClaudeIcon, CodexIcon, GrokIcon } from '@/components/common/AgentIcons'
+import { ClaudeIcon, CodexIcon, GrokIcon, OpenCodeIcon } from '@/components/common/AgentIcons'
 import { listProjectPersonas, spawnProjectAgent, spawnProjectPersona, type SpawnAgentCli } from '@/lib/spawn-agent'
 import type { WorkforcePersona } from '@/lib/ipc'
 import { useProjectStore, type ProjectRoot } from '@/stores/project-store'
@@ -10,7 +10,8 @@ import { useUIStore } from '@/stores/ui-store'
 const AGENT_OPTIONS: Array<{ cli: SpawnAgentCli; label: string; Icon: typeof ClaudeIcon }> = [
   { cli: 'claude', label: 'Claude', Icon: ClaudeIcon },
   { cli: 'codex', label: 'Codex', Icon: CodexIcon },
-  { cli: 'grok', label: 'Grok', Icon: GrokIcon }
+  { cli: 'grok', label: 'Grok', Icon: GrokIcon },
+  { cli: 'opencode', label: 'OpenCode', Icon: OpenCodeIcon }
 ]
 
 export function SpawnAgentDialog(): React.ReactNode {
