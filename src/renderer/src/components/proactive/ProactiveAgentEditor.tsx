@@ -90,7 +90,8 @@ type KeyValueRow = {
 const MODEL_OPTIONS: Record<Harness, string[]> = {
   claude: ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
   codex: ['gpt-5.2', 'gpt-5.1-codex', 'gpt-5.1-codex-mini'],
-  opencode: ['claude-sonnet-4-6', 'gpt-5.2', 'qwen3-coder']
+  opencode: ['claude-sonnet-4-6', 'gpt-5.2', 'qwen3-coder'],
+  grok: ['grok-build', 'grok-composer-2.5-fast']
 }
 
 const DEPLOY_PHASES: DeployPhase[] = [
@@ -926,6 +927,7 @@ export function ProactiveAgentEditor({
                       <option value="claude">Claude</option>
                       <option value="codex">Codex</option>
                       <option value="opencode">OpenCode</option>
+                      <option value="grok">Grok</option>
                     </select>
                     <FieldError message={errors.harness} />
                   </label>

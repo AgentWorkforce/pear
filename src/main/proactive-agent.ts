@@ -43,7 +43,7 @@ type PersonaKitModule = {
 
 const PERSONA_ID_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/
 const WATCH_EVENTS = new Set<ProactiveAgentWatchEventKind>(['created', 'updated', 'deleted'])
-const HARNESSES = new Set(['claude', 'codex', 'opencode'])
+const HARNESSES = new Set(['claude', 'codex', 'opencode', 'grok'])
 const RUN_MODES = new Set(['cloud', 'local'])
 const MEMORY_SCOPES = new Set(['workspace', 'project', 'persona'])
 const REASONING_LEVELS = new Set(['low', 'medium', 'high'])
@@ -390,7 +390,7 @@ export class ProactiveAgentManager {
       throw new Error('Agent id must be kebab-case')
     }
     if (!HARNESSES.has(draft.harness)) {
-      throw new Error('Harness must be one of claude, codex, or opencode')
+      throw new Error('Harness must be one of claude, codex, opencode, or grok')
     }
     if (!RUN_MODES.has(draft.runMode || 'cloud')) {
       throw new Error('Run mode must be cloud or local')

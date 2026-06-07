@@ -1038,7 +1038,7 @@ function preflightSpawnCli(input: SpawnPtyInput): SpawnPtyInput {
   }
 
   const label = spawnCliLabel(input.cli)
-  if (!['claude', 'codex', 'opencode'].includes(label)) return input
+  if (!['claude', 'codex', 'opencode', 'grok'].includes(label)) return input
   const resolved = resolveCommandWithAugmentedPath(input.cli)
   if (!resolved) {
     throw new Error(

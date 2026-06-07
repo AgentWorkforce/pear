@@ -354,8 +354,13 @@ export function useTerminal(
         theme: getXtermTheme(theme),
         fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, monospace",
         fontSize: 13,
-        lineHeight: 1,
+        lineHeight: 1.2,
+        letterSpacing: 0.5,
         cursorBlink: true,
+        cursorStyle: 'bar',
+        scrollback: 10000,
+        fastScrollModifier: 'alt',
+        macOptionIsMeta: true,
         allowProposedApi: true
       })
 

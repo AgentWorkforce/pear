@@ -1,7 +1,7 @@
 import type React from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Loader2, X } from 'lucide-react'
-import { ClaudeIcon, CodexIcon } from '@/components/common/AgentIcons'
+import { ClaudeIcon, CodexIcon, GrokIcon } from '@/components/common/AgentIcons'
 import { listProjectPersonas, spawnProjectAgent, spawnProjectPersona, type SpawnAgentCli } from '@/lib/spawn-agent'
 import type { WorkforcePersona } from '@/lib/ipc'
 import { useProjectStore, type ProjectRoot } from '@/stores/project-store'
@@ -9,7 +9,8 @@ import { useUIStore } from '@/stores/ui-store'
 
 const AGENT_OPTIONS: Array<{ cli: SpawnAgentCli; label: string; Icon: typeof ClaudeIcon }> = [
   { cli: 'claude', label: 'Claude', Icon: ClaudeIcon },
-  { cli: 'codex', label: 'Codex', Icon: CodexIcon }
+  { cli: 'codex', label: 'Codex', Icon: CodexIcon },
+  { cli: 'grok', label: 'Grok', Icon: GrokIcon }
 ]
 
 export function SpawnAgentDialog(): React.ReactNode {
@@ -207,7 +208,7 @@ export function SpawnAgentDialog(): React.ReactNode {
                   className="h-9 w-full rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 text-sm text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent-dim)] disabled:opacity-50"
                 />
               </div>
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-3 gap-3">
                 {AGENT_OPTIONS.map(({ cli, label, Icon }) => (
                   <button
                     key={cli}
