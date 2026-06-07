@@ -127,6 +127,11 @@ describe('getAccountWorkspaceId', () => {
     expect(mock.fetchMock).not.toHaveBeenCalled()
   })
 
+  it('uses the production cloud URL by default', async () => {
+    const { getApiUrl } = await import('./auth')
+    expect(getApiUrl()).toBe('https://agentrelay.com/cloud')
+  })
+
   it('returns the workspace id from currentWorkspace.id and persists the cache', async () => {
     writeAuthJson(userDataDir, {
       accessToken: 'cld_at_abc',
@@ -333,6 +338,47 @@ describe('getAccountWorkspaceId', () => {
     const { getAccountWorkspaceId } = await import('./auth')
     await expect(getAccountWorkspaceId({ retryAttempts: 2, retryDelayMs: 0 })).resolves.toBe('ws-after-ready')
     expect(mock.fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('retries when whoami temporarily times out', async () => {
+    writeAuthJson(userDataDir, {
+      accessToken: 'cld_at_timeout_retry',
+      refreshToken: 'cld_rt_timeout_retry',
+      apiUrl: 'https://cloud.example'
+    })
+    mock.fetchMock
+      .mockRejectedValueOnce(Object.assign(new Error('aborted'), { name: 'AbortError' }))
+      .mockResolvedValueOnce({
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => ({ currentWorkspace: { id: 'ws-after-timeout' } })
+      })
+
+    const { getAccountWorkspaceId } = await import('./auth')
+    await expect(getAccountWorkspaceId({ retryAttempts: 2, retryDelayMs: 0 })).resolves.toBe('ws-after-timeout')
+    expect(mock.fetchMock).toHaveBeenCalledTimes(2)
+  })
+
+  it('canonicalizes legacy agentrelay.dev auth records to production', async () => {
+    writeAuthJson(userDataDir, {
+      accessToken: 'cld_at_legacy_dev',
+      refreshToken: 'cld_rt_legacy_dev',
+      apiUrl: 'https://agentrelay.dev/cloud'
+    })
+    mock.fetchMock.mockResolvedValue({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({ currentWorkspace: { id: 'ws-prod' } })
+    })
+
+    const { getAccountWorkspaceId } = await import('./auth')
+    await expect(getAccountWorkspaceId()).resolves.toBe('ws-prod')
+    expect(mock.fetchMock).toHaveBeenCalledWith(
+      'https://agentrelay.com/cloud/api/v1/auth/whoami',
+      expect.any(Object)
+    )
   })
 
   it('throws cloud-auth-required when whoami rejects the access token', async () => {

@@ -14,8 +14,9 @@ import {
   type UserInfo
 } from './schemas'
 
-const CLOUD_API_URL = process.env.RELAY_CLOUD_URL || 'https://agentrelay.dev/cloud'
+const CLOUD_API_URL = process.env.RELAY_CLOUD_URL || 'https://agentrelay.com/cloud'
 const TOKEN_EXPIRY_BUFFER_MS = 60_000
+const WHOAMI_REQUEST_TIMEOUT_MS = 10_000
 const ACCOUNT_WORKSPACE_RETRY_ATTEMPTS = 8
 const ACCOUNT_WORKSPACE_RETRY_DELAY_MS = 500
 const warnedWhoamiWorkspaceFailures = new Set<string>()
@@ -277,7 +278,7 @@ function warnWhoamiWorkspaceFailure(failureClass: string): void {
 
 async function fetchWhoamiPayload(apiUrl: string, accessToken: string): Promise<WhoamiPayloadResult> {
   const controller = new AbortController()
-  const timeout = setTimeout(() => controller.abort(), 2500)
+  const timeout = setTimeout(() => controller.abort(), WHOAMI_REQUEST_TIMEOUT_MS)
 
   try {
     const res = await fetch(`${apiUrl}/api/v1/auth/whoami`, {
@@ -598,7 +599,9 @@ function cloudAuthFromStored(tokens: StoredTokens): CloudAuth {
 }
 
 function normalizeCloudApiUrl(url: string | undefined): string {
-  return (url || getApiUrl()).trim().replace(/\/+$/, '')
+  const normalized = (url || getApiUrl()).trim().replace(/\/+$/, '')
+  if (normalized === 'https://agentrelay.dev/cloud') return CLOUD_API_URL
+  return normalized
 }
 
 function readJwtPayload(token: string): Record<string, unknown> | null {
