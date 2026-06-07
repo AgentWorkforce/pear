@@ -590,6 +590,30 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('skips PTY operations when attaching to a headless agent discovered from listAgents', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, ['headless-agent'])
+    local.listAgents.mockImplementation(async () => [
+      { name: 'headless-agent', runtime: 'headless', channels: [] }
+    ])
+    local.getPending.mockResolvedValueOnce([{ id: 'pending-1' }])
+
+    const result = await manager.attachTerminal(PROJECT_ID, { name: 'headless-agent', mode: 'drive', rows: 32, cols: 100 })
+
+    expect(result).toEqual({
+      name: 'headless-agent',
+      mode: 'manual_flush',
+      previousMode: 'passthrough',
+      pending: 1,
+      runtime: 'headless'
+    })
+    expect(local.setInboundDeliveryMode).toHaveBeenCalledWith('headless-agent', 'manual_flush')
+    expect(local.resizePty).not.toHaveBeenCalled()
+    expect(local.snapshot).not.toHaveBeenCalled()
+
+    await manager.shutdown()
+  })
+
   it('detachCloudSandbox drops only the cloud session', async () => {
     const manager = new BrokerManager()
     const local = await startLocal(manager, ['local-agent'])

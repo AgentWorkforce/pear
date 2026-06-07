@@ -9,7 +9,6 @@ import {
   HarnessDriverClient as AgentRelayClient,
   type RuntimeSpawnOptions as AgentRelaySpawnOptions,
   type SpawnPtyInput,
-  type SpawnCliInput,
   type SendMessageInput,
   type BrokerEvent,
   type BrokerStatus,
@@ -41,6 +40,12 @@ import {
   resolveCommandOnPath,
   resolvePackageBin
 } from './mcp-command'
+
+type KnownAgentRuntime = 'pty' | 'headless'
+
+function normalizeAgentRuntime(runtime: unknown): KnownAgentRuntime | undefined {
+  return runtime === 'pty' || runtime === 'headless' ? runtime : undefined
+}
 
 function isShellLikeCommand(cli: string): boolean {
   const normalized = basename(cli).toLowerCase()
@@ -323,6 +328,7 @@ export interface AttachTerminalResult {
   mode: InboundDeliveryMode
   previousMode?: InboundDeliveryMode
   pending: number
+  runtime?: 'pty' | 'headless'
   snapshot?: {
     rows: number
     cols: number
@@ -2040,7 +2046,7 @@ export class BrokerManager {
       if (event.kind === 'agent_spawned' && event.name) {
         this.rememberAgentSession(event.name, sessionKey)
         if ('runtime' in event && (event.runtime === 'pty' || event.runtime === 'headless')) {
-          this.agentRuntimes.set(event.name, event.runtime)
+          this.agentRuntimes.set(this.getAgentRuntimeKey(sessionKey, event.name), event.runtime)
         }
         if (event.parent) {
           void this.handleSpawnedChildLineage(sessionKey, event)
@@ -2048,7 +2054,7 @@ export class BrokerManager {
       } else if (event.kind === 'agent_exit' && event.name) {
         this.closeInputStream(this.getInputStreamKey(sessionKey, event.name), 1000, 'agent closed')
         this.forgetAgentSession(event.name, sessionKey)
-        this.agentRuntimes.delete(event.name)
+        this.agentRuntimes.delete(this.getAgentRuntimeKey(sessionKey, event.name))
         void client.release(event.name, 'agent exit').catch((err) => {
           if (!isMissingAgentError(err)) {
             console.warn(`[broker] Failed to release exited agent ${event.name}:`, err)
@@ -2057,7 +2063,7 @@ export class BrokerManager {
       } else if ((event.kind === 'agent_exited' || event.kind === 'agent_released') && event.name) {
         this.closeInputStream(this.getInputStreamKey(sessionKey, event.name), 1000, 'agent closed')
         this.forgetAgentSession(event.name, sessionKey)
-        this.agentRuntimes.delete(event.name)
+        this.agentRuntimes.delete(this.getAgentRuntimeKey(sessionKey, event.name))
       } else if ('name' in event && typeof event.name === 'string') {
         this.rememberAgentSession(event.name, sessionKey)
       } else if ('from' in event && typeof event.from === 'string') {
@@ -2191,6 +2197,12 @@ export class BrokerManager {
     this.agentSessions.set(name, sessionKeys)
   }
 
+  private rememberAgentRuntime(sessionKey: string, agent: Pick<ListAgent, 'name' | 'runtime'>): void {
+    if (agent.runtime === 'pty' || agent.runtime === 'headless') {
+      this.agentRuntimes.set(this.getAgentRuntimeKey(sessionKey, agent.name), agent.runtime)
+    }
+  }
+
   private forgetAgentSession(name: string, sessionKey: string): void {
     const sessionKeys = this.agentSessions.get(name)
     if (!sessionKeys) return
@@ -2198,6 +2210,10 @@ export class BrokerManager {
     if (sessionKeys.size === 0) {
       this.agentSessions.delete(name)
     }
+  }
+
+  private getAgentRuntimeKey(sessionKey: string, name: string): string {
+    return `${sessionKey}:${name}`
   }
 
   private getInputStreamKey(sessionKey: string, name: string): string {
@@ -2306,6 +2322,9 @@ export class BrokerManager {
     }
     for (const key of Array.from(this.inputStreamReady)) {
       if (key.startsWith(prefix)) this.inputStreamReady.delete(key)
+    }
+    for (const key of Array.from(this.agentRuntimes.keys())) {
+      if (key.startsWith(prefix)) this.agentRuntimes.delete(key)
     }
   }
 
@@ -2543,7 +2562,11 @@ export class BrokerManager {
     while (Date.now() < deadline) {
       try {
         const agents = await session.client.listAgents()
-        if (agents.some((agent) => agent.name === name)) return true
+        const agent = agents.find((candidate) => candidate.name === name)
+        if (agent) {
+          this.rememberAgentRuntime(sessionKeyFor(session), agent)
+          return true
+        }
       } catch {
         // Transient broker errors during the wait are fine — keep polling
         // until the deadline; if the broker is genuinely down the downstream
@@ -2575,8 +2598,11 @@ export class BrokerManager {
     while (Date.now() < deadline) {
       for (const candidate of candidates) {
         const agents = await candidate.client.listAgents().catch(() => null)
-        if (agents?.some((agent) => agent.name === name)) {
-          this.rememberAgentSession(name, sessionKeyFor(candidate))
+        const agent = agents?.find((candidateAgent) => candidateAgent.name === name)
+        if (agent) {
+          const sessionKey = sessionKeyFor(candidate)
+          this.rememberAgentSession(name, sessionKey)
+          this.rememberAgentRuntime(sessionKey, agent)
           return { session: candidate, registered: true }
         }
       }
@@ -2730,15 +2756,16 @@ export class BrokerManager {
     // session history first and can take 10+ seconds to register.
     const { session, registered } = await this.locateSessionForAgent(name, projectId)
     const client = session.client
+    const sessionKey = sessionKeyFor(session)
     // A re-attach (window reload, restart, tab re-open) is a fresh start for
     // this terminal — clear any stale HTTP-only fallback so the WS fast path
     // gets retried instead of being stuck on HTTP for the agent's lifetime.
-    this.resetInputStreamFallback(this.getInputStreamKey(sessionKeyFor(session), name))
+    this.resetInputStreamFallback(this.getInputStreamKey(sessionKey, name))
     if (!registered) {
       console.warn(`[broker] attachTerminal: ${name} did not appear in listAgents within wait window; falling through to per-call retry`)
     }
     const mode = toInboundDeliveryMode(input.mode)
-    const isHeadless = this.agentRuntimes.get(name) === 'headless'
+    const isHeadless = this.agentRuntimes.get(this.getAgentRuntimeKey(sessionKey, name)) === 'headless'
     let previousMode: InboundDeliveryMode | undefined
 
     try {
@@ -3270,6 +3297,7 @@ export class BrokerManager {
     const sessionKey = sessionKeyFor(session)
     for (const agent of agents) {
       this.rememberAgentSession(agent.name, sessionKey)
+      this.rememberAgentRuntime(sessionKey, agent)
     }
     const brokerKind = session.cloudSandboxId ? ('cloud' as const) : ('local' as const)
     return Promise.all(
