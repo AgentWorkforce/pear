@@ -57,7 +57,8 @@ export type CloudAgentPickerProps = {
 const HARNESS_OPTIONS = [
   { value: 'claude', label: 'Claude', defaultModel: 'claude-opus-4-7' },
   { value: 'codex', label: 'Codex', defaultModel: 'gpt-5.2' },
-  { value: 'opencode', label: 'OpenCode', defaultModel: 'claude-sonnet-4-6' }
+  { value: 'opencode', label: 'OpenCode', defaultModel: 'claude-sonnet-4-6' },
+  { value: 'grok', label: 'Grok', defaultModel: 'grok-build' }
 ]
 
 function getErrorMessage(error: unknown): string {
@@ -140,9 +141,10 @@ function cloudWorkerName(agent: CloudAgentRecord): string {
 
 function cloudWorkerCli(agent: CloudAgentRecord): string {
   const harness = agent.harness.trim().toLowerCase()
-  if (harness === 'claude' || harness === 'codex' || harness === 'opencode') return harness
+  if (harness === 'claude' || harness === 'codex' || harness === 'opencode' || harness === 'grok') return harness
   if (harness === 'anthropic') return 'claude'
   if (harness === 'openai' || harness === 'gpt' || harness === 'chatgpt') return 'codex'
+  if (harness === 'xai' || harness === 'x.ai') return 'grok'
   return 'claude'
 }
 

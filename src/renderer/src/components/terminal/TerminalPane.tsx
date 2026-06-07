@@ -1,7 +1,8 @@
 import type React from 'react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, ChevronLeft, ChevronRight, Columns2, CornerUpLeft, Loader2, PanelTop, X } from 'lucide-react'
-import { AgentHarnessIcon, ClaudeIcon, CodexIcon } from '@/components/common/AgentIcons'
+import { AlertTriangle, ChevronLeft, ChevronRight, Columns2, CornerUpLeft, Loader2, Network, PanelTop, X } from 'lucide-react'
+import { AgentHarnessIcon, ClaudeIcon, CodexIcon, GrokIcon } from '@/components/common/AgentIcons'
+import { GraphView } from '@/components/graph/GraphView'
 import { ChatComposerInput } from '@/components/chat/ChatComposerInput'
 import { spawnProjectAgent, type SpawnAgentCli } from '@/lib/spawn-agent'
 import { formatTokenCount } from '@/lib/format'
@@ -777,7 +778,7 @@ export function TerminalPane(): React.ReactNode {
           {activeProject ? 'No agents running' : 'No project selected'}
         </p>
         {activeProject ? (
-          <div className="mt-4 grid w-full max-w-[340px] grid-cols-2 gap-3">
+          <div className="mt-4 grid w-full max-w-[420px] grid-cols-3 gap-3">
             <button
               type="button"
               onClick={() => handleSpawn('claude')}
@@ -797,6 +798,16 @@ export function TerminalPane(): React.ReactNode {
             >
               <CodexIcon className="h-4 w-4" />
               <span>{spawningCli === 'codex' ? 'Starting' : 'Codex'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => handleSpawn('grok')}
+              disabled={!activeRoot?.pathExists || spawningCli !== null}
+              className="flex items-center justify-center gap-2 rounded-lg border border-[var(--pear-border)] px-4 py-3 text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:cursor-not-allowed disabled:opacity-40"
+              title={activeRoot?.pathExists ? 'Spawn Grok' : `Path not found: ${activeRoot?.path || activeProject.rootPath}`}
+            >
+              <GrokIcon className="h-4 w-4" />
+              <span>{spawningCli === 'grok' ? 'Starting' : 'Grok'}</span>
             </button>
           </div>
         ) : (

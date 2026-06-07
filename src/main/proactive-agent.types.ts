@@ -1,4 +1,4 @@
-export type ProactiveAgentHarness = 'claude' | 'codex' | 'opencode'
+export type ProactiveAgentHarness = 'claude' | 'codex' | 'opencode' | 'grok'
 export type ProactiveAgentStatus = 'draft' | 'warming' | 'active' | 'paused' | 'error'
 export type ProactiveAgentRunStatus = 'running' | 'succeeded' | 'failed'
 export type ProactiveAgentRunMode = 'cloud' | 'local'

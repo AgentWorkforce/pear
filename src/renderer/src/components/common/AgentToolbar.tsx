@@ -1,6 +1,6 @@
 import type React from 'react'
 import { Settings } from 'lucide-react'
-import { ClaudeIcon, CodexIcon, CopilotIcon, GeminiIcon, OpenCodeIcon } from '@/components/common/AgentIcons'
+import { ClaudeIcon, CodexIcon, CopilotIcon, GeminiIcon, GrokIcon, OpenCodeIcon } from '@/components/common/AgentIcons'
 import { useUIStore } from '@/stores/ui-store'
 
 const AGENTS = [
@@ -8,7 +8,8 @@ const AGENTS = [
   { cli: 'codex', label: 'codex', Icon: CodexIcon },
   { cli: 'copilot', label: 'copilot', Icon: CopilotIcon },
   { cli: 'opencode', label: 'opencode', Icon: OpenCodeIcon },
-  { cli: 'gemini', label: 'gemini', Icon: GeminiIcon }
+  { cli: 'gemini', label: 'gemini', Icon: GeminiIcon },
+  { cli: 'grok', label: 'grok', Icon: GrokIcon }
 ]
 
 export function AgentToolbar(): React.ReactNode {
