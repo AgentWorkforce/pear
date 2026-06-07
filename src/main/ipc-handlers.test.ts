@@ -63,6 +63,9 @@ const mock = vi.hoisted(() => {
       updateHistoricalDownload: vi.fn(),
       disconnect: vi.fn()
     },
+    integrationEventBridge: {
+      invalidateProjectAgentCache: vi.fn()
+    },
     proactiveAgentManager: {
       onEvent: vi.fn()
     }
@@ -118,9 +121,7 @@ vi.mock('./integrations', () => ({
 }))
 vi.mock('./integration-event-bridge', () => ({
   getIntegrationEventTelemetrySnapshot: vi.fn(() => ({})),
-  integrationEventBridge: {
-    invalidateProjectAgentCache: vi.fn()
-  }
+  integrationEventBridge: mock.integrationEventBridge
 }))
 vi.mock('./ai-hist', () => ({
   aiHistManager: {}
@@ -195,5 +196,29 @@ describe('registerIpcHandlers broker:spawn-agent', () => {
 
     expect(result).toEqual({ name: 'worker', runtime: 'pty' })
     expect(() => structuredClone(result)).not.toThrow()
+  })
+})
+
+describe('registerIpcHandlers broker:spawn-persona', () => {
+  beforeEach(() => {
+    mock.handlers.clear()
+    mock.ipcMain.handle.mockClear()
+    mock.ipcMain.on.mockClear()
+    mock.brokerManager.spawnPersona.mockReset()
+    mock.integrationEventBridge.invalidateProjectAgentCache.mockClear()
+    mock.brokerManager.spawnPersona.mockResolvedValue({ name: 'persona', runtime: 'pty', cli: 'claude' })
+    registerIpcHandlers()
+  })
+
+  it('invalidates the integration agent cache after persona spawn settles', async () => {
+    const handler = mock.handlers.get('broker:spawn-persona')
+    expect(handler).toBeTypeOf('function')
+
+    const result = await handler?.({}, 'project-1', 'autonomous-actor')
+
+    expect(result).toEqual({ name: 'persona', runtime: 'pty', cli: 'claude' })
+    expect(mock.brokerManager.spawnPersona).toHaveBeenCalledWith('project-1', 'autonomous-actor')
+    expect(mock.integrationEventBridge.invalidateProjectAgentCache).toHaveBeenCalledTimes(1)
+    expect(mock.integrationEventBridge.invalidateProjectAgentCache).toHaveBeenCalledWith('project-1')
   })
 })

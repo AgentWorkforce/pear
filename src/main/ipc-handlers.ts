@@ -270,7 +270,6 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('broker:spawn-persona', async (_, projectId: string, personaId: string) => {
-    integrationEventBridge.invalidateProjectAgentCache(projectId)
     try {
       const result = await brokerManager.spawnPersona(projectId, personaId)
       return toBrokerSpawnAgentResult(result)

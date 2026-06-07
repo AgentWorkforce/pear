@@ -3732,14 +3732,15 @@ export class BrokerManager {
         'Broker status'
       )
       return {
-        agents: status.agents,
+        agents: status.agents.filter((agent) => !this.isPersonaReadinessPending(session, agent.name)),
         pendingDeliveryCount: status.pending_delivery_count,
         auth: status.auth
       }
     } catch (statusErr) {
       try {
         return {
-          agents: await withBrokerDetailsTimeout(session.client.listAgents(), 'Agent list'),
+          agents: (await withBrokerDetailsTimeout(session.client.listAgents(), 'Agent list'))
+            .filter((agent) => !this.isPersonaReadinessPending(session, agent.name)),
           pendingDeliveryCount: 0
         }
       } catch (listErr) {

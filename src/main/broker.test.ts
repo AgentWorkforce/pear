@@ -795,6 +795,50 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('does not expose a workforce persona to broker details until harness readiness passes', async () => {
+    personaTempDir = await mkdtemp(join(tmpdir(), 'pear-persona-spawn-'))
+    await writeAgentWorkforceFixture(personaTempDir)
+
+    const manager = new BrokerManager()
+    mock.state.nextLocalAgents = []
+    await manager.start(PROJECT_ID, personaTempDir, 'pear-project-1', undefined as never, [])
+    const local = lastSpawned()
+    let releaseSpawn!: () => void
+    local.spawnPty.mockImplementationOnce(async (input: { name: string }) => {
+      local.agentNames.push(input.name)
+      await new Promise<void>((resolve) => {
+        releaseSpawn = resolve
+      })
+      setImmediate(() => emitPersonaHarnessReady(local, input.name))
+      return {
+        name: input.name,
+        runtime: 'pty',
+        cli: 'agentworkforce'
+      }
+    })
+
+    const spawned = manager.spawnPersona(PROJECT_ID, 'autonomous-actor')
+    await Promise.resolve()
+    await Promise.resolve()
+
+    const [pendingDetails] = await manager.listBrokerDetails()
+    expect(pendingDetails.agentCount).toBe(0)
+    expect(pendingDetails.agents).toEqual([])
+
+    releaseSpawn()
+    await expect(spawned).resolves.toEqual({
+      name: 'autonomous-actor',
+      runtime: 'pty',
+      cli: 'claude'
+    })
+
+    const [readyDetails] = await manager.listBrokerDetails()
+    expect(readyDetails.agentCount).toBe(1)
+    expect(readyDetails.agents.map((agent) => agent.name)).toEqual(['autonomous-actor'])
+
+    await manager.shutdown()
+  })
+
   it('releases a workforce persona when broker delivery readiness is not confirmed', async () => {
     personaTempDir = await mkdtemp(join(tmpdir(), 'pear-persona-spawn-'))
     await writeAgentWorkforceFixture(personaTempDir)
