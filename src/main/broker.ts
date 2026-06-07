@@ -365,6 +365,8 @@ const MAX_BROKER_TIMEOUTS_BEFORE_REVIVE = 2
 const BROKER_REVIVE_TERM_GRACE_MS = 1_500
 const PERSONA_REGISTRATION_TIMEOUT_MS = 5_000
 const PERSONA_REGISTRATION_STABILITY_MS = 1_000
+const PERSONA_HARNESS_READY_TIMEOUT_MS = 120_000
+const PERSONA_READY_PROBE_TIMEOUT_MS = 5_000
 const AGENTWORKFORCE_CLI_VERSION = '3.0.50'
 
 function delay(ms: number): Promise<void> {
@@ -404,6 +406,11 @@ type BrokerSpawnResult = {
   name: string
   runtime: string
   cli?: string
+}
+
+type PersonaBrokerSpawnResult = BrokerSpawnResult & {
+  workerStreamBaselineSeq?: number
+  workerStreamBaselineCount: number
 }
 
 function normalizeSpawnPtyResult(value: unknown, fallbackName: string, cli?: string): BrokerSpawnResult {
@@ -453,6 +460,33 @@ function deliveryFailureMessage(event: BrokerEvent): string {
   const reason = typeof event.reason === 'string' ? event.reason : undefined
   const lastError = typeof event.lastError === 'string' ? event.lastError : undefined
   return reason || lastError || 'Broker delivery failed'
+}
+
+function isWorkerStreamForAgent(event: BrokerEvent, name: string): boolean {
+  return brokerEventString(event, 'kind') === 'worker_stream' && brokerEventString(event, 'name') === name
+}
+
+function brokerEventChunk(event: BrokerEvent): string {
+  const value = (event as unknown as Record<string, unknown>).chunk
+  return typeof value === 'string' ? value : ''
+}
+
+function brokerEventNumber(event: BrokerEvent, key: string): number | undefined {
+  const value = (event as unknown as Record<string, unknown>)[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function personaHarnessReadyFromOutput(output: string): boolean {
+  return /Sandbox mount ready/i.test(output)
+}
+
+function personaHarnessFailedFromOutput(output: string): string | undefined {
+  const match = output.match(/(Failed to (?:launch sandbox mount|spawn "[^"]+"(?: inside sandbox mount)?|set up sandbox mount)[^\r\n]*)/i)
+  return match?.[1]
+}
+
+function tailText(text: string, maxChars = 2_000): string {
+  return text.length > maxChars ? text.slice(text.length - maxChars) : text
 }
 
 interface PearLineageEntry {
@@ -1229,6 +1263,7 @@ export class BrokerManager {
   // Consecutive broker read timeouts per project/operation; after MAX we
   // respawn the wedged broker. Reset whenever that operation succeeds.
   private brokerTimeoutCounts = new Map<string, number>()
+  private pendingPersonaReadiness = new Set<string>()
   private eventStreamGenerationCounter = 0
   private eventObservers = new Set<BrokerEventObserver>()
   private eventHistory: BrokerEventRecord[] = []
@@ -2231,6 +2266,22 @@ export class BrokerManager {
     return `${sessionKey}:${name}`
   }
 
+  private personaReadinessKey(sessionKey: string, name: string): string {
+    return `${sessionKey}:${name}`
+  }
+
+  private markPersonaReadinessPending(session: BrokerSession, name: string): void {
+    this.pendingPersonaReadiness.add(this.personaReadinessKey(sessionKeyFor(session), name))
+  }
+
+  private clearPersonaReadinessPending(session: BrokerSession, name: string): void {
+    this.pendingPersonaReadiness.delete(this.personaReadinessKey(sessionKeyFor(session), name))
+  }
+
+  private isPersonaReadinessPending(session: BrokerSession, name: string): boolean {
+    return this.pendingPersonaReadiness.has(this.personaReadinessKey(sessionKeyFor(session), name))
+  }
+
   // Returns the input stream for an agent plus whether it is *ready* to send on
   // (the broker has acked pty_input_ready). The WS handshake runs in the
   // background and is never awaited here, so a keystroke is never blocked on the
@@ -2482,9 +2533,9 @@ export class BrokerManager {
     const persona = findWorkforcePersona(session.cwd, trimmedPersonaId, command)
 
     // Resolve the harness from `agentworkforce show --json`. The actual spawn
-    // is delegated to the workforce CLI (`agent --install-in-repo`), which
-    // reads the full inherited persona itself, so the broker only needs the
-    // harness for the informational `cli` field it returns.
+    // is delegated to the workforce CLI (`agent <persona>`), which reads the
+    // full inherited persona itself, stages skills, materializes sidecars in
+    // its sandbox mount, and injects relaycast MCP from the broker env.
     const resolvedHarness = persona.spec.harness ?? 'claude'
     const spawned = await this.spawnPersonaWithMode(session, {
       personaId: trimmedPersonaId,
@@ -2498,19 +2549,31 @@ export class BrokerManager {
         projectId: session.projectId,
         personaId: trimmedPersonaId,
         name: spawned.name,
-        mode: 'cli-install-in-repo',
+        mode: 'cli-sandbox',
         runtime: registeredAgent.runtime,
         cli: registeredAgent.cli,
         currentState: registeredAgent.current_state
       })
-      return spawned
+      this.markPersonaReadinessPending(session, spawned.name)
+      try {
+        await this.verifyPersonaHarnessReady(session, spawned.name, trimmedPersonaId, {
+          workerStreamBaselineSeq: spawned.workerStreamBaselineSeq,
+          workerStreamBaselineCount: spawned.workerStreamBaselineCount
+        })
+      } catch (err) {
+        await this.releaseUnreadyPersona(session, spawned.name, 'persona harness readiness verification failed')
+        throw err
+      } finally {
+        this.clearPersonaReadinessPending(session, spawned.name)
+      }
+      return {
+        name: spawned.name,
+        runtime: spawned.runtime,
+        ...(spawned.cli ? { cli: spawned.cli } : {})
+      }
     }
 
-    await session.client.release(spawned.name, 'persona broker registration verification failed').catch((err) => {
-      if (!isMissingAgentError(err)) {
-        console.warn(`[broker] Failed to release unverified persona agent ${spawned.name}:`, err)
-      }
-    })
+    await this.releaseUnreadyPersona(session, spawned.name, 'persona broker registration verification failed')
     throw new Error(
       `Workforce persona ${trimmedPersonaId} launched but did not stay registered with the broker`
     )
@@ -2524,11 +2587,11 @@ export class BrokerManager {
       command: { cli: string; args: string[] }
       resolvedHarness: string
     }
-  ): Promise<BrokerSpawnResult> {
+  ): Promise<PersonaBrokerSpawnResult> {
     const existingNames = new Set(
       (await session.client.listAgents()).map((agent) => agent.name)
     )
-    const personaArgs = ['agent', '--install-in-repo', input.personaId]
+    const personaArgs = ['agent', input.personaId]
     let nextInput: SpawnPtyInput = {
       name: getAvailableAgentName(input.baseName, existingNames),
       cli: input.command.cli,
@@ -2539,12 +2602,20 @@ export class BrokerManager {
     }
 
     for (let attempt = 0; attempt < 20; attempt += 1) {
+      const requestedName = nextInput.name
+      this.markPersonaReadinessPending(session, requestedName)
       try {
+        const baseline = this.workerStreamBaseline(session, requestedName)
         const spawned = await session.client.spawnPty(nextInput)
         const safeSpawned = normalizeSpawnPtyResult(spawned, nextInput.name, input.resolvedHarness)
+        if (safeSpawned.name !== requestedName) {
+          this.clearPersonaReadinessPending(session, requestedName)
+          this.markPersonaReadinessPending(session, safeSpawned.name)
+        }
         this.rememberAgentSession(safeSpawned.name, sessionKeyFor(session))
-        return safeSpawned
+        return { ...safeSpawned, ...baseline }
       } catch (err) {
+        this.clearPersonaReadinessPending(session, requestedName)
         if (!isAgentNameConflict(err)) {
           throw err
         }
@@ -2662,6 +2733,170 @@ export class BrokerManager {
 
     this.rememberAgentSession(stableAgent.name, sessionKeyFor(session))
     return stableAgent
+  }
+
+  private async releaseUnreadyPersona(session: BrokerSession, name: string, reason: string): Promise<void> {
+    this.clearPersonaReadinessPending(session, name)
+    this.forgetAgentSession(name, sessionKeyFor(session))
+    await session.client.release(name, reason).catch((err) => {
+      if (!isMissingAgentError(err)) {
+        console.warn(`[broker] Failed to release unready persona agent ${name}:`, err)
+      }
+    })
+  }
+
+  private workerStreamEvents(session: BrokerSession, name: string, limit: number): BrokerEvent[] {
+    const queryEvents = (session.client as unknown as {
+      queryEvents?: (filter: { kind: string; name: string; limit: number }) => BrokerEvent[]
+    }).queryEvents
+    return typeof queryEvents === 'function'
+      ? queryEvents.call(session.client, { kind: 'worker_stream', name, limit })
+      : []
+  }
+
+  private workerStreamBaseline(session: BrokerSession, name: string): {
+    workerStreamBaselineSeq?: number
+    workerStreamBaselineCount: number
+  } {
+    const events = this.workerStreamEvents(session, name, 1000)
+    const seqs = events
+      .map((event) => brokerEventNumber(event, 'seq'))
+      .filter((seq): seq is number => seq !== undefined)
+    return {
+      workerStreamBaselineSeq: seqs.length > 0 ? Math.max(...seqs) : undefined,
+      workerStreamBaselineCount: events.length
+    }
+  }
+
+  private isWorkerStreamAfterBaseline(
+    event: BrokerEvent,
+    index: number,
+    baseline: { workerStreamBaselineSeq?: number; workerStreamBaselineCount: number }
+  ): boolean {
+    const seq = brokerEventNumber(event, 'seq')
+    if (baseline.workerStreamBaselineSeq !== undefined) {
+      return seq !== undefined && seq > baseline.workerStreamBaselineSeq
+    }
+    return index >= baseline.workerStreamBaselineCount
+  }
+
+  private async verifyPersonaHarnessReady(
+    session: BrokerSession,
+    name: string,
+    personaId: string,
+    baseline: { workerStreamBaselineSeq?: number; workerStreamBaselineCount: number }
+  ): Promise<void> {
+    const timeoutMs = parsePositiveIntegerEnv('PEAR_PERSONA_HARNESS_READY_TIMEOUT_MS', PERSONA_HARNESS_READY_TIMEOUT_MS)
+    const deadline = Date.now() + timeoutMs
+    await this.waitForPersonaHarnessReadyOutput(session, name, personaId, deadline, baseline)
+    await this.waitForPersonaDeliveryReadiness(session, name, personaId, deadline)
+    console.info('[broker] Workforce persona harness readiness verified', {
+      projectId: session.projectId,
+      personaId,
+      name
+    })
+  }
+
+  private async waitForPersonaHarnessReadyOutput(
+    session: BrokerSession,
+    name: string,
+    personaId: string,
+    deadline: number,
+    baseline: { workerStreamBaselineSeq?: number; workerStreamBaselineCount: number }
+  ): Promise<void> {
+    let output = ''
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let settled = false
+    let resolveReady: (() => void) | undefined
+    let rejectReady: ((error: Error) => void) | undefined
+
+    const finish = (error?: Error): void => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      if (error) {
+        rejectReady?.(error)
+      } else {
+        resolveReady?.()
+      }
+    }
+
+    const observe = (event: BrokerEvent): void => {
+      if (!isWorkerStreamForAgent(event, name)) return
+      output += brokerEventChunk(event)
+      const failure = personaHarnessFailedFromOutput(output)
+      if (failure) {
+        finish(new Error(`Workforce persona ${personaId} failed during harness startup: ${failure}`))
+        return
+      }
+      if (personaHarnessReadyFromOutput(output)) {
+        finish()
+      }
+    }
+
+    const remainingMs = Math.max(1, deadline - Date.now())
+    if (remainingMs <= 1) {
+      throw new Error(`Timed out waiting for Workforce persona ${personaId} to prepare its harness`)
+    }
+
+    const readyPromise = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve
+      rejectReady = reject
+      timer = setTimeout(() => {
+        finish(new Error(
+          `Timed out waiting for Workforce persona ${personaId} to prepare its harness. Last output:\n${tailText(output) || '(no output)'}`
+        ))
+      }, remainingMs)
+    })
+    const unsubscribe = session.client.onEvent((event) => {
+      observe(event)
+    })
+
+    try {
+      const events = this.workerStreamEvents(session, name, 1000)
+      for (const [index, event] of events.entries()) {
+        if (this.isWorkerStreamAfterBaseline(event, index, baseline)) {
+          observe(event)
+          if (settled) break
+        }
+      }
+      await readyPromise
+    } finally {
+      if (timer) clearTimeout(timer)
+      unsubscribe()
+    }
+  }
+
+  private async waitForPersonaDeliveryReadiness(
+    session: BrokerSession,
+    name: string,
+    personaId: string,
+    deadline: number
+  ): Promise<void> {
+    try {
+      const confirmation = await this.sendMessageAndWaitForInjected(session.projectId, {
+        to: name,
+        from: 'pear',
+        text: 'Persona launch readiness check. No action required.',
+        priority: -100,
+        mode: 'steer',
+        data: {
+          kind: 'persona-readiness-check',
+          system: true,
+          personaId
+        }
+      } as SendMessageInput, {
+        timeoutMs: Math.min(PERSONA_READY_PROBE_TIMEOUT_MS, Math.max(1, deadline - Date.now()))
+      })
+      if (confirmation.eventId === 'unsupported_operation' || !confirmation.targets.includes(name)) {
+        throw new Error(`Broker did not confirm delivery injection for ${name}`)
+      }
+      return
+    } catch (err) {
+      throw new Error(
+        `Workforce persona ${personaId} launched but did not become ready for broker delivery: ${toErrorMessage(err)}`
+      )
+    }
   }
 
   async generateCommitDraft(projectId: string, diff: string): Promise<GeneratedCommitDraft> {
@@ -3380,7 +3615,8 @@ export class BrokerManager {
     inboundDeliveryMode?: InboundDeliveryMode
     brokerKind?: 'local' | 'cloud'
   }>> {
-    const agents = await session.client.listAgents()
+    const agents = (await session.client.listAgents())
+      .filter((agent) => !this.isPersonaReadinessPending(session, agent.name))
     // A successful poll means the broker is answering again — clear any wedge
     // streak so a future timeout starts counting from zero.
     this.brokerTimeoutCounts.delete(`${session.projectId}:listAgents`)
@@ -3496,14 +3732,15 @@ export class BrokerManager {
         'Broker status'
       )
       return {
-        agents: status.agents,
+        agents: status.agents.filter((agent) => !this.isPersonaReadinessPending(session, agent.name)),
         pendingDeliveryCount: status.pending_delivery_count,
         auth: status.auth
       }
     } catch (statusErr) {
       try {
         return {
-          agents: await withBrokerDetailsTimeout(session.client.listAgents(), 'Agent list'),
+          agents: (await withBrokerDetailsTimeout(session.client.listAgents(), 'Agent list'))
+            .filter((agent) => !this.isPersonaReadinessPending(session, agent.name)),
           pendingDeliveryCount: 0
         }
       } catch (listErr) {
