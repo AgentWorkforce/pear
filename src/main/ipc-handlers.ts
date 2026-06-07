@@ -17,7 +17,7 @@ import {
   addProjectIntegration,
   removeProjectIntegration
 } from './store'
-import { brokerManager, resolveCommandWithAugmentedPath } from './broker'
+import { brokerManager, isCommandAvailableWithAugmentedPath } from './broker'
 import * as git from './git'
 import * as filesystem from './filesystem'
 import * as auth from './auth'
@@ -387,7 +387,7 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('broker:check-cli-available', (_, cli: string) => {
-    return Boolean(resolveCommandWithAugmentedPath(cli))
+    return typeof cli === 'string' && isCommandAvailableWithAugmentedPath(cli)
   })
 
   ipcMain.handle('broker:list-details', async () => {

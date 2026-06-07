@@ -114,6 +114,15 @@ export function resolveCommandWithAugmentedPath(command: string): string | undef
   return undefined
 }
 
+export function isCommandAvailableWithAugmentedPath(command: string): boolean {
+  const trimmed = command.trim()
+  if (!trimmed) return false
+  return Boolean(resolveCommandOnPath(trimmed, {
+    ...process.env,
+    PATH: augmentedPath()
+  }))
+}
+
 function executableCliPath(input: SpawnPtyInput): string {
   return isAbsolute(input.cli)
     ? input.cli

@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, ChevronLeft, ChevronRight, Columns2, CornerUpLeft, Loader2, Network, PanelTop, X } from 'lucide-react'
 import { AgentHarnessIcon, ClaudeIcon, CodexIcon, GrokIcon, OpenCodeIcon } from '@/components/common/AgentIcons'
 import { ChatComposerInput } from '@/components/chat/ChatComposerInput'
-import { spawnProjectAgent, type SpawnAgentCli } from '@/lib/spawn-agent'
+import { SPAWN_AGENT_CLI_INSTALL_COMMANDS, spawnProjectAgent, type SpawnAgentCli } from '@/lib/spawn-agent'
 import { formatTokenCount } from '@/lib/format'
 import { pear, type BurnAgentInput, type BurnAgentSummary, type TerminalAttachMode } from '@/lib/ipc'
 import { getAgentKeyForAgent, type Agent, useAgentStore } from '@/stores/agent-store'
@@ -803,7 +803,7 @@ export function TerminalPane(): React.ReactNode {
                 className="flex items-center justify-center gap-2 rounded-lg border border-[var(--pear-border)] px-4 py-3 text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:cursor-not-allowed disabled:opacity-40"
                 title={
                   !activeRoot?.pathExists ? `Path not found: ${activeRoot?.path || activeProject.rootPath}`
-                  : cliAvailability[cli] === false ? `${label} is not installed`
+                  : cliAvailability[cli] === false ? `${label} is not installed - run: ${SPAWN_AGENT_CLI_INSTALL_COMMANDS[cli]}`
                   : `Spawn ${label}`
                 }
               >

@@ -2,7 +2,7 @@ import type React from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Loader2, X } from 'lucide-react'
 import { ClaudeIcon, CodexIcon, GrokIcon, OpenCodeIcon } from '@/components/common/AgentIcons'
-import { listProjectPersonas, spawnProjectAgent, spawnProjectPersona, type SpawnAgentCli } from '@/lib/spawn-agent'
+import { SPAWN_AGENT_CLI_INSTALL_COMMANDS, listProjectPersonas, spawnProjectAgent, spawnProjectPersona, type SpawnAgentCli } from '@/lib/spawn-agent'
 import { pear, type WorkforcePersona } from '@/lib/ipc'
 import { useProjectStore, type ProjectRoot } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
@@ -231,7 +231,7 @@ export function SpawnAgentDialog(): React.ReactNode {
                     className="flex min-h-[92px] flex-col items-center justify-center gap-2 rounded-lg border border-[var(--pear-border)] text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:cursor-not-allowed disabled:opacity-40"
                     title={
                       !root?.pathExists ? `Path not found: ${root?.path || project.rootPath}`
-                      : cliAvailability[cli] === false ? `${label} is not installed — run: npm install -g ${cli}`
+                      : cliAvailability[cli] === false ? `${label} is not installed - run: ${SPAWN_AGENT_CLI_INSTALL_COMMANDS[cli]}`
                       : `Spawn ${label}`
                     }
                   >

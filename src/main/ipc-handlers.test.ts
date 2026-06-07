@@ -47,6 +47,7 @@ const mock = vi.hoisted(() => {
       detachCloudSandbox: vi.fn(),
       onBrokerEvent: vi.fn()
     },
+    isCommandAvailableWithAugmentedPath: vi.fn(),
     integrationsManager: {
       notifyAgentState: vi.fn(async () => undefined),
       initialSpawnInstructions: vi.fn(),
@@ -105,7 +106,8 @@ vi.mock('./store', () => ({
 }))
 
 vi.mock('./broker', () => ({
-  brokerManager: mock.brokerManager
+  brokerManager: mock.brokerManager,
+  isCommandAvailableWithAugmentedPath: mock.isCommandAvailableWithAugmentedPath
 }))
 
 vi.mock('./git', () => ({
@@ -208,10 +210,14 @@ describe('registerIpcHandlers broker:spawn-agent', () => {
 })
 
 describe('registerIpcHandlers broker:list-personas', () => {
+=======
+describe('registerIpcHandlers broker:check-cli-available', () => {
+>>>>>>> ed6285c (chore: apply pr-reviewer fixes for #143)
   beforeEach(() => {
     mock.handlers.clear()
     mock.ipcMain.handle.mockClear()
     mock.ipcMain.on.mockClear()
+<<<<<<< HEAD
     mock.brokerManager.listPersonas.mockReset()
     vi.mocked(loadStore).mockReset()
     vi.mocked(loadStore).mockReturnValue({ projects: [], activeProjectId: null })
@@ -345,5 +351,36 @@ describe('registerIpcHandlers git:generate-commit-message', () => {
     )
     expect(git.getSelectedDiff).not.toHaveBeenCalled()
     expect(mock.brokerManager.generateCommitDraft).not.toHaveBeenCalled()
+  })
+})
+
+describe('registerIpcHandlers broker:check-cli-available', () => {
+  beforeEach(() => {
+    mock.handlers.clear()
+    mock.ipcMain.handle.mockClear()
+    mock.ipcMain.on.mockClear()
+    mock.isCommandAvailableWithAugmentedPath.mockReset()
+    registerIpcHandlers()
+  })
+
+  it('returns whether the requested CLI can be resolved', () => {
+    const handler = mock.handlers.get('broker:check-cli-available')
+    expect(handler).toBeTypeOf('function')
+    mock.isCommandAvailableWithAugmentedPath.mockReturnValueOnce(true)
+
+    const result = handler?.({}, 'opencode')
+
+    expect(result).toBe(true)
+    expect(mock.isCommandAvailableWithAugmentedPath).toHaveBeenCalledWith('opencode')
+  })
+
+  it('rejects non-string CLI values', () => {
+    const handler = mock.handlers.get('broker:check-cli-available')
+    expect(handler).toBeTypeOf('function')
+
+    const result = handler?.({}, null)
+
+    expect(result).toBe(false)
+    expect(mock.isCommandAvailableWithAugmentedPath).not.toHaveBeenCalled()
   })
 })

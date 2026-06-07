@@ -5,6 +5,13 @@ import { useUIStore } from '@/stores/ui-store'
 
 export type SpawnAgentCli = 'claude' | 'codex' | 'grok' | 'opencode'
 
+export const SPAWN_AGENT_CLI_INSTALL_COMMANDS: Record<SpawnAgentCli, string> = {
+  claude: 'npm install -g @anthropic-ai/claude-code',
+  codex: 'npm install -g @openai/codex',
+  grok: 'npm install -g grok-ai',
+  opencode: 'npm install -g opencode-ai'
+}
+
 function nextAgentName(cli: SpawnAgentCli, projectId: string, liveNames: string[]): string {
   const existingNames = new Set([
     ...liveNames,
