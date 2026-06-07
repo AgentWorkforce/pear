@@ -1,8 +1,9 @@
 # Integration Event Re-Drive After Lost Steers
 
 Issue: #147. Base: #145 (`split/132-slack-integration-event-context-retry`).
-Status: DESIGN ONLY. Do not implement or merge until #145 has landed. The
-broker delivery-signal contract was pinned by relay-worker and project-lead on
+Status: IMPLEMENTATION APPROVED FOR DIRECT-AGENT PATH ONLY. Do not merge until
+#145 has landed and project-lead explicitly clears #147. The broker
+delivery-signal contract was pinned by relay-worker and project-lead on
 2026-06-07.
 
 ## Problem
@@ -49,8 +50,9 @@ bounded re-drive window.
   replay, stream reconnect, or event-feed polling provides the re-drive input.
 - No merge before Khaliq's explicit go. This design stacks on #145 and should
   become a follow-up PR after #145 lands.
-- No implementation until relay-worker confirms `delivery_injected` coverage for
-  every agent transport the integration bridge can target.
+- No channel-target delivery confirmation in #147 unless concrete resolved agent
+  targets are available. Empty/unresolved channel targets must never commit a
+  provisional claim.
 
 ## Broker Delivery Contract
 
@@ -143,15 +145,15 @@ writes the injection and CR, then emits `delivery_injected`. It can still wait
 behind the worker's local pending-injection queue or a wedged PTY write, but it
 does not wait for a long model turn to complete.
 
-Channel caveat: the bridge can target channels as well as direct agents. Broker
+Channel guard: the bridge can target channels as well as direct agents. Broker
 channel sends fan out to concrete workers that use the same delivery machinery,
 but today's `/api/send` response does not include the resolved worker names.
 Existing wait helpers therefore see `targets=[]` for `#channel` sends and return
-immediately. For #147, that must NOT count as committed delivery. The
-implementation must either resolve concrete channel recipients before
-waiting/committing, or explicitly leave channel-target commit/re-drive as a
-residual and avoid committing on `targets=[]` for channel sends. The long-term
-fix is for the broker send response to include resolved targets.
+immediately. For #147, that must NOT count as committed delivery. Engage
+provisional -> commit-on-injected only when there is at least one concrete agent
+target. Empty-target/channel sends keep prior semantics, are logged as residual,
+and must never be falsely committed. The long-term fix is for the broker send
+response to include resolved targets.
 
 File ownership for implementation:
 
@@ -298,9 +300,8 @@ Add broker tests for relay-worker's helper extension:
 ## Rollout
 
 1. Land #145 and restart Pear on it to restore reliable content reads.
-2. Direct-agent implementation can use `delivery_injected` with a 5-second
-   timeout. Channel targets must either resolve concrete recipients before
-   commit or remain explicitly residual without committing on `targets=[]`.
+2. Direct-agent implementation uses `delivery_injected` with a 5-second timeout.
+   Channel/unresolved targets remain residual and never commit on `targets=[]`.
 3. pear-worker adds the additive BrokerManager helper and bridge state machine;
    relay-worker adds helper tests.
 4. Implement #147 as a follow-up stacked from #145/main using that helper as the
