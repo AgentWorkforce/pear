@@ -939,6 +939,25 @@ test('slack raw-id event falls back to matched local suffixed mount when remote 
         path: localRemotePath
       }
     ])
+
+    await harness.emit(changeEvent(
+      localRemotePath,
+      'slack',
+      { digest: 'revision:slug-copy' }
+    ))
+    await waitForDropped('project-1', 1, 2_500)
+
+    assert.equal(harness.sent.length, 1)
+    assert.deepEqual(harness.readFileCalls.slice(8, 10), [
+      {
+        workspaceId: 'workspace-id',
+        path: localRemotePath
+      },
+      {
+        workspaceId: 'workspace-id',
+        path: remotePath
+      }
+    ])
   } finally {
     await rm(tempRoot, { recursive: true, force: true })
   }

@@ -987,10 +987,6 @@ function concreteLocalMountRootsForIntegration(
     if (remoteRoot) addRoot(localRoot, remoteRoot)
   }
 
-  for (const mountPath of mountPaths) {
-    addRoot(localPathForRemoteRoot(workspaceId, mountPath), mountPath)
-  }
-
   return Array.from(roots.values())
 }
 
