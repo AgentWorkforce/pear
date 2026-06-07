@@ -294,6 +294,31 @@ describe('IntegrationMountManager', () => {
     })
   })
 
+  it('mounts Slack messages and threads for the same channel separately', async () => {
+    const manager = new IntegrationMountManager()
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/channels/C123/messages', '/slack/channels/C123/threads']
+      }
+    ])
+
+    expect(mock.mountInputs).toHaveLength(2)
+    expect(mock.mountInputs[0]).toMatchObject({
+      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/slack/channels/C123/messages',
+      remotePath: '/slack/channels/C123/messages',
+      localLayout: 'exact',
+      syncMode: 'write-only'
+    })
+    expect(mock.mountInputs[1]).toMatchObject({
+      localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/slack/channels/C123/threads',
+      remotePath: '/slack/channels/C123/threads',
+      localLayout: 'exact',
+      syncMode: 'mirror'
+    })
+  })
+
   it('rejects Slack command roots with traversal segments', async () => {
     const manager = new IntegrationMountManager()
 
