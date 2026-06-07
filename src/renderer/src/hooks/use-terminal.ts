@@ -358,9 +358,9 @@ export function useTerminal(
         letterSpacing: 0.5,
         cursorBlink: true,
         cursorStyle: 'bar',
-        scrollback: 10000,
+        scrollback: 3000,
         fastScrollModifier: 'alt',
-        macOptionIsMeta: true,
+        macOptionIsMeta: false,
         allowProposedApi: true
       })
 
