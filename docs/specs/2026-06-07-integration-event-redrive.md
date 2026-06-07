@@ -83,7 +83,7 @@ on a sibling helper, not hand-subscribe to broker events:
 sendMessageAndWaitForInjected(
   projectId: string,
   input: SendMessageInput,
-  options?: { timeoutMs?: number }
+  options?: { timeoutMs?: number; signal?: AbortSignal }
 ): Promise<{ eventId: string; targets: string[] }>
 ```
 
@@ -100,8 +100,16 @@ Semantics:
   timeout.
 - Target handling matches the existing helper: use returned `targets` when
   present; for direct agent sends with no targets, fall back to `[input.to]`.
-- Unsupported brokers may return no `eventId` or no targets; the bridge treats
-  those as accepted-only and commits immediately, preserving current behavior.
+- Unsupported brokers may return no usable `event_id`; the bridge treats those as
+  accepted-only and commits immediately, preserving current behavior. A direct
+  agent send with no returned targets is not unsupported: it falls back to
+  `[input.to]` and must still wait for `delivery_injected`. Channel/project
+  fanout with no concrete targets is the residual case described below.
+- Before waiting for `delivery_injected`, BrokerManager should detect support
+  from broker session metadata, such as an explicit capability flag or the
+  protocol/version threshold that introduced `delivery_injected`. If the session
+  is known not to support the signal, return an accepted-only result immediately
+  and record `deliveryInjectedUnsupported` instead of waiting for timeout.
 
 The helper may internally reuse the current `sendMessageAndWaitForDelivery`
 mechanics: send once, capture `event_id` / targets, subscribe internally, filter
@@ -113,6 +121,13 @@ reintroduce the old head-of-line block. The bridge must start the helper as a
 background confirmation task, attach `.then(commit).catch(release)`, and return
 from the pacer callback immediately after starting the send attempt. The pacer
 rate-limits starts, not confirmation completion.
+
+Background confirmation tasks must be project-scoped and cancellable. The bridge
+should keep an `AbortController` per active confirmation task, pass its
+`signal` to `sendMessageAndWaitForInjected()`, and abort all pending
+confirmations from `close(projectId)` before disposing the pacer. Abort should
+release provisional claims without emitting delivery-failure warnings for a
+project that is intentionally closing.
 
 Coverage result: relay-worker confirmed `delivery_injected` is emitted for the
 agent transports the integration bridge can inject to. Local PTY workers emit it
@@ -185,8 +200,10 @@ Behavior:
   copies while confirmation is still pending.
 - When confirmation times out or fails, the provisional claim is removed. A later
   replay of the same logical key/content hash can inject again.
-- A blind claim can still learn the first later content hash as in #145, but that
-  hash stays provisional until delivery is confirmed.
+- A blind claim can still learn the first later content hash as in #145. When
+  the hash is learned, move the existing `blindClaim` into `contentHashes` under
+  that hash and clear `blindClaim`; the moved claim stays provisional until
+  delivery is confirmed.
 - Genuine edits with new content hashes continue to inject independently.
 
 For non-Slack integration events, the existing recent-injection map becomes the
@@ -264,6 +281,8 @@ Add integration-event bridge tests on top of the existing #145 suite:
   `sendMessageAndWaitForDelivery`.
 - Unsupported injection confirmation commits accepted sends immediately and
   emits low-noise telemetry.
+- Project close aborts pending background confirmations, releases provisional
+  claims, and does not log delivery-failure warnings for the intentional abort.
 
 Add broker tests for relay-worker's helper extension:
 
