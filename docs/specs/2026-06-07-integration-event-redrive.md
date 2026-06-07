@@ -152,8 +152,11 @@ Existing wait helpers therefore see `targets=[]` for `#channel` sends and return
 immediately. For #147, that must NOT count as committed delivery. Engage
 provisional -> commit-on-injected only when there is at least one concrete agent
 target. Empty-target/channel sends keep prior semantics, are logged as residual,
-and must never be falsely committed. The long-term fix is for the broker send
-response to include resolved targets.
+and must never be falsely committed. Mixed direct-agent plus channel batches use
+the same conservative behavior for the whole batch: no injected-delivery claim
+is committed, so direct-agent recipients in that mixed batch do not get #147
+re-drive protection. The long-term fix is for the broker send response to
+include resolved targets.
 
 File ownership for implementation:
 
@@ -226,19 +229,15 @@ same provisional/committed state keyed by `eventDedupeKeyWithFingerprint()`.
    - On `delivery_injected`: mark that recipient confirmed.
    - When all recipients are confirmed: commit the claim and extend `expiresAt`
      to the normal replay TTL.
-   - On failure or timeout: mark failed and release the provisional claim if no
-     recipient confirmed.
+   - On failure or timeout: mark failed and release the provisional claim.
 7. If every recipient fails synchronously before send acceptance, release the
    claim immediately as today.
-8. If some recipients confirm and some fail, commit for confirmed recipients and
-   log/telemetry the partial failure. A later replay should target only missing
-   recipients if recipient-scoped tracking is implemented in the same pass;
-   otherwise release the whole claim to prefer duplicate delivery over message
-   loss.
-
-The first implementation should prefer whole-claim release on partial failure.
-It may duplicate a message for a recipient that already got it, but it avoids the
-known worse behavior of losing human instructions.
+8. If some recipients confirm and some fail, release the whole shared logical
+   claim rather than committing on first success. A later replay re-sends to all
+   recipients, so recipients that already received the steer may see a duplicate.
+   That is the accepted duplicate-over-drop bias for #147. True per-recipient
+   claims could avoid the duplicate, but they add complexity and are out of
+   scope for this pass; the live drop path is single-recipient (`slack-comms`).
 
 ## Timeout And Telemetry
 
@@ -302,6 +301,8 @@ Add broker tests for relay-worker's helper extension:
 1. Land #145 and restart Pear on it to restore reliable content reads.
 2. Direct-agent implementation uses `delivery_injected` with a 5-second timeout.
    Channel/unresolved targets remain residual and never commit on `targets=[]`.
+   Mixed direct-agent plus channel batches also keep prior semantics for the
+   whole batch.
 3. pear-worker adds the additive BrokerManager helper and bridge state machine;
    relay-worker adds helper tests.
 4. Implement #147 as a follow-up stacked from #145/main using that helper as the
