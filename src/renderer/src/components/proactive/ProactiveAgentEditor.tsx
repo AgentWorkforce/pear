@@ -91,7 +91,7 @@ const MODEL_OPTIONS: Record<Harness, string[]> = {
   claude: ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
   codex: ['gpt-5.2', 'gpt-5.1-codex', 'gpt-5.1-codex-mini'],
   opencode: ['claude-sonnet-4-6', 'gpt-5.2', 'qwen3-coder'],
-  grok: ['grok-build', 'grok-composer-2.5-fast']
+  grok: ['grok-build-0.1', 'grok-code-fast-1', 'grok-code-fast']
 }
 
 const DEPLOY_PHASES: DeployPhase[] = [

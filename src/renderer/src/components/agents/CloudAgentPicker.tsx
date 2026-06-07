@@ -58,7 +58,7 @@ const HARNESS_OPTIONS = [
   { value: 'claude', label: 'Claude', defaultModel: 'claude-opus-4-7' },
   { value: 'codex', label: 'Codex', defaultModel: 'gpt-5.2' },
   { value: 'opencode', label: 'OpenCode', defaultModel: 'claude-sonnet-4-6' },
-  { value: 'grok', label: 'Grok', defaultModel: 'grok-build' }
+  { value: 'grok', label: 'Grok', defaultModel: 'grok-build-0.1' }
 ]
 
 function getErrorMessage(error: unknown): string {
