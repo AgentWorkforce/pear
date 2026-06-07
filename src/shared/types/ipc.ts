@@ -250,7 +250,8 @@ export interface BrokerEventStreamDiagnostic {
 export interface BrokerListAgent {
   name: string
   projectId: string
-  runtime?: string
+  runtime?: 'pty' | 'headless'
+  sessionId?: string
   cli?: string
   model?: string
   channels?: string[]
@@ -369,6 +370,7 @@ export interface BrokerAttachTerminalResult {
   mode: InboundDeliveryMode
   previousMode?: InboundDeliveryMode
   pending: number
+  runtime?: 'pty' | 'headless'
   snapshot?: {
     rows: number
     cols: number

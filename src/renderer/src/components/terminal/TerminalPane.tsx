@@ -188,6 +188,16 @@ function TerminalProject({
 }: TerminalProjectProps): React.ReactNode {
   const terminalMode = getTerminalMode(agent)
 
+  if (agent.runtime === 'headless') {
+    return (
+      <div className="flex h-full min-h-0 w-full min-w-0 flex-1 items-center justify-center bg-[var(--pear-bg)]">
+        <div className="text-[var(--pear-fg-muted)] text-sm">
+          {agent.name} is running headless
+        </div>
+      </div>
+    )
+  }
+
   return (
     <div className="flex h-full min-h-0 w-full min-w-0 flex-1 bg-[var(--pear-bg)]">
       <div className="min-h-0 min-w-0 flex-1">

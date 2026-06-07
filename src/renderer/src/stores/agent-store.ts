@@ -21,6 +21,8 @@ export interface Agent {
   name: string
   cli: string
   model?: string
+  runtime?: 'pty' | 'headless'
+  sessionId?: string
   status: 'running' | 'exited'
   activity: 'idle' | 'active'
   currentState: AgentCurrentState
@@ -571,6 +573,8 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
           ...agent,
           cli: liveAgent.cli || agent.cli,
           model: liveAgent.model || agent.model,
+          runtime: liveAgent.runtime ?? agent.runtime,
+          sessionId: liveAgent.sessionId ?? agent.sessionId,
           status: 'running' as const,
           currentState,
           activity: activityFromCurrentState(currentState),
@@ -592,6 +596,8 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
           name: liveAgent.name,
           cli: liveAgent.cli || 'unknown',
           model: liveAgent.model,
+          runtime: liveAgent.runtime,
+          sessionId: liveAgent.sessionId,
           status: 'running',
           activity: activityFromCurrentState(currentState),
           currentState,
@@ -721,6 +727,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
                       ...a,
                       cli: event.cli || a.cli,
                       model: event.model || a.model,
+                      runtime: (event.runtime as 'pty' | 'headless' | undefined) ?? a.runtime,
                       status: 'running',
                       activity: activityFromCurrentState(currentState),
                       currentState,
@@ -739,6 +746,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
                   name: event.name!,
                   cli: event.cli || 'unknown',
                   model: event.model,
+                  runtime: event.runtime as 'pty' | 'headless' | undefined,
                   status: 'running',
                   activity: activityFromCurrentState(currentState),
                   currentState,

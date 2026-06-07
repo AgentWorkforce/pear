@@ -9,6 +9,7 @@ import {
   HarnessDriverClient as AgentRelayClient,
   type RuntimeSpawnOptions as AgentRelaySpawnOptions,
   type SpawnPtyInput,
+  type SpawnCliInput,
   type SendMessageInput,
   type BrokerEvent,
   type BrokerStatus,
@@ -1182,6 +1183,9 @@ export class BrokerManager {
   // so agent names are project-unique in practice — the set tracks which
   // session actually owns the worker so agent-scoped calls route correctly.
   private agentSessions = new Map<string, Set<string>>()
+  // Tracks the runtime for each agent name so attachTerminal can skip PTY
+  // operations (snapshot, resizePty, input streams) for headless agents.
+  private agentRuntimes = new Map<string, 'pty' | 'headless'>()
   private inputStreams = new Map<string, PtyInputStream>()
   private inputStreamFallbacks = new Set<string>()
   private inputStreamFallbackRetryAt = new Map<string, number>()
@@ -2037,12 +2041,16 @@ export class BrokerManager {
 
       if (event.kind === 'agent_spawned' && event.name) {
         this.rememberAgentSession(event.name, sessionKey)
+        if ('runtime' in event && (event.runtime === 'pty' || event.runtime === 'headless')) {
+          this.agentRuntimes.set(event.name, event.runtime)
+        }
         if (event.parent) {
           void this.handleSpawnedChildLineage(sessionKey, event)
         }
       } else if (event.kind === 'agent_exit' && event.name) {
         this.closeInputStream(this.getInputStreamKey(sessionKey, event.name), 1000, 'agent closed')
         this.forgetAgentSession(event.name, sessionKey)
+        this.agentRuntimes.delete(event.name)
         void client.release(event.name, 'agent exit').catch((err) => {
           if (!isMissingAgentError(err)) {
             console.warn(`[broker] Failed to release exited agent ${event.name}:`, err)
@@ -2051,6 +2059,7 @@ export class BrokerManager {
       } else if ((event.kind === 'agent_exited' || event.kind === 'agent_released') && event.name) {
         this.closeInputStream(this.getInputStreamKey(sessionKey, event.name), 1000, 'agent closed')
         this.forgetAgentSession(event.name, sessionKey)
+        this.agentRuntimes.delete(event.name)
       } else if ('name' in event && typeof event.name === 'string') {
         this.rememberAgentSession(event.name, sessionKey)
       } else if ('from' in event && typeof event.from === 'string') {
@@ -2731,6 +2740,7 @@ export class BrokerManager {
       console.warn(`[broker] attachTerminal: ${name} did not appear in listAgents within wait window; falling through to per-call retry`)
     }
     const mode = toInboundDeliveryMode(input.mode)
+    const isHeadless = this.agentRuntimes.get(name) === 'headless'
     let previousMode: InboundDeliveryMode | undefined
 
     try {
@@ -2742,6 +2752,14 @@ export class BrokerManager {
     // Keep the broker's inbound delivery policy aligned with the renderer's
     // queue mode while human terminal input continues to go through sendInput.
     await this.withAgentMissingRetry('setInboundDeliveryMode', name, () => client.setInboundDeliveryMode(name, mode))
+
+    // Headless agents (app-server based) have no PTY — skip resize and snapshot.
+    if (isHeadless) {
+      const pending = mode === 'manual_flush'
+        ? await this.withAgentMissingRetry('getPending', name, () => client.getPending(name)).then((messages) => messages.length).catch(() => 0)
+        : 0
+      return { name, mode, previousMode, pending, runtime: 'headless' }
+    }
 
     let resizedBeforeSnapshot = false
     if (isPositiveInteger(input.rows) && isPositiveInteger(input.cols)) {
