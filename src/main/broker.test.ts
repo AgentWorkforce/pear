@@ -114,6 +114,7 @@ const mock = vi.hoisted(() => {
     nextCloudAgents: [] as string[],
     nextCloudSessionMetadata: [] as Array<Record<string, unknown>>,
     nextConnectedAgents: [] as string[],
+    nextConnectedSessionMetadata: [] as Array<Record<string, unknown>>,
     nextConnectedSessionErrors: [] as Error[]
   }
 
@@ -126,6 +127,10 @@ const mock = vi.hoisted(() => {
 
     static connect = vi.fn(() => {
       const client = createMockClient(state.nextConnectedAgents.splice(0))
+      const metadata = state.nextConnectedSessionMetadata.shift()
+      if (metadata) {
+        client.getSession.mockResolvedValueOnce(metadata)
+      }
       const sessionError = state.nextConnectedSessionErrors.shift()
       if (sessionError) {
         client.getSession.mockRejectedValueOnce(sessionError)
@@ -411,6 +416,7 @@ describe('BrokerManager local + cloud coexistence', () => {
     mock.state.nextCloudAgents = []
     mock.state.nextCloudSessionMetadata = []
     mock.state.nextConnectedAgents = []
+    mock.state.nextConnectedSessionMetadata = []
     mock.state.nextConnectedSessionErrors = []
     mock.HarnessDriverClient.spawn.mockClear()
     mock.HarnessDriverClient.connect.mockClear()
@@ -464,6 +470,7 @@ describe('BrokerManager local + cloud coexistence', () => {
   it('passes an explicit workspace key env pin to local broker spawn options', async () => {
     const previousWorkspaceKey = process.env.AGENT_RELAY_WORKSPACE_KEY
     process.env.AGENT_RELAY_WORKSPACE_KEY = 'rk_live_pinned'
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
     const manager = new BrokerManager()
 
     try {
@@ -473,7 +480,11 @@ describe('BrokerManager local + cloud coexistence', () => {
         brokerName: 'pear-project-1',
         workspaceKey: 'rk_live_pinned'
       }))
+      const logged = logSpy.mock.calls.map((call) => call.join(' ')).join('\n')
+      expect(logged).toContain('rk_live_…')
+      expect(logged).not.toContain('rk_live_pinned')
     } finally {
+      logSpy.mockRestore()
       if (previousWorkspaceKey === undefined) {
         delete process.env.AGENT_RELAY_WORKSPACE_KEY
       } else {
@@ -593,6 +604,43 @@ describe('BrokerManager local + cloud coexistence', () => {
 
       await manager.shutdown()
     } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('does not reuse an existing connection with a mismatched explicit workspace key', async () => {
+    const previousWorkspaceKey = process.env.AGENT_RELAY_WORKSPACE_KEY
+    process.env.AGENT_RELAY_WORKSPACE_KEY = 'rk_live_pinned'
+    const tempDir = await mkdtemp(join(tmpdir(), 'pear-pinned-connection-'))
+    const connectionPath = join(tempDir, '.agentworkforce', 'relay', 'connection.json')
+    await mkdir(dirname(connectionPath), { recursive: true })
+    await writeFile(connectionPath, JSON.stringify({
+      url: 'http://127.0.0.1:43210',
+      apiKey: 'test-key',
+      pid: 4242
+    }))
+
+    try {
+      const manager = new BrokerManager()
+      mock.state.nextConnectedSessionMetadata.push({ workspace_key: 'rk_live_other' })
+
+      const started = await manager.start(PROJECT_ID, tempDir, 'pear-project-1', undefined as never, [])
+
+      expect(started).toBe(true)
+      expect(mock.HarnessDriverClient.connect).toHaveBeenCalledWith({ cwd: tempDir, connectionPath })
+      expect(mock.state.connectedClients[0]?.disconnect).toHaveBeenCalled()
+      expect(mock.HarnessDriverClient.spawn).toHaveBeenCalledWith(expect.objectContaining({
+        brokerName: 'pear-project-1',
+        workspaceKey: 'rk_live_pinned'
+      }))
+
+      await manager.shutdown()
+    } finally {
+      if (previousWorkspaceKey === undefined) {
+        delete process.env.AGENT_RELAY_WORKSPACE_KEY
+      } else {
+        process.env.AGENT_RELAY_WORKSPACE_KEY = previousWorkspaceKey
+      }
       await rm(tempDir, { recursive: true, force: true })
     }
   })

@@ -1347,7 +1347,8 @@ export class BrokerManager {
     }
 
     const startBroker = async (): Promise<boolean> => {
-      const existingClient = await this.connectExistingBroker(normalizedProjectId, cwd)
+      const explicitWorkspaceKey = process.env.AGENT_RELAY_WORKSPACE_KEY?.trim() || undefined
+      const existingClient = await this.connectExistingBroker(normalizedProjectId, cwd, explicitWorkspaceKey)
       if (existingClient) {
         const eventStreamGeneration = this.nextEventStreamGeneration()
         const unsubEvent = this.attachClient(normalizedProjectId, existingClient, win, eventStreamGeneration)
@@ -1391,7 +1392,6 @@ export class BrokerManager {
       // PUBLISHES workspaceKey in RuntimeSpawnOptions (landed relay-side in
       // 6419d59c; verified against the built 8.3.0+T3 dist locally) — the
       // intersection erases to a no-op then and drops with the version bump.
-      const explicitWorkspaceKey = process.env.AGENT_RELAY_WORKSPACE_KEY?.trim() || undefined
       const opts: AgentRelaySpawnOptions & { workspaceKey?: string } = {
         cwd,
         brokerName: name,
@@ -1408,7 +1408,11 @@ export class BrokerManager {
         }
       }
 
-      console.log('[broker] Starting with opts:', JSON.stringify({ ...opts, projectId: normalizedProjectId }))
+      console.log('[broker] Starting with opts:', JSON.stringify({
+        ...opts,
+        ...(explicitWorkspaceKey ? { workspaceKey: `${explicitWorkspaceKey.slice(0, 8)}…` } : {}),
+        projectId: normalizedProjectId
+      }))
       const client = await AgentRelayClient.spawn(opts)
       console.log('[broker] Started successfully for project:', normalizedProjectId)
       const eventStreamGeneration = this.nextEventStreamGeneration()
@@ -1460,7 +1464,11 @@ export class BrokerManager {
     }
   }
 
-  private async connectExistingBroker(projectId: string, cwd: string): Promise<AgentRelayClient | null> {
+  private async connectExistingBroker(
+    projectId: string,
+    cwd: string,
+    expectedWorkspaceKey?: string
+  ): Promise<AgentRelayClient | null> {
     const connectionPaths = brokerConnectionPathCandidates(cwd).filter((candidate) => existsSync(candidate))
     if (connectionPaths.length === 0) {
       return null
@@ -1470,7 +1478,19 @@ export class BrokerManager {
       let client: AgentRelayClient | undefined
       try {
         client = AgentRelayClient.connect({ cwd, connectionPath })
-        await client.getSession()
+        const metadata = await client.getSession()
+        if (expectedWorkspaceKey && metadata.workspace_key !== expectedWorkspaceKey) {
+          console.warn(
+            `[broker] Existing broker connection workspace key does not match explicit pin for project ${projectId}; starting a pinned broker instead`,
+            {
+              connectionPath,
+              expectedWorkspaceKeyPrefix: expectedWorkspaceKey.slice(0, 8),
+              actualWorkspaceKeyPrefix: metadata.workspace_key?.slice(0, 8) ?? '(none)'
+            }
+          )
+          client.disconnect()
+          continue
+        }
         console.log(`[broker] Reusing existing broker for project ${projectId}: ${connectionPath}`)
         return client
       } catch (err) {
