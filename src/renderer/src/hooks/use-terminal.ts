@@ -328,11 +328,18 @@ export function useTerminal(
 
   useEffect(() => {
     if (!visible || !active) return
+    let timer: ReturnType<typeof setTimeout> | null = null
     const handleWindowFocus = (): void => {
-      setTimeout(() => runtimeRef.current?.term.focus(), 50)
+      timer = setTimeout(() => {
+        const term = runtimeRef.current?.term
+        if (term) term.focus()
+      }, 50)
     }
     window.addEventListener('focus', handleWindowFocus)
-    return () => window.removeEventListener('focus', handleWindowFocus)
+    return () => {
+      window.removeEventListener('focus', handleWindowFocus)
+      if (timer) clearTimeout(timer)
+    }
   }, [visible, active])
 
   useEffect(() => {
