@@ -90,7 +90,16 @@ export function flushPtyChunksNow(key: string): void {
   }
 }
 
+// TEMP DIAGNOSTIC — remove after duplication root cause is identified.
+let __appendSeq = 0
+function __previewChunk(chunk: string): string {
+  return chunk.slice(0, 80).replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\x1b/g, '\\e')
+}
+
 export function appendPtyChunk(key: string, chunk: string): void {
+  __appendSeq += 1
+  // eslint-disable-next-line no-console
+  console.log(`[diag:pty-append] #${__appendSeq} key=${key} bytes=${chunk.length} preview="${__previewChunk(chunk)}"`)
   const queue = pending.get(key)
   if (queue) {
     queue.push(chunk)

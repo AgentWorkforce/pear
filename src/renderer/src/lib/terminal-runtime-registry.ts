@@ -330,6 +330,9 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
     const writeChunks = (newChunks: string[]): void => {
       if (disposed || !term) return
       if (newChunks.length === 0) return
+      // TEMP DIAGNOSTIC — remove after duplication root cause is identified.
+      // eslint-disable-next-line no-console
+      console.log(`[diag:runtime:writeChunks] key=${key} count=${newChunks.length} firstPreview="${newChunks[0]?.slice(0, 80).replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\x1b/g, '\\e')}"`)
       const wasPinned = isViewportPinnedToBottom(liveTerm)
       for (const chunk of newChunks) {
         recordChunkEchoed(chunk)
