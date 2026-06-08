@@ -90,16 +90,33 @@ export function flushPtyChunksNow(key: string): void {
   }
 }
 
-// TEMP DIAGNOSTIC — remove after duplication root cause is identified.
+// Optional diagnostic — enable by running this in DevTools console:
+//   localStorage.setItem('PEAR_DIAG_PTY', '1'); location.reload()
+// Disable by removing the key. Off by default so production renderers
+// don't pay the per-chunk console.log cost.
+let __diagPtyChecked = false
+let __diagPtyEnabled = false
+function __diagPtyOn(): boolean {
+  if (__diagPtyChecked) return __diagPtyEnabled
+  __diagPtyChecked = true
+  try {
+    __diagPtyEnabled = typeof localStorage !== 'undefined' && localStorage.getItem('PEAR_DIAG_PTY') === '1'
+  } catch {
+    __diagPtyEnabled = false
+  }
+  return __diagPtyEnabled
+}
 let __appendSeq = 0
 function __previewChunk(chunk: string): string {
   return chunk.slice(0, 80).replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\x1b/g, '\\e')
 }
 
 export function appendPtyChunk(key: string, chunk: string): void {
-  __appendSeq += 1
-  // eslint-disable-next-line no-console
-  console.log(`[diag:pty-append] #${__appendSeq} key=${key} bytes=${chunk.length} preview="${__previewChunk(chunk)}"`)
+  if (__diagPtyOn()) {
+    __appendSeq += 1
+    // eslint-disable-next-line no-console
+    console.log(`[diag:pty-append] #${__appendSeq} key=${key} bytes=${chunk.length} preview="${__previewChunk(chunk)}"`)
+  }
   const queue = pending.get(key)
   if (queue) {
     queue.push(chunk)
