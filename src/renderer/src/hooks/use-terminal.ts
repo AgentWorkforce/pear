@@ -189,6 +189,11 @@ export function useTerminal(
       getInputSrtt: () => inputSrttRef.current
     })
     runtimeRef.current = runtime
+    // Re-bind the SRTT getter on each effect run. The runtime captures
+    // the getter once at first acquire; without this, a remount that
+    // changes inputSrttRef identity would leave the predictor reading
+    // the stale ref.
+    runtime.setInputSrttGetter(() => inputSrttRef.current)
     runtime.setOnData((data) => sendInput(data))
 
     let disposed = false
@@ -308,6 +313,10 @@ export function useTerminal(
     try {
       const wasPinned = isViewportPinnedToBottom(runtime.term)
       runtime.fitAndSync()
+      // Fix #11: WebGL doesn't repaint while the host is display:none;
+      // when the tab comes back, force a refresh so the canvas redraws
+      // rather than showing a stale frame.
+      runtime.refreshOnShow()
       if (wasPinned) runtime.term.scrollToBottom()
     } catch {
       // ignore
