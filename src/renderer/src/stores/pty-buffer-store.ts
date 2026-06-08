@@ -13,7 +13,12 @@
 
 const MAX_PTY_BUFFER_CHUNKS = 10_000
 
-type Listener = (chunks: string[]) => void
+// Listeners receive only the newly-added chunks (the "tail"), not the full
+// buffer. This sidesteps the 10k trim case where a subscriber holding an
+// older buffer length would slice past the end of a trimmed window and
+// drop the freshly-added chunks. Tail semantics also keep per-flush work
+// proportional to the new data, not the buffer size.
+type Listener = (newChunks: string[]) => void
 
 const buffers = new Map<string, string[]>()
 const listeners = new Map<string, Set<Listener>>()
@@ -59,7 +64,7 @@ function flushPending(key: string): void {
   if (!keyListeners || keyListeners.size === 0) return
   for (const listener of [...keyListeners]) {
     try {
-      listener(trimmed)
+      listener(queued)
     } catch (err) {
       console.error('[pty-buffer-store] listener threw', err)
     }

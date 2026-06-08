@@ -309,12 +309,8 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
     if (unsubBuffer || !term || disposed) return
     const liveTerm = term
 
-    const writeFromBuffer = (ptyBuffer: string[]): void => {
+    const writeChunks = (newChunks: string[]): void => {
       if (disposed || !term) return
-      if (ptyBuffer.length < writtenChunks) {
-        writtenChunks = 0
-      }
-      const newChunks = ptyBuffer.slice(writtenChunks)
       if (newChunks.length === 0) return
       const wasPinned = isViewportPinnedToBottom(liveTerm)
       for (const chunk of newChunks) {
@@ -325,12 +321,16 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
           liveTerm.write(chunk)
         }
       }
-      writtenChunks = ptyBuffer.length
       if (wasPinned) liveTerm.scrollToBottom()
     }
 
-    unsubBuffer = subscribePtyBuffer(key, writeFromBuffer)
-    writeFromBuffer(getPtyChunks(key))
+    unsubBuffer = subscribePtyBuffer(key, writeChunks)
+    // Initial replay: pull whatever is already in the buffer past the
+    // snapshot baseline (writtenChunks). The listener only receives tails
+    // from this point on, so we have to do the catch-up explicitly here.
+    const buffered = getPtyChunks(key)
+    if (writtenChunks > buffered.length) writtenChunks = 0
+    writeChunks(buffered.slice(writtenChunks))
   }
 
   const attachAndSeed = async (
