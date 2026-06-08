@@ -12,12 +12,14 @@ import { createPearMountLauncher } from './relayfile-mount-launcher'
 import { isSlackWritebackCommandRoot } from './slack-writeback-command-roots'
 
 const MOUNT_READY_TIMEOUT_MS = 60_000
+const MOUNT_SYNC_TIMEOUT = '180s'
 const MOUNT_REFRESH_FALLBACK_MARGIN_MS = 5 * 60_000
 const MOUNT_REFRESH_MIN_DELAY_MS = 1_000
 const MOUNT_AUTH_RESTART_THROTTLE_MS = 60_000
 // Stays under MOUNT_AUTH_RESTART_THROTTLE_MS so back-to-back poll hits
 // coalesce into one restart instead of racing it.
 const MOUNT_HEALTH_POLL_INTERVAL_MS = 45_000
+const MOUNT_SYNC_WEDGE_FAILURES = 3
 export const MAX_LOCAL_INTEGRATION_MOUNT_PATHS = 24
 
 type IntegrationMountInput = {
@@ -242,11 +244,9 @@ export class IntegrationMountManager {
   }
 
   // The mount binary runs detached (background: true) and logs sync failures
-  // to .relay/mount.log + state.json — the launcher's stdout scrape only sees
-  // startup output, so an expired token mid-session stalls writeback silently
-  // (observed: 4+ min of 401 cycles with 1 dirty file queued). Polling
-  // state.json is the deterministic signal; the stdout scrape stays for the
-  // startup window.
+  // to .relay/mount.log plus its state file — the launcher's stdout scrape only
+  // sees startup output, so mid-session stalls otherwise stay silent. Polling
+  // state/log files is the deterministic signal; stdout remains a startup guard.
   private ensureHealthPolling(): void {
     if (this.healthPollTimer || this.handles.size === 0) return
     const timer = setInterval(() => {
@@ -259,46 +259,73 @@ export class IntegrationMountManager {
   private async checkMountHealth(): Promise<void> {
     for (const [remotePath, handle] of Array.from(this.handles.entries())) {
       const state = await readMountStateFile(handle.localDir)
-      if (!state) continue
-      const lastError = asRecord(state.lastError)
-      if (!lastError) continue
-      const errorAt = parseTimestamp(typeof lastError.at === 'string' ? lastError.at : null)
-      const lastSuccessAt = parseTimestamp(
-        typeof state.lastSuccessfulReconcileAt === 'string' ? state.lastSuccessfulReconcileAt : null
-      )
-      // Only act on errors newer than the last good cycle — a recovered mount
-      // keeps its historical lastError in state.json.
-      if (errorAt !== null && lastSuccessAt !== null && errorAt <= lastSuccessAt) {
-        this.handledHealthErrorKeys.delete(remotePath)
-        continue
+      if (state) {
+        const lastError = asRecord(state.lastError)
+        if (lastError) {
+          const errorAt = parseTimestamp(typeof lastError.at === 'string' ? lastError.at : null)
+          const lastSuccessAt = parseTimestamp(
+            typeof state.lastSuccessfulReconcileAt === 'string' ? state.lastSuccessfulReconcileAt : null
+          )
+          // Only act on errors newer than the last good cycle — a recovered mount
+          // keeps its historical lastError in state.json.
+          if (errorAt !== null && lastSuccessAt !== null && errorAt <= lastSuccessAt) {
+            this.handledHealthErrorKeys.delete(remotePath)
+          } else {
+            const message = typeof lastError.message === 'string' ? lastError.message : ''
+            const unauthorized = lastError.statusCode === 401 ||
+              lastError.code === 'unauthorized' ||
+              isMountAuthExpiredOutput(message)
+            if (unauthorized) {
+              const healthErrorKey = [
+                errorAt ?? 'missing-at',
+                typeof lastError.statusCode === 'number' ? lastError.statusCode : '',
+                typeof lastError.code === 'string' ? lastError.code : '',
+                message
+              ].join('|')
+              if (this.handledHealthErrorKeys.get(remotePath) === healthErrorKey) continue
+              const pendingWriteback = typeof state.pendingWriteback === 'number' ? state.pendingWriteback : 0
+              const queued = this.queueForcedRestart(remotePath, 'auth failure (state poll)')
+              if (queued) {
+                this.handledHealthErrorKeys.set(remotePath, healthErrorKey)
+                console.warn(
+                  `[integration-mounts] Mount auth expired for ${remotePath} (state poll); restarting with fresh credentials`,
+                  { pendingWriteback, error: message || 'unauthorized' }
+                )
+                this.healthObserver?.({
+                  type: 'auth-stall',
+                  remotePath,
+                  status: typeof state.status === 'string' ? state.status : null,
+                  pendingWriteback,
+                  message: message || 'unauthorized'
+                })
+              }
+            }
+          }
+        }
       }
-      const message = typeof lastError.message === 'string' ? lastError.message : ''
-      const unauthorized = lastError.statusCode === 401 ||
-        lastError.code === 'unauthorized' ||
-        isMountAuthExpiredOutput(message)
-      if (!unauthorized) continue
-      const healthErrorKey = [
-        errorAt ?? 'missing-at',
-        typeof lastError.statusCode === 'number' ? lastError.statusCode : '',
-        typeof lastError.code === 'string' ? lastError.code : '',
-        message
-      ].join('|')
-      if (this.handledHealthErrorKeys.get(remotePath) === healthErrorKey) continue
-      const pendingWriteback = typeof state.pendingWriteback === 'number' ? state.pendingWriteback : 0
-      const queued = this.queueForcedRestart(remotePath, 'auth failure (state poll)')
-      if (queued) {
-        this.handledHealthErrorKeys.set(remotePath, healthErrorKey)
-        console.warn(
-          `[integration-mounts] Mount auth expired for ${remotePath} (state poll); restarting with fresh credentials`,
-          { pendingWriteback, error: message || 'unauthorized' }
-        )
-        this.healthObserver?.({
-          type: 'auth-stall',
-          remotePath,
-          status: typeof state.status === 'string' ? state.status : null,
-          pendingWriteback,
-          message: message || 'unauthorized'
-        })
+
+      const syncWedge = await readMountSyncWedge(handle.localDir)
+      if (syncWedge) {
+        const healthErrorKey = [
+          syncWedge.lastFailureAt,
+          syncWedge.failureCount,
+          syncWedge.message
+        ].join('|')
+        if (this.handledHealthErrorKeys.get(remotePath) === healthErrorKey) continue
+        const queued = this.queueForcedRestart(remotePath, 'sync wedge')
+        if (queued) {
+          this.handledHealthErrorKeys.set(remotePath, healthErrorKey)
+          console.warn(
+            `[integration-mounts] Mount sync wedged for ${remotePath}; restarting`,
+            {
+              failures: syncWedge.failureCount,
+              lastFailureAt: syncWedge.lastFailureAt,
+              error: syncWedge.message
+            }
+          )
+        } else {
+          this.handledHealthErrorKeys.set(remotePath, healthErrorKey)
+        }
       }
     }
   }
@@ -390,7 +417,11 @@ export class IntegrationMountManager {
           this.scheduleRefresh(spec.remotePath, existing)
           continue
         }
+        const existingLocalDir = existing.localDir
         await this.stopHandle(spec.remotePath)
+        if (forceRemotePaths.has(spec.remotePath)) {
+          await clearMountStateFiles(spec.remotePath, existingLocalDir)
+        }
       }
 
       await ensureProtectedDirectory(spec.localDir)
@@ -499,7 +530,10 @@ export class IntegrationMountManager {
         env: {
           ...input.env,
           RELAYFILE_MOUNT_LOCAL_LAYOUT: spec.localLayout,
-          RELAYFILE_MOUNT_SYNC_MODE: spec.syncMode
+          RELAYFILE_MOUNT_SYNC_MODE: spec.syncMode,
+          RELAYFILE_MOUNT_TIMEOUT: input.env.RELAYFILE_MOUNT_TIMEOUT ||
+            process.env.RELAYFILE_MOUNT_TIMEOUT ||
+            MOUNT_SYNC_TIMEOUT
         }
       })
     }
@@ -541,15 +575,76 @@ function asRecord(value: unknown): Record<string, unknown> | null {
     : null
 }
 
-// The mount binary maintains .relay/state.json inside the local mount dir
-// (the same contract the SDK ready-probe reads). A missing or mid-write file
-// resolves null and the poll simply retries next cycle.
+// relayfile-mount v0.7.x writes .relayfile-mount-state.json at the mount root;
+// newer SDK probes may also expose .relay/state.json. A missing or mid-write
+// file resolves null and the poll simply retries next cycle.
 async function readMountStateFile(localDir: string): Promise<Record<string, unknown> | null> {
+  for (const statePath of [
+    join(localDir, '.relayfile-mount-state.json'),
+    join(localDir, '.relay', 'state.json')
+  ]) {
+    try {
+      const state = asRecord(JSON.parse(await readFile(statePath, 'utf8')))
+      if (state) return state
+    } catch {
+      // Try the next known state-file contract.
+    }
+  }
+  return null
+}
+
+async function clearMountStateFiles(remotePath: string, localDir: string): Promise<void> {
+  await Promise.all([
+    join(localDir, '.relayfile-mount-state.json'),
+    join(localDir, '.relay', 'state.json')
+  ].map(async (statePath) => {
+    await rm(statePath, { force: true }).catch((error) => {
+      console.warn(
+        `[integration-mounts] Failed to remove stale Relayfile mount state for ${remotePath} at ${statePath}:`,
+        toErrorMessage(error)
+      )
+    })
+  }))
+}
+
+type MountSyncWedge = {
+  failureCount: number
+  lastFailureAt: string
+  message: string
+}
+
+async function readMountSyncWedge(localDir: string): Promise<MountSyncWedge | null> {
+  let logText: string
   try {
-    return asRecord(JSON.parse(await readFile(join(localDir, '.relay', 'state.json'), 'utf8')))
+    logText = await readFile(join(localDir, '.relay', 'mount.log'), 'utf8')
   } catch {
     return null
   }
+
+  let consecutiveFailures = 0
+  let lastFailureAt: string | null = null
+  let message = ''
+  for (const line of logText.trim().split(/\r?\n/u).slice(-120).reverse()) {
+    if (line.includes('mount sync cycle completed')) break
+    const failed = line.match(/^(\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}) mount sync cycle failed: (.+)$/u)
+    if (!failed) continue
+    const failedMessage = failed[2] || ''
+    if (!isMountSyncWedgeOutput(failedMessage)) continue
+    consecutiveFailures += 1
+    lastFailureAt ??= failed[1]?.replace(/\//gu, '-').replace(' ', 'T') ?? 'unknown'
+    message ||= failedMessage
+  }
+
+  if (consecutiveFailures < MOUNT_SYNC_WEDGE_FAILURES || !lastFailureAt) return null
+  return {
+    failureCount: consecutiveFailures,
+    lastFailureAt,
+    message
+  }
+}
+
+function isMountSyncWedgeOutput(text: string): boolean {
+  return /context deadline exceeded|i\/o timeout|Client\.Timeout exceeded/i.test(text)
 }
 
 function mountPathsForIntegrations(integrations: IntegrationMountInput[]): string[] {

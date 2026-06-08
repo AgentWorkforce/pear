@@ -253,7 +253,8 @@ describe('IntegrationMountManager', () => {
     expect(mock.startMount).toHaveBeenCalledWith(expect.objectContaining({
       env: expect.objectContaining({
         RELAYFILE_MOUNT_LOCAL_LAYOUT: 'exact',
-        RELAYFILE_MOUNT_SYNC_MODE: 'write-only'
+        RELAYFILE_MOUNT_SYNC_MODE: 'write-only',
+        RELAYFILE_MOUNT_TIMEOUT: '180s'
       })
     }))
   })
@@ -463,7 +464,7 @@ describe('IntegrationMountManager', () => {
     await Promise.resolve()
 
     expect(mock.readFile).toHaveBeenCalledWith(
-      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/slack/channels/C123/messages/.relay/state.json',
+      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/slack/channels/C123/messages/.relayfile-mount-state.json',
       'utf8'
     )
     expect(healthObserver).toHaveBeenCalledWith({
@@ -474,6 +475,118 @@ describe('IntegrationMountManager', () => {
       message: 'http 401 unauthorized: Token has expired'
     })
     expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/messages')).toHaveLength(2)
+  })
+
+  it('falls back to the legacy state file path for state-poll auth recovery', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-06T14:00:00.000Z'))
+    const manager = new IntegrationMountManager()
+    mock.readFile.mockImplementation(async (path: string) => {
+      if (path.endsWith('/.relayfile-mount-state.json')) throw new Error('ENOENT')
+      if (path.endsWith('/.relay/state.json')) {
+        return JSON.stringify({
+          status: 'writeback-pending',
+          pendingWriteback: 1,
+          lastSuccessfulReconcileAt: '2026-06-06T13:59:00.000Z',
+          lastError: {
+            code: 'unauthorized',
+            statusCode: 401,
+            message: 'http 401 unauthorized: Token has expired',
+            at: '2026-06-06T14:00:30.000Z'
+          }
+        })
+      }
+      return ''
+    })
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/channels/C123/messages']
+      }
+    ])
+
+    await vi.advanceTimersByTimeAsync(45_000)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mock.readFile).toHaveBeenCalledWith(
+      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/slack/channels/C123/messages/.relay/state.json',
+      'utf8'
+    )
+    expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/messages')).toHaveLength(2)
+  })
+
+  it('restarts and clears stale state after repeated sync deadline failures', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-06T14:00:00.000Z'))
+    const manager = new IntegrationMountManager()
+    mock.readFile.mockImplementation(async (path: string) => {
+      if (path.endsWith('/.relay/mount.log')) {
+        return [
+          '2026/06/06 13:59:00 mount sync cycle completed',
+          '2026/06/06 14:00:00 mount sync cycle failed: context deadline exceeded',
+          '2026/06/06 14:00:45 mount sync cycle failed: context deadline exceeded',
+          '2026/06/06 14:01:30 mount sync cycle failed: context deadline exceeded'
+        ].join('\n')
+      }
+      return JSON.stringify({
+        files: {},
+        eventsCursor: 'evt_1'
+      })
+    })
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/channels/C123/threads']
+      }
+    ])
+
+    await vi.advanceTimersByTimeAsync(45_000)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mock.rm).toHaveBeenCalledWith(
+      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/slack/channels/C123/threads/.relayfile-mount-state.json',
+      { force: true }
+    )
+    expect(mock.rm).toHaveBeenCalledWith(
+      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/slack/channels/C123/threads/.relay/state.json',
+      { force: true }
+    )
+    expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/threads')).toHaveLength(2)
+  })
+
+  it('does not restart when sync deadline failures are followed by a completed cycle', async () => {
+    vi.useFakeTimers()
+    const manager = new IntegrationMountManager()
+    mock.readFile.mockImplementation(async (path: string) => {
+      if (path.endsWith('/.relay/mount.log')) {
+        return [
+          '2026/06/06 14:00:00 mount sync cycle failed: context deadline exceeded',
+          '2026/06/06 14:00:45 mount sync cycle failed: context deadline exceeded',
+          '2026/06/06 14:01:30 mount sync cycle completed'
+        ].join('\n')
+      }
+      return JSON.stringify({
+        files: {},
+        eventsCursor: 'evt_1'
+      })
+    })
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/channels/C123/threads']
+      }
+    ])
+
+    await vi.advanceTimersByTimeAsync(45_000)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/threads')).toHaveLength(1)
   })
 
   it('suppresses replayed state-poll auth alerts while a restart is throttled', async () => {
