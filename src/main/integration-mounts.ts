@@ -9,7 +9,6 @@ import {
 } from '@relayfile/sdk'
 import { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, refreshCloudAuth, resolveCloudAuth } from './auth'
 import { createPearMountLauncher } from './relayfile-mount-launcher'
-import { isSlackWritebackCommandRoot } from './slack-writeback-command-roots'
 
 const MOUNT_READY_TIMEOUT_MS = 60_000
 const MOUNT_SYNC_TIMEOUT = '180s'
@@ -519,7 +518,18 @@ export class IntegrationMountManager {
         remotePath: mountPath,
         localDir: join(mountRoot, ...remotePathSegments(mountPath)),
         localLayout: 'exact',
-        syncMode: isSlackWritebackCommandRoot(mountPath) ? 'write-only' : 'mirror',
+        // Slack message/DM roots (`/slack/channels/<id>/messages`,
+        // `/slack/users/<U>/messages`) are DUAL-PURPOSE: they are writeback
+        // command roots AND the inbound read-down surface for top-level messages
+        // and DMs. Mounting them `write-only` pushed our send-writeback command
+        // files up but did ZERO remote->local pulls, so inbound never
+        // materialized (the DM/top-level read-down gap; only `threads`, which is
+        // mirror, read down). `mirror` is a strict superset of `write-only` — the
+        // local push/dispatch path is identical, it only ADDS the inbound pull —
+        // so use it for every Slack mount: inbound reads down AND send-writebacks
+        // still dispatch. (Durable cloud path-correctness for channel messages
+        // ships in cloud#2010; DMs use the cloud#1997 D->U mapping.)
+        syncMode: 'mirror',
         agentName: `pear-integrations-${agentSegment}`,
         scopes: [
           `relayfile:fs:read:${mountPath}/**`,
