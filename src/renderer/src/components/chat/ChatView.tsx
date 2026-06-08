@@ -1,6 +1,7 @@
 import type React from 'react'
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { useStickToBottom } from 'use-stick-to-bottom'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useVirtualizer } from '@tanstack/react-virtual'
+import { useStickToBottom, type StickToBottomInstance } from 'use-stick-to-bottom'
 import {
   Bot,
   Check,
@@ -98,6 +99,79 @@ function CountPill({
     >
       <Icon size={17} className="text-[var(--pear-text-faint)]" />
       <span className="text-sm font-semibold text-[var(--pear-text)]">{count}</span>
+    </div>
+  )
+}
+
+interface VirtualizedMessageListProps {
+  messages: ChatMessageType[]
+  authUser?: AuthUser | null
+  activeChannelName: string | null
+  directMessageParticipants: string[] | null
+  activeThreadMessageId: string | null
+  canInteractWithMessages: boolean
+  scrollRef: StickToBottomInstance['scrollRef']
+  contentRef: StickToBottomInstance['contentRef']
+  onReply: (message: ChatMessageType) => void
+  onReact: (messageId: string, emoji: string) => void
+}
+
+function VirtualizedMessageList({
+  messages,
+  authUser,
+  activeChannelName,
+  directMessageParticipants,
+  activeThreadMessageId,
+  canInteractWithMessages,
+  scrollRef,
+  contentRef,
+  onReply,
+  onReact
+}: VirtualizedMessageListProps): React.ReactNode {
+  const messageVirtualizer = useVirtualizer<HTMLElement, HTMLDivElement>({
+    count: messages.length,
+    getScrollElement: () => scrollRef.current,
+    estimateSize: () => 88,
+    overscan: 8,
+    getItemKey: (index) => messages[index]?.id || index
+  })
+
+  return (
+    <div
+      ref={contentRef}
+      className="relative [overflow-anchor:none]"
+      style={{ height: `${messageVirtualizer.getTotalSize()}px` }}
+    >
+      {messageVirtualizer.getVirtualItems().map((virtualRow) => {
+        const index = virtualRow.index
+        const message = messages[index]
+        if (!message) return null
+
+        const previousMessage = messages[index - 1]
+        const showDateDivider = !previousMessage || !isSameDay(previousMessage.timestamp, message.timestamp)
+
+        return (
+          <div
+            key={virtualRow.key}
+            ref={messageVirtualizer.measureElement}
+            data-index={index}
+            className="absolute left-0 top-0 w-full overflow-visible"
+            style={{ transform: `translateY(${virtualRow.start}px)` }}
+          >
+            {showDateDivider && <DateDivider timestamp={message.timestamp} />}
+            <ChatMessage
+              message={message}
+              authUser={authUser}
+              showRoute={!activeChannelName && !directMessageParticipants}
+              showActions={canInteractWithMessages}
+              showThreadSummary={canInteractWithMessages}
+              activeThread={activeThreadMessageId === message.id}
+              onReply={canInteractWithMessages ? onReply : undefined}
+              onReact={canInteractWithMessages ? onReact : undefined}
+            />
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -596,28 +670,18 @@ export function ChatView(): React.ReactNode {
                     {emptyMessage}
                   </div>
                 ) : (
-                  <div ref={contentRef} className="space-y-0.5 [overflow-anchor:none]">
-                    {messages.map((message, index) => {
-                      const previousMessage = messages[index - 1]
-                      const showDateDivider = !previousMessage || !isSameDay(previousMessage.timestamp, message.timestamp)
-
-                      return (
-                        <Fragment key={message.id}>
-                          {showDateDivider && <DateDivider timestamp={message.timestamp} />}
-                          <ChatMessage
-                            message={message}
-                            authUser={authUser}
-                            showRoute={!activeChannelName && !directMessageParticipants}
-                            showActions={canInteractWithMessages}
-                            showThreadSummary={canInteractWithMessages}
-                            activeThread={activeThreadMessageId === message.id}
-                            onReply={canInteractWithMessages ? handleReplyToMessage : undefined}
-                            onReact={canInteractWithMessages ? handleReactToMessage : undefined}
-                          />
-                        </Fragment>
-                      )
-                    })}
-                  </div>
+                  <VirtualizedMessageList
+                    messages={messages}
+                    authUser={authUser}
+                    activeChannelName={activeChannelName}
+                    directMessageParticipants={directMessageParticipants}
+                    activeThreadMessageId={activeThreadMessageId}
+                    canInteractWithMessages={canInteractWithMessages}
+                    scrollRef={scrollRef}
+                    contentRef={contentRef}
+                    onReply={handleReplyToMessage}
+                    onReact={handleReactToMessage}
+                  />
                 )}
               </div>
 
