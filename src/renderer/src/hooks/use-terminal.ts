@@ -6,6 +6,7 @@ import { recordKeystrokeSent } from '@/lib/typing-trace'
 import {
   acquireTerminalRuntime,
   disposeTerminalRuntime,
+  hasTerminalRuntime,
   type TerminalRuntime
 } from '@/lib/terminal-runtime-registry'
 import { useUIStore } from '@/stores/ui-store'
@@ -137,6 +138,9 @@ export function useTerminal(
       return
     }
 
+    const runtimeKey = getAgentKey(projectId, agentName)
+    const isRuntimeRemount = hasTerminalRuntime(runtimeKey)
+
     // Acquire the persistent runtime for this agent. Tab switches /
     // re-mounts return the same runtime instance, so xterm + PTY
     // subscription survive across React lifecycle churn — this is what
@@ -184,10 +188,15 @@ export function useTerminal(
     // first frame with layout.
     if (containerEl) {
       mountToken = runtime.mount(containerEl)
-      focusTerminal(true)
-      focusTimers = [0, 50, 150, 300].map((delay) =>
-        setTimeout(() => focusTerminal(true), delay)
-      )
+      // Do not programmatically focus an existing runtime on tab remount.
+      // Some TUIs enable DECSET ?1004; xterm focus() then emits a focus-in
+      // sequence that can make them redraw and stack duplicate content.
+      if (!isRuntimeRemount) {
+        focusTerminal(true)
+        focusTimers = [0, 50, 150, 300].map((delay) =>
+          setTimeout(() => focusTerminal(true), delay)
+        )
+      }
     }
 
     // Keep the SRTT estimate warm so prediction engages promptly. Refresh
