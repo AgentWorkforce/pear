@@ -903,9 +903,12 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
           projectId
         }
         const targetName = eventTarget.startsWith('#') ? null : normalizeMessageTarget(eventTarget)
-        const messages = isHuman && isDuplicateHumanEcho(state.messages, msg)
+        const alreadySeenById = state.messages.some((m) => m.id === msg.id)
+        const messages = alreadySeenById
           ? state.messages
-          : capByCount([...state.messages, msg], MAX_CHAT_MESSAGES)
+          : isHuman && isDuplicateHumanEcho(state.messages, msg)
+            ? state.messages
+            : capByCount([...state.messages, msg], MAX_CHAT_MESSAGES)
 
         if (messages !== state.messages && isBrokerDebugEnabled()) {
           console.info('[broker:renderer-receipt]', {
@@ -1196,9 +1199,8 @@ export function useAgentByName(
 ): Agent | undefined {
   return useAgentStore((state) => {
     const lookup = getAgentLookup(state.agents)
-    if (projectId) {
-      const exact = lookup.get(getAgentKey(projectId, name))
-      if (exact) return exact
+    if (projectId !== undefined) {
+      return lookup.get(getAgentKey(projectId, name))
     }
     return lookup.get(`*:${name}`)
   })
