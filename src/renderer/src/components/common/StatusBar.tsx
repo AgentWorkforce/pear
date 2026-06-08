@@ -103,10 +103,7 @@ export function StatusBar(): React.ReactNode {
       cancelled = true
       window.clearInterval(interval)
     }
-    // Include `projectSummary?.branch` so a branch checkout triggers an
-    // immediate PR refresh rather than waiting up to PULL_REQUEST_REFRESH_MS
-    // (60s) for the next poll.
-  }, [projectRootPathKey, projectSummary?.branch])
+  }, [projectRootPathKey])
 
   const statusColor =
     brokerStatus === 'connected'
