@@ -651,7 +651,7 @@ function IntegrationVisibilitySection({
         throw new Error('Slack DM recipient options are not available yet.')
       }
       const options = await listOptions(projectId, integration.provider, 'users')
-      return options.map(slackUserResourceFromOption)
+      return Array.isArray(options) ? options.map(slackUserResourceFromOption) : []
     })
   }, [cachedResources, projectId])
 
@@ -667,12 +667,12 @@ function IntegrationVisibilitySection({
       listenDms
     }
     const nextMountPaths = mergeSlackScopeMountPaths({
-      existing: integration.mountPaths,
+      existing: integration.mountPaths ?? [],
       channelPaths: pendingScopeValue?.mountPaths ?? null,
       // Only mount concrete `/slack/users/<U>/messages` recipients — never a bare
       // `/slack/users` root (emitted when no users are available to select).
       dmPaths: pendingDmScopeValue
-        ? pendingDmScopeValue.mountPaths.filter(isSlackUserMessagesMountPath)
+        ? (pendingDmScopeValue.mountPaths ?? []).filter(isSlackUserMessagesMountPath)
         : null
     })
 
@@ -761,12 +761,13 @@ function IntegrationVisibilitySection({
             const scopeEditorOpen = scopeEditorIntegrationId === integration.integrationId
             const savedSlackListenDms = slackListenDmsFromScope(integration.scope)
             const slackListenDms = pendingSlackListenDms ?? savedSlackListenDms
+            const integrationMountPaths = integration.mountPaths ?? []
             const selectedSlackSourceIds = Array.from(new Set([
-              ...integration.mountPaths,
+              ...integrationMountPaths,
               ...scopeStringList(integration.scope, 'channels')
             ]))
             const selectedSlackDmRecipientIds = Array.from(new Set([
-              ...integration.mountPaths
+              ...integrationMountPaths
                 .filter(isSlackUserMessagesMountPath)
                 .map((path) => path.split('/')[3])
                 .filter(Boolean),

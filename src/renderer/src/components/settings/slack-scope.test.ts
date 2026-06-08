@@ -30,6 +30,21 @@ describe('slack DM recipient helpers', () => {
   test('slackDmMountSegment is empty without an id', () => {
     expect(slackDmMountSegment({})).toBe('')
   })
+
+  test('slack DM helpers tolerate nullish resources', () => {
+    expect(slackDmUserId(null)).toBe('')
+    expect(slackDmUserId(undefined)).toBe('')
+    expect(slackDmMountSegment(null)).toBe('')
+    expect(slackDmMountSegment(undefined)).toBe('')
+  })
+
+  test('slackUserResourceFromOption tolerates missing option data', () => {
+    const resource = slackUserResourceFromOption(null)
+    expect(resource.id).toBe('')
+    expect(resource.displayName).toBe('')
+    expect(resource.name).toBe('')
+    expect(resource.metadata?.userId).toBe('')
+  })
 })
 
 describe('slack mount-path classifiers', () => {
@@ -44,6 +59,13 @@ describe('slack mount-path classifiers', () => {
     expect(isSlackUserMessagesMountPath('/slack/channels/C1')).toBe(false)
     // raw D conversation stays diagnostic, not a user-message product path
     expect(isSlackUserMessagesMountPath('/slack/channels/D1/messages')).toBe(false)
+  })
+
+  test('malformed mount paths are ignored', () => {
+    for (const path of [null, undefined, 12, {}, []]) {
+      expect(isSlackChannelMountPath(path)).toBe(false)
+      expect(isSlackUserMessagesMountPath(path)).toBe(false)
+    }
   })
 })
 
@@ -96,5 +118,18 @@ describe('mergeSlackScopeMountPaths', () => {
       dmPaths: ['/slack/users/U1/messages']
     })
     expect(merged).toEqual(['/slack/channels/C1__proj', '/slack/users/U1/messages'])
+  })
+
+  test('malformed path entries are ignored while merging', () => {
+    const merged = mergeSlackScopeMountPaths({
+      existing: ['/discovery/slack', null, '/slack/channels/C1__proj', 12],
+      channelPaths: null,
+      dmPaths: ['/slack/users/U1/messages', undefined]
+    })
+    expect(merged).toEqual([
+      '/discovery/slack',
+      '/slack/channels/C1__proj',
+      '/slack/users/U1/messages'
+    ])
   })
 })

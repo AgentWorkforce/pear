@@ -9,7 +9,11 @@ import type { IntegrationAccessibleResource } from './scope-pickers/GenericScope
 // relayfile adapter writeback extraction and Cloud scope aliasing only bridge
 // channel suffixes today, not user suffixes.
 
-function resourceField(resource: IntegrationAccessibleResource, ...keys: Array<keyof IntegrationAccessibleResource>): string {
+function resourceField(
+  resource: IntegrationAccessibleResource | null | undefined,
+  ...keys: Array<keyof IntegrationAccessibleResource>
+): string {
+  if (!resource) return ''
   for (const key of keys) {
     const value = resource[key]
     if (typeof value === 'string' && value.trim()) return value.trim()
@@ -17,7 +21,8 @@ function resourceField(resource: IntegrationAccessibleResource, ...keys: Array<k
   return ''
 }
 
-function resourceMeta(resource: IntegrationAccessibleResource, ...keys: string[]): string {
+function resourceMeta(resource: IntegrationAccessibleResource | null | undefined, ...keys: string[]): string {
+  if (!resource) return ''
   for (const key of keys) {
     const value = resource.metadata?.[key]
     if (typeof value === 'string' && value.trim()) return value.trim()
@@ -27,13 +32,13 @@ function resourceMeta(resource: IntegrationAccessibleResource, ...keys: string[]
 
 /** Bare Slack user id (`U…`) for a DM-recipient resource. Cloud `users` options
  *  already normalize to bare ids; we never emit a suffixed `U…__slug`. */
-export function slackDmUserId(resource: IntegrationAccessibleResource): string {
+export function slackDmUserId(resource: IntegrationAccessibleResource | null | undefined): string {
   return resourceMeta(resource, 'userId') || resourceField(resource, 'id', 'slug', 'key', 'name')
 }
 
 /** Mount segment appended to `/slack/users` → `<U…>/messages`, yielding the
  *  canonical 1:1 DM path `/slack/users/<U…>/messages`. Empty when no id. */
-export function slackDmMountSegment(resource: IntegrationAccessibleResource): string {
+export function slackDmMountSegment(resource: IntegrationAccessibleResource | null | undefined): string {
   const id = slackDmUserId(resource)
   return id ? `${id}/messages` : ''
 }
@@ -43,26 +48,27 @@ export function slackUserResourceFromOption(option: {
   value: string
   label: string
   hint?: string
-}): IntegrationAccessibleResource {
-  const id = option.value.trim()
-  const name = option.label.replace(/^@/u, '').trim() || id
+} | null | undefined): IntegrationAccessibleResource {
+  const id = option?.value?.trim() ?? ''
+  const label = option?.label ?? ''
+  const name = label.replace(/^@/u, '').trim() || id
   return {
     id,
-    displayName: option.label,
+    displayName: label,
     name,
     metadata: {
       userId: id,
-      ...(option.hint ? { hint: option.hint } : {})
+      ...(option?.hint ? { hint: option.hint } : {})
     }
   }
 }
 
-export function isSlackChannelMountPath(path: string): boolean {
-  return /^\/slack\/channels(?:\/|$)/u.test(path.trim())
+export function isSlackChannelMountPath(path: unknown): path is string {
+  return typeof path === 'string' && /^\/slack\/channels(?:\/|$)/u.test(path.trim())
 }
 
-export function isSlackUserMessagesMountPath(path: string): boolean {
-  return /^\/slack\/users\/[^/]+\/messages(?:\/|$)/u.test(path.trim())
+export function isSlackUserMessagesMountPath(path: unknown): path is string {
+  return typeof path === 'string' && /^\/slack\/users\/[^/]+\/messages(?:\/|$)/u.test(path.trim())
 }
 
 /**
@@ -73,21 +79,22 @@ export function isSlackUserMessagesMountPath(path: string): boolean {
  * Result is order-stable and de-duplicated.
  */
 export function mergeSlackScopeMountPaths(args: {
-  existing: string[]
-  channelPaths: string[] | null
-  dmPaths: string[] | null
+  existing: unknown[] | null | undefined
+  channelPaths: unknown[] | null
+  dmPaths: unknown[] | null
 }): string[] {
   const { existing, channelPaths, dmPaths } = args
-  const resolvedChannelPaths = channelPaths ?? existing.filter(isSlackChannelMountPath)
-  const resolvedDmPaths = dmPaths ?? existing.filter(isSlackUserMessagesMountPath)
-  const preserved = existing.filter(
+  const existingPaths = Array.isArray(existing) ? existing : []
+  const resolvedChannelPaths = channelPaths ?? existingPaths.filter(isSlackChannelMountPath)
+  const resolvedDmPaths = dmPaths ?? existingPaths.filter(isSlackUserMessagesMountPath)
+  const preserved = existingPaths.filter(
     (path) => !isSlackChannelMountPath(path) && !isSlackUserMessagesMountPath(path)
   )
 
   const merged: string[] = []
   const seen = new Set<string>()
   for (const path of [...preserved, ...resolvedChannelPaths, ...resolvedDmPaths]) {
-    const trimmed = path?.trim()
+    const trimmed = typeof path === 'string' ? path.trim() : ''
     if (!trimmed || seen.has(trimmed)) continue
     seen.add(trimmed)
     merged.push(trimmed)
