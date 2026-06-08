@@ -1387,12 +1387,8 @@ export class BrokerManager {
       }
 
       // Phase 1 of #125: the local broker stays the workspace creator, so the
-      // key is only threaded when explicitly pinned via env. The intersection
-      // type is the single cast site until @agent-relay/harness-driver
-      // PUBLISHES workspaceKey in RuntimeSpawnOptions (landed relay-side in
-      // 6419d59c; verified against the built 8.3.0+T3 dist locally) — the
-      // intersection erases to a no-op then and drops with the version bump.
-      const opts: AgentRelaySpawnOptions & { workspaceKey?: string } = {
+      // key is only threaded when explicitly pinned via env.
+      const opts: AgentRelaySpawnOptions = {
         cwd,
         brokerName: name,
         channels: nextChannels,
