@@ -134,6 +134,14 @@ export interface TerminalRuntime {
   getTerminalMode(): TerminalAttachMode
   fit(): { rows: number; cols: number } | null
   fitAndSync(): { rows: number; cols: number } | null
+  // Redraw the live canvas (e.g. after the host was display:none and is
+  // becoming visible again — WebGL doesn't repaint until something forces
+  // a refresh).
+  refreshOnShow(): void
+  // Swap in a fresh getter for the input-SRTT polled by predictive echo.
+  // The engine captures its callback at construction, so we trampoline
+  // through a runtime-owned slot to allow rebinding on each hook effect.
+  setInputSrttGetter(getter: () => number | null): void
   getPredictiveEcho(): PredictiveEcho | null
   // Install a handler for `term.onData`. Returns the previous handler so the
   // caller can re-install it later (e.g. on unmount while keeping the
@@ -241,6 +249,16 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
   let writtenChunks = 0
   let attachSeeded = false
   let pendingInitFrame: number | null = null
+  // Last rows/cols actually sent to the PTY. fitAndSync drops the IPC when
+  // the size hasn't changed — observers fire on every dragged pixel and the
+  // backend reacts to no-op resizes by reflowing.
+  let lastSentRows = -1
+  let lastSentCols = -1
+  let lastMountedContainer: HTMLElement | null = null
+  // Holder for the current input-SRTT getter. The predictive echo engine
+  // captures this once on construction, so we wrap it in a trampoline and
+  // let setInputSrttGetter swap the underlying getter on each effect run.
+  let currentSrttGetter: () => number | null = opts.getInputSrtt
 
   const cancelPendingInit = (): void => {
     if (pendingInitFrame !== null) {
@@ -411,7 +429,7 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
         write: (data) => liveTerm.write(data),
         cols: term.cols,
         rows: term.rows,
-        getInputSrtt: opts.getInputSrtt
+        getInputSrtt: () => currentSrttGetter()
       })
       predictiveEcho = handle.engine
       disposePredictiveEcho = handle.dispose
@@ -432,6 +450,10 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
       } catch {
         // ignore
       }
+      // Post-settle metrics may differ from the pre-settle ones the
+      // predictor was constructed with. Sync it so column wraps and row
+      // counts line up with the real grid.
+      predictiveEcho?.onResize(refitted.cols, refitted.rows)
       initialSize = refitted
     }
 
@@ -451,10 +473,19 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
     host,
     mount(container: HTMLElement): void {
       if (disposed || !term) return
+      // Fix #12: refuse a second concurrent mount into a different
+      // container. Currently chunkAgents doesn't trigger this, but future
+      // split layouts could — and silently reparenting would tear the
+      // canvas out from under the first owner.
+      if (mounted && host.parentElement && host.parentElement !== container) {
+        console.warn('[terminal-runtime] refusing second concurrent mount for', key)
+        return
+      }
       if (host.parentElement !== container) {
         container.appendChild(host)
       }
       mounted = true
+      lastMountedContainer = container
       // Always run initIfReady so a split-page / hidden-tab mount that
       // landed without layout gets a retry once it becomes visible.
       void initIfReady(container)
@@ -462,6 +493,15 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
     detach(): void {
       if (disposed) return
       mounted = false
+      // Fix #14: a cross-tree React commit order can produce
+      //   componentB.mount(B) → componentA.cleanup → detach()
+      // where the host has already been moved to container B. Parking
+      // would yank the canvas out from under B. Only park when the host
+      // is still in the container we last mounted into.
+      if (lastMountedContainer && host.parentElement !== lastMountedContainer) {
+        return
+      }
+      lastMountedContainer = null
       const park = getParkedContainer()
       if (host.parentElement !== park) {
         park.appendChild(host)
@@ -520,9 +560,28 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
       const size = tryFit()
       if (size) {
         predictiveEcho?.onResize(size.cols, size.rows)
-        pear.broker.resizePty(opts.projectId, opts.agentName, size.rows, size.cols).catch(() => {})
+        // Fix #9: ResizeObserver fires on every dragged pixel; only
+        // round-trip to the backend when the cell grid actually changed.
+        if (size.rows !== lastSentRows || size.cols !== lastSentCols) {
+          lastSentRows = size.rows
+          lastSentCols = size.cols
+          pear.broker
+            .resizePty(opts.projectId, opts.agentName, size.rows, size.cols)
+            .catch(() => {})
+        }
       }
       return size
+    },
+    refreshOnShow(): void {
+      if (!term || disposed) return
+      try {
+        term.refresh(0, term.rows - 1)
+      } catch {
+        // ignore
+      }
+    },
+    setInputSrttGetter(getter: () => number | null): void {
+      currentSrttGetter = getter
     },
     getPredictiveEcho(): PredictiveEcho | null {
       return predictiveEcho
