@@ -818,6 +818,40 @@ export class IntegrationsManager {
     return this.authRecoveryState
   }
 
+  /**
+   * Re-run the cloud auth check after a fresh login and clear the
+   * "Cloud sign-in required" banner if the new credentials resolve. The
+   * `auth:login` IPC handler calls this on a successful sign-in. Without it,
+   * `authRecoveryState` set by an earlier cloud-auth failure stays stale —
+   * the background retry only ever re-checks local mounts (`hydrateCloud:
+   * false`), so the banner used to linger until the integrations settings
+   * page happened to re-hydrate the cloud workspace.
+   *
+   * No-op when there's no banner to clear. On success `syncLocalMounts`
+   * clears the state and emits `integration-auth-recovered`; on a fresh auth
+   * failure it re-sets the state — either way this never rejects.
+   */
+  async retryAuthRecovery(): Promise<void> {
+    if (!this.authRecoveryState) return
+    // Deliberate user action (just logged in) — bypass the hydration throttle
+    // so the cloud re-check isn't skipped as a too-recent attempt, and drop any
+    // in-flight hydration so we don't await a check that began before login
+    // (hydrateCloudIntegrationsForLocalMounts reuses a pending promise). The
+    // older promise's own `finally` only nulls the field when it still points
+    // at itself, so clearing it here can't clobber the fresh hydration.
+    this.localMountCloudHydrationStartedAt = 0
+    this.localMountCloudHydrationPromise = null
+    try {
+      await this.syncLocalMounts({ hydrateCloud: true })
+    } catch (error) {
+      if (!isIntegrationAuthRecoveryError(error)) {
+        console.warn('[integrations] retryAuthRecovery failed:', toErrorMessage(error))
+      }
+      // syncLocalMounts re-sets the recovery state on auth errors; the banner
+      // stays up correctly and the retry timer keeps trying.
+    }
+  }
+
   private setAuthRecoveryState(
     reason: IntegrationAuthRecoveryState['reason'],
     failureClass?: string,
@@ -861,8 +895,14 @@ export class IntegrationsManager {
     if (this.authRecoveryRetryTimer) return
     const timer = setTimeout(() => {
       this.authRecoveryRetryTimer = null
-      if (!this.authRecoveryState) return
-      void this.syncLocalMounts({ hydrateCloud: false })
+      const state = this.authRecoveryState
+      if (!state) return
+      // `cloud-auth-required` originates in the cloud hydration path, so a
+      // local-only retry can never clear it — re-run the cloud check. Reset
+      // the hydration throttle so this retry isn't skipped as too-recent.
+      const hydrateCloud = state.reason === 'cloud-auth-required'
+      if (hydrateCloud) this.localMountCloudHydrationStartedAt = 0
+      void this.syncLocalMounts({ hydrateCloud })
         .catch((error) => {
           if (!isIntegrationAuthRecoveryError(error)) {
             console.warn('[integrations] Failed to retry integration mount recovery:', toErrorMessage(error))
