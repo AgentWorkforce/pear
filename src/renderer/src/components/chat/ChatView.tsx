@@ -130,6 +130,12 @@ function VirtualizedMessageList({
   onReply,
   onReact
 }: VirtualizedMessageListProps): React.ReactNode {
+  const roomKey = directMessageParticipants
+    ? `dm:${directMessageParticipants.join('\u0000')}`
+    : `channel:${activeChannelName || 'all'}`
+  const lastScrolledRoomKeyRef = useRef<string | null>(null)
+  // TODO: verify against STRESS_PROFILE=chat-heavy when the Playwright
+  // stress harness lands in this branch.
   const messageVirtualizer = useVirtualizer<HTMLElement, HTMLDivElement>({
     count: messages.length,
     getScrollElement: () => scrollRef.current,
@@ -137,10 +143,14 @@ function VirtualizedMessageList({
     overscan: 8,
     getItemKey: (index) => messages[index]?.id || index
   })
+  const totalSize = messageVirtualizer.getTotalSize()
 
   useEffect(() => {
+    if (messages.length === 0 || totalSize <= 0) return
+    if (lastScrolledRoomKeyRef.current === roomKey) return
+    lastScrolledRoomKeyRef.current = roomKey
     void scrollToBottom('instant')
-  }, [activeChannelName, directMessageParticipants, scrollToBottom])
+  }, [messages.length, roomKey, scrollToBottom, totalSize])
 
   useEffect(() => {
     messageVirtualizer.measure()
@@ -150,7 +160,7 @@ function VirtualizedMessageList({
     <div
       ref={contentRef}
       className="relative [overflow-anchor:none]"
-      style={{ height: `${messageVirtualizer.getTotalSize()}px` }}
+      style={{ height: `${totalSize}px` }}
     >
       {messageVirtualizer.getVirtualItems().map((virtualRow) => {
         const index = virtualRow.index
@@ -487,14 +497,6 @@ export function ChatView(): React.ReactNode {
     setHumanInviteDraft('')
     setSettingsError(null)
   }, [activeChannelName, directMessageParticipants])
-
-  // Channel/DM switch should jump to bottom instantly. Streaming/append
-  // behaviour is handled by useStickToBottom's ResizeObserver, so we don't
-  // need to react to messages.length here anymore (which is what caused the
-  // "text drag" mid-scroll yanks).
-  useEffect(() => {
-    scrollToBottom('instant')
-  }, [activeChannelName, directMessageParticipants, scrollToBottom])
 
   useEffect(() => {
     if (!activeThreadMessageId || activeThreadMessage) return
