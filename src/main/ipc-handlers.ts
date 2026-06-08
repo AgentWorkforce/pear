@@ -538,7 +538,14 @@ export function registerIpcHandlers(): void {
   // --- Auth ---
   ipcMain.handle('auth:login', async (_, input?: { apiUrl?: string }) => {
     const status = await auth.ensureAuthenticated(input?.apiUrl)
-    if (status.loggedIn) resetRelayWorkspaceManager()
+    if (status.loggedIn) {
+      resetRelayWorkspaceManager()
+      // Re-run the cloud auth check so a stale "Cloud sign-in required" banner
+      // clears now that we have fresh tokens. Fire-and-forget: the banner
+      // clears via the `integration-auth-recovered` event when this resolves,
+      // so we don't block the login response on a cloud round-trip.
+      void integrationsManager.retryAuthRecovery()
+    }
     return status
   })
 

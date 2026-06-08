@@ -466,6 +466,41 @@ describe('IntegrationsManager', () => {
     })
   })
 
+  it('clears the cloud-auth banner when retryAuthRecovery re-checks after a fresh login', async () => {
+    const manager = new IntegrationsManager()
+    const events: unknown[] = []
+    manager.onEvent((event) => events.push(event))
+
+    // Banner goes up: cloud rejects the workspace access (e.g. revoked/expired
+    // token), exactly the state a "Cloud sign-in required" banner reflects.
+    mock.fetch.mockImplementationOnce(async () => ({
+      ok: false,
+      status: 403,
+      statusText: 'Forbidden',
+      json: async () => ({ error: 'Forbidden' })
+    }))
+    await expect(manager.listConnectedForSettings('project-1'))
+      .rejects.toThrow('cloud-auth-required:workspace-access-revoked')
+    expect(manager.getAuthRecoveryState()).toMatchObject({ reason: 'cloud-auth-required' })
+
+    // Fresh login fires retryAuthRecovery; the cloud re-check now succeeds, so
+    // the banner clears without the user opening the integrations settings page.
+    await manager.retryAuthRecovery()
+
+    expect(manager.getAuthRecoveryState()).toBeNull()
+    expect(events).toContainEqual({ type: 'integration-auth-recovered' })
+  })
+
+  it('retryAuthRecovery is a no-op when no auth banner is showing', async () => {
+    const manager = new IntegrationsManager()
+    mock.integrationMountManager.ensureMounted.mockClear()
+
+    await manager.retryAuthRecovery()
+
+    expect(manager.getAuthRecoveryState()).toBeNull()
+    expect(mock.integrationMountManager.ensureMounted).not.toHaveBeenCalled()
+  })
+
   it('relays mount-manager auth recovery alerts to renderer integration events', () => {
     const manager = new IntegrationsManager()
     const events: unknown[] = []
