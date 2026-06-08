@@ -1,3 +1,8 @@
+---
+name: bug-class-triage
+description: Use BEFORE reading source when a terminal rendering symptom is reported — maps the symptom (duplicate text, ghosting, smeared glyphs, cursor drift, blank canvas) by timing and shape to the most-likely cause and the file to open first.
+---
+
 # renderer-bug-class-triage
 
 The lookup table from observed symptom to specific code path. Built from the PR #158 catalogue of fixes and the bugs found while shipping it. Use this **before** reading source — it disambiguates which file to open.

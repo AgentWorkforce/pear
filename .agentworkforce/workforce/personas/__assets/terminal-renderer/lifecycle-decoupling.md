@@ -1,3 +1,8 @@
+---
+name: lifecycle-decoupling
+description: Use when terminal duplicate-text-on-tab-switch or mount/dispose races appear — the module-level runtime registry plus token-based mount ownership pattern that decouples xterm/WebGL/PTY from the React component lifecycle.
+---
+
 # react-lifecycle-decoupling-and-token-ownership
 
 The architecture pattern that takes "duplicate text on tab switch" off the table as an entire bug class. xterm + WebGL + PTY subscription must NOT be torn down and rebuilt on React component lifecycle changes.

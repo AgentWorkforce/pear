@@ -1,3 +1,8 @@
+---
+name: ansi-vt-sequences
+description: Use when reading raw escape sequences from instrumentation or reasoning about cursor/clear/scroll-region/DECSET behavior and the three TUI redraw patterns (cursor-positioning in place, alt-screen full-redraw, synchronized output) behind a terminal rendering bug.
+---
+
 # ansi-vt-escape-sequences
 
 The byte-level command vocabulary TUIs use to drive the terminal. When you can read the chunks, you can name the bug.

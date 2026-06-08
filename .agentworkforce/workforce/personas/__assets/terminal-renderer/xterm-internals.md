@@ -1,3 +1,8 @@
+---
+name: xterm-internals
+description: Use when a terminal rendering bug implicates xterm.js internals — the parser pipeline, DOM/Canvas/WebGL renderer choice, addon lifecycle, alt-screen vs main buffer, focus mode (DECSET ?1004), viewport vs scrollback, or font-measurement timing.
+---
+
 # xterm-internals-and-renderers
 
 The xterm.js parser pipeline, renderer trade-offs, addon discipline, and the bits of internal state that matter when something paints wrong.

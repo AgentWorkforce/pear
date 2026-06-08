@@ -1,3 +1,8 @@
+---
+name: pty-broker-pipeline
+description: Use when diagnosing the PTY byte path from broker IPC to term.write — rAF chunk coalescing, the snapshot-vs-replay race on attach, SIGWINCH/resize redraws, trim-cap chunk loss, and predictive-echo reconciliation.
+---
+
 # pty-broker-streaming-pipeline
 
 The end-to-end PTY byte path from the broker IPC into `term.write`, the races between snapshot and stream, and the discipline that prevents the duplicate-text bug class.

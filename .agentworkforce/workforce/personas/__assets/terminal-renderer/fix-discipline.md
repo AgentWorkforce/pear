@@ -1,3 +1,8 @@
+---
+name: fix-discipline
+description: Use when fixing any terminal renderer bug — the one-write-per-chunk invariant, read-before-guessing, minimal-diff scope, instrument-don't-guess after two failed fixes, and the battle-tested/regression-test bar that keep fixes from being speculative.
+---
+
 # fix-discipline-and-instrumentation
 
 The operating discipline that keeps renderer fixes from being speculative or regressing. Read this before writing any fix.
