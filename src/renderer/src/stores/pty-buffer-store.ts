@@ -57,8 +57,12 @@ function flushPending(key: string): void {
 
   const keyListeners = listeners.get(key)
   if (!keyListeners || keyListeners.size === 0) return
-  for (const listener of keyListeners) {
-    listener(trimmed)
+  for (const listener of [...keyListeners]) {
+    try {
+      listener(trimmed)
+    } catch (err) {
+      console.error('[pty-buffer-store] listener threw', err)
+    }
   }
 }
 
@@ -83,8 +87,12 @@ export function clearPtyBuffer(key: string): void {
   buffers.delete(key)
   const keyListeners = listeners.get(key)
   if (keyListeners) {
-    for (const listener of keyListeners) {
-      listener([])
+    for (const listener of [...keyListeners]) {
+      try {
+        listener([])
+      } catch (err) {
+        console.error('[pty-buffer-store] listener threw', err)
+      }
     }
   }
 }
