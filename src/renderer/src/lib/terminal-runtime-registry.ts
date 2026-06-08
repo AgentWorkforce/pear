@@ -21,7 +21,12 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { pear, type TerminalAttachMode } from '@/lib/ipc'
 import { getAgentKey } from '@/stores/agent-store'
-import { clearPtyBuffer, getPtyChunks, subscribePtyBuffer } from '@/stores/pty-buffer-store'
+import {
+  clearPtyBuffer,
+  flushPtyChunksNow,
+  getPtyChunks,
+  subscribePtyBuffer
+} from '@/stores/pty-buffer-store'
 import { recordChunkEchoed } from '@/lib/typing-trace'
 import { createPredictiveEcho } from '@/lib/predictive-echo'
 import type { PredictiveEcho } from '@agent-relay/harness-driver/predictive-echo'
@@ -350,6 +355,11 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
       ) {
         term.write(result.snapshot.screen)
         await predictiveEcho?.seed(result.snapshot.screen)
+        // Drain any chunks that arrived during the IPC roundtrip but are
+        // still staged in pending. Without this, the next rAF would push
+        // them into the buffer AFTER we capture writtenChunks, and the
+        // subsequent subscribe would replay them on top of the snapshot.
+        flushPtyChunksNow(key)
         writtenChunks = getPtyChunks(key).length
         shouldReplay = false
       }

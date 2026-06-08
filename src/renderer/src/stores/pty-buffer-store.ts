@@ -70,6 +70,21 @@ export function getPtyChunks(key: string): string[] {
   return buffers.get(key) ?? []
 }
 
+// Synchronously drain any chunks staged for the next rAF into the buffer.
+// Used by the terminal runtime right before reading the buffer length as a
+// snapshot baseline — otherwise pending chunks would be replayed on top of
+// the snapshot we just wrote.
+export function flushPtyChunksNow(key: string): void {
+  const handle = pendingFrames.get(key)
+  if (handle !== undefined) {
+    cancelRaf(handle)
+    pendingFrames.delete(key)
+  }
+  if (pending.has(key)) {
+    flushPending(key)
+  }
+}
+
 export function appendPtyChunk(key: string, chunk: string): void {
   const queue = pending.get(key)
   if (queue) {
