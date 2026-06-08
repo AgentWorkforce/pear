@@ -151,14 +151,21 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<v
   assert.equal(predicate(), true)
 }
 
+async function statIfExists(path: string): Promise<Awaited<ReturnType<typeof stat>> | null> {
+  return stat(path).catch((error: NodeJS.ErrnoException) => {
+    if (error?.code === 'ENOENT') return null
+    throw error
+  })
+}
+
 async function waitForPathMissing(path: string, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() <= deadline) {
-    const stats = await stat(path).catch(() => null)
+    const stats = await statIfExists(path)
     if (!stats) return
     await new Promise((resolve) => setTimeout(resolve, 10))
   }
-  assert.equal(await stat(path).then(() => true).catch(() => false), false)
+  assert.equal(await statIfExists(path).then((stats) => stats !== null), false)
 }
 
 function makeHarness(
@@ -2134,11 +2141,86 @@ test('confirmed Slack writeback success removes the local draft command file', a
       })
     ])
 
+    const confirmedEvent = {
+      ...changeEvent(remoteDraftPath, 'slack'),
+      type: 'writeback.succeeded'
+    } as ChangeEvent
+
+    await harness.emit(confirmedEvent)
+    await waitForPathMissing(localDraftPath)
+
+    await harness.emit(confirmedEvent)
+    await waitForPathMissing(localDraftPath)
+
+    assert.deepEqual(harness.sent, [])
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true })
+  }
+})
+
+test('confirmed Slack writeback cleanup handles broad historical local roots', async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), 'pear-writeback-cleanup-'))
+  const localRoot = join(workspaceRoot, 'workspace-id', 'slack', 'channels', 'C123ABC')
+  const localDraftPath = join(localRoot, 'messages', 'reply-confirmed.json')
+  const remoteDraftPath = '/slack/channels/C123ABC/messages/reply-confirmed.json'
+  await mkdir(join(localRoot, 'messages'), { recursive: true })
+  await writeFile(localDraftPath, JSON.stringify({ text: 'confirmed send' }))
+
+  try {
+    const harness = makeHarness(['alice'])
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC'],
+        localMountPaths: [localRoot],
+        downloadHistoricalData: true,
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+
     await harness.emit({
       ...changeEvent(remoteDraftPath, 'slack'),
       type: 'writeback.succeeded'
     } as ChangeEvent)
     await waitForPathMissing(localDraftPath)
+
+    assert.deepEqual(harness.sent, [])
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true })
+  }
+})
+
+test('confirmed Slack writeback cleanup removes duplicate local roots', async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), 'pear-writeback-cleanup-'))
+  const localRootA = join(workspaceRoot, 'a', 'workspace-id', 'slack', 'channels', 'C123ABC', 'messages')
+  const localRootB = join(workspaceRoot, 'b', 'workspace-id', 'slack', 'channels', 'C123ABC', 'messages')
+  const localDraftPathA = join(localRootA, 'reply-confirmed.json')
+  const localDraftPathB = join(localRootB, 'reply-confirmed.json')
+  const remoteDraftPath = '/slack/channels/C123ABC/messages/reply-confirmed.json'
+  await mkdir(localRootA, { recursive: true })
+  await mkdir(localRootB, { recursive: true })
+  await writeFile(localDraftPathA, JSON.stringify({ text: 'confirmed send' }))
+  await writeFile(localDraftPathB, JSON.stringify({ text: 'confirmed send' }))
+
+  try {
+    const harness = makeHarness(['alice'])
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC/messages'],
+        localMountPaths: [localRootA, localRootB],
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+
+    await harness.emit({
+      ...changeEvent(remoteDraftPath, 'slack'),
+      type: 'writeback.succeeded'
+    } as ChangeEvent)
+    await waitForPathMissing(localDraftPathA)
+    await waitForPathMissing(localDraftPathB)
 
     assert.deepEqual(harness.sent, [])
   } finally {
@@ -2169,7 +2251,7 @@ test('Slack writeback draft cleanup waits for confirmed dispatch', async () => {
     await harness.emit(changeEvent(remoteDraftPath, 'slack'))
     await waitForDispatcherTick()
 
-    assert.equal(await stat(localDraftPath).then(() => true).catch(() => false), true)
+    assert.equal(await statIfExists(localDraftPath).then((stats) => stats !== null), true)
     assert.deepEqual(harness.sent, [])
   } finally {
     await rm(workspaceRoot, { recursive: true, force: true })

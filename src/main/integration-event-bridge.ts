@@ -1881,7 +1881,6 @@ async function cleanupConfirmedSlackWritebackDraft(
   for (const spec of specs) {
     if (spec.provider !== 'slack') continue
     for (const root of spec.localMountRoots) {
-      if (!isSlackWritebackCommandRoot(root.remoteRoot)) continue
       if (!pathIsInsideMount(remotePath, root.remoteRoot)) continue
       const localPath = localPathForRemotePathInsideRoot(root.localRoot, root.remoteRoot, remotePath)
       if (!localPathIsInsideRoot(root.localRoot, localPath)) continue
@@ -1894,7 +1893,6 @@ async function cleanupConfirmedSlackWritebackDraft(
         remotePath,
         localRoot: root.localRoot
       })
-      return
     }
   }
 }
