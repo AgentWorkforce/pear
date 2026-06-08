@@ -59,6 +59,12 @@ type SentMessage = {
   }
 }
 
+type PendingInjectedConfirmation = {
+  input: SentMessage['input']
+  resolve: () => void
+  reject: (error: unknown) => void
+}
+
 type SubscribeCall = {
   globs: string[]
   onChange: (event: ChangeEvent) => void
@@ -179,6 +185,7 @@ function makeHarness(
     onSendStart?: (activeSends: number) => void
     waitForDeliveryNeverSettles?: boolean
     waitForInjectedNeverSettles?: boolean
+    manualInjectedConfirmations?: boolean
     failInjected?: boolean
   } = {}
 ): {
@@ -189,6 +196,7 @@ function makeHarness(
   listAgentsCalls: string[]
   deliveryConfirmationCalls: SentMessage[]
   injectedConfirmationCalls: SentMessage[]
+  pendingInjectedConfirmations: PendingInjectedConfirmation[]
   unsubscribedCount: () => number
   emit(event: ChangeEvent): Promise<void>
 } {
@@ -198,6 +206,7 @@ function makeHarness(
   const listAgentsCalls: string[] = []
   const deliveryConfirmationCalls: SentMessage[] = []
   const injectedConfirmationCalls: SentMessage[] = []
+  const pendingInjectedConfirmations: PendingInjectedConfirmation[] = []
   const subscriptions: Subscription[] = []
   let unsubscribedCount = 0
   let activeSends = 0
@@ -267,6 +276,15 @@ function makeHarness(
           if (options.failSend) throw new Error('broker unavailable')
           sent.push({ projectId, input })
           if (options.failInjected) throw new Error('delivery injection timed out')
+          if (options.manualInjectedConfirmations) {
+            await new Promise<void>((resolve, reject) => {
+              pendingInjectedConfirmations.push({
+                input,
+                resolve,
+                reject
+              })
+            })
+          }
           if (options.waitForInjectedNeverSettles) {
             await new Promise(() => undefined)
           }
@@ -292,6 +310,7 @@ function makeHarness(
     listAgentsCalls,
     deliveryConfirmationCalls,
     injectedConfirmationCalls,
+    pendingInjectedConfirmations,
     unsubscribedCount: () => unsubscribedCount,
     emit
   }
@@ -1645,6 +1664,147 @@ test('slack blind thread-reply delivery does not suppress a later content-bearin
 
   await harness.emit(changeEvent(replyPath, 'slack', { digest: 'revision:content-replay' }))
   await waitForDropped('project-1', 1, 2_500)
+  assert.equal(harness.sent.length, 2)
+})
+
+test('slack blind commit does not commit an in-flight content-bearing replay hash', async () => {
+  let readable = false
+  const warnCalls: unknown[][] = []
+  const originalWarn = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnCalls.push(args)
+  }
+  const replyPath = '/slack/channels/C123ABC__proj-cloud/threads/1780871788_370329/replies/1780914176_827829.json'
+  const harness = makeHarness(['alice'], {
+    manualInjectedConfirmations: true,
+    readFileResponse: (_workspaceId, path) => {
+      if (!readable) throw new Error('remote file not ready')
+      return {
+        path,
+        revision: 'rev-content',
+        contentType: 'application/json',
+        content: JSON.stringify({ provider: 'slack', text: 'late thread reply content' }),
+        encoding: 'utf-8'
+      }
+    }
+  })
+
+  try {
+    await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+      await harness.bridge.reconcile('project-1', [
+        integration({
+          provider: 'slack',
+          integrationId: 'slack-1',
+          mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+          downloadHistoricalData: false,
+          scope: { notifyAgents: ['alice'] }
+        })
+      ])
+    })
+
+    await harness.emit({
+      ...changeEvent(replyPath, 'slack', { digest: 'revision:blind' }),
+      expand: async () => ({
+        level: 'full',
+        path: replyPath,
+        data: {
+          path: replyPath,
+          deleted: false
+        }
+      })
+    } as ChangeEvent)
+    await waitForSent(harness, 1, 2_500)
+
+    readable = true
+    await harness.emit(changeEvent(replyPath, 'slack', { digest: 'revision:content' }))
+    await waitForSent(harness, 2, 2_500)
+    assert.equal(harness.pendingInjectedConfirmations.length, 2)
+
+    harness.pendingInjectedConfirmations[0].resolve()
+    await waitUntil(() => (getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsInjected || 0) >= 1)
+    harness.pendingInjectedConfirmations[1].reject(new Error('content replay was not injected'))
+    await waitUntil(() => warnCalls.some((call) => call[0] === '[integration-events] delivery injected confirmation failed'))
+
+    await harness.emit(changeEvent(replyPath, 'slack', { digest: 'revision:content-retry' }))
+    await waitForSent(harness, 3, 2_500)
+  } finally {
+    console.warn = originalWarn
+  }
+
+  assert.match(harness.sent[0].input.text, /Message: unavailable/u)
+  assert.match(harness.sent[1].input.text, /Message:\nlate thread reply content/u)
+  assert.match(harness.sent[2].input.text, /Message:\nlate thread reply content/u)
+})
+
+test('slack blind release does not release an in-flight content-bearing replay hash', async () => {
+  let readable = false
+  const warnCalls: unknown[][] = []
+  const originalWarn = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnCalls.push(args)
+  }
+  const replyPath = '/slack/channels/C123ABC__proj-cloud/threads/1780871788_370329/replies/1780914176_827829.json'
+  const harness = makeHarness(['alice'], {
+    manualInjectedConfirmations: true,
+    readFileResponse: (_workspaceId, path) => {
+      if (!readable) throw new Error('remote file not ready')
+      return {
+        path,
+        revision: 'rev-content',
+        contentType: 'application/json',
+        content: JSON.stringify({ provider: 'slack', text: 'late thread reply content' }),
+        encoding: 'utf-8'
+      }
+    }
+  })
+
+  try {
+    await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+      await harness.bridge.reconcile('project-1', [
+        integration({
+          provider: 'slack',
+          integrationId: 'slack-1',
+          mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+          downloadHistoricalData: false,
+          scope: { notifyAgents: ['alice'] }
+        })
+      ])
+    })
+
+    await harness.emit({
+      ...changeEvent(replyPath, 'slack', { digest: 'revision:blind' }),
+      expand: async () => ({
+        level: 'full',
+        path: replyPath,
+        data: {
+          path: replyPath,
+          deleted: false
+        }
+      })
+    } as ChangeEvent)
+    await waitForSent(harness, 1, 2_500)
+
+    readable = true
+    await harness.emit(changeEvent(replyPath, 'slack', { digest: 'revision:content' }))
+    await waitForSent(harness, 2, 2_500)
+    assert.equal(harness.pendingInjectedConfirmations.length, 2)
+
+    harness.pendingInjectedConfirmations[0].reject(new Error('blind delivery was not injected'))
+    await waitUntil(() => warnCalls.some((call) => call[0] === '[integration-events] delivery injected confirmation failed'))
+
+    const duplicateDelivery = harness.emit(changeEvent(replyPath, 'slack', { digest: 'revision:content-duplicate' }))
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.equal(harness.sent.length, 2)
+
+    harness.pendingInjectedConfirmations[1].resolve()
+    await duplicateDelivery
+    await waitForDropped('project-1', 1, 2_500)
+  } finally {
+    console.warn = originalWarn
+  }
+
+  assert.match(harness.sent[0].input.text, /Message: unavailable/u)
+  assert.match(harness.sent[1].input.text, /Message:\nlate thread reply content/u)
   assert.equal(harness.sent.length, 2)
 })
 

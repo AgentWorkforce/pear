@@ -3026,10 +3026,6 @@ export class IntegrationEventBridge {
     } else if (entry.provisionalBlind) {
       entry.provisionalBlind = false
       entry.committedBlind = true
-      for (const contentHash of entry.provisionalContentHashes) {
-        entry.committedContentHashes.add(contentHash)
-      }
-      entry.provisionalContentHashes.clear()
     }
     entry.expiresAt = now + claim.ttlMs
   }
@@ -3068,7 +3064,6 @@ export class IntegrationEventBridge {
         entry.provisionalContentHashes.delete(contentHash)
       } else {
         entry.provisionalBlind = false
-        entry.provisionalContentHashes.clear()
       }
       if (
         !entry.committedBlind &&
