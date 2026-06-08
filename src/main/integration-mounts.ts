@@ -282,22 +282,23 @@ export class IntegrationMountManager {
                 typeof lastError.code === 'string' ? lastError.code : '',
                 message
               ].join('|')
-              if (this.handledHealthErrorKeys.get(remotePath) === healthErrorKey) continue
-              const pendingWriteback = typeof state.pendingWriteback === 'number' ? state.pendingWriteback : 0
-              const queued = this.queueForcedRestart(remotePath, 'auth failure (state poll)')
-              if (queued) {
-                this.handledHealthErrorKeys.set(remotePath, healthErrorKey)
-                console.warn(
-                  `[integration-mounts] Mount auth expired for ${remotePath} (state poll); restarting with fresh credentials`,
-                  { pendingWriteback, error: message || 'unauthorized' }
-                )
-                this.healthObserver?.({
-                  type: 'auth-stall',
-                  remotePath,
-                  status: typeof state.status === 'string' ? state.status : null,
-                  pendingWriteback,
-                  message: message || 'unauthorized'
-                })
+              if (this.handledHealthErrorKeys.get(remotePath) !== healthErrorKey) {
+                const pendingWriteback = typeof state.pendingWriteback === 'number' ? state.pendingWriteback : 0
+                const queued = this.queueForcedRestart(remotePath, 'auth failure (state poll)')
+                if (queued) {
+                  this.handledHealthErrorKeys.set(remotePath, healthErrorKey)
+                  console.warn(
+                    `[integration-mounts] Mount auth expired for ${remotePath} (state poll); restarting with fresh credentials`,
+                    { pendingWriteback, error: message || 'unauthorized' }
+                  )
+                  this.healthObserver?.({
+                    type: 'auth-stall',
+                    remotePath,
+                    status: typeof state.status === 'string' ? state.status : null,
+                    pendingWriteback,
+                    message: message || 'unauthorized'
+                  })
+                }
               }
             }
           }
@@ -583,11 +584,17 @@ async function readMountStateFile(localDir: string): Promise<Record<string, unkn
     join(localDir, '.relayfile-mount-state.json'),
     join(localDir, '.relay', 'state.json')
   ]) {
+    let rawState: string
     try {
-      const state = asRecord(JSON.parse(await readFile(statePath, 'utf8')))
+      rawState = await readFile(statePath, 'utf8')
+    } catch {
+      continue
+    }
+    try {
+      const state = asRecord(JSON.parse(rawState))
       if (state) return state
     } catch {
-      // Try the next known state-file contract.
+      return null
     }
   }
   return null
@@ -629,7 +636,7 @@ async function readMountSyncWedge(localDir: string): Promise<MountSyncWedge | nu
     const failed = line.match(/^(\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}) mount sync cycle failed: (.+)$/u)
     if (!failed) continue
     const failedMessage = failed[2] || ''
-    if (!isMountSyncWedgeOutput(failedMessage)) continue
+    if (!isMountSyncWedgeOutput(failedMessage)) break
     consecutiveFailures += 1
     lastFailureAt ??= failed[1]?.replace(/\//gu, '-').replace(' ', 'T') ?? 'unknown'
     message ||= failedMessage
