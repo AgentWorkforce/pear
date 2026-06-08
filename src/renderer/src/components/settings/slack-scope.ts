@@ -33,7 +33,7 @@ function resourceMeta(resource: IntegrationAccessibleResource | null | undefined
 /** Bare Slack user id (`U…`) for a DM-recipient resource. Cloud `users` options
  *  already normalize to bare ids; we never emit a suffixed `U…__slug`. */
 export function slackDmUserId(resource: IntegrationAccessibleResource | null | undefined): string {
-  return resourceMeta(resource, 'userId') || resourceField(resource, 'id', 'slug', 'key', 'name')
+  return resourceMeta(resource, 'userId') || resourceField(resource, 'id', 'slug', 'key')
 }
 
 /** Mount segment appended to `/slack/users` → `<U…>/messages`, yielding the

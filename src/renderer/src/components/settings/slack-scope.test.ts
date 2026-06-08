@@ -31,6 +31,10 @@ describe('slack DM recipient helpers', () => {
     expect(slackDmMountSegment({})).toBe('')
   })
 
+  test('slackDmMountSegment does not use display names as user ids', () => {
+    expect(slackDmMountSegment({ name: 'alice', displayName: '@alice' })).toBe('')
+  })
+
   test('slack DM helpers tolerate nullish resources', () => {
     expect(slackDmUserId(null)).toBe('')
     expect(slackDmUserId(undefined)).toBe('')

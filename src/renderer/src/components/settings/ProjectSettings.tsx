@@ -651,7 +651,10 @@ function IntegrationVisibilitySection({
         throw new Error('Slack DM recipient options are not available yet.')
       }
       const options = await listOptions(projectId, integration.provider, 'users')
-      return Array.isArray(options) ? options.map(slackUserResourceFromOption) : []
+      if (!Array.isArray(options)) {
+        throw new Error('Slack DM recipient options returned an unexpected response.')
+      }
+      return options.map(slackUserResourceFromOption)
     })
   }, [cachedResources, projectId])
 

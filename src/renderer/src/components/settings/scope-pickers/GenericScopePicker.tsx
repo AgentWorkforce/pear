@@ -162,9 +162,10 @@ export function GenericScopePicker({
   )
 
   useEffect(() => {
-    if (loading) return
+    if (loading || error) return
 
     if (resources.length === 0) {
+      if (!defaultSelectAll) return
       onChangeRef.current({
         scope: { provider, selection: 'all', [scopeKey]: [] },
         mountPaths: [baseMountPath]
@@ -190,6 +191,8 @@ export function GenericScopePicker({
     })
   }, [
     baseMountPath,
+    defaultSelectAll,
+    error,
     loading,
     provider,
     resources.length,
