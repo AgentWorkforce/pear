@@ -1,5 +1,4 @@
-import type React from 'react'
-import { useEffect, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AlertTriangle, ChevronLeft, ChevronRight, Columns2, Loader2, Network, PanelTop, X } from 'lucide-react'
 import { AgentHarnessIcon, ClaudeIcon, CodexIcon } from '@/components/common/AgentIcons'
 import { GraphView } from '@/components/graph/GraphView'
@@ -7,7 +6,7 @@ import { ChatComposerInput } from '@/components/chat/ChatComposerInput'
 import { spawnProjectAgent, type SpawnAgentCli } from '@/lib/spawn-agent'
 import { formatTokenCount } from '@/lib/format'
 import { pear, type BurnAgentInput, type BurnAgentSummary, type TerminalAttachMode } from '@/lib/ipc'
-import { getAgentKeyForAgent, type Agent, useAgentStore } from '@/stores/agent-store'
+import { getAgentKeyForAgent, type Agent, useAgentByName, useAgentStore } from '@/stores/agent-store'
 import { useCloudAgentStore, type CloudAgentAttachProgress } from '@/stores/cloud-agent-store'
 import { useIsAgentTyping } from '@/stores/typing-store'
 import { useProjectStore } from '@/stores/project-store'
@@ -16,6 +15,62 @@ import { PendingMessagesMenu, type QueueDeliveryMode } from './PendingMessagesPa
 import { TerminalInstance } from './TerminalInstance'
 
 const SPLIT_PAGE_SIZE = 4
+
+interface TerminalAgentRef {
+  key: string
+  projectId?: string
+  name: string
+  rootPath?: string
+  cli: string
+  terminalMode: TerminalAttachMode
+}
+
+let terminalAgentRefsCache:
+  | { projectId: string | null; refs: TerminalAgentRef[] }
+  | null = null
+
+function selectTerminalAgentRefs(allAgents: Agent[], activeProjectId: string | null): TerminalAgentRef[] {
+  const refs = allAgents
+    .filter((agent) => !activeProjectId || agent.projectId === activeProjectId)
+    .map((agent) => ({
+      key: getAgentKeyForAgent(agent),
+      projectId: agent.projectId,
+      name: agent.name,
+      rootPath: agent.rootPath,
+      cli: agent.cli,
+      terminalMode: agent.terminalMode
+    }))
+
+  if (
+    terminalAgentRefsCache &&
+    terminalAgentRefsCache.projectId === activeProjectId &&
+    areTerminalAgentRefsEqual(terminalAgentRefsCache.refs, refs)
+  ) {
+    return terminalAgentRefsCache.refs
+  }
+
+  terminalAgentRefsCache = { projectId: activeProjectId, refs }
+  return refs
+}
+
+function areTerminalAgentRefsEqual(left: TerminalAgentRef[], right: TerminalAgentRef[]): boolean {
+  if (left.length !== right.length) return false
+  for (let index = 0; index < left.length; index++) {
+    const a = left[index]!
+    const b = right[index]!
+    if (
+      a.key !== b.key ||
+      a.projectId !== b.projectId ||
+      a.name !== b.name ||
+      a.rootPath !== b.rootPath ||
+      a.cli !== b.cli ||
+      a.terminalMode !== b.terminalMode
+    ) {
+      return false
+    }
+  }
+  return true
+}
 
 function isPreparingCloudAgent(progress: CloudAgentAttachProgress | undefined): boolean {
   return Boolean(progress && progress.phase !== 'idle' && progress.phase !== 'done' && progress.phase !== 'error')
@@ -79,7 +134,7 @@ function progressPercent(progress: CloudAgentAttachProgress | undefined, elapsed
   return Math.max(base, Math.min(96, Math.round(base + fraction * (96 - base))))
 }
 
-function getTerminalMode(agent: Agent): TerminalAttachMode {
+function getTerminalMode(agent: Pick<Agent, 'terminalMode'>): TerminalAttachMode {
   return agent.terminalMode === 'passthrough' || agent.terminalMode === 'view'
     ? 'passthrough'
     : 'drive'
@@ -93,8 +148,8 @@ function toTerminalMode(mode: QueueDeliveryMode): TerminalAttachMode {
   return mode === 'drive' ? 'drive' : 'passthrough'
 }
 
-function chunkAgents(agents: Agent[]): Agent[][] {
-  const pages: Agent[][] = []
+function chunkAgents<T>(agents: T[]): T[][] {
+  const pages: T[][] = []
   for (let index = 0; index < agents.length; index += SPLIT_PAGE_SIZE) {
     pages.push(agents.slice(index, index + SPLIT_PAGE_SIZE))
   }
@@ -126,7 +181,7 @@ function TypingDots({ className = '' }: { className?: string }): React.ReactNode
   )
 }
 
-function getBurnInputForAgent(agent: Agent): BurnAgentInput {
+function getBurnInputForAgent(agent: Pick<Agent, 'name' | 'projectId' | 'rootPath' | 'cli'>): BurnAgentInput {
   return {
     name: agent.name,
     projectId: agent.projectId,
@@ -168,29 +223,31 @@ function BurnTokenBadge({
 }
 
 interface TerminalProjectProps {
-  agent: Agent
+  projectId?: string
+  agentName: string
+  mode: TerminalAttachMode
   visible: boolean
   active: boolean
   onActivate: () => void
 }
 
 function TerminalProject({
-  agent,
+  projectId,
+  agentName,
+  mode,
   visible,
   active,
   onActivate
 }: TerminalProjectProps): React.ReactNode {
-  const terminalMode = getTerminalMode(agent)
-
   return (
     <div className="flex h-full min-h-0 w-full min-w-0 flex-1 bg-[var(--pear-bg)]">
       <div className="min-h-0 min-w-0 flex-1">
         <TerminalInstance
-          agentName={agent.name}
-          projectId={agent.projectId}
+          agentName={agentName}
+          projectId={projectId}
           visible={visible}
           active={active}
-          mode={terminalMode}
+          mode={mode}
           onActivate={onActivate}
         />
       </div>
@@ -199,7 +256,8 @@ function TerminalProject({
 }
 
 interface SplitTerminalTileProps {
-  agent: Agent
+  projectId: string | undefined
+  name: string
   burnSummary?: BurnAgentSummary
   visible: boolean
   active: boolean
@@ -210,7 +268,8 @@ interface SplitTerminalTileProps {
 }
 
 function SplitTerminalTile({
-  agent,
+  projectId,
+  name,
   burnSummary,
   visible,
   active,
@@ -219,7 +278,15 @@ function SplitTerminalTile({
   onDeliveryModeChange,
   onOpenBurn
 }: SplitTerminalTileProps): React.ReactNode {
-  const typing = useIsAgentTyping(agent)
+  const agent = useAgentByName(projectId, name)
+  const typing = useIsAgentTyping(agent ?? {
+    projectId,
+    name,
+    currentState: 'idle'
+  })
+
+  if (!agent) return null
+
   return (
     <div
       className={`flex min-h-0 min-w-0 flex-col overflow-hidden border bg-[var(--pear-bg)] ${
@@ -265,7 +332,9 @@ function SplitTerminalTile({
       </div>
       <div className="min-h-0 min-w-0 flex-1">
         <TerminalProject
-          agent={agent}
+          projectId={agent.projectId}
+          agentName={agent.name}
+          mode={getTerminalMode(agent)}
           visible={visible}
           active={active}
           onActivate={onActivate}
@@ -276,26 +345,45 @@ function SplitTerminalTile({
 }
 
 interface AgentTabProps {
-  agent: Agent
+  projectId: string | undefined
+  name: string
   burnSummary?: BurnAgentSummary
   active: boolean
-  onActivate: () => void
-  onOpenBurn: (agent: Agent) => void
+  onActivate: (agentKey: string) => void
+  onOpenBurn: (projectId: string | undefined, name: string) => void
 }
 
-function AgentTab({ agent, burnSummary, active, onActivate, onOpenBurn }: AgentTabProps): React.ReactNode {
-  const typing = useIsAgentTyping(agent)
+const AgentTab = React.memo(function AgentTab({
+  projectId,
+  name,
+  burnSummary,
+  active,
+  onActivate,
+  onOpenBurn
+}: AgentTabProps): React.ReactNode {
+  const agent = useAgentByName(projectId, name)
+  const agentKey = `${projectId || 'unknown'}:${name}`
+  const typing = useIsAgentTyping(agent ?? {
+    projectId,
+    name,
+    currentState: 'idle'
+  })
+
+  if (!agent) return null
+
+  const handleActivate = (): void => onActivate(agentKey)
+  const handleOpenBurn = (): void => onOpenBurn(agent.projectId, agent.name)
+
   return (
     <div
-      key={getAgentKeyForAgent(agent)}
       role="tab"
       tabIndex={0}
       aria-selected={active}
-      onClick={onActivate}
+      onClick={handleActivate}
       onKeyDown={(e) => {
         if (e.key === 'Enter' || e.key === ' ') {
           e.preventDefault()
-          onActivate()
+          handleActivate()
         }
       }}
       className={`group my-1 flex cursor-pointer items-center gap-2.5 rounded-xl border border-transparent px-4 py-3 text-sm transition-colors ${
@@ -318,7 +406,7 @@ function AgentTab({ agent, burnSummary, active, onActivate, onOpenBurn }: AgentT
       </span>
       <div className="flex items-center gap-2">
         <span className="max-w-[120px] truncate">{agent.name}</span>
-        <BurnTokenBadge summary={burnSummary} onClick={() => onOpenBurn(agent)} />
+        <BurnTokenBadge summary={burnSummary} onClick={handleOpenBurn} />
         {typing && <TypingDots />}
       </div>
       {agent.status === 'running' && (
@@ -336,10 +424,60 @@ function AgentTab({ agent, burnSummary, active, onActivate, onOpenBurn }: AgentT
       )}
     </div>
   )
+}, areAgentTabPropsEqual)
+
+function areAgentTabPropsEqual(prev: AgentTabProps, next: AgentTabProps): boolean {
+  return (
+    prev.projectId === next.projectId &&
+    prev.name === next.name &&
+    prev.active === next.active &&
+    prev.onActivate === next.onActivate &&
+    prev.onOpenBurn === next.onOpenBurn &&
+    areBurnSummariesEqual(prev.burnSummary, next.burnSummary)
+  )
+}
+
+function areBurnSummariesEqual(
+  prev: BurnAgentSummary | undefined,
+  next: BurnAgentSummary | undefined
+): boolean {
+  if (prev === next) return true
+  if (!prev || !next) return false
+  return (
+    prev.status === next.status &&
+    prev.totalTokens === next.totalTokens &&
+    prev.updatedAt === next.updatedAt &&
+    prev.error === next.error
+  )
+}
+
+interface ActivePendingMessagesMenuProps {
+  projectId: string | undefined
+  name: string
+  onDeliveryModeChange: (agent: Agent, mode: QueueDeliveryMode) => void
+}
+
+function ActivePendingMessagesMenu({
+  projectId,
+  name,
+  onDeliveryModeChange
+}: ActivePendingMessagesMenuProps): React.ReactNode {
+  const agent = useAgentByName(projectId, name)
+  if (!agent) return null
+
+  return (
+    <PendingMessagesMenu
+      projectId={agent.projectId}
+      agentName={agent.name}
+      deliveryMode={getQueueDeliveryMode(agent)}
+      refreshToken={agent.pendingDeliveryIds.join('|')}
+      onDeliveryModeChange={(mode) => onDeliveryModeChange(agent, mode)}
+    />
+  )
 }
 
 interface SplitTerminalPageProps {
-  agents: Agent[]
+  agents: TerminalAgentRef[]
   burnSummariesByAgentKey: Record<string, BurnAgentSummary>
   visible: boolean
   activeAgentKey: string | null
@@ -360,12 +498,13 @@ function SplitTerminalPage({
   return (
     <div className={`grid h-full gap-1 p-1 ${getSplitPageGridClass(agents.length)}`}>
       {agents.map((agent, index) => {
-        const agentKey = getAgentKeyForAgent(agent)
+        const agentKey = agent.key
         const active = visible && agentKey === activeAgentKey
         return (
           <SplitTerminalTile
             key={agentKey}
-            agent={agent}
+            projectId={agent.projectId}
+            name={agent.name}
             burnSummary={burnSummariesByAgentKey[agentKey]}
             visible={visible}
             active={active}
@@ -381,13 +520,10 @@ function SplitTerminalPage({
 }
 
 export function TerminalPane(): React.ReactNode {
-  const allAgents = useAgentStore((s) => s.agents)
   const activeProjectId = useProjectStore((s) => s.activeProjectId)
+  const agentRefs = useAgentStore((s) => selectTerminalAgentRefs(s.agents, activeProjectId))
   const activeProject = useProjectStore((s) => s.getActiveProject())
   const activeRoot = useProjectStore((s) => s.getActiveRoot())
-  const agents = activeProjectId
-    ? allAgents.filter((a) => a.projectId === activeProjectId)
-    : allAgents
   const activeAgentKey = useAgentStore((s) => s.activeAgentKey)
   const setActiveAgentKey = useAgentStore((s) => s.setActiveAgentKey)
   const setAgentTerminalMode = useAgentStore((s) => s.setAgentTerminalMode)
@@ -411,17 +547,17 @@ export function TerminalPane(): React.ReactNode {
   const [nowMs, setNowMs] = useState(() => Date.now())
   const flushingPromptRef = useRef<string | null>(null)
   const graphEnabled = terminalLayout === 'graph'
-  const splitEnabled = terminalLayout === 'horizontal-split' && agents.length > 1
-  const splitPages = splitEnabled ? chunkAgents(agents) : []
+  const splitEnabled = terminalLayout === 'horizontal-split' && agentRefs.length > 1
+  const splitPages = splitEnabled ? chunkAgents(agentRefs) : []
   const splitPageCount = splitPages.length
-  const activeAgent = agents.find((agent) => getAgentKeyForAgent(agent) === activeAgentKey)
+  const activeAgentRef = agentRefs.find((agent) => agent.key === activeAgentKey)
   const splitButtonTitle = splitEnabled
     ? 'Move terminals back to tabs'
-    : agents.length > 1
+    : agentRefs.length > 1
       ? 'Show split terminal pages'
       : 'Start another agent to split terminals'
   const graphButtonTitle = graphEnabled ? 'Show terminal tabs' : 'Show agent graph'
-  const burnInputs = useMemo(() => agents.map(getBurnInputForAgent), [agents])
+  const burnInputs = useMemo(() => agentRefs.map(getBurnInputForAgent), [agentRefs])
   const burnInputsKey = useMemo(
     () => burnInputs.map((agent) => `${agent.projectId || 'unknown'}:${agent.name}:${agent.cwd || ''}:${agent.cli || ''}`).join('|'),
     [burnInputs]
@@ -501,7 +637,7 @@ export function TerminalPane(): React.ReactNode {
 
     const nextAgent = splitPages[clampedPage]?.[0]
     if (nextAgent) {
-      setActiveAgentKey(getAgentKeyForAgent(nextAgent))
+      setActiveAgentKey(nextAgent.key)
     }
   }
 
@@ -512,6 +648,23 @@ export function TerminalPane(): React.ReactNode {
       burnAgent: getBurnInputForAgent(agent)
     })
   }
+
+  const openBurnDetailsByName = useCallback((projectId: string | undefined, name: string): void => {
+    const agent = useAgentStore.getState().agents.find((candidate) =>
+      candidate.name === name &&
+      (projectId === undefined || candidate.projectId === projectId)
+    )
+    if (!agent) return
+    openTab({
+      kind: 'burn-session',
+      projectId: agent.projectId,
+      burnAgent: getBurnInputForAgent(agent)
+    })
+  }, [openTab])
+
+  const activateAgentTab = useCallback((agentKey: string): void => {
+    setActiveAgentKey(agentKey)
+  }, [setActiveAgentKey])
 
   useEffect(() => {
     let cancelled = false
@@ -552,7 +705,7 @@ export function TerminalPane(): React.ReactNode {
 
   useEffect(() => {
     if (!activeProjectId || !queuedFirstPrompt || queuedPromptError || brokerStatus !== 'connected') return
-    const target = agents.find((agent) => agent.name === queuedFirstPrompt.targetName) || agents[0]
+    const target = agentRefs.find((agent) => agent.name === queuedFirstPrompt.targetName) || agentRefs[0]
     if (!target) return
 
     const flushKey = `${activeProjectId}\0${queuedFirstPrompt.queuedAt}\0${target.name}`
@@ -580,7 +733,7 @@ export function TerminalPane(): React.ReactNode {
   }, [
     activeProjectId,
     addHumanMessage,
-    agents,
+    agentRefs,
     brokerStatus,
     cloudAttachProgress?.phase,
     queuedFirstPrompt,
@@ -590,17 +743,17 @@ export function TerminalPane(): React.ReactNode {
   ])
 
   useEffect(() => {
-    if (agents.length === 0) {
+    if (agentRefs.length === 0) {
       if (activeAgentKey) {
         setActiveAgentKey(null)
       }
       return
     }
 
-    if (!activeAgentKey || !agents.some((agent) => getAgentKeyForAgent(agent) === activeAgentKey)) {
-      setActiveAgentKey(getAgentKeyForAgent(agents[0]))
+    if (!activeAgentKey || !agentRefs.some((agent) => agent.key === activeAgentKey)) {
+      setActiveAgentKey(agentRefs[0]!.key)
     }
-  }, [activeAgentKey, agents, setActiveAgentKey])
+  }, [activeAgentKey, agentRefs, setActiveAgentKey])
 
   useEffect(() => {
     if (!splitEnabled) {
@@ -616,13 +769,13 @@ export function TerminalPane(): React.ReactNode {
   useEffect(() => {
     if (!splitEnabled || !activeAgentKey) return
 
-    const activeIndex = agents.findIndex((agent) => getAgentKeyForAgent(agent) === activeAgentKey)
+    const activeIndex = agentRefs.findIndex((agent) => agent.key === activeAgentKey)
     if (activeIndex >= 0) {
       setSplitPage(Math.floor(activeIndex / SPLIT_PAGE_SIZE))
     }
-  }, [activeAgentKey, agents, splitEnabled])
+  }, [activeAgentKey, agentRefs, splitEnabled])
 
-  if (agents.length === 0) {
+  if (agentRefs.length === 0) {
     if (activeProject && cloudAttachError) {
       return (
         <div className="flex h-full flex-col bg-[var(--pear-bg)]">
@@ -780,7 +933,7 @@ export function TerminalPane(): React.ReactNode {
 
               return (
                 <div
-                  key={pageAgents.map(getAgentKeyForAgent).join('|')}
+                  key={pageAgents.map((agent) => agent.key).join('|')}
                   role="tab"
                   tabIndex={0}
                   aria-selected={active}
@@ -807,34 +960,33 @@ export function TerminalPane(): React.ReactNode {
               )
             })
           ) : (
-            agents.map((agent) => {
-              const agentKey = getAgentKeyForAgent(agent)
+            agentRefs.map((agent) => {
+              const agentKey = agent.key
               return (
                 <AgentTab
                   key={agentKey}
-                  agent={agent}
+                  projectId={agent.projectId}
+                  name={agent.name}
                   burnSummary={burnSummariesByAgentKey[agentKey]}
                   active={activeAgentKey === agentKey}
-                  onActivate={() => setActiveAgentKey(agentKey)}
-                  onOpenBurn={openBurnDetails}
+                  onActivate={activateAgentTab}
+                  onOpenBurn={openBurnDetailsByName}
                 />
               )
             })
           )}
         </div>
-        {!splitEnabled && activeAgent && (
-          <PendingMessagesMenu
-            projectId={activeAgent.projectId}
-            agentName={activeAgent.name}
-            deliveryMode={getQueueDeliveryMode(activeAgent)}
-            refreshToken={activeAgent.pendingDeliveryIds.join('|')}
-            onDeliveryModeChange={(mode) => void handleDeliveryModeChange(activeAgent, mode)}
+        {!splitEnabled && activeAgentRef && (
+          <ActivePendingMessagesMenu
+            projectId={activeAgentRef.projectId}
+            name={activeAgentRef.name}
+            onDeliveryModeChange={(agent, mode) => void handleDeliveryModeChange(agent, mode)}
           />
         )}
         <button
           type="button"
           onClick={() => setTerminalLayout(splitEnabled ? 'tabs' : 'horizontal-split')}
-          disabled={agents.length < 2}
+          disabled={agentRefs.length < 2}
           aria-pressed={splitEnabled}
           className={`rounded-xl px-3 py-2 transition-colors ${
             splitEnabled
@@ -920,7 +1072,7 @@ export function TerminalPane(): React.ReactNode {
                 value={firstPromptText}
                 placeholder={queuedFirstPrompt ? 'First prompt queued' : 'Queue the first prompt'}
                 sendLabel="Queue first prompt"
-                runningAgents={agents}
+                runningAgents={agentRefs}
                 activeProjectId={activeProjectId}
                 disabled={Boolean(queuedFirstPrompt)}
                 canSend={Boolean(firstPromptText.trim()) && !queuedFirstPrompt}
@@ -954,7 +1106,7 @@ export function TerminalPane(): React.ReactNode {
             if (!visible) return null
             return (
               <div
-                key={pageAgents.map(getAgentKeyForAgent).join('|')}
+                key={pageAgents.map((agent) => agent.key).join('|')}
                 className="absolute inset-0"
               >
                 <SplitTerminalPage
@@ -998,7 +1150,7 @@ export function TerminalPane(): React.ReactNode {
             <div className="absolute bottom-2 left-1/2 z-10 flex -translate-x-1/2 items-center gap-1 rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-2 py-1">
               {splitPages.map((pageAgents, pageIndex) => (
                 <button
-                  key={pageAgents.map(getAgentKeyForAgent).join('|')}
+                  key={pageAgents.map((agent) => agent.key).join('|')}
                   type="button"
                   onClick={() => goToSplitPage(pageIndex)}
                   className={`h-1.5 rounded-full transition-all ${
@@ -1015,16 +1167,18 @@ export function TerminalPane(): React.ReactNode {
         </div>
       ) : (
         <div className="relative min-h-0 flex-1 overflow-hidden">
-          {activeAgent && (
+          {activeAgentRef && (
             <div
-              key={getAgentKeyForAgent(activeAgent)}
+              key={activeAgentRef.key}
               className="absolute inset-0"
             >
               <TerminalProject
-                agent={activeAgent}
+                projectId={activeAgentRef.projectId}
+                agentName={activeAgentRef.name}
+                mode={getTerminalMode(activeAgentRef)}
                 visible
                 active
-                onActivate={() => setActiveAgentKey(getAgentKeyForAgent(activeAgent))}
+                onActivate={() => setActiveAgentKey(activeAgentRef.key)}
               />
             </div>
           )}

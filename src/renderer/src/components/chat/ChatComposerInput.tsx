@@ -96,7 +96,7 @@ interface ChatComposerInputProps {
   value: string
   placeholder: string
   sendLabel: string
-  runningAgents: Agent[]
+  runningAgents: Array<Pick<Agent, 'name'> & Partial<Pick<Agent, 'cli' | 'status' | 'pendingDeliveryIds'>>>
   activeProjectId?: string | null
   disabled?: boolean
   canSend?: boolean
@@ -348,21 +348,21 @@ export function ChatComposerInput({
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <span className="truncate text-sm font-medium text-[inherit]">{agent.name}</span>
-                        {agent.pendingDeliveryIds.length > 0 && (
+                        {(agent.pendingDeliveryIds?.length ?? 0) > 0 && (
                           <span className="text-[10px] text-[var(--pear-text-faint)]">thinking</span>
                         )}
                       </div>
                       <div className="mt-0.5 flex items-center gap-2 text-xs text-[var(--pear-text-faint)]">
                         <AgentHarnessIcon
-                          cli={agent.cli}
+                          cli={agent.cli || 'unknown'}
                           className="h-3 w-3 shrink-0 text-[var(--pear-text-faint)]"
                         />
-                        <span>{agent.cli}</span>
+                        <span>{agent.cli || 'unknown'}</span>
                       </div>
                     </div>
                     <div
                       className={`h-2 w-2 shrink-0 rounded-full ${
-                        agent.status === 'running' ? 'bg-[var(--pear-accent)]' : 'bg-[var(--pear-text-faint)]'
+                        agent.status !== 'exited' ? 'bg-[var(--pear-accent)]' : 'bg-[var(--pear-text-faint)]'
                       }`}
                     />
                   </button>
