@@ -207,7 +207,7 @@ function debugReconciliation(event: MessageReconciliationDebugEvent): void {
 
 function refreshEventStream(reason: string): void {
   const projectId = useProjectStore.getState().activeProjectId || undefined
-  const broker = pear.broker as PearAPI['broker'] & BrokerWithMessageReconciliation
+  const broker = pear?.broker as (PearAPI['broker'] & BrokerWithMessageReconciliation) | undefined
   void broker?.refreshEventStream?.(projectId, reason)?.catch(() => undefined)
 }
 
@@ -234,7 +234,7 @@ export function useMessageReconciliation(): void {
       })
     },
     reconcileMessages: (input) => {
-      const broker = pear.broker as PearAPI['broker'] & BrokerWithMessageReconciliation
+      const broker = pear?.broker as (PearAPI['broker'] & BrokerWithMessageReconciliation) | undefined
       return broker?.reconcileMessages?.(input) ?? Promise.resolve([])
     },
     mergeMessages: mergeReconciledMessages,
@@ -288,7 +288,7 @@ export function useMessageReconciliation(): void {
   }, [reconciler])
 
   useEffect(() => {
-    return pear.broker.onStatus((status) => {
+    return pear?.broker?.onStatus?.((status) => {
       if (BROKER_CONNECTED_STATUSES.has(status.status)) {
         refreshEventStream(`broker:${status.status}`)
         reconciler.schedule(`broker:${status.status}`)
@@ -297,7 +297,7 @@ export function useMessageReconciliation(): void {
   }, [reconciler])
 
   useEffect(() => {
-    const broker = pear.broker as PearAPI['broker'] & BrokerWithMessageReconciliation
+    const broker = pear?.broker as (PearAPI['broker'] & BrokerWithMessageReconciliation) | undefined
     if (!broker?.onEventStreamDiagnostic) return
     return broker.onEventStreamDiagnostic((event) => {
       if (EVENT_STREAM_RECONCILED_STATUSES.has(event.status)) {
