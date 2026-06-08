@@ -141,6 +141,8 @@ vi.mock('./cli', () => ({
 }))
 
 import { registerIpcHandlers } from './ipc-handlers'
+import { findProjectForPath } from './cli'
+import { isDirectory } from './path-utils'
 
 describe('registerIpcHandlers broker:start', () => {
   beforeEach(() => {
@@ -196,6 +198,42 @@ describe('registerIpcHandlers broker:spawn-agent', () => {
 
     expect(result).toEqual({ name: 'worker', runtime: 'pty' })
     expect(() => structuredClone(result)).not.toThrow()
+  })
+})
+
+describe('registerIpcHandlers broker:list-personas', () => {
+  beforeEach(() => {
+    mock.handlers.clear()
+    mock.ipcMain.handle.mockClear()
+    mock.ipcMain.on.mockClear()
+    mock.brokerManager.listPersonas.mockReset()
+    vi.mocked(findProjectForPath).mockReset()
+    vi.mocked(isDirectory).mockReset()
+    vi.mocked(isDirectory).mockReturnValue(true)
+    registerIpcHandlers()
+  })
+
+  it('lists personas for a cwd inside the requested project root', async () => {
+    const handler = mock.handlers.get('broker:list-personas')
+    expect(handler).toBeTypeOf('function')
+    vi.mocked(findProjectForPath).mockReturnValue({ id: 'project-1' } as never)
+    mock.brokerManager.listPersonas.mockResolvedValueOnce([{ id: 'autonomous-actor' }])
+
+    const result = await handler?.({}, 'project-1', '/tmp/project-1')
+
+    expect(result).toEqual([{ id: 'autonomous-actor' }])
+    expect(mock.brokerManager.listPersonas).toHaveBeenCalledWith('project-1', '/tmp/project-1')
+  })
+
+  it('rejects persona cwd outside the requested project root', async () => {
+    const handler = mock.handlers.get('broker:list-personas')
+    expect(handler).toBeTypeOf('function')
+    vi.mocked(findProjectForPath).mockReturnValue({ id: 'project-2' } as never)
+
+    await expect(handler?.({}, 'project-1', '/tmp/project-2')).rejects.toThrow(
+      /Path is outside project roots for project project-1/
+    )
+    expect(mock.brokerManager.listPersonas).not.toHaveBeenCalled()
   })
 })
 

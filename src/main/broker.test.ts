@@ -190,7 +190,7 @@ vi.mock('./burn', () => ({
   getPearBurnAgentKey: vi.fn((projectId: string, name: string) => `${projectId}:${name}`)
 }))
 
-import { BrokerManager, resolveAgentRelayMcpCommand } from './broker'
+import { BrokerManager, parseBrokerInitCliFlags, resolveAgentRelayMcpCommand } from './broker'
 
 const PROJECT_ID = 'project-1'
 const originalMcpCommand = process.env.AGENT_RELAY_MCP_COMMAND
@@ -404,6 +404,52 @@ describe('resolveAgentRelayMcpCommand', () => {
     setProcessResourcesPath(tempDir)
 
     expect(() => resolveAgentRelayMcpCommand()).toThrow(/launcher is missing or not executable/)
+  })
+})
+
+describe('parseBrokerInitCliFlags', () => {
+  it('detects current broker init flags', () => {
+    const flags = parseBrokerInitCliFlags(`
+Usage: agent-relay-broker init [OPTIONS]
+
+Options:
+      --name <NAME>                    Legacy broker instance name flag. Prefer --instance-name [default: ]
+      --instance-name <INSTANCE_NAME>  Stable broker instance name within the Relay workspace
+      --workspace-key <WORKSPACE_KEY>  Join an existing Relay workspace instead of creating a fresh one
+      --channels <CHANNELS>            [default: general]
+`)
+
+    expect(flags).toEqual({
+      supportsInstanceName: true,
+      supportsName: true,
+      supportsWorkspaceKey: true
+    })
+  })
+
+  it('detects legacy broker init flags', () => {
+    const flags = parseBrokerInitCliFlags(`
+Usage: agent-relay-broker init [OPTIONS]
+
+Options:
+      --name <NAME>            [default: ]
+      --channels <CHANNELS>    [default: general]
+      --persist                Enable persistence
+`)
+
+    expect(flags).toEqual({
+      supportsInstanceName: false,
+      supportsName: true,
+      supportsWorkspaceKey: false
+    })
+  })
+})
+
+describe('electron-builder broker packaging', () => {
+  it('unpacks bundled broker binaries outside app.asar', async () => {
+    const config = await readFile('electron-builder.yml', 'utf8')
+
+    expect(config).toContain('node_modules/@agent-relay/broker-*/bin/**')
+    expect(config).toContain('node_modules/agent-relay/node_modules/@agent-relay/broker-*/bin/**')
   })
 })
 
@@ -830,6 +876,28 @@ describe('BrokerManager local + cloud coexistence', () => {
       cli: 'claude'
     })
     expect(() => structuredClone(result)).not.toThrow()
+
+    await manager.shutdown()
+  })
+
+  it('lists workforce personas from a project root before the relay workspace starts', async () => {
+    personaTempDir = await mkdtemp(join(tmpdir(), 'pear-persona-list-'))
+    await writeAgentWorkforceFixture(personaTempDir)
+
+    const manager = new BrokerManager()
+
+    await expect(manager.listPersonas(PROJECT_ID, personaTempDir)).resolves.toEqual([
+      { id: 'autonomous-actor', harness: 'claude' }
+    ])
+    expect(mock.HarnessDriverClient.spawn).not.toHaveBeenCalled()
+
+    await manager.shutdown()
+  })
+
+  it('returns an empty persona list instead of throwing when no session or root is available', async () => {
+    const manager = new BrokerManager()
+
+    await expect(manager.listPersonas(PROJECT_ID)).resolves.toEqual([])
 
     await manager.shutdown()
   })

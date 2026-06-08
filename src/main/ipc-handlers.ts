@@ -265,7 +265,19 @@ export function registerIpcHandlers(): void {
     return toBrokerSpawnAgentResult(result)
   })
 
-  ipcMain.handle('broker:list-personas', async (_, projectId: string) => {
+  ipcMain.handle('broker:list-personas', async (_, projectId: string, cwd?: string) => {
+    const personaCwd = cwd?.trim()
+    if (personaCwd) {
+      const resolved = resolve(personaCwd)
+      const pathProjectId = getProjectIdForPath(resolved)
+      if (!pathProjectId || pathProjectId !== projectId.trim()) {
+        throw new Error(`Path is outside project roots for project ${projectId}: ${resolved}`)
+      }
+      if (!isDirectory(resolved)) {
+        return []
+      }
+      return brokerManager.listPersonas(projectId, resolved)
+    }
     return brokerManager.listPersonas(projectId)
   })
 

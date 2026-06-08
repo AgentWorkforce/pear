@@ -110,14 +110,13 @@ export async function listProjectPersonas(project: Project, rootOverride?: Proje
   if (rootOverride && !rootOverride.pathExists) {
     return []
   }
-  await ensureLocalBroker(project, rootOverride, { detachCloud: false })
 
   const root = rootOverride ?? useProjectStore.getState().getActiveRoot()
   if (!root?.pathExists) {
     return []
   }
 
-  return pear.broker.listPersonas(project.id)
+  return pear.broker.listPersonas(project.id, root.path)
 }
 
 export async function spawnProjectPersona(project: Project, personaId: string, rootOverride?: ProjectRoot): Promise<string> {
@@ -151,7 +150,7 @@ export async function spawnProjectPersona(project: Project, personaId: string, r
     )
   }
 
-  const personas = await pear.broker.listPersonas(project.id).catch((): WorkforcePersona[] => [])
+  const personas = await pear.broker.listPersonas(project.id, root.path).catch((): WorkforcePersona[] => [])
   const persona = personas.find((candidate) => candidate.id === personaId)
   const spawned = await pear.broker.spawnPersona(project.id, personaId)
   const name = spawned.name || personaId

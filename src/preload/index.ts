@@ -240,8 +240,8 @@ const api = {
     connectCloud: () => invoke<string>('broker:connect-cloud'),
     spawnAgent: (projectId: string, input: BrokerSpawnAgentInput) =>
       invoke<BrokerSpawnAgentResult>('broker:spawn-agent', projectId, input),
-    listPersonas: (projectId: string) =>
-      invoke<WorkforcePersona[]>('broker:list-personas', projectId),
+    listPersonas: (projectId: string, cwd?: string) =>
+      invoke<WorkforcePersona[]>('broker:list-personas', projectId, cwd),
     spawnPersona: (projectId: string, personaId: string) =>
       invoke<BrokerSpawnAgentResult>('broker:spawn-persona', projectId, personaId),
     attachTerminal: (input: BrokerAttachTerminalInput) =>
