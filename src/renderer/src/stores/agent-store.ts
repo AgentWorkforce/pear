@@ -1156,3 +1156,50 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
 
   getAgentBuffer: (projectId, name) => getPtyChunks(getAgentKey(projectId, name))
 })))
+
+// Cache for the agents-by-(projectId, name) lookup map. Rebuilding it costs
+// O(n) on every PTY tick if we use a useMemo or selector that touches the
+// agents array, so we key it on the array reference (which only changes when
+// the store actually mutates agents) and reuse the same Map across renders.
+// Callers like ChatMessage / ThreadParticipantAvatar previously did
+// `state.agents.find(...)` inside a Zustand selector, which made every
+// message component re-render whenever the agents array changed (every PTY
+// chunk that flips activity / currentState).
+let agentMapCache: { source: Agent[]; map: Map<string, Agent> } | null = null
+
+function getAgentLookup(agents: Agent[]): Map<string, Agent> {
+  if (agentMapCache && agentMapCache.source === agents) return agentMapCache.map
+
+  const map = new Map<string, Agent>()
+  for (const agent of agents) {
+    map.set(getAgentKeyForAgent(agent), agent)
+    // Also key by name only so callers without a projectId can fall back to
+    // any matching agent — preserves the prior `agents.find` semantics for the
+    // few call sites where projectId is unknown.
+    const nameOnlyKey = `*:${agent.name}`
+    if (!map.has(nameOnlyKey)) map.set(nameOnlyKey, agent)
+  }
+
+  agentMapCache = { source: agents, map }
+  return map
+}
+
+/**
+ * Look up an agent by (projectId, name) using a cached map that only rebuilds
+ * when the agents array reference changes. The selector returns the agent
+ * object directly so components only re-render when *their* agent changes,
+ * not when any other agent's activity/state ticks.
+ */
+export function useAgentByName(
+  projectId: string | undefined,
+  name: string
+): Agent | undefined {
+  return useAgentStore((state) => {
+    const lookup = getAgentLookup(state.agents)
+    if (projectId) {
+      const exact = lookup.get(getAgentKey(projectId, name))
+      if (exact) return exact
+    }
+    return lookup.get(`*:${name}`)
+  })
+}
