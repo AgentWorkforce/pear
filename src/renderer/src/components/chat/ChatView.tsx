@@ -1,5 +1,6 @@
 import type React from 'react'
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useStickToBottom } from 'use-stick-to-bottom'
 import {
   Bot,
   Check,
@@ -331,7 +332,15 @@ export function ChatView(): React.ReactNode {
     ? isDirectMessageRoomHumanIncluded(directMessageParticipants)
     : false
   const directMessageReadOnly = Boolean(directMessageParticipants && !directMessageHumanIncluded)
-  const scrollRef = useRef<HTMLDivElement>(null)
+  // `use-stick-to-bottom` watches the content element via ResizeObserver and
+  // keeps the viewport pinned to the bottom while the user is at the bottom.
+  // This cooperates with the browser's overflow-anchor and avoids the manual
+  // scrollTop = scrollHeight effect that used to fight scroll anchoring and
+  // yank the viewport during streaming.
+  const { scrollRef, contentRef, scrollToBottom } = useStickToBottom({
+    initial: 'instant',
+    resize: 'instant'
+  })
   const preserveSettingsAfterRenameRef = useRef(false)
   const [activeThreadMessageId, setActiveThreadMessageId] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<ChannelTab>('messages')
@@ -394,11 +403,13 @@ export function ChatView(): React.ReactNode {
     setSettingsError(null)
   }, [activeChannelName, directMessageParticipants])
 
+  // Channel/DM switch should jump to bottom instantly. Streaming/append
+  // behaviour is handled by useStickToBottom's ResizeObserver, so we don't
+  // need to react to messages.length here anymore (which is what caused the
+  // "text drag" mid-scroll yanks).
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-    }
-  }, [activeChannelName, directMessageParticipants, messages.length])
+    scrollToBottom('instant')
+  }, [activeChannelName, directMessageParticipants, scrollToBottom])
 
   useEffect(() => {
     if (!activeThreadMessageId || activeThreadMessage) return
@@ -425,6 +436,15 @@ export function ChatView(): React.ReactNode {
     if (activeTab === 'messages' && !directMessageReadOnly) return
     setActiveThreadMessageId(null)
   }, [activeTab, directMessageReadOnly])
+
+  // Stabilise the per-message callbacks so memoised ChatMessage children only
+  // re-render when their own props change (not on every parent re-render).
+  const handleReplyToMessage = useCallback((nextMessage: ChatMessageType) => {
+    setActiveThreadMessageId(nextMessage.id)
+  }, [])
+  const handleReactToMessage = useCallback((messageId: string, emoji: string) => {
+    toggleMessageReaction(messageId, emoji)
+  }, [toggleMessageReaction])
 
   const handleRenameChannel = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault()
@@ -576,7 +596,7 @@ export function ChatView(): React.ReactNode {
                     {emptyMessage}
                   </div>
                 ) : (
-                  <div className="space-y-0.5">
+                  <div ref={contentRef} className="space-y-0.5 [overflow-anchor:none]">
                     {messages.map((message, index) => {
                       const previousMessage = messages[index - 1]
                       const showDateDivider = !previousMessage || !isSameDay(previousMessage.timestamp, message.timestamp)
@@ -591,10 +611,8 @@ export function ChatView(): React.ReactNode {
                             showActions={canInteractWithMessages}
                             showThreadSummary={canInteractWithMessages}
                             activeThread={activeThreadMessageId === message.id}
-                            onReply={canInteractWithMessages
-                              ? (nextMessage) => setActiveThreadMessageId(nextMessage.id)
-                              : undefined}
-                            onReact={canInteractWithMessages ? toggleMessageReaction : undefined}
+                            onReply={canInteractWithMessages ? handleReplyToMessage : undefined}
+                            onReact={canInteractWithMessages ? handleReactToMessage : undefined}
                           />
                         </Fragment>
                       )
