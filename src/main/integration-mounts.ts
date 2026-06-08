@@ -171,7 +171,7 @@ export class IntegrationMountManager {
     }
 
     if (this.pending) return this.pending
-    const pending = this.mount(mountPaths, new Set())
+    const pending = this.mount(mountPaths, new Set(), new Set())
       .catch((error) => {
         if (isCloudAuthRequiredError(error) || isAccountWorkspaceRequiredError(error)) {
           this.reportAuthRequired(error)
@@ -313,7 +313,7 @@ export class IntegrationMountManager {
           syncWedge.message
         ].join('|')
         if (this.handledHealthErrorKeys.get(remotePath) === healthErrorKey) continue
-        const queued = this.queueForcedRestart(remotePath, 'sync wedge')
+        const queued = this.queueForcedRestart(remotePath, 'sync wedge', { clearState: true })
         if (queued) {
           this.handledHealthErrorKeys.set(remotePath, healthErrorKey)
           console.warn(
@@ -331,7 +331,7 @@ export class IntegrationMountManager {
     }
   }
 
-  private queueForcedRestart(remotePath: string, reason: string): boolean {
+  private queueForcedRestart(remotePath: string, reason: string, options: { clearState?: boolean } = {}): boolean {
     if (!this.handles.has(remotePath)) return false
     const now = Date.now()
     const lastRestartedAt = this.authRestartedAt.get(remotePath) ?? 0
@@ -341,7 +341,11 @@ export class IntegrationMountManager {
     const previous = this.pending ?? Promise.resolve()
     const pending = previous
       .catch(() => undefined)
-      .then(() => this.mount(this.desiredMountPaths, new Set([remotePath])))
+      .then(() => this.mount(
+        this.desiredMountPaths,
+        new Set([remotePath]),
+        options.clearState ? new Set([remotePath]) : new Set()
+      ))
       .catch((error) => {
         console.warn(
           `[integration-mounts] Failed to restart Relayfile mount for ${remotePath} after ${reason}:`,
@@ -371,7 +375,11 @@ export class IntegrationMountManager {
     this.refreshTimers.set(remotePath, timer)
   }
 
-  private async mount(mountPaths: string[], forceRemotePaths: Set<string>): Promise<void> {
+  private async mount(
+    mountPaths: string[],
+    forceRemotePaths: Set<string>,
+    clearStateRemotePaths: Set<string>
+  ): Promise<void> {
     const auth = await resolveCloudAuth()
     if (!auth) {
       await this.stopAll()
@@ -420,7 +428,7 @@ export class IntegrationMountManager {
         }
         const existingLocalDir = existing.localDir
         await this.stopHandle(spec.remotePath)
-        if (forceRemotePaths.has(spec.remotePath)) {
+        if (clearStateRemotePaths.has(spec.remotePath)) {
           await clearMountStateFiles(spec.remotePath, existingLocalDir)
         }
       }

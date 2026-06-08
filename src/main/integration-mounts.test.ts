@@ -347,6 +347,7 @@ describe('IntegrationMountManager', () => {
     ])
 
     expect(mock.mountInputs.map((input) => input.remotePath)).toEqual(['/github/repos'])
+    mock.rm.mockClear()
 
     await vi.advanceTimersByTimeAsync(1_000)
     await Promise.resolve()
@@ -354,6 +355,14 @@ describe('IntegrationMountManager', () => {
 
     expect(mock.mountInputs.map((input) => input.remotePath)).toContain('/github/repos')
     expect(mock.mountInputs.filter((input) => input.remotePath === '/github/repos')).toHaveLength(2)
+    expect(mock.rm).not.toHaveBeenCalledWith(
+      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/github/repos/.relayfile-mount-state.json',
+      { force: true }
+    )
+    expect(mock.rm).not.toHaveBeenCalledWith(
+      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/github/repos/.relay/state.json',
+      { force: true }
+    )
   })
 
   it('caps local integration mount starts when selected resources exceed the mount budget', async () => {
@@ -680,6 +689,38 @@ describe('IntegrationMountManager', () => {
           '2026/06/06 14:00:00 mount sync cycle failed: context deadline exceeded',
           '2026/06/06 14:00:45 mount sync cycle failed: context deadline exceeded',
           '2026/06/06 14:01:30 mount sync cycle failed: http 401 unauthorized: Token has expired'
+        ].join('\n')
+      }
+      return JSON.stringify({
+        files: {},
+        eventsCursor: 'evt_1'
+      })
+    })
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/channels/C123/threads']
+      }
+    ])
+
+    await vi.advanceTimersByTimeAsync(45_000)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/threads')).toHaveLength(1)
+  })
+
+  it('does not restart when a newer non-wedge failure interrupts sync deadline failures', async () => {
+    vi.useFakeTimers()
+    const manager = new IntegrationMountManager()
+    mock.readFile.mockImplementation(async (path: string) => {
+      if (path.endsWith('/.relay/mount.log')) {
+        return [
+          '2026/06/06 14:00:00 mount sync cycle failed: context deadline exceeded',
+          '2026/06/06 14:00:45 mount sync cycle failed: context deadline exceeded',
+          '2026/06/06 14:01:30 mount sync cycle failed: http 401 unauthorized: Token has expired',
+          '2026/06/06 14:02:15 mount sync cycle failed: context deadline exceeded'
         ].join('\n')
       }
       return JSON.stringify({
