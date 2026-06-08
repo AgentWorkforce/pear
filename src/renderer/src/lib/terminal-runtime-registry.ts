@@ -241,6 +241,10 @@ export function hasTerminalRuntime(key: string): boolean {
   return runtimes.has(key)
 }
 
+export function getTerminalRuntime(key: string): TerminalRuntime | null {
+  return runtimes.get(key)?.runtime ?? null
+}
+
 function createRuntime(
   key: string,
   opts: AcquireOptions,
