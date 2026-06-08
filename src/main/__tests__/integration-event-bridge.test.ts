@@ -7,6 +7,7 @@ import {
   getIntegrationEventTelemetrySnapshot,
   IntegrationEventBridge,
   createWorkspaceScopedEventClient,
+  eventPathGlobsForIntegration,
   integrationSubscriptionSummaries,
   integrationRelayFileSyncOptions,
   localWatchEventPathsForFilename,
@@ -302,6 +303,29 @@ test('relayfile sdk path filters broaden partial-segment Slack DM globs', () => 
     '/slack/dms/*/**',
     '/slack/users/*/messages/**'
   ])
+})
+
+test('slack DM watch globs use the user-message model and drop vestigial /slack/dms', () => {
+  const slackDm = integration({
+    provider: 'slack',
+    integrationId: 'slack-1',
+    mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+    scope: { listenDms: true }
+  })
+  const globs = eventPathGlobsForIntegration(slackDm)
+  assert.ok(globs.includes('/slack/users/*/messages/**'), 'canonical user-message DM watch present')
+  assert.ok(globs.includes('/slack/channels/D*/**'), 'raw-D diagnostic alias retained')
+  assert.ok(!globs.includes('/slack/dms/*/**'), 'vestigial /slack/dms watch glob dropped')
+
+  const noDm = integration({
+    provider: 'slack',
+    integrationId: 'slack-2',
+    mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+    scope: { listenDms: false }
+  })
+  const noDmGlobs = eventPathGlobsForIntegration(noDm)
+  assert.ok(!noDmGlobs.includes('/slack/users/*/messages/**'), 'no DM watch when listenDms is off')
+  assert.ok(!noDmGlobs.includes('/slack/channels/D*/**'), 'no raw-D diagnostic watch when listenDms is off')
 })
 
 test('integration event remote stream keeps a refreshable relayfile token provider', () => {

@@ -24,9 +24,15 @@ import { ProactiveAgentsSection } from '@/components/proactive/ProactiveAgentsSe
 import { pear, type ConnectedIntegration } from '@/lib/ipc'
 import {
   SlackChannelPicker,
+  SlackDmRecipientPicker,
   type IntegrationAccessibleResource,
   type ScopePickerValue
 } from '@/components/settings/scope-pickers'
+import {
+  isSlackUserMessagesMountPath,
+  mergeSlackScopeMountPaths,
+  slackUserResourceFromOption
+} from '@/components/settings/slack-scope'
 import { useAgentStore } from '@/stores/agent-store'
 import {
   normalizeChannelName,
@@ -385,6 +391,7 @@ function IntegrationVisibilitySection({
   const [error, setError] = useState<string | null>(null)
   const [scopeEditorIntegrationId, setScopeEditorIntegrationId] = useState<string | null>(null)
   const [pendingScopeValue, setPendingScopeValue] = useState<ScopePickerValue | null>(null)
+  const [pendingDmScopeValue, setPendingDmScopeValue] = useState<ScopePickerValue | null>(null)
   const [pendingSlackListenDms, setPendingSlackListenDms] = useState<boolean | null>(null)
   const resourceCacheRef = useRef(new Map<string, ResourceCacheEntry>())
 
@@ -634,6 +641,20 @@ function IntegrationVisibilitySection({
     })
   }, [cachedResources, projectId])
 
+  const listSlackDmRecipients = useCallback(async (integration: ConnectedIntegration): Promise<IntegrationAccessibleResource[]> => {
+    const cacheKey = `slack-users:${projectId}:${integration.integrationId}`
+    return cachedResources(cacheKey, async () => {
+      const listOptions = (pear.integrations as typeof pear.integrations & {
+        listOptions?: typeof pear.integrations.listOptions
+      }).listOptions
+      if (typeof listOptions !== 'function') {
+        throw new Error('Slack DM recipient options are not available yet.')
+      }
+      const options = await listOptions(projectId, integration.provider, 'users')
+      return options.map(slackUserResourceFromOption)
+    })
+  }, [cachedResources, projectId])
+
   const saveSlackSourceChannels = useCallback(async (integration: ConnectedIntegration) => {
     const listenDms = pendingSlackListenDms ?? slackListenDmsFromScope(integration.scope)
     const nextScope = {
@@ -642,8 +663,18 @@ function IntegrationVisibilitySection({
       selection: pendingScopeValue?.scope.selection ?? integration.scope.selection ?? 'selected',
       channels: pendingScopeValue?.scope.channels ?? integration.scope.channels ?? [],
       resources: pendingScopeValue?.scope.resources ?? integration.scope.resources ?? [],
+      dmUsers: pendingDmScopeValue?.scope.dmUsers ?? integration.scope.dmUsers ?? [],
       listenDms
     }
+    const nextMountPaths = mergeSlackScopeMountPaths({
+      existing: integration.mountPaths,
+      channelPaths: pendingScopeValue?.mountPaths ?? null,
+      // Only mount concrete `/slack/users/<U>/messages` recipients — never a bare
+      // `/slack/users` root (emitted when no users are available to select).
+      dmPaths: pendingDmScopeValue
+        ? pendingDmScopeValue.mountPaths.filter(isSlackUserMessagesMountPath)
+        : null
+    })
 
     setBusyIntegrationId(integration.integrationId)
     setError(null)
@@ -652,7 +683,7 @@ function IntegrationVisibilitySection({
         projectId,
         integration.integrationId,
         nextScope,
-        pendingScopeValue?.mountPaths ?? integration.mountPaths
+        nextMountPaths
       )
       setIntegrations((current) =>
         current.map((entry) =>
@@ -661,13 +692,14 @@ function IntegrationVisibilitySection({
       )
       setScopeEditorIntegrationId(null)
       setPendingScopeValue(null)
+      setPendingDmScopeValue(null)
       setPendingSlackListenDms(null)
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
       setBusyIntegrationId(null)
     }
-  }, [pendingScopeValue, pendingSlackListenDms, projectId])
+  }, [pendingScopeValue, pendingDmScopeValue, pendingSlackListenDms, projectId])
 
   return (
     <Section
@@ -733,7 +765,14 @@ function IntegrationVisibilitySection({
               ...integration.mountPaths,
               ...scopeStringList(integration.scope, 'channels')
             ]))
-            const slackScopeDirty = !!pendingScopeValue || (
+            const selectedSlackDmRecipientIds = Array.from(new Set([
+              ...integration.mountPaths
+                .filter(isSlackUserMessagesMountPath)
+                .map((path) => path.split('/')[3])
+                .filter(Boolean),
+              ...scopeStringList(integration.scope, 'dmUsers')
+            ]))
+            const slackScopeDirty = !!pendingScopeValue || !!pendingDmScopeValue || (
               pendingSlackListenDms !== null && pendingSlackListenDms !== savedSlackListenDms
             )
             const knownTargetValues = new Set([
@@ -879,9 +918,20 @@ function IntegrationVisibilitySection({
                       />
                       <span className="min-w-0">
                         <span className="block text-sm text-[var(--pear-text)]">Direct messages</span>
-                        <span className="block text-xs text-[var(--pear-text-faint)]">Listen for Slack DMs</span>
+                        <span className="block text-xs text-[var(--pear-text-faint)]">
+                          Observe DM events (watch-only). Choose recipients below to read &amp; send their DMs.
+                        </span>
                       </span>
                     </label>
+                    <div className="mt-3">
+                      <SlackDmRecipientPicker
+                        provider="slack"
+                        disabled={busy}
+                        initialSelectedIds={selectedSlackDmRecipientIds}
+                        listAccessibleResources={() => listSlackDmRecipients(integration)}
+                        onChange={setPendingDmScopeValue}
+                      />
+                    </div>
                     <div className="mt-3 flex justify-end gap-2">
                       <button
                         type="button"
@@ -889,6 +939,7 @@ function IntegrationVisibilitySection({
                         onClick={() => {
                           setScopeEditorIntegrationId(null)
                           setPendingScopeValue(null)
+                          setPendingDmScopeValue(null)
                           setPendingSlackListenDms(null)
                         }}
                         className="h-8 rounded-md border border-[var(--pear-border)] px-3 text-xs text-[var(--pear-text-dim)] hover:text-[var(--pear-text)] disabled:opacity-40"
