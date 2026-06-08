@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
-import { tmpdir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beforeEach, test } from 'node:test'
 
@@ -187,6 +187,7 @@ function makeHarness(
     waitForInjectedNeverSettles?: boolean
     manualInjectedConfirmations?: boolean
     failInjected?: boolean
+    localMountWorkspaceId?: string
   } = {}
 ): {
   bridge: IntegrationEventBridge
@@ -215,7 +216,7 @@ function makeHarness(
   const bridge = new IntegrationEventBridge({
     getWorkspaceHandle: async () => ({
       workspaceId: 'workspace-id',
-      localMountWorkspaceId: 'workspace-id',
+      localMountWorkspaceId: options.localMountWorkspaceId ?? 'workspace-id',
       client: () => ({
         subscribe(globs, onChange, options) {
           subscribeCalls.push({ globs: [...globs], onChange, options })
@@ -2336,13 +2337,13 @@ test('slack channel aliases without revision inject one logical message only onc
 })
 
 test('slack self-bot writeback echoes are suppressed without dropping humans or other bots', async () => {
-  const workspaceRoot = await mkdtemp(join(tmpdir(), 'pear-self-echo-'))
-  const localRoot = join(workspaceRoot, 'workspace-id', 'slack', 'channels', 'C123ABC', 'messages')
+  const localMountWorkspaceId = `pear-self-echo-${Date.now()}-${Math.round(Math.random() * 1_000_000)}`
+  const workspaceRoot = join(homedir(), '.agentworkforce', 'pear', 'relayfile', 'workspaces', localMountWorkspaceId)
+  const localRoot = join(workspaceRoot, 'slack', 'channels', 'C123ABC', 'messages')
   const localDraftPath = join(localRoot, 'codex-175-self-echo.json')
   const remoteDraftPath = '/slack/channels/C123ABC/messages/codex-175-self-echo.json'
   const outboundText = 'Pear posted this from an agent'
   await mkdir(localRoot, { recursive: true })
-  await writeFile(localDraftPath, JSON.stringify({ text: `  ${outboundText}\n` }))
 
   const recordsByPath = new Map<string, Record<string, unknown>>([
     ['/slack/channels/C123ABC/messages/1780668000_000000/meta.json', {
@@ -2386,6 +2387,7 @@ test('slack self-bot writeback echoes are suppressed without dropping humans or 
   let harness: ReturnType<typeof makeHarness> | undefined
   try {
     harness = makeHarness(['alice'], {
+      localMountWorkspaceId,
       readFileResponse: (_workspaceId, path) => ({
         path,
         revision: 'rev-1',
@@ -2400,21 +2402,18 @@ test('slack self-bot writeback echoes are suppressed without dropping humans or 
           provider: 'slack',
           integrationId: 'slack-1',
           mountPaths: ['/slack/channels/C123ABC/messages'],
-          localMountPaths: [localRoot],
-          downloadHistoricalData: true,
+          downloadHistoricalData: false,
           scope: { notifyAgents: ['alice'] }
         })
       ])
     })
 
-    await (harness.bridge as unknown as {
-      recordSlackOutboundWriteback: (
-        projectId: string,
-        command: { localPath: string; remotePath: string }
-      ) => Promise<void>
-    }).recordSlackOutboundWriteback('project-1', {
-      localPath: localDraftPath,
-      remotePath: remoteDraftPath
+    await writeFile(localDraftPath, JSON.stringify({ text: `  ${outboundText}\n` }))
+    await waitUntil(() => {
+      const recentOutboundWritebacks = (harness!.bridge as unknown as {
+        recentOutboundWritebacks?: Map<string, Map<string, number>>
+      }).recentOutboundWritebacks
+      return (recentOutboundWritebacks?.get('project-1')?.size || 0) > 0
     })
 
     await harness.emit(changeEvent('/slack/channels/C123ABC/messages/1780668000_000000/meta.json', 'slack'))

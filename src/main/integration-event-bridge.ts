@@ -15,7 +15,7 @@ import {
 } from '@relayfile/sdk'
 import type { ConnectedIntegration } from './integrations'
 // @ts-expect-error Node's strip-types test runner requires the explicit .ts extension.
-import { isSlackWritebackCommandRoot } from './slack-writeback-command-roots.ts'
+import { isSlackWritebackCommandRoot, slackWritebackCommandMountPathFor } from './slack-writeback-command-roots.ts'
 import type {
   IntegrationEventTelemetryCounters,
   IntegrationEventTelemetrySnapshot
@@ -1152,7 +1152,6 @@ function watchLocalMounts(
   globs: string[],
   onChange: (event: ChangeEvent) => void,
   coalesceMs: number,
-  onSlackOutboundWriteback?: (command: SlackOutboundWritebackCommand) => void,
   telemetry?: {
     onCoalesced?: () => void
     onQueueDepth?: (depth: number) => void
@@ -1170,13 +1169,9 @@ function watchLocalMounts(
 
   const schedule = (localRoot: string, remoteRoot: string, filename: string, eventType: string): void => {
     const eventPaths = localWatchEventPathsForFilename(localRoot, remoteRoot, filename)
-    if (!eventPaths) return
+    if (!eventPaths || !shouldNotifyRelayfilePath(eventPaths.remotePath)) return
     const { localPath, remotePath } = eventPaths
-    const matchesGlob = globs.some((glob) => globMatchesPath(glob, remotePath))
-    if (matchesGlob && isSlackLocalWritebackCommandPath(remotePath)) {
-      onSlackOutboundWriteback?.({ localPath, remotePath })
-    }
-    if (!shouldNotifyRelayfilePath(remotePath) || !matchesGlob) return
+    if (!globs.some((glob) => globMatchesPath(glob, remotePath))) return
 
     const existing = pendingByPath.get(remotePath)
     if (existing) {
@@ -1255,6 +1250,93 @@ function watchLocalMounts(
       active = false
       for (const timer of pendingByPath.values()) clearTimeout(timer)
       pendingByPath.clear()
+      await Promise.all(watchers.map((watcher) => new Promise<void>((resolveClose) => {
+        watcher.once('close', resolveClose)
+        watcher.close()
+      })))
+    }
+  }
+}
+
+function slackWritebackCaptureRootsFor(
+  workspaceId: string,
+  integrations: ConnectedIntegration[]
+): Array<{ localRoot: string; remoteRoot: string }> {
+  const roots = new Map<string, { localRoot: string; remoteRoot: string }>()
+  for (const integration of integrations) {
+    if (!isSlackProvider(integration.provider)) continue
+    for (const mountPath of canonicalMountPaths(integration)) {
+      const remoteRoot = slackWritebackCommandMountPathFor(integration.provider, mountPath)
+      if (!remoteRoot || !isSlackWritebackCommandRoot(remoteRoot)) continue
+      const localRoot = resolve(localPathForRemoteRoot(workspaceId, remoteRoot))
+      roots.set(localRoot, { localRoot, remoteRoot })
+    }
+  }
+  return Array.from(roots.values())
+}
+
+function watchSlackWritebackCommandRoots(
+  workspaceId: string,
+  integrations: ConnectedIntegration[],
+  onSlackOutboundWriteback: (command: SlackOutboundWritebackCommand) => void
+): LocalMountSubscription | null {
+  const roots = new Map<string, { localRoot: string; remoteRoot: string }>()
+  for (const root of slackWritebackCaptureRootsFor(workspaceId, integrations)) {
+    roots.set(root.localRoot, root)
+  }
+  if (roots.size === 0) return null
+
+  let active = true
+  const watchers: FSWatcher[] = []
+
+  const capture = (localRoot: string, remoteRoot: string, filename: string): void => {
+    const eventPaths = localWatchEventPathsForFilename(localRoot, remoteRoot, filename)
+    if (!eventPaths || !isSlackLocalWritebackCommandPath(eventPaths.remotePath)) return
+    onSlackOutboundWriteback({
+      localPath: eventPaths.localPath,
+      remotePath: eventPaths.remotePath
+    })
+  }
+
+  for (const { localRoot, remoteRoot } of roots.values()) {
+    if (!existsSync(localRoot)) continue
+    try {
+      const watcher = watch(localRoot, { recursive: true }, (_eventType, filename) => {
+        if (!active || !filename) return
+        capture(localRoot, remoteRoot, String(filename))
+      })
+      watcher.on('error', (error) => {
+        const errorMessage = toErrorMessage(error)
+        warnIntegrationEventAggregated(
+          `Slack writeback command watcher error:${workspaceId}`,
+          'Slack writeback command watcher error',
+          {
+            workspaceId,
+            localRoot,
+            error: errorMessage
+          }
+        )
+      })
+      watchers.push(watcher)
+    } catch (error) {
+      const errorMessage = toErrorMessage(error)
+      warnIntegrationEventAggregated(
+        `failed to watch Slack writeback command root:${workspaceId}`,
+        'failed to watch Slack writeback command root',
+        {
+          workspaceId,
+          localRoot,
+          error: errorMessage
+        }
+      )
+    }
+  }
+
+  if (watchers.length === 0) return null
+  return {
+    localRoots: Array.from(roots.keys()),
+    async unsubscribe() {
+      active = false
       await Promise.all(watchers.map((watcher) => new Promise<void>((resolveClose) => {
         watcher.once('close', resolveClose)
         watcher.close()
@@ -2514,19 +2596,6 @@ export class IntegrationEventBridge {
           })
         },
         Math.max(...watches.map((watch) => watch.coalesceMs), 750),
-        (command) => {
-          void this.recordSlackOutboundWriteback(projectId, command).catch((error) => {
-            warnIntegrationEventAggregated(
-              `Slack outbound writeback capture failed:${projectId}`,
-              'Slack outbound writeback capture failed',
-              {
-                projectId,
-                remotePath: command.remotePath,
-                error: toErrorMessage(error)
-              }
-            )
-          })
-        },
         {
           onCoalesced: () => incrementIntegrationEventCounter(projectId, 'eventsCoalesced'),
           onQueueDepth: (depth) => setIntegrationEventGauge(projectId, 'queueDepth', depth)
@@ -2541,6 +2610,32 @@ export class IntegrationEventBridge {
           localRoots: localSubscription.localRoots
         })
         subscriptions.push(localSubscription)
+      }
+      const slackWritebackCaptureSubscription = watchSlackWritebackCommandRoots(
+        handle.localMountWorkspaceId,
+        subscribed,
+        (command) => {
+          void this.recordSlackOutboundWriteback(projectId, command).catch((error) => {
+            warnIntegrationEventAggregated(
+              `Slack outbound writeback capture failed:${projectId}`,
+              'Slack outbound writeback capture failed',
+              {
+                projectId,
+                remotePath: command.remotePath,
+                error: toErrorMessage(error)
+              }
+            )
+          })
+        }
+      )
+      if (slackWritebackCaptureSubscription) {
+        logIntegrationEvent('watching Slack writeback command roots', {
+          projectId,
+          workspaceId: handle.workspaceId,
+          localMountWorkspaceId: handle.localMountWorkspaceId,
+          localRoots: slackWritebackCaptureSubscription.localRoots
+        })
+        subscriptions.push(slackWritebackCaptureSubscription)
       }
       this.subscriptions.set(projectId, { subscriptions, signature })
     } catch (error) {
