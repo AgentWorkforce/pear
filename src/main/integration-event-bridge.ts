@@ -38,9 +38,15 @@ const INTEGRATION_EVENT_LOG_PATH = join(homedir(), '.agentworkforce', 'pear', 'i
 const AGGREGATED_WARNING_REPEAT_EVERY = 25
 const MAX_AGGREGATED_WARNING_KEYS = 256
 const SLACK_LIVE_EVENT_WINDOW_MS = 30 * 60 * 1_000
+// DM event watch globs. Canonical 1:1 DM surface is the user-recipient model
+// `/slack/users/<U>/messages` (where the adapter materializes message.im once
+// D→U mapping lands). `/slack/channels/D*` is retained only as a diagnostic
+// alias for raw Slack IM conversation ids the adapter still materializes
+// channel-style today. `/slack/dms/*` was vestigial residue — no adapter
+// resource or record ever materialized there — so it is intentionally dropped;
+// it must not imply mounted/readable DM content.
 const SLACK_DM_EVENT_GLOBS = [
   '/slack/channels/D*/**',
-  '/slack/dms/*/**',
   '/slack/users/*/messages/**'
 ]
 const MAX_EVENT_CONTEXT_PREVIEW_BYTES = 32 * 1024
@@ -480,7 +486,7 @@ function watchGlobForPath(path: string): string {
   return root.endsWith('/**') ? root : `${root || '/'}/**`
 }
 
-function eventPathGlobsForIntegration(integration: ConnectedIntegration): string[] {
+export function eventPathGlobsForIntegration(integration: ConnectedIntegration): string[] {
   return dedupeStrings([
     ...canonicalMountPaths(integration).map(watchGlobForPath),
     ...(slackListenDms(integration) ? SLACK_DM_EVENT_GLOBS : [])

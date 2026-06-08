@@ -32,6 +32,10 @@ type GenericScopePickerProps = ScopePickerProps & {
   resourceNoun?: string
   baseMountPath?: string
   scopeKey?: string
+  // When no prior selection exists, select every resource by default (true) or
+  // none (false). Bounded "watch everything" surfaces like channels default to
+  // true; DM recipients default to false so we never mount every user's DMs.
+  defaultSelectAll?: boolean
   getResourceLabel?: (resource: IntegrationAccessibleResource) => string
   getResourceDescription?: (resource: IntegrationAccessibleResource) => string
   getResourceMountSegment?: (resource: IntegrationAccessibleResource) => string
@@ -89,6 +93,7 @@ export function GenericScopePicker({
   resourceNoun = 'resources',
   baseMountPath = `/integrations/${provider}`,
   scopeKey = 'resources',
+  defaultSelectAll = true,
   getResourceLabel = (resource) => resourceText(resource, 'displayName', 'title', 'name', 'slug', 'key', 'path', 'id'),
   getResourceDescription = (resource) => resourceText(resource, 'path', 'type', 'kind'),
   getResourceMountSegment = (resource) => resourceText(resource, 'path', 'slug', 'key', 'name', 'id'),
@@ -103,6 +108,7 @@ export function GenericScopePicker({
   const getResourceScopeIdRef = useRef(getResourceScopeId)
   const listAccessibleResourcesRef = useRef(listAccessibleResources)
   const initialSelectedIdsRef = useRef(initialSelectedIds)
+  const defaultSelectAllRef = useRef(defaultSelectAll)
 
   useEffect(() => {
     onChangeRef.current = onChange
@@ -110,6 +116,7 @@ export function GenericScopePicker({
     getResourceScopeIdRef.current = getResourceScopeId
     listAccessibleResourcesRef.current = listAccessibleResources
     initialSelectedIdsRef.current = initialSelectedIds
+    defaultSelectAllRef.current = defaultSelectAll
   })
 
   useEffect(() => {
@@ -126,7 +133,9 @@ export function GenericScopePicker({
           new Set(
             seeds && seeds.length > 0
               ? seeds
-              : nextResources.map(resourceId)
+              : defaultSelectAllRef.current
+                ? nextResources.map(resourceId)
+                : []
           )
         )
       })
@@ -153,9 +162,10 @@ export function GenericScopePicker({
   )
 
   useEffect(() => {
-    if (loading) return
+    if (loading || error) return
 
     if (resources.length === 0) {
+      if (!defaultSelectAll) return
       onChangeRef.current({
         scope: { provider, selection: 'all', [scopeKey]: [] },
         mountPaths: [baseMountPath]
@@ -181,6 +191,8 @@ export function GenericScopePicker({
     })
   }, [
     baseMountPath,
+    defaultSelectAll,
+    error,
     loading,
     provider,
     resources.length,
