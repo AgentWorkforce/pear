@@ -87,6 +87,8 @@ export function getXtermTheme(theme: Theme): typeof DARK_THEME {
 
 const TERMINAL_FONT_FAMILY =
   "'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, monospace"
+const IDLE_DISPOSE_MS = 5 * 60_000
+const IDLE_SWEEP_MS = 30_000
 
 // Default-on, demoted to DOM after the first webgl failure for the rest of
 // the session. We don't recover: if webgl construction blew up once we
@@ -163,33 +165,87 @@ interface AcquireOptions {
   getInputSrtt: () => number | null
 }
 
-const runtimes = new Map<string, TerminalRuntime>()
+interface RuntimeRecord {
+  runtime: TerminalRuntime
+  lastDetachedAt: number | null
+}
+
+interface RuntimeLifecycle {
+  markMounted(): void
+  markDetached(): void
+}
+
+const runtimes = new Map<string, RuntimeRecord>()
+let idleSweepTimer: ReturnType<typeof setInterval> | null = null
+
+function startIdleSweepTimer(): void {
+  if (idleSweepTimer !== null) return
+  idleSweepTimer = setInterval(disposeIdleRuntimes, IDLE_SWEEP_MS)
+}
+
+function stopIdleSweepTimerIfEmpty(): void {
+  if (runtimes.size > 0 || idleSweepTimer === null) return
+  clearInterval(idleSweepTimer)
+  idleSweepTimer = null
+}
+
+function disposeIdleRuntimes(): void {
+  const now = Date.now()
+  for (const [key, record] of Array.from(runtimes)) {
+    if (
+      record.lastDetachedAt !== null &&
+      now - record.lastDetachedAt > IDLE_DISPOSE_MS
+    ) {
+      disposeTerminalRuntime(key)
+    }
+  }
+  stopIdleSweepTimerIfEmpty()
+}
 
 export function acquireTerminalRuntime(opts: AcquireOptions): TerminalRuntime {
   const key = getAgentKey(opts.projectId, opts.agentName)
-  const existing = runtimes.get(key)
-  if (existing) {
-    existing.setTheme(opts.theme)
-    existing.setTerminalMode(opts.terminalMode)
-    return existing
+  const existingRecord = runtimes.get(key)
+  if (existingRecord) {
+    startIdleSweepTimer()
+    existingRecord.runtime.setTheme(opts.theme)
+    existingRecord.runtime.setTerminalMode(opts.terminalMode)
+    return existingRecord.runtime
   }
-  const runtime = createRuntime(key, opts)
-  runtimes.set(key, runtime)
+  const record: RuntimeRecord = {
+    runtime: null as unknown as TerminalRuntime,
+    lastDetachedAt: null
+  }
+  const runtime = createRuntime(key, opts, {
+    markMounted: () => {
+      record.lastDetachedAt = null
+    },
+    markDetached: () => {
+      record.lastDetachedAt = Date.now()
+    }
+  })
+  record.runtime = runtime
+  runtimes.set(key, record)
+  startIdleSweepTimer()
   return runtime
 }
 
 export function disposeTerminalRuntime(key: string): void {
-  const runtime = runtimes.get(key)
-  if (!runtime) return
+  const record = runtimes.get(key)
+  if (!record) return
   runtimes.delete(key)
-  runtime.dispose()
+  record.runtime.dispose()
+  stopIdleSweepTimerIfEmpty()
 }
 
 export function hasTerminalRuntime(key: string): boolean {
   return runtimes.has(key)
 }
 
-function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
+function createRuntime(
+  key: string,
+  opts: AcquireOptions,
+  lifecycle: RuntimeLifecycle
+): TerminalRuntime {
   const host = document.createElement('div')
   host.setAttribute('data-pear-terminal-runtime', key)
   host.style.width = '100%'
@@ -503,6 +559,7 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
     host,
     mount(container: HTMLElement): symbol {
       if (disposed || !term) return Symbol('disposed')
+      lifecycle.markMounted()
       if (host.parentElement !== container) {
         container.appendChild(host)
       }
@@ -517,6 +574,7 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
       if (disposed) return
       if (token !== currentToken) return
       currentToken = null
+      lifecycle.markDetached()
       // Cancel any pending initIfReady rAF. Without this, a split-page
       // mount that never gained layout would spin forever against a
       // detached/old container — a permanent rAF loop per parked page.

@@ -77,6 +77,7 @@ beforeEach(async () => {
 afterEach(() => {
   document.body.innerHTML = ''
   vi.clearAllMocks()
+  vi.useRealTimers()
 })
 
 describe('terminal-runtime-registry — token-based mount/detach ownership', () => {
@@ -215,6 +216,72 @@ describe('terminal-runtime-registry — refreshOnShow', () => {
     runtime.refreshOnShow()
     expect(term.__refreshCalls).toContainEqual({ start: 0, end: expectedEnd })
 
+    registry.disposeTerminalRuntime(runtime.key)
+  })
+})
+
+describe('terminal-runtime-registry — idle-timeout disposal', () => {
+  it('disposes detached runtimes after five idle minutes and creates a fresh runtime on reacquire', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
+
+    const runtime = registry.acquireTerminalRuntime({
+      projectId: 'p',
+      agentName: 'a',
+      terminalMode: 'drive',
+      theme: 'dark',
+      getInputSrtt: () => null
+    })
+    const term = createdTerminals[0]
+    const token = runtime.mount(makeLayoutContainer())
+
+    runtime.detach(token)
+    await vi.advanceTimersByTimeAsync(5 * 60_000)
+
+    expect(registry.hasTerminalRuntime(runtime.key)).toBe(true)
+    expect(term.__disposed).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(30_001)
+
+    expect(registry.hasTerminalRuntime(runtime.key)).toBe(false)
+    expect(term.__disposed).toBe(true)
+
+    const reacquired = registry.acquireTerminalRuntime({
+      projectId: 'p',
+      agentName: 'a',
+      terminalMode: 'drive',
+      theme: 'dark',
+      getInputSrtt: () => null
+    })
+    expect(reacquired).not.toBe(runtime)
+    expect(createdTerminals).toHaveLength(2)
+
+    registry.disposeTerminalRuntime(reacquired.key)
+  })
+
+  it('keeps a remounted runtime hot after prior idle time', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
+
+    const runtime = registry.acquireTerminalRuntime({
+      projectId: 'p',
+      agentName: 'a',
+      terminalMode: 'drive',
+      theme: 'dark',
+      getInputSrtt: () => null
+    })
+    const firstToken = runtime.mount(makeLayoutContainer())
+
+    runtime.detach(firstToken)
+    await vi.advanceTimersByTimeAsync(4 * 60_000)
+
+    const secondToken = runtime.mount(makeLayoutContainer())
+    await vi.advanceTimersByTimeAsync(10 * 60_000)
+
+    expect(registry.hasTerminalRuntime(runtime.key)).toBe(true)
+    expect(createdTerminals[0].__disposed).toBe(false)
+
+    runtime.detach(secondToken)
     registry.disposeTerminalRuntime(runtime.key)
   })
 })
