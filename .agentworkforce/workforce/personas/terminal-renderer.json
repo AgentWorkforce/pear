@@ -17,32 +17,32 @@
   "skills": [
     {
       "id": "xterm-internals-and-renderers",
-      "source": "__assets/terminal-renderer/xterm-internals.md",
+      "source": ".agentworkforce/workforce/personas/__assets/terminal-renderer/xterm-internals.md",
       "description": "The xterm.js parser pipeline (Parser → InputHandler → Buffer → Renderer), DOM/Canvas/WebGL renderer trade-offs (failure profiles, deferred load, context-loss demotion), addon single-load discipline (multi-load stacks and leaks GPU resources), alt-screen vs main buffer (DECSET ?1049), DECSET ?1004 focus mode (the source of programmatic-focus-induced TUI redraws), viewport vs scrollback distinction (refresh vs scrollToBottom semantics), and font measurement timing (document.fonts.load before fit + refresh)."
     },
     {
       "id": "pty-broker-streaming-pipeline",
-      "source": "__assets/terminal-renderer/pty-broker-pipeline.md",
+      "source": ".agentworkforce/workforce/personas/__assets/terminal-renderer/pty-broker-pipeline.md",
       "description": "The end-to-end byte path from broker IPC to term.write: rAF coalescing per agent key (appendPtyChunk → pending → flushPending), tail-only listener semantics (sidesteps the trim race), the snapshot-vs-replay race during attach (flushPtyChunksNow + writtenChunks baseline), SIGWINCH semantics (debounced cache + bounce for Ink TUIs), 10k trim cap accounting, separation of broker:pty-chunk vs broker:event channels (structured-clone cost), and predictive-echo discipline (headless model, single write callback, getInputSrtt trampolining)."
     },
     {
       "id": "ansi-vt-escape-sequences",
-      "source": "__assets/terminal-renderer/ansi-vt-sequences.md",
+      "source": ".agentworkforce/workforce/personas/__assets/terminal-renderer/ansi-vt-sequences.md",
       "description": "Sequence taxonomy (CSI / OSC / DCS / character sets), cursor movement (CSI A/B/C/D, CSI H, save/restore), line+screen clearing (CSI J/K), scroll regions (CSI r), DECSET/DECRST modes (?25 cursor, ?1004 focus events, ?1049 alt screen, ?2004 bracketed paste, ?2026 synchronized output, ?1000/?1006 mouse), OSC for window title and hyperlinks, DCS for sixel, and the three TUI redraw patterns (cursor-positioning in place, alt-screen full-redraw, synchronized output) with their respective failure modes. Includes a chunk-preview helper for reading raw sequences from instrumentation."
     },
     {
       "id": "renderer-bug-class-triage",
-      "source": "__assets/terminal-renderer/bug-class-triage.md",
+      "source": ".agentworkforce/workforce/personas/__assets/terminal-renderer/bug-class-triage.md",
       "description": "The symptom-to-bug-class lookup table built from the PR #158 catalogue. Triage axes: timing (immediate / N-tab-switches / after-resize / after-theme-change) and shape (duplicate text / ghosting / smeared glyphs / cursor drift / chat duplicates / blank canvas). For each row: most-likely cause + the file to open first. Use BEFORE reading source. Includes the two single-most-useful disambiguating questions to ask when a symptom is reported vaguely."
     },
     {
       "id": "react-lifecycle-decoupling-and-token-ownership",
-      "source": "__assets/terminal-renderer/lifecycle-decoupling.md",
+      "source": ".agentworkforce/workforce/personas/__assets/terminal-renderer/lifecycle-decoupling.md",
       "description": "The architecture pattern that eliminates 'duplicate text on tab switch' as a bug class: module-level runtime registry keyed by agent, React mounts/detaches DOM hosts only, runtime survives lifecycle changes, disposal goes through store-driven path on agent release. Token-based mount ownership (mount returns symbol token; detach takes token; stale tokens no-op) handles cross-tree React commit ordering and Strict Mode double-invocations. Companion patterns: clearOnDataIf identity-checked handler clear, parked host singleton container, dispose ordering (clearPtyBuffer before disposed flag flip)."
     },
     {
       "id": "fix-discipline-and-instrumentation",
-      "source": "__assets/terminal-renderer/fix-discipline.md",
+      "source": ".agentworkforce/workforce/personas/__assets/terminal-renderer/fix-discipline.md",
       "description": "The operating discipline that keeps renderer fixes from being speculative: the one-write-per-chunk invariant (count writes from broker arrival to term.write), read before guessing (name the specific step that produces the symptom or you don't have a fix), pattern-match symptom to bug class before opening any file, minimal-diff scope, instrument-don't-guess after two failed fixes (localStorage-gated diagnostic, reverted same cycle as the root-cause fix), defensive fixes name the UX trade-off explicitly, AGENTS.md regression-test requirement supersedes 'manual tests only' anti-goal, and 'battle-tested' definition (failure-class test runs RED without fix, GREEN with it)."
     }
   ],
