@@ -1,11 +1,11 @@
 import type React from 'react'
-import { useState } from 'react'
+import { memo, useState } from 'react'
 import { MessageCircle, SmilePlus } from 'lucide-react'
 import { AgentHarnessIcon } from '@/components/common/AgentIcons'
 import type { AuthUser } from '@/lib/ipc'
 import { renderChatMessageBody } from '@/lib/chat-formatting'
 import { formatClockTime, formatRelativeShort } from '@/lib/format'
-import { useAgentStore } from '@/stores/agent-store'
+import { useAgentByName } from '@/stores/agent-store'
 import type {
   ChatMessage as ChatMessageType,
   ChatThreadReply
@@ -174,12 +174,7 @@ function ThreadParticipantAvatar({
   participant: ChatThreadReply
   authUser?: AuthUser | null
 }): React.ReactNode {
-  const agent = useAgentStore((state) =>
-    state.agents.find((candidate) =>
-      candidate.name === participant.from &&
-      (!participant.projectId || candidate.projectId === participant.projectId)
-    )
-  )
+  const agent = useAgentByName(participant.projectId, participant.from)
 
   if (participant.isHuman) {
     return (
@@ -246,7 +241,7 @@ function ThreadSummary({
   )
 }
 
-export function ChatMessage({
+function ChatMessageInner({
   message,
   showRoute = true,
   showActions = true,
@@ -256,12 +251,7 @@ export function ChatMessage({
   onReply,
   onReact
 }: Props): React.ReactNode {
-  const agent = useAgentStore((state) =>
-    state.agents.find((candidate) =>
-      candidate.name === message.from &&
-      (!message.projectId || candidate.projectId === message.projectId)
-    )
-  )
+  const agent = useAgentByName(message.projectId, message.from)
   const color = message.isHuman ? 'var(--pear-accent-bright)' : getAgentColor(message.from)
   const reactions = message.reactions || []
   const replies = message.threadReplies || []
@@ -364,3 +354,9 @@ export function ChatMessage({
     </div>
   )
 }
+
+// Default shallow prop comparison is enough here: `message` is referentially
+// stable from the store (only mutated when the actual message record changes),
+// `authUser` is stable across renders, and the boolean / callback props are
+// stabilised by the parent. Memoising avoids a re-render per PTY tick.
+export const ChatMessage = memo(ChatMessageInner)

@@ -1,5 +1,6 @@
 import type React from 'react'
-import { Fragment, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useStickToBottom } from 'use-stick-to-bottom'
 import {
   Bot,
   Check,
@@ -36,54 +37,6 @@ function normalizeMessageChannel(target: string): string {
 
 function isChannelMessage(message: ChatMessageType, channelName: string): boolean {
   return normalizeMessageChannel(message.to) === channelName
-}
-
-function isHumanMessage(message: ChatMessageType): boolean {
-  return message.isHuman || message.from.trim().toLowerCase() === 'human'
-}
-
-function areDuplicateHumanMessages(left: ChatMessageType, right: ChatMessageType): boolean {
-  return isHumanMessage(left) &&
-    isHumanMessage(right) &&
-    left.body === right.body &&
-    (!left.projectId || !right.projectId || left.projectId === right.projectId) &&
-    normalizeMessageChannel(left.to) === normalizeMessageChannel(right.to) &&
-    Math.abs(left.timestamp - right.timestamp) < 10_000
-}
-
-function dedupeHumanMessages(messages: ChatMessageType[]): ChatMessageType[] {
-  const deduped: ChatMessageType[] = []
-  // Collapsing near-simultaneous human echoes used to be O(n²): a findIndex over
-  // the whole deduped list per message, so the cost grew with chat length and
-  // ran on every new message (via the messages useMemo). Track the most recently
-  // kept human message per `${to}\0${body}` key instead, making each message O(1).
-  // Only human messages dedupe against each other, and duplicates fall inside a
-  // 10s window, so the latest kept entry for a key is the only one a new message
-  // can collide with — the result is identical to the previous scan.
-  const lastHumanIndexByKey = new Map<string, number>()
-
-  for (const message of messages) {
-    if (!isHumanMessage(message)) {
-      deduped.push(message)
-      continue
-    }
-
-    const key = `${normalizeMessageChannel(message.to)}\0${message.body}`
-    const priorIndex = lastHumanIndexByKey.get(key)
-    const prior = priorIndex !== undefined ? deduped[priorIndex] : undefined
-
-    if (prior && areDuplicateHumanMessages(prior, message)) {
-      if (message.isHuman && !prior.isHuman) {
-        deduped[priorIndex!] = message
-      }
-      continue
-    }
-
-    deduped.push(message)
-    lastHumanIndexByKey.set(key, deduped.length - 1)
-  }
-
-  return deduped
 }
 
 function isSameDay(left: number, right: number): boolean {
@@ -379,7 +332,15 @@ export function ChatView(): React.ReactNode {
     ? isDirectMessageRoomHumanIncluded(directMessageParticipants)
     : false
   const directMessageReadOnly = Boolean(directMessageParticipants && !directMessageHumanIncluded)
-  const scrollRef = useRef<HTMLDivElement>(null)
+  // `use-stick-to-bottom` watches the content element via ResizeObserver and
+  // keeps the viewport pinned to the bottom while the user is at the bottom.
+  // This cooperates with the browser's overflow-anchor and avoids the manual
+  // scrollTop = scrollHeight effect that used to fight scroll anchoring and
+  // yank the viewport during streaming.
+  const { scrollRef, contentRef, scrollToBottom } = useStickToBottom({
+    initial: 'instant',
+    resize: 'instant'
+  })
   const preserveSettingsAfterRenameRef = useRef(false)
   const [activeThreadMessageId, setActiveThreadMessageId] = useState<string | null>(null)
   const [activeTab, setActiveTab] = useState<ChannelTab>('messages')
@@ -396,15 +357,18 @@ export function ChatView(): React.ReactNode {
       : allMessages,
     [activeProjectId, allMessages]
   )
+  // The store is the source of truth for message identity — each chat message
+  // arrives with a unique `id` (broker event_id) and the store's
+  // reconcileChatMessages / isDuplicateHumanEcho paths handle dedupe on insert.
+  // Trust those ids here and just scope to the current channel/DM so we don't
+  // re-run a content+timestamp heuristic on every render that could collapse
+  // legitimately distinct messages (or miss duplicates outside the 10s window).
   const messages = useMemo(
-    () => {
-      const scopedMessages = directMessageParticipants
-        ? projectMessages.filter((message) => messageMatchesDirectMessageRoom(message, directMessageParticipants))
-        : activeChannelName
-        ? projectMessages.filter((message) => isChannelMessage(message, activeChannelName))
-        : projectMessages
-      return dedupeHumanMessages(scopedMessages)
-    },
+    () => directMessageParticipants
+      ? projectMessages.filter((message) => messageMatchesDirectMessageRoom(message, directMessageParticipants))
+      : activeChannelName
+      ? projectMessages.filter((message) => isChannelMessage(message, activeChannelName))
+      : projectMessages,
     [activeChannelName, directMessageParticipants, projectMessages]
   )
   const agents = useMemo(
@@ -439,11 +403,13 @@ export function ChatView(): React.ReactNode {
     setSettingsError(null)
   }, [activeChannelName, directMessageParticipants])
 
+  // Channel/DM switch should jump to bottom instantly. Streaming/append
+  // behaviour is handled by useStickToBottom's ResizeObserver, so we don't
+  // need to react to messages.length here anymore (which is what caused the
+  // "text drag" mid-scroll yanks).
   useEffect(() => {
-    if (scrollRef.current) {
-      scrollRef.current.scrollTop = scrollRef.current.scrollHeight
-    }
-  }, [activeChannelName, directMessageParticipants, messages.length])
+    scrollToBottom('instant')
+  }, [activeChannelName, directMessageParticipants, scrollToBottom])
 
   useEffect(() => {
     if (!activeThreadMessageId || activeThreadMessage) return
@@ -470,6 +436,15 @@ export function ChatView(): React.ReactNode {
     if (activeTab === 'messages' && !directMessageReadOnly) return
     setActiveThreadMessageId(null)
   }, [activeTab, directMessageReadOnly])
+
+  // Stabilise the per-message callbacks so memoised ChatMessage children only
+  // re-render when their own props change (not on every parent re-render).
+  const handleReplyToMessage = useCallback((nextMessage: ChatMessageType) => {
+    setActiveThreadMessageId(nextMessage.id)
+  }, [])
+  const handleReactToMessage = useCallback((messageId: string, emoji: string) => {
+    toggleMessageReaction(messageId, emoji)
+  }, [toggleMessageReaction])
 
   const handleRenameChannel = async (event: React.FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault()
@@ -621,7 +596,7 @@ export function ChatView(): React.ReactNode {
                     {emptyMessage}
                   </div>
                 ) : (
-                  <div className="space-y-0.5">
+                  <div ref={contentRef} className="space-y-0.5 [overflow-anchor:none]">
                     {messages.map((message, index) => {
                       const previousMessage = messages[index - 1]
                       const showDateDivider = !previousMessage || !isSameDay(previousMessage.timestamp, message.timestamp)
@@ -636,10 +611,8 @@ export function ChatView(): React.ReactNode {
                             showActions={canInteractWithMessages}
                             showThreadSummary={canInteractWithMessages}
                             activeThread={activeThreadMessageId === message.id}
-                            onReply={canInteractWithMessages
-                              ? (nextMessage) => setActiveThreadMessageId(nextMessage.id)
-                              : undefined}
-                            onReact={canInteractWithMessages ? toggleMessageReaction : undefined}
+                            onReply={canInteractWithMessages ? handleReplyToMessage : undefined}
+                            onReact={canInteractWithMessages ? handleReactToMessage : undefined}
                           />
                         </Fragment>
                       )

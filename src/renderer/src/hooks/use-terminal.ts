@@ -1,68 +1,22 @@
 import { useCallback, useEffect, useRef } from 'react'
 import { Terminal } from '@xterm/xterm'
-import { FitAddon } from '@xterm/addon-fit'
-import { WebLinksAddon } from '@xterm/addon-web-links'
-import { WebglAddon } from '@xterm/addon-webgl'
 import { pear, type TerminalAttachMode } from '@/lib/ipc'
 import { useAgentStore, getAgentKey } from '@/stores/agent-store'
-import { getPtyChunks, subscribePtyBuffer } from '@/stores/pty-buffer-store'
-import { recordChunkEchoed, recordKeystrokeSent } from '@/lib/typing-trace'
-import { createPredictiveEcho } from '@/lib/predictive-echo'
-import type { PredictiveEcho } from '@agent-relay/harness-driver/predictive-echo'
-import { useUIStore, type Theme } from '@/stores/ui-store'
-
-const DARK_THEME = {
-  background: '#0b1017',
-  foreground: '#d7e0ea',
-  cursor: '#74b8e2',
-  selectionBackground: '#203247',
-  black: '#121a24',
-  red: '#f0727f',
-  green: '#6bd4bc',
-  yellow: '#e6d78d',
-  blue: '#74b8e2',
-  magenta: '#c9a7ff',
-  cyan: '#04d1f6',
-  white: '#d7e0ea',
-  brightBlack: '#64707d',
-  brightRed: '#ff8a96',
-  brightGreen: '#89e4cb',
-  brightYellow: '#f1e5a7',
-  brightBlue: '#94cbef',
-  brightMagenta: '#dcc6ff',
-  brightCyan: '#6fe7ff',
-  brightWhite: '#edf4fb'
-}
-
-const LIGHT_THEME = {
-  background: '#f7fafc',
-  foreground: '#111827',
-  cursor: '#4a90c2',
-  selectionBackground: '#d7e7f4',
-  black: '#111827',
-  red: '#d95b63',
-  green: '#2e9f92',
-  yellow: '#c89934',
-  blue: '#4a90c2',
-  magenta: '#8b72d8',
-  cyan: '#2e9f92',
-  white: '#f7fafc',
-  brightBlack: '#6b7280',
-  brightRed: '#ea717a',
-  brightGreen: '#4fb4a7',
-  brightYellow: '#d8ac4f',
-  brightBlue: '#6aa7d2',
-  brightMagenta: '#a28ae7',
-  brightCyan: '#4fbab0',
-  brightWhite: '#ffffff'
-}
-
-function getXtermTheme(theme: Theme): typeof DARK_THEME {
-  return theme === 'light' ? LIGHT_THEME : DARK_THEME
-}
+import { recordKeystrokeSent } from '@/lib/typing-trace'
+import {
+  acquireTerminalRuntime,
+  disposeTerminalRuntime,
+  type TerminalRuntime
+} from '@/lib/terminal-runtime-registry'
+import { useUIStore } from '@/stores/ui-store'
 
 function hasLayout(el: HTMLElement): boolean {
   return el.clientWidth > 0 && el.clientHeight > 0
+}
+
+function isViewportPinnedToBottom(term: Terminal): boolean {
+  const buffer = term.buffer.active
+  return buffer.viewportY === buffer.baseY
 }
 
 const KEY_INPUT_SEQUENCES: Record<string, string> = {
@@ -125,19 +79,6 @@ function isEditableElement(target: EventTarget | null): boolean {
   return editable instanceof HTMLElement
 }
 
-function hasVisibleTerminalContent(screen: string): boolean {
-  const stripped = screen.replace(
-    /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-Z\\-_])/g,
-    ''
-  )
-  return /\S/.test(stripped)
-}
-
-interface TerminalSize {
-  rows: number
-  cols: number
-}
-
 export function useTerminal(
   containerRef: React.RefObject<HTMLDivElement | null>,
   agentName: string | null,
@@ -146,12 +87,13 @@ export function useTerminal(
   active: boolean = visible,
   terminalMode: TerminalAttachMode = 'drive'
 ): Terminal | null {
-  const termRef = useRef<Terminal | null>(null)
-  const fitAddonRef = useRef<FitAddon | null>(null)
-  const predictiveEchoRef = useRef<PredictiveEcho | null>(null)
-  const writtenChunksRef = useRef<number>(0)
+  const runtimeRef = useRef<TerminalRuntime | null>(null)
   const activeRef = useRef(active)
   const terminalModeRef = useRef<TerminalAttachMode>(terminalMode)
+  // Backs the runtime's predictive echo `getInputSrtt` callback. The
+  // runtime holds the function reference for life; we just keep the
+  // latest value in this ref and poll while the hook is mounted.
+  const inputSrttRef = useRef<number | null>(null)
   const theme = useUIStore((s) => s.theme)
   const activeDialog = useUIStore((s) => s.activeDialog)
 
@@ -161,6 +103,7 @@ export function useTerminal(
 
   useEffect(() => {
     terminalModeRef.current = terminalMode
+    runtimeRef.current?.setTerminalMode(terminalMode)
   }, [terminalMode])
 
   useEffect(() => {
@@ -175,341 +118,202 @@ export function useTerminal(
 
     // Optimistically echo before the round trip; the engine reconciles
     // against authoritative output and stays dormant on fast local links.
-    predictiveEchoRef.current?.onUserInput(data)
+    runtimeRef.current?.getPredictiveEcho()?.onUserInput(data)
     recordKeystrokeSent(data)
     pear.broker.sendInputFast(projectId, agentName, data)
   }, [agentName, projectId])
 
+  // Read the latest theme via a ref so the main acquisition effect can be
+  // independent of theme changes; the dedicated setTheme effect below
+  // propagates theme updates to the live runtime.
+  const themeRef = useRef(theme)
   useEffect(() => {
-    if (!containerRef.current || !agentName) return
-
-    const container = containerRef.current
-    let unsubStore: (() => void) | null = null
-    let term: Terminal | null = null
-    let fitAddon: FitAddon | null = null
-    let resizeObserver: ResizeObserver | null = null
-    let disposed = false
-    let cleanupBounce: (() => void) | null = null
-    let disposePredictiveEcho: (() => void) | null = null
-    // Latest broker input→ack SRTT (ms), refreshed by the poll below. Backs the
-    // engine's adaptive engage decision; SRTT is a slow-moving EWMA so a ~1s
-    // poll is responsive enough and cheap.
-    let inputSrttMs: number | null = null
-    let srttPoll: ReturnType<typeof setInterval> | null = null
-
-    const focusTerminal = (requireActive = false): void => {
-      if (!term) return
-      if (requireActive && !activeRef.current) return
-      requestAnimationFrame(() => {
-        if (!disposed && (!requireActive || activeRef.current)) {
-          container.focus({ preventScroll: true })
-          term?.textarea?.focus({ preventScroll: true })
-          term?.focus()
-        }
-      })
-    }
-
-    const fitTerminal = (): TerminalSize | null => {
-      if (!term || !fitAddon || !hasLayout(container)) return null
-      try {
-        fitAddon.fit()
-      } catch {
-        return null
-      }
-      const { rows, cols } = term
-      if (rows > 0 && cols > 0) {
-        return { rows, cols }
-      }
-      return null
-    }
-
-    const safeFitAndSync = (): TerminalSize | null => {
-      const size = fitTerminal()
-      if (size) {
-        predictiveEchoRef.current?.onResize(size.cols, size.rows)
-        pear.broker.resizePty(projectId, agentName!, size.rows, size.cols).catch(() => {})
-      }
-      return size
-    }
-
-    const subscribeToBuffer = (targetTerm: Terminal): void => {
-      if (unsubStore) return
-
-      const writeFromBuffer = (ptyBuffer: string[]): void => {
-        if (ptyBuffer.length < writtenChunksRef.current) {
-          // Buffer was trimmed past our cursor; replay everything we still have.
-          writtenChunksRef.current = 0
-        }
-        const newChunks = ptyBuffer.slice(writtenChunksRef.current)
-        if (newChunks.length === 0) return
-        for (const chunk of newChunks) {
-          recordChunkEchoed(chunk)
-          if (predictiveEchoRef.current) {
-            // The engine owns pass-through to the live terminal and reconciles
-            // outstanding predictions against this confirmed output.
-            void predictiveEchoRef.current.onServerOutput(chunk)
-          } else {
-            targetTerm.write(chunk)
-          }
-        }
-        writtenChunksRef.current = ptyBuffer.length
-      }
-
-      const bufferKey = getAgentKey(projectId, agentName!)
-      unsubStore = subscribePtyBuffer(bufferKey, writeFromBuffer)
-      writeFromBuffer(getPtyChunks(bufferKey))
-    }
-
-    const attachAndSeedTerminal = async (
-      targetTerm: Terminal,
-      initialSize: TerminalSize | null
-    ): Promise<void> => {
-      let shouldReplayBuffer = true
-
-      try {
-        const result = await pear.broker.attachTerminal({
-          projectId,
-          name: agentName!,
-          rows: initialSize?.rows,
-          cols: initialSize?.cols,
-          mode: terminalModeRef.current
-        })
-
-        if (disposed) return
-
-        if (result.snapshot?.screen && hasVisibleTerminalContent(result.snapshot.screen)) {
-          targetTerm.write(result.snapshot.screen)
-          // Prime the engine's confirmed-screen model with the same bytes (this
-          // does not re-write to the terminal) so its cursor matches the real
-          // screen before any prediction is made.
-          await predictiveEchoRef.current?.seed(result.snapshot.screen)
-          writtenChunksRef.current = useAgentStore.getState().getAgentBuffer(projectId, agentName!).length
-          shouldReplayBuffer = false
-        }
-      } catch (err) {
-        console.error('[terminal] attachTerminal failed:', err)
-      }
-
-      if (disposed) return
-
-      if (shouldReplayBuffer) {
-        writtenChunksRef.current = 0
-        // No snapshot to prime from; mark the model seeded so predictions can
-        // engage. The buffer replay below feeds confirmed output through the
-        // engine, keeping the model in sync.
-        await predictiveEchoRef.current?.seed('')
-      }
-
-      subscribeToBuffer(targetTerm)
-    }
-
-    const init = (): void => {
-      if (disposed) return
-      if (!hasLayout(container)) {
-        requestAnimationFrame(init)
-        return
-      }
-
-      term = new Terminal({
-        theme: getXtermTheme(theme),
-        fontFamily: "'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, monospace",
-        fontSize: 13,
-        lineHeight: 1,
-        cursorBlink: true,
-        allowProposedApi: true
-      })
-
-      fitAddon = new FitAddon()
-      term.loadAddon(fitAddon)
-      term.loadAddon(new WebLinksAddon())
-
-      // GPU-accelerated renderer: dramatically faster than the default DOM
-      // renderer that emits one element per cell. Fall back silently if the
-      // host can't initialize WebGL (Electron contexts without GL, headless
-      // CI, etc.) — xterm will keep using the DOM renderer in that case.
-      try {
-        const webgl = new WebglAddon()
-        webgl.onContextLoss(() => {
-          webgl.dispose()
-        })
-        term.loadAddon(webgl)
-      } catch (err) {
-        console.warn('[terminal] WebGL renderer unavailable, falling back to DOM:', err)
-      }
-
-      // Forward keystrokes + terminal protocol responses to PTY
-      term.onData((data) => {
-        sendInput(data)
-      })
-
-      term.open(container)
-      const initialSize = fitTerminal()
-
-      // Mosh-style predictive local echo: optimistically renders printable
-      // keystrokes and reconciles against authoritative server output. Adaptive
-      // on measured latency, so it stays dormant (invisible) on fast local
-      // links and only engages when driving a high-latency / remote agent.
-      const liveTerm = term
-      const predictiveEcho = createPredictiveEcho({
-        write: (data) => liveTerm.write(data),
-        cols: term.cols,
-        rows: term.rows,
-        getInputSrtt: () => inputSrttMs
-      })
-      predictiveEchoRef.current = predictiveEcho.engine
-      disposePredictiveEcho = predictiveEcho.dispose
-
-      // Keep the SRTT estimate warm so prediction engages promptly. Refresh
-      // immediately, then on an interval; failures leave the last value intact.
-      const refreshSrtt = (): void => {
-        pear.broker
-          .inputSrtt(projectId, agentName!)
-          .then((srtt) => {
-            if (!disposed) inputSrttMs = srtt
-          })
-          .catch(() => {})
-      }
-      refreshSrtt()
-      srttPoll = setInterval(refreshSrtt, 1000)
-
-      void attachAndSeedTerminal(term, initialSize)
-
-      termRef.current = term
-      fitAddonRef.current = fitAddon
-
-      focusTerminal(true)
-
-      // Spawn dialogs and pane layout updates can steal focus immediately after
-      // mount. Retry a few times so the xterm textarea reliably becomes active.
-      const focusTimers = [0, 50, 150, 300].map((delay) =>
-        setTimeout(() => focusTerminal(true), delay)
-      )
-
-      resizeObserver = new ResizeObserver(() => safeFitAndSync())
-      resizeObserver.observe(container)
-
-      // The PTY starts at a default size before the terminal connects.
-      // Bounce the size to force a SIGWINCH so the running process redraws
-      // at the correct dimensions.
-      const bounceTimer = setTimeout(() => {
-        if (!term || !fitAddon || !hasLayout(container)) return
-        try {
-          fitAddon.fit()
-        } catch {
-          return
-        }
-        const { rows, cols } = term
-        if (rows > 1 && cols > 0) {
-          pear.broker.resizePty(projectId, agentName!, rows - 1, cols).then(() => {
-            pear.broker.resizePty(projectId, agentName!, rows, cols)
-          }).catch(() => {})
-        }
-      }, 200)
-      cleanupBounce = () => {
-        clearTimeout(bounceTimer)
-        for (const timer of focusTimers) {
-          clearTimeout(timer)
-        }
-      }
-    }
-
-    requestAnimationFrame(init)
-
-    // Click-to-focus
-    const handlePointerDown = (): void => {
-      focusTerminal()
-    }
-
-    const handleKeyDown = (event: KeyboardEvent): void => {
-      if (event.isComposing || event.target === term?.textarea) {
-        return
-      }
-
-      const data = getKeyboardInput(event)
-      if (!data) return
-
-      event.preventDefault()
-      event.stopPropagation()
-      sendInput(data)
-      focusTerminal()
-    }
-
-    const handlePaste = (event: ClipboardEvent): void => {
-      if (document.activeElement === term?.textarea) {
-        return
-      }
-
-      const text = event.clipboardData?.getData('text')
-      if (!text) return
-
-      event.preventDefault()
-      event.stopPropagation()
-      sendInput(text)
-      focusTerminal()
-    }
-
-    container.addEventListener('pointerdown', handlePointerDown)
-    container.addEventListener('keydown', handleKeyDown)
-    container.addEventListener('paste', handlePaste)
-
-    return () => {
-      disposed = true
-      cleanupBounce?.()
-      unsubStore?.()
-      container.removeEventListener('pointerdown', handlePointerDown)
-      container.removeEventListener('keydown', handleKeyDown)
-      container.removeEventListener('paste', handlePaste)
-      resizeObserver?.disconnect()
-      if (srttPoll) clearInterval(srttPoll)
-      disposePredictiveEcho?.()
-      predictiveEchoRef.current = null
-      term?.dispose()
-      termRef.current = null
-      fitAddonRef.current = null
-      writtenChunksRef.current = 0
-    }
-  }, [containerRef, agentName, projectId, sendInput])
-
-  useEffect(() => {
-    if (termRef.current) {
-      termRef.current.options.theme = getXtermTheme(theme)
-    }
+    themeRef.current = theme
   }, [theme])
 
   useEffect(() => {
-    if (!visible || !termRef.current || !fitAddonRef.current) return
+    if (!agentName) {
+      runtimeRef.current = null
+      return
+    }
+
+    // Acquire the persistent runtime for this agent. Tab switches /
+    // re-mounts return the same runtime instance, so xterm + PTY
+    // subscription survive across React lifecycle churn — this is what
+    // kills the duplicate-text class of bugs.
+    const runtime = acquireTerminalRuntime({
+      projectId,
+      agentName,
+      terminalMode: terminalModeRef.current,
+      theme: themeRef.current,
+      getInputSrtt: () => inputSrttRef.current
+    })
+    runtimeRef.current = runtime
+    // Re-bind the SRTT getter on each effect run. The runtime captures
+    // the getter once at first acquire; without this, a remount that
+    // changes inputSrttRef identity would leave the predictor reading
+    // the stale ref.
+    runtime.setInputSrttGetter(() => inputSrttRef.current)
+    const onDataHandler = (data: string): void => sendInput(data)
+    runtime.setOnData(onDataHandler)
+
+    let disposed = false
+    let resizeObserver: ResizeObserver | null = null
+    let resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null
+    let srttPoll: ReturnType<typeof setInterval> | null = null
+    let focusTimers: ReturnType<typeof setTimeout>[] = []
+    let mountToken: symbol | null = null
+    const containerEl = containerRef.current
+
+    const focusTerminal = (requireActive = false): void => {
+      const term = runtime.term
+      const container = containerRef.current
+      if (!term || !container) return
+      if (requireActive && !activeRef.current) return
+      requestAnimationFrame(() => {
+        if (disposed) return
+        if (requireActive && !activeRef.current) return
+        container.focus({ preventScroll: true })
+        term.textarea?.focus({ preventScroll: true })
+        term.focus()
+      })
+    }
+
+    // Mount into the visible container if we have layout. If not yet,
+    // we still call mount() so the runtime can defer its init() to the
+    // first frame with layout.
+    if (containerEl) {
+      mountToken = runtime.mount(containerEl)
+      focusTerminal(true)
+      focusTimers = [0, 50, 150, 300].map((delay) =>
+        setTimeout(() => focusTerminal(true), delay)
+      )
+    }
+
+    // Keep the SRTT estimate warm so prediction engages promptly. Refresh
+    // immediately, then on an interval; failures leave the last value intact.
+    const refreshSrtt = (): void => {
+      pear.broker
+        .inputSrtt(projectId, agentName)
+        .then((srtt) => {
+          if (!disposed) inputSrttRef.current = srtt
+        })
+        .catch(() => {})
+    }
+    refreshSrtt()
+    srttPoll = setInterval(refreshSrtt, 1000)
+
+    // Trailing-debounced refit. The raw ResizeObserver fires per entry on
+    // every allotment drag, including 0×0 intermediate states. Refitting
+    // on a 0×0 box leaks bad metrics into xterm and forces a fix-up later
+    // — gate on a real box and debounce.
+    if (containerEl) {
+      resizeObserver = new ResizeObserver((entries) => {
+        const entry = entries[0]
+        if (!entry) return
+        const { width, height } = entry.contentRect
+        if (width === 0 || height === 0) return
+        if (resizeDebounceTimer) clearTimeout(resizeDebounceTimer)
+        resizeDebounceTimer = setTimeout(() => {
+          resizeDebounceTimer = null
+          if (disposed) return
+          const term = runtime.term
+          const wasPinned = term ? isViewportPinnedToBottom(term) : false
+          runtime.fitAndSync()
+          if (wasPinned && term) {
+            term.scrollToBottom()
+          }
+        }, 75)
+      })
+      resizeObserver.observe(containerEl)
+    }
+
+    return () => {
+      disposed = true
+      // Identity-checked clear: don't wipe a NEW hook's onData handler
+      // if its mount happened to commit before this cleanup ran (the
+      // cross-tree React commit-order case the token-based detach
+      // already protects the host against).
+      runtime.clearOnDataIf(onDataHandler)
+      for (const timer of focusTimers) clearTimeout(timer)
+      if (resizeDebounceTimer) clearTimeout(resizeDebounceTimer)
+      resizeObserver?.disconnect()
+      if (srttPoll) clearInterval(srttPoll)
+
+      // Don't dispose the runtime — detach so xterm + subscription survive
+      // the React unmount. The runtime is only torn down when the agent
+      // itself goes away (see effect below).
+      if (mountToken) {
+        runtime.detach(mountToken)
+      }
+    }
+  }, [containerRef, agentName, projectId, sendInput])
+
+  // Dispose the runtime when its owning agent is no longer in the store.
+  // Tab switches null-out agentName without removing the agent — we should
+  // keep the runtime around in that case. But when the agent is actually
+  // released (closed, removed, etc.) we should free GPU resources.
+  useEffect(() => {
+    return () => {
+      // On unmount, check whether the agent has actually been removed
+      // from the store; if so, dispose. Otherwise leave the runtime
+      // parked for future remounts.
+      if (!agentName) return
+      const key = getAgentKey(projectId, agentName)
+      const stillExists = useAgentStore
+        .getState()
+        .agents.some((a) => getAgentKey(a.projectId, a.name) === key)
+      if (!stillExists) {
+        disposeTerminalRuntime(key)
+      }
+    }
+  }, [agentName, projectId])
+
+  useEffect(() => {
+    runtimeRef.current?.setTheme(theme)
+  }, [theme])
+
+  useEffect(() => {
+    const runtime = runtimeRef.current
+    if (!visible || !runtime) return
     const container = containerRef.current
     if (!container || !hasLayout(container)) return
     try {
-      fitAddonRef.current.fit()
-      const { rows, cols } = termRef.current
-      if (rows > 0 && cols > 0 && agentName) {
-        predictiveEchoRef.current?.onResize(cols, rows)
-        pear.broker.resizePty(projectId, agentName, rows, cols)
-      }
+      const wasPinned = isViewportPinnedToBottom(runtime.term)
+      runtime.fitAndSync()
+      // Fix #11: WebGL doesn't repaint while the host is display:none;
+      // when the tab comes back, force a refresh so the canvas redraws
+      // rather than showing a stale frame.
+      runtime.refreshOnShow()
+      if (wasPinned) runtime.term.scrollToBottom()
     } catch {
       // ignore
     }
-    if (!active) return
-    const timer = setTimeout(() => termRef.current?.focus(), 50)
-    return () => clearTimeout(timer)
-  }, [visible, active, agentName, projectId])
+    // Intentionally do NOT call term.focus() on visibility change.
+    // When the PTY application has enabled DECSET ?1004 (focus events) —
+    // which Claude Code's TUI does — term.focus() emits "\x1b[I" to the
+    // PTY. The application interprets it as "user just looked at me" and
+    // redraws its UI. On a stacked TUI card layout, that redraw appends a
+    // duplicate card instead of overwriting in place, so every tab switch
+    // back stacks another card in scrollback. User clicks on the terminal
+    // already focus the textarea via the pointerdown handler in the main
+    // effect; the visibility effect doesn't need to reinforce it.
+  }, [visible, active, agentName, projectId, containerRef])
 
-  useEffect(() => {
-    if (!visible || !active) return
-    const handleWindowFocus = (): void => {
-      setTimeout(() => termRef.current?.focus(), 50)
-    }
-    window.addEventListener('focus', handleWindowFocus)
-    return () => window.removeEventListener('focus', handleWindowFocus)
-  }, [visible, active])
+  // Window-focus auto-focus was removed for the same reason as the
+  // visibility-effect focus: any TUI that has enabled DECSET ?1004
+  // receives a focus-in event on programmatic term.focus(), causing
+  // redraws and stacked TUI cards in scrollback. Alt-tabbing back to
+  // pear is rarer than tab-switching but in the same bug class.
+  // User-initiated clicks still focus the terminal via the pointerdown
+  // handler in the main effect.
 
   useEffect(() => {
     if (!visible || !active || terminalMode === 'view' || !agentName || activeDialog) return
     const container = containerRef.current
 
     const handleGlobalKeyDown = (event: KeyboardEvent): void => {
-      const term = termRef.current
+      const term = runtimeRef.current?.term
       if (!term || event.isComposing) {
         return
       }
@@ -533,7 +337,7 @@ export function useTerminal(
     }
 
     const handleGlobalPaste = (event: ClipboardEvent): void => {
-      const term = termRef.current
+      const term = runtimeRef.current?.term
       if (!term) {
         return
       }
@@ -565,5 +369,72 @@ export function useTerminal(
     }
   }, [visible, active, terminalMode, agentName, projectId, activeDialog, containerRef, sendInput])
 
-  return termRef.current
+  // Keyboard handlers attached directly to the container element. These
+  // were previously inside the mount effect; pulling them out keeps the
+  // runtime acquisition simple and lets them piggyback on agent/projectId
+  // identity without re-running the heavy effect.
+  useEffect(() => {
+    const container = containerRef.current
+    if (!container || !agentName) return
+
+    const handlePointerDown = (): void => {
+      const term = runtimeRef.current?.term
+      if (!term) return
+      requestAnimationFrame(() => {
+        container.focus({ preventScroll: true })
+        term.textarea?.focus({ preventScroll: true })
+        term.focus()
+      })
+    }
+
+    const handleKeyDown = (event: KeyboardEvent): void => {
+      const term = runtimeRef.current?.term
+      if (event.isComposing || event.target === term?.textarea) {
+        return
+      }
+
+      const data = getKeyboardInput(event)
+      if (!data) return
+
+      event.preventDefault()
+      event.stopPropagation()
+      sendInput(data)
+      requestAnimationFrame(() => {
+        container.focus({ preventScroll: true })
+        term?.textarea?.focus({ preventScroll: true })
+        term?.focus()
+      })
+    }
+
+    const handlePaste = (event: ClipboardEvent): void => {
+      const term = runtimeRef.current?.term
+      if (document.activeElement === term?.textarea) {
+        return
+      }
+
+      const text = event.clipboardData?.getData('text')
+      if (!text) return
+
+      event.preventDefault()
+      event.stopPropagation()
+      sendInput(text)
+      requestAnimationFrame(() => {
+        container.focus({ preventScroll: true })
+        term?.textarea?.focus({ preventScroll: true })
+        term?.focus()
+      })
+    }
+
+    container.addEventListener('pointerdown', handlePointerDown)
+    container.addEventListener('keydown', handleKeyDown)
+    container.addEventListener('paste', handlePaste)
+
+    return () => {
+      container.removeEventListener('pointerdown', handlePointerDown)
+      container.removeEventListener('keydown', handleKeyDown)
+      container.removeEventListener('paste', handlePaste)
+    }
+  }, [containerRef, agentName, sendInput])
+
+  return runtimeRef.current?.term ?? null
 }

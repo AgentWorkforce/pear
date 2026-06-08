@@ -45,6 +45,12 @@ export interface ChatMessage {
   conversationId?: string
   reactions?: ChatReaction[]
   threadReplies?: ChatThreadReply[]
+  // True for messages added via the optimistic local-UUID path
+  // (addHumanMessage). Lets reconciliation distinguish a pending
+  // local echo from a canonical broker record so the canonical
+  // record only replaces the optimistic, not another real human
+  // message that happens to match by body/target/time.
+  local?: boolean
 }
 
 export interface ChatReaction {
@@ -90,6 +96,13 @@ const HUMAN_SENDER_NAME = 'human'
 const SYSTEM_NOTICE_SENDER_NAME = 'system'
 const HUMAN_MESSAGE_DEDUPE_WINDOW_MS = 10_000
 const JOIN_NOTICE_DEDUPE_WINDOW_MS = 30_000
+// Tighter window for agent-message dedupe — agents reply fast and a
+// 10s window would falsely collapse two legitimately distinct messages
+// with similar bodies. Only catches the broker-replay / cross-stream
+// case where the same logical agent message arrives twice within ~2s
+// with different event_ids (per AGENTS.md: renderer is the final
+// guardrail; stable event_id is the broker's job).
+const AGENT_MESSAGE_DEDUPE_WINDOW_MS = 2_000
 
 export function getAgentKey(projectId: string | undefined, name: string): string {
   return `${projectId || 'unknown'}:${name}`
@@ -266,17 +279,57 @@ function isHumanMessage(message: Pick<ChatMessage, 'from' | 'isHuman'>): boolean
   return message.isHuman || isHumanSender(message.from)
 }
 
-function isDuplicateHumanEcho(
+// Detects the canonical-of-optimistic case: an incoming broker record
+// that matches an existing optimistic local-UUID record by content +
+// time window. Scoped to local: true records so it doesn't collapse two
+// legitimately distinct identical user messages (e.g. "ok" then "ok").
+function isCanonicalEchoOfLocalHuman(
   messages: ChatMessage[],
   candidate: Pick<ChatMessage, 'body' | 'projectId' | 'timestamp' | 'to'>
 ): boolean {
   return messages.some((message) =>
+    message.local === true &&
     isHumanMessage(message) &&
     message.body === candidate.body &&
     (!message.projectId || !candidate.projectId || message.projectId === candidate.projectId) &&
     normalizeMessageTarget(message.to) === normalizeMessageTarget(candidate.to) &&
     Math.abs(message.timestamp - candidate.timestamp) < HUMAN_MESSAGE_DEDUPE_WINDOW_MS
   )
+}
+
+// Same shape as the human echo guard but scoped to agent (non-human)
+// messages with a tighter 2s window. Catches the broker-replay /
+// cross-stream race where the same agent message arrives via
+// relay_inbound AND a reconcile snapshot with mismatched event_ids
+// — without this, both records survive id-based dedup and the user
+// sees the message twice. Per AGENTS.md the renderer should defend as
+// final guardrail even when the broker is supposed to provide stable ids.
+//
+// Accepts any iterable so the reconcile path can pass `byId.values()`
+// directly without an Array.from() copy per incoming message — under
+// heavy load (1000+ agents) the per-message copy was O(n) on the
+// existing message buffer.
+function isDuplicateAgentEcho(
+  messages: Iterable<ChatMessage>,
+  candidate: Pick<ChatMessage, 'from' | 'body' | 'projectId' | 'timestamp' | 'to' | 'isHuman'>
+): boolean {
+  if (isHumanMessage(candidate)) return false
+  const candidateFrom = candidate.from.trim().toLowerCase()
+  const candidateTarget = normalizeMessageTarget(candidate.to)
+  for (const message of messages) {
+    if (isHumanMessage(message)) continue
+    if (message.from.trim().toLowerCase() !== candidateFrom) continue
+    if (message.body !== candidate.body) continue
+    // Require exact project equality. Allowing `undefined` to wildcard
+    // would let an unscoped message from one project shadow a real
+    // distinct message in another project.
+    if (message.projectId !== candidate.projectId) continue
+    if (normalizeMessageTarget(message.to) !== candidateTarget) continue
+    if (Math.abs(message.timestamp - candidate.timestamp) < AGENT_MESSAGE_DEDUPE_WINDOW_MS) {
+      return true
+    }
+  }
+  return false
 }
 
 function createChannelJoinNotice(
@@ -368,6 +421,36 @@ function chatMessagesEqual(left: ChatMessage, right: ChatMessage): boolean {
     threadRepliesEqual(left.threadReplies, right.threadReplies)
 }
 
+// Find an existing optimistic local-UUID human echo that matches an incoming
+// canonical broker record. Optimistic messages are appended by `addHumanMessage`
+// with `crypto.randomUUID()` and `local: true`; the broker subsequently
+// reconciles the same message with its canonical `event_id`. Without identity
+// replacement, both records survive id-based reconciliation and the user sees
+// their message twice. Match only against `local: true` records — without the
+// scope, two distinct human messages sharing body/target inside the dedupe
+// window would collapse, deleting a real message.
+function findOptimisticHumanMatch(
+  byId: Map<string, ChatMessage>,
+  incoming: ChatMessage
+): ChatMessage | null {
+  if (!isHumanMessage(incoming)) return null
+  for (const existing of byId.values()) {
+    if (existing.id === incoming.id) continue
+    if (!existing.local) continue
+    if (!isHumanMessage(existing)) continue
+    if (existing.body !== incoming.body) continue
+    if (
+      existing.projectId &&
+      incoming.projectId &&
+      existing.projectId !== incoming.projectId
+    ) continue
+    if (normalizeMessageTarget(existing.to) !== normalizeMessageTarget(incoming.to)) continue
+    if (Math.abs(existing.timestamp - incoming.timestamp) > HUMAN_MESSAGE_DEDUPE_WINDOW_MS) continue
+    return existing
+  }
+  return null
+}
+
 function reconcileChatMessages(
   existingMessages: ChatMessage[],
   incomingMessages: BrokerReconciledChatMessage[]
@@ -394,6 +477,38 @@ function reconcileChatMessages(
         byId.set(next.id, merged)
         changed = true
       }
+      continue
+    }
+    // No id match — check whether this is the canonical echo of an
+    // optimistic local-UUID record we already have. If so, replace
+    // (preserving any client-side UI state from the optimistic record)
+    // rather than appending and creating a visible duplicate. The
+    // `local: false` reset ensures a subsequent optimistic with the
+    // same body/target/time can still match its own future canonical
+    // echo, rather than being seen as already-replaced.
+    const optimistic = findOptimisticHumanMatch(byId, next)
+    if (optimistic) {
+      byId.delete(optimistic.id)
+      byId.set(next.id, {
+        ...optimistic,
+        ...next,
+        threadReplies: next.threadReplies || optimistic.threadReplies,
+        reactions: next.reactions || optimistic.reactions,
+        local: false
+      })
+      changed = true
+      continue
+    }
+    // No id match and not an optimistic-echo case — check the
+    // agent-duplicate guardrail: if a non-human message with the
+    // same (from, body, project, target) arrived within the agent
+    // dedupe window via another stream (relay_inbound), don't append
+    // a second copy under a different id. Pass byId.values() directly
+    // — copying to an array per message was O(n²) under heavy load.
+    if (
+      !isHumanMessage(next) &&
+      isDuplicateAgentEcho(byId.values(), next)
+    ) {
       continue
     }
     byId.set(next.id, next)
@@ -903,7 +1018,11 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
           projectId
         }
         const targetName = eventTarget.startsWith('#') ? null : normalizeMessageTarget(eventTarget)
-        const messages = isHuman && isDuplicateHumanEcho(state.messages, msg)
+        const alreadySeenById = state.messages.some((m) => m.id === msg.id)
+        const isDuplicate = alreadySeenById ||
+          (isHuman && isCanonicalEchoOfLocalHuman(state.messages, msg)) ||
+          (!isHuman && isDuplicateAgentEcho(state.messages, msg))
+        const messages = isDuplicate
           ? state.messages
           : capByCount([...state.messages, msg], MAX_CHAT_MESSAGES)
 
@@ -999,12 +1118,16 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
       body,
       timestamp,
       isHuman: true,
-      projectId
+      projectId,
+      local: true
     }
+    // Always append the optimistic record. The previous
+    // isDuplicateHumanEcho check here silently dropped the second of
+    // two identical sends within 10s ("ok", "ok"), losing a real
+    // message. Optimistic-vs-canonical dedup is now handled exclusively
+    // via the `local` flag in the relay_inbound + reconcile paths.
     set((state) => ({
-      messages: isDuplicateHumanEcho(state.messages, msg)
-        ? state.messages
-        : capByCount([...state.messages, msg], MAX_CHAT_MESSAGES),
+      messages: capByCount([...state.messages, msg], MAX_CHAT_MESSAGES),
       lastHumanMessageSentAt: timestamp
     }))
   },
@@ -1156,3 +1279,49 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
 
   getAgentBuffer: (projectId, name) => getPtyChunks(getAgentKey(projectId, name))
 })))
+
+// Cache for the agents-by-(projectId, name) lookup map. Rebuilding it costs
+// O(n) on every PTY tick if we use a useMemo or selector that touches the
+// agents array, so we key it on the array reference (which only changes when
+// the store actually mutates agents) and reuse the same Map across renders.
+// Callers like ChatMessage / ThreadParticipantAvatar previously did
+// `state.agents.find(...)` inside a Zustand selector, which made every
+// message component re-render whenever the agents array changed (every PTY
+// chunk that flips activity / currentState).
+let agentMapCache: { source: Agent[]; map: Map<string, Agent> } | null = null
+
+function getAgentLookup(agents: Agent[]): Map<string, Agent> {
+  if (agentMapCache && agentMapCache.source === agents) return agentMapCache.map
+
+  const map = new Map<string, Agent>()
+  for (const agent of agents) {
+    map.set(getAgentKeyForAgent(agent), agent)
+    // Also key by name only so callers without a projectId can fall back to
+    // any matching agent — preserves the prior `agents.find` semantics for the
+    // few call sites where projectId is unknown.
+    const nameOnlyKey = `*:${agent.name}`
+    if (!map.has(nameOnlyKey)) map.set(nameOnlyKey, agent)
+  }
+
+  agentMapCache = { source: agents, map }
+  return map
+}
+
+/**
+ * Look up an agent by (projectId, name) using a cached map that only rebuilds
+ * when the agents array reference changes. The selector returns the agent
+ * object directly so components only re-render when *their* agent changes,
+ * not when any other agent's activity/state ticks.
+ */
+export function useAgentByName(
+  projectId: string | undefined,
+  name: string
+): Agent | undefined {
+  return useAgentStore((state) => {
+    const lookup = getAgentLookup(state.agents)
+    if (projectId !== undefined) {
+      return lookup.get(getAgentKey(projectId, name))
+    }
+    return lookup.get(`*:${name}`)
+  })
+}

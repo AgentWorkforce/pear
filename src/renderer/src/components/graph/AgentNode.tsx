@@ -40,7 +40,9 @@ function useAgentPreviewChunks(agent: Agent): string[] {
   const [chunks, setChunks] = useState<string[]>(() => getPtyChunks(key))
   useEffect(() => {
     setChunks(getPtyChunks(key))
-    return subscribePtyBuffer(key, (next) => setChunks(next))
+    // Listener now only signals new tail chunks; re-pull the canonical
+    // buffer on every notification so this preview reflects the trim cap.
+    return subscribePtyBuffer(key, () => setChunks(getPtyChunks(key)))
   }, [key])
   return chunks
 }

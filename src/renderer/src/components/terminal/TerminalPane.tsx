@@ -951,12 +951,18 @@ export function TerminalPane(): React.ReactNode {
         <div className="relative min-h-0 flex-1 overflow-hidden bg-[var(--pear-bg)]">
           {splitPages.map((pageAgents, pageIndex) => {
             const visible = pageIndex === splitPage
+            // Hide non-visible pages with `display: none` rather than the
+            // translateX slide that used to live here. Sliding the WebGL
+            // canvas via CSS transform produces ghosting / scroll-trail
+            // artifacts during streaming. The page indicator + nav buttons
+            // below still work without the animation.
             return (
               <div
                 key={pageAgents.map(getAgentKeyForAgent).join('|')}
-                className="absolute inset-0 transition-transform duration-300 ease-out"
-                style={{ transform: `translateX(${(pageIndex - splitPage) * 100}%)` }}
+                className="absolute inset-0"
+                style={{ display: visible ? 'block' : 'none' }}
                 aria-hidden={!visible}
+                inert={!visible}
               >
                 <SplitTerminalPage
                   agents={pageAgents}
@@ -1025,6 +1031,8 @@ export function TerminalPane(): React.ReactNode {
                 key={agentKey}
                 className="absolute inset-0"
                 style={{ display: active ? 'block' : 'none' }}
+                aria-hidden={!active}
+                inert={!active}
               >
                 <TerminalProject
                   agent={agent}
