@@ -154,7 +154,8 @@ export function useTerminal(
     // changes inputSrttRef identity would leave the predictor reading
     // the stale ref.
     runtime.setInputSrttGetter(() => inputSrttRef.current)
-    runtime.setOnData((data) => sendInput(data))
+    const onDataHandler = (data: string): void => sendInput(data)
+    runtime.setOnData(onDataHandler)
 
     let disposed = false
     let resizeObserver: ResizeObserver | null = null
@@ -229,7 +230,11 @@ export function useTerminal(
 
     return () => {
       disposed = true
-      runtime.setOnData(null)
+      // Identity-checked clear: don't wipe a NEW hook's onData handler
+      // if its mount happened to commit before this cleanup ran (the
+      // cross-tree React commit-order case the token-based detach
+      // already protects the host against).
+      runtime.clearOnDataIf(onDataHandler)
       for (const timer of focusTimers) clearTimeout(timer)
       if (resizeDebounceTimer) clearTimeout(resizeDebounceTimer)
       resizeObserver?.disconnect()

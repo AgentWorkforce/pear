@@ -45,6 +45,12 @@ export interface ChatMessage {
   conversationId?: string
   reactions?: ChatReaction[]
   threadReplies?: ChatThreadReply[]
+  // True for messages added via the optimistic local-UUID path
+  // (addHumanMessage). Lets reconciliation distinguish a pending
+  // local echo from a canonical broker record so the canonical
+  // record only replaces the optimistic, not another real human
+  // message that happens to match by body/target/time.
+  local?: boolean
 }
 
 export interface ChatReaction {
@@ -370,11 +376,12 @@ function chatMessagesEqual(left: ChatMessage, right: ChatMessage): boolean {
 
 // Find an existing optimistic local-UUID human echo that matches an incoming
 // canonical broker record. Optimistic messages are appended by `addHumanMessage`
-// with `crypto.randomUUID()`; the broker subsequently reconciles the same
-// message with its canonical `event_id`. Without identity replacement, both
-// records survive id-based reconciliation and the user sees their message
-// twice. Match by (channel, body, project, time-window) — same predicate as
-// `isDuplicateHumanEcho`, just on the reconcile side.
+// with `crypto.randomUUID()` and `local: true`; the broker subsequently
+// reconciles the same message with its canonical `event_id`. Without identity
+// replacement, both records survive id-based reconciliation and the user sees
+// their message twice. Match only against `local: true` records — without the
+// scope, two distinct human messages sharing body/target inside the dedupe
+// window would collapse, deleting a real message.
 function findOptimisticHumanMatch(
   byId: Map<string, ChatMessage>,
   incoming: ChatMessage
@@ -382,6 +389,7 @@ function findOptimisticHumanMatch(
   if (!isHumanMessage(incoming)) return null
   for (const existing of byId.values()) {
     if (existing.id === incoming.id) continue
+    if (!existing.local) continue
     if (!isHumanMessage(existing)) continue
     if (existing.body !== incoming.body) continue
     if (
@@ -427,7 +435,10 @@ function reconcileChatMessages(
     // No id match — check whether this is the canonical echo of an
     // optimistic local-UUID record we already have. If so, replace
     // (preserving any client-side UI state from the optimistic record)
-    // rather than appending and creating a visible duplicate.
+    // rather than appending and creating a visible duplicate. The
+    // `local: false` reset ensures a subsequent optimistic with the
+    // same body/target/time can still match its own future canonical
+    // echo, rather than being seen as already-replaced.
     const optimistic = findOptimisticHumanMatch(byId, next)
     if (optimistic) {
       byId.delete(optimistic.id)
@@ -435,7 +446,8 @@ function reconcileChatMessages(
         ...optimistic,
         ...next,
         threadReplies: next.threadReplies || optimistic.threadReplies,
-        reactions: next.reactions || optimistic.reactions
+        reactions: next.reactions || optimistic.reactions,
+        local: false
       })
       changed = true
       continue
@@ -1046,7 +1058,8 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
       body,
       timestamp,
       isHuman: true,
-      projectId
+      projectId,
+      local: true
     }
     set((state) => ({
       messages: isDuplicateHumanEcho(state.messages, msg)

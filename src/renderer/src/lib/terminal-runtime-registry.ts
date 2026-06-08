@@ -151,6 +151,8 @@ export interface TerminalRuntime {
   // setting null disables forwarding without tearing down the xterm
   // listener.
   setOnData(handler: ((data: string) => void) | null): void
+  // Identity-checked clear used by cleanup paths. See implementation.
+  clearOnDataIf(handler: (data: string) => void): void
 }
 
 interface AcquireOptions {
@@ -161,45 +163,26 @@ interface AcquireOptions {
   getInputSrtt: () => number | null
 }
 
-interface RuntimeRecord {
-  runtime: TerminalRuntime
-  refCount: number
-}
-
-const runtimes = new Map<string, RuntimeRecord>()
+const runtimes = new Map<string, TerminalRuntime>()
 
 export function acquireTerminalRuntime(opts: AcquireOptions): TerminalRuntime {
   const key = getAgentKey(opts.projectId, opts.agentName)
   const existing = runtimes.get(key)
   if (existing) {
-    existing.refCount += 1
-    existing.runtime.setTheme(opts.theme)
-    existing.runtime.setTerminalMode(opts.terminalMode)
-    return existing.runtime
+    existing.setTheme(opts.theme)
+    existing.setTerminalMode(opts.terminalMode)
+    return existing
   }
   const runtime = createRuntime(key, opts)
-  runtimes.set(key, { runtime, refCount: 1 })
+  runtimes.set(key, runtime)
   return runtime
 }
 
-export function releaseTerminalRuntime(key: string, dispose = false): void {
-  const record = runtimes.get(key)
-  if (!record) return
-  record.refCount = Math.max(0, record.refCount - 1)
-  if (dispose) {
-    runtimes.delete(key)
-    record.runtime.dispose()
-    return
-  }
-  // Reference counting is just bookkeeping; runtime stays alive until the
-  // caller explicitly disposes (typically when the agent itself goes away).
-}
-
 export function disposeTerminalRuntime(key: string): void {
-  const record = runtimes.get(key)
-  if (!record) return
+  const runtime = runtimes.get(key)
+  if (!runtime) return
   runtimes.delete(key)
-  record.runtime.dispose()
+  runtime.dispose()
 }
 
 export function hasTerminalRuntime(key: string): boolean {
@@ -250,6 +233,7 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
   let unsubBuffer: (() => void) | null = null
   let writtenChunks = 0
   let attachSeeded = false
+  let attachInFlight = false
   let pendingInitFrame: number | null = null
   // Last rows/cols actually sent to the PTY. fitAndSync drops the IPC when
   // the size hasn't changed — observers fire on every dragged pixel and the
@@ -362,8 +346,8 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
   const attachAndSeed = async (
     initialSize: { rows: number; cols: number } | null
   ): Promise<void> => {
-    if (!term || disposed || attachSeeded) return
-    attachSeeded = true
+    if (!term || disposed || attachSeeded || attachInFlight) return
+    attachInFlight = true
 
     let shouldReplay = true
     try {
@@ -374,7 +358,10 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
         cols: initialSize?.cols,
         mode: currentMode
       })
-      if (disposed || !term) return
+      if (disposed || !term) {
+        attachInFlight = false
+        return
+      }
       if (
         result.snapshot?.screen &&
         hasVisibleTerminalContent(result.snapshot.screen)
@@ -389,8 +376,12 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
         writtenChunks = getPtyChunks(key).length
         shouldReplay = false
       }
+      attachSeeded = true
     } catch (err) {
       console.error('[terminal] attachTerminal failed:', err)
+      // Don't latch attachSeeded — the next init/mount cycle should retry.
+    } finally {
+      attachInFlight = false
     }
 
     if (disposed || !term) return
@@ -421,8 +412,14 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
       pear.broker
         .resizePty(opts.projectId, opts.agentName, rows - 1, cols)
         .then(() => {
-          if (disposed) return
-          return pear.broker.resizePty(opts.projectId, opts.agentName, rows, cols)
+          if (disposed || !liveTerm) return
+          // Re-read dimensions across the async boundary — the user may
+          // have resized the pane between the first and second IPC.
+          // Sending stale dims would regress the PTY size.
+          const currentRows = liveTerm.rows
+          const currentCols = liveTerm.cols
+          if (currentRows <= 0 || currentCols <= 0) return
+          return pear.broker.resizePty(opts.projectId, opts.agentName, currentRows, currentCols)
         })
         .catch(() => {})
     }, 200)
@@ -610,6 +607,15 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
     },
     setOnData(handler: ((data: string) => void) | null): void {
       onDataHandler = handler
+    },
+    // Clear `setOnData(null)` only when the caller's handler reference
+    // is still the one currently installed. Cross-tree React commit
+    // ordering can fire an old hook's cleanup *after* a new hook
+    // already installed its own handler; without this guard the old
+    // cleanup wipes the new hook's input forwarding for the still-live
+    // mount. Used in place of `setOnData(null)` from cleanup paths.
+    clearOnDataIf(handler: (data: string) => void): void {
+      if (onDataHandler === handler) onDataHandler = null
     }
   }
 
