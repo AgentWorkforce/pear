@@ -40,9 +40,18 @@ type StressResult = {
   totalEvents: number
   minFps: number
   avgFps: number
+  firstWindowFps: number
+  lastWindowFps: number
+  firstThirtySecondMinFps: number
+  lastThirtySecondMinFps: number
+  firstThirtySecondAvgFps: number
+  lastThirtySecondAvgFps: number
   longestFrameMs: number
   frameCount: number
   wallClockMs: number
+  jsHeapUsedStartMb: number | null
+  jsHeapUsedEndMb: number | null
+  jsHeapUsedDeltaMb: number | null
   finalMockMessageCount: number
   finalMockAgentCount: number
   finalMockBrokerEventCount: number
@@ -54,6 +63,10 @@ type RunRecord = StressResult & {
   status: 'PASS' | 'FAIL' | 'ERROR'
   consoleErrorCount: number
   consoleErrorSamples: string[]
+  cdpJsHeapUsedStartMb: number | null
+  cdpJsHeapUsedEndMb: number | null
+  cdpJsHeapUsedPeakMb: number | null
+  cdpJsHeapUsedDeltaMb: number | null
   errorMessage?: string
 }
 
@@ -112,6 +125,9 @@ test.describe('renderer stress explorer', () => {
   test('records renderer behavior under parameterized synthetic broker load', async ({ page }) => {
     const consoleErrors: string[] = []
     const startedAt = Date.now()
+    const cdpHeapSamplesMb: number[] = []
+    let stopHeapSampling = false
+    let heapSampler: Promise<void> | null = null
 
     page.on('console', (message) => {
       if (message.type() === 'error') consoleErrors.push(message.text())
@@ -135,9 +151,18 @@ test.describe('renderer stress explorer', () => {
       totalEvents: 0,
       minFps: 0,
       avgFps: 0,
+      firstWindowFps: 0,
+      lastWindowFps: 0,
+      firstThirtySecondMinFps: 0,
+      lastThirtySecondMinFps: 0,
+      firstThirtySecondAvgFps: 0,
+      lastThirtySecondAvgFps: 0,
       longestFrameMs: 0,
       frameCount: 0,
       wallClockMs: 0,
+      jsHeapUsedStartMb: null,
+      jsHeapUsedEndMb: null,
+      jsHeapUsedDeltaMb: null,
       finalMockMessageCount: 0,
       finalMockAgentCount: 0,
       finalMockBrokerEventCount: 0,
@@ -148,6 +173,35 @@ test.describe('renderer stress explorer', () => {
     try {
       await page.goto('/')
       await expect(page.getByText('Mock Project')).toBeVisible()
+
+      try {
+        const cdpSession = await page.context().newCDPSession(page)
+        await cdpSession.send('Performance.enable')
+        const sampleHeap = async (): Promise<void> => {
+          const metrics = await cdpSession.send('Performance.getMetrics')
+          const usedHeapMetric = metrics.metrics.find((metric) => metric.name === 'JSHeapUsedSize')
+          if (typeof usedHeapMetric?.value === 'number') {
+            cdpHeapSamplesMb.push(usedHeapMetric.value / (1024 * 1024))
+          }
+        }
+        heapSampler = (async () => {
+          while (!stopHeapSampling) {
+            try {
+              await sampleHeap()
+            } catch {
+              return
+            }
+            await new Promise((resolve) => setTimeout(resolve, 10_000))
+          }
+          try {
+            await sampleHeap()
+          } catch {
+            // Ignore a final sampling race if the page closed after the run.
+          }
+        })()
+      } catch {
+        heapSampler = null
+      }
 
       const result = await page.evaluate<StressResult>(
         async ({
@@ -164,6 +218,13 @@ test.describe('renderer stress explorer', () => {
         }) => {
           const mock = window.__pearMock
           if (!mock) throw new Error('window.__pearMock is not available')
+
+          const readHeapUsedMb = (): number | null => {
+            const memory = (performance as Performance & { memory?: { usedJSHeapSize?: number } }).memory
+            return typeof memory?.usedJSHeapSize === 'number'
+              ? memory.usedJSHeapSize / (1024 * 1024)
+              : null
+          }
 
           const logicalEventsPerAgentPerTick = Math.max(1, Math.round(logicalEventsPerAgentPerSecond * (tickMs / 1_000)))
           const explicitChatRatio = chatRatio ?? 0
@@ -191,6 +252,7 @@ test.describe('renderer stress explorer', () => {
           }
           await new Promise((resolve) => setTimeout(resolve, 1_000))
 
+          const jsHeapUsedStartMb = readHeapUsedMb()
           const frameDeltas: number[] = []
           const frameTimes: number[] = []
           let lastFrame = performance.now()
@@ -263,6 +325,7 @@ test.describe('renderer stress explorer', () => {
           collectingFrames = false
           await new Promise((resolve) => requestAnimationFrame(resolve))
           const fpsEnd = performance.now()
+          const jsHeapUsedEndMb = readHeapUsedMb()
 
           if (finalChat) {
             for (let batchStart = 0; batchStart < agentCount; batchStart += agentBatchSize) {
@@ -296,6 +359,10 @@ test.describe('renderer stress explorer', () => {
             const windowEnd = windowStart + 1_000
             return frameTimes.filter((time) => time >= windowStart && time < windowEnd).length
           })
+          const firstThirtySecondWindows = frameWindows.slice(0, 30)
+          const lastThirtySecondWindows = frameWindows.slice(-30)
+          const averageWindowFps = (windows: number[]): number =>
+            windows.reduce((sum, fps) => sum + fps, 0) / Math.max(1, windows.length)
 
           return {
             label,
@@ -312,9 +379,20 @@ test.describe('renderer stress explorer', () => {
             totalEvents: chatEvents + ptyEvents,
             minFps: frameWindows.length > 0 ? Math.min(...frameWindows) : 0,
             avgFps: 1000 / avgFrameMs,
+            firstWindowFps: frameWindows[0] ?? 0,
+            lastWindowFps: frameWindows[frameWindows.length - 1] ?? 0,
+            firstThirtySecondMinFps: firstThirtySecondWindows.length > 0 ? Math.min(...firstThirtySecondWindows) : 0,
+            lastThirtySecondMinFps: lastThirtySecondWindows.length > 0 ? Math.min(...lastThirtySecondWindows) : 0,
+            firstThirtySecondAvgFps: averageWindowFps(firstThirtySecondWindows),
+            lastThirtySecondAvgFps: averageWindowFps(lastThirtySecondWindows),
             longestFrameMs,
             frameCount: frameDeltas.length,
             wallClockMs: fpsEnd - start,
+            jsHeapUsedStartMb,
+            jsHeapUsedEndMb,
+            jsHeapUsedDeltaMb: jsHeapUsedStartMb !== null && jsHeapUsedEndMb !== null
+              ? jsHeapUsedEndMb - jsHeapUsedStartMb
+              : null,
             finalMockMessageCount: state.messages.filter((message) => message.kind === 'message' && message.to === '#general').length,
             finalMockAgentCount: state.agents.length,
             finalMockBrokerEventCount: state.events.length,
@@ -325,22 +403,43 @@ test.describe('renderer stress explorer', () => {
         config
       )
 
+      stopHeapSampling = true
+      if (heapSampler) await heapSampler
+      const cdpJsHeapUsedStartMb = cdpHeapSamplesMb[0] ?? null
+      const cdpJsHeapUsedEndMb = cdpHeapSamplesMb[cdpHeapSamplesMb.length - 1] ?? null
+
       const record: RunRecord = {
         ...result,
         wallClockMs: Date.now() - startedAt,
         status: result.minFps >= 30 && consoleErrors.length === 0 ? 'PASS' : 'FAIL',
         consoleErrorCount: consoleErrors.length,
-        consoleErrorSamples: consoleErrors.slice(0, 5)
+        consoleErrorSamples: consoleErrors.slice(0, 5),
+        cdpJsHeapUsedStartMb,
+        cdpJsHeapUsedEndMb,
+        cdpJsHeapUsedPeakMb: cdpHeapSamplesMb.length > 0 ? Math.max(...cdpHeapSamplesMb) : null,
+        cdpJsHeapUsedDeltaMb: cdpJsHeapUsedStartMb !== null && cdpJsHeapUsedEndMb !== null
+          ? cdpJsHeapUsedEndMb - cdpJsHeapUsedStartMb
+          : null
       }
       console.info(`[stress-explorer-result] ${JSON.stringify(record)}`)
       appendResult(record)
     } catch (error) {
+      stopHeapSampling = true
+      if (heapSampler) await heapSampler
+      const cdpJsHeapUsedStartMb = cdpHeapSamplesMb[0] ?? null
+      const cdpJsHeapUsedEndMb = cdpHeapSamplesMb[cdpHeapSamplesMb.length - 1] ?? null
       const record: RunRecord = {
         ...baseRecord,
         wallClockMs: Date.now() - startedAt,
         status: 'ERROR',
         consoleErrorCount: consoleErrors.length,
         consoleErrorSamples: consoleErrors.slice(0, 5),
+        cdpJsHeapUsedStartMb,
+        cdpJsHeapUsedEndMb,
+        cdpJsHeapUsedPeakMb: cdpHeapSamplesMb.length > 0 ? Math.max(...cdpHeapSamplesMb) : null,
+        cdpJsHeapUsedDeltaMb: cdpJsHeapUsedStartMb !== null && cdpJsHeapUsedEndMb !== null
+          ? cdpJsHeapUsedEndMb - cdpJsHeapUsedStartMb
+          : null,
         errorMessage: error instanceof Error ? error.message : String(error)
       }
       console.info(`[stress-explorer-result] ${JSON.stringify(record)}`)
