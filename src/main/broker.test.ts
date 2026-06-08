@@ -408,7 +408,11 @@ describe('resolveAgentRelayMcpCommand', () => {
 })
 
 describe('BrokerManager local + cloud coexistence', () => {
+  let personaTempDir: string | null = null
+  const inheritedWorkspaceKey = process.env.AGENT_RELAY_WORKSPACE_KEY
+
   beforeEach(() => {
+    delete process.env.AGENT_RELAY_WORKSPACE_KEY
     mock.state.spawnedClients.length = 0
     mock.state.constructedClients.length = 0
     mock.state.connectedClients.length = 0
@@ -430,6 +434,11 @@ describe('BrokerManager local + cloud coexistence', () => {
     }
     if (personaTempDir) await rm(personaTempDir, { recursive: true, force: true })
     personaTempDir = null
+    if (inheritedWorkspaceKey === undefined) {
+      delete process.env.AGENT_RELAY_WORKSPACE_KEY
+    } else {
+      process.env.AGENT_RELAY_WORKSPACE_KEY = inheritedWorkspaceKey
+    }
   })
 
   it('keeps the local session alive when a cloud sandbox attaches', async () => {
