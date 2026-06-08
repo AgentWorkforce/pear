@@ -304,24 +304,32 @@ function isCanonicalEchoOfLocalHuman(
 // — without this, both records survive id-based dedup and the user
 // sees the message twice. Per AGENTS.md the renderer should defend as
 // final guardrail even when the broker is supposed to provide stable ids.
+//
+// Accepts any iterable so the reconcile path can pass `byId.values()`
+// directly without an Array.from() copy per incoming message — under
+// heavy load (1000+ agents) the per-message copy was O(n) on the
+// existing message buffer.
 function isDuplicateAgentEcho(
-  messages: ChatMessage[],
+  messages: Iterable<ChatMessage>,
   candidate: Pick<ChatMessage, 'from' | 'body' | 'projectId' | 'timestamp' | 'to' | 'isHuman'>
 ): boolean {
   if (isHumanMessage(candidate)) return false
   const candidateFrom = candidate.from.trim().toLowerCase()
-  return messages.some((message) => {
-    if (isHumanMessage(message)) return false
-    if (message.from.trim().toLowerCase() !== candidateFrom) return false
-    if (message.body !== candidate.body) return false
-    if (
-      message.projectId &&
-      candidate.projectId &&
-      message.projectId !== candidate.projectId
-    ) return false
-    if (normalizeMessageTarget(message.to) !== normalizeMessageTarget(candidate.to)) return false
-    return Math.abs(message.timestamp - candidate.timestamp) < AGENT_MESSAGE_DEDUPE_WINDOW_MS
-  })
+  const candidateTarget = normalizeMessageTarget(candidate.to)
+  for (const message of messages) {
+    if (isHumanMessage(message)) continue
+    if (message.from.trim().toLowerCase() !== candidateFrom) continue
+    if (message.body !== candidate.body) continue
+    // Require exact project equality. Allowing `undefined` to wildcard
+    // would let an unscoped message from one project shadow a real
+    // distinct message in another project.
+    if (message.projectId !== candidate.projectId) continue
+    if (normalizeMessageTarget(message.to) !== candidateTarget) continue
+    if (Math.abs(message.timestamp - candidate.timestamp) < AGENT_MESSAGE_DEDUPE_WINDOW_MS) {
+      return true
+    }
+  }
+  return false
 }
 
 function createChannelJoinNotice(
@@ -495,10 +503,11 @@ function reconcileChatMessages(
     // agent-duplicate guardrail: if a non-human message with the
     // same (from, body, project, target) arrived within the agent
     // dedupe window via another stream (relay_inbound), don't append
-    // a second copy under a different id.
+    // a second copy under a different id. Pass byId.values() directly
+    // — copying to an array per message was O(n²) under heavy load.
     if (
       !isHumanMessage(next) &&
-      isDuplicateAgentEcho(Array.from(byId.values()), next)
+      isDuplicateAgentEcho(byId.values(), next)
     ) {
       continue
     }
