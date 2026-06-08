@@ -812,6 +812,7 @@ function IntegrationVisibilitySection({
                       disabled={busy}
                       onClick={() => {
                         setPendingScopeValue(null)
+                        setPendingDmScopeValue(null)
                         setPendingSlackListenDms(scopeEditorOpen ? null : savedSlackListenDms)
                         setScopeEditorIntegrationId(scopeEditorOpen ? null : integration.integrationId)
                       }}
