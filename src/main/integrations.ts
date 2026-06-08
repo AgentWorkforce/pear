@@ -834,8 +834,13 @@ export class IntegrationsManager {
   async retryAuthRecovery(): Promise<void> {
     if (!this.authRecoveryState) return
     // Deliberate user action (just logged in) — bypass the hydration throttle
-    // so the cloud re-check isn't skipped as a too-recent attempt.
+    // so the cloud re-check isn't skipped as a too-recent attempt, and drop any
+    // in-flight hydration so we don't await a check that began before login
+    // (hydrateCloudIntegrationsForLocalMounts reuses a pending promise). The
+    // older promise's own `finally` only nulls the field when it still points
+    // at itself, so clearing it here can't clobber the fresh hydration.
     this.localMountCloudHydrationStartedAt = 0
+    this.localMountCloudHydrationPromise = null
     try {
       await this.syncLocalMounts({ hydrateCloud: true })
     } catch (error) {
