@@ -16,6 +16,18 @@ interface TypingState {
 }
 
 const expiryTimers = new Map<string, number>()
+const pendingActivity = new Map<string, number>()
+let pendingActivityFrame: number | null = null
+
+const scheduleAnimationFrame: (cb: FrameRequestCallback) => number =
+  typeof requestAnimationFrame === 'function'
+    ? requestAnimationFrame
+    : ((cb: FrameRequestCallback) => setTimeout(() => cb(performance.now()), 16) as unknown as number)
+
+const cancelScheduledAnimationFrame: (handle: number) => void =
+  typeof cancelAnimationFrame === 'function'
+    ? cancelAnimationFrame
+    : ((handle: number) => clearTimeout(handle as unknown as ReturnType<typeof setTimeout>))
 
 function clearExpiryTimer(key: string): void {
   const existing = expiryTimers.get(key)
@@ -40,31 +52,72 @@ function scheduleExpiry(
   expiryTimers.set(key, timer as unknown as number)
 }
 
+function expireTypingEntry(key: string, expectedTypingUntilMs: number): void {
+  useTypingStore.setState((state) => {
+    const entry = state.entries[key]
+    if (!entry || entry.typingUntilMs !== expectedTypingUntilMs) return state
+    const { [key]: _removed, ...rest } = state.entries
+    return { entries: rest }
+  })
+}
+
+function flushPendingActivity(): void {
+  pendingActivityFrame = null
+  const queued = Array.from(pendingActivity.entries())
+  pendingActivity.clear()
+  if (queued.length === 0) return
+
+  const updatedEntries: Array<[string, TypingEntry]> = []
+  useTypingStore.setState((state) => {
+    let entries = state.entries
+    for (const [key, now] of queued) {
+      const existing = state.entries[key]
+      if (existing && now - existing.lastActivityAtMs < 1_000) continue
+
+      const typingUntilMs = now + TYPING_ACTIVITY_WINDOW_MS
+      const entry = { lastActivityAtMs: now, typingUntilMs }
+      if (entries === state.entries) entries = { ...state.entries }
+      entries[key] = entry
+      updatedEntries.push([key, entry])
+    }
+
+    return entries === state.entries ? state : { entries }
+  })
+
+  for (const [key, entry] of updatedEntries) {
+    scheduleExpiry(key, entry.typingUntilMs, expireTypingEntry)
+  }
+}
+
+function queueActivity(key: string, now: number): void {
+  pendingActivity.set(key, Math.max(pendingActivity.get(key) ?? now, now))
+  if (pendingActivityFrame !== null) return
+  pendingActivityFrame = scheduleAnimationFrame(flushPendingActivity)
+}
+
+function clearPendingActivity(key: string): void {
+  pendingActivity.delete(key)
+  if (pendingActivity.size === 0 && pendingActivityFrame !== null) {
+    cancelScheduledAnimationFrame(pendingActivityFrame)
+    pendingActivityFrame = null
+  }
+}
+
 export const useTypingStore = create<TypingState>((set, get) => ({
   entries: {},
 
   noteActivity: (key, now = Date.now()) => {
     // Bursty PTY output can produce 100+ chunks/sec; only refresh the typing
-    // entry once per second so we don't pay for a state rebuild + timer
-    // reschedule per character.
+    // entry once per second, and batch the actual state rebuild + timer
+    // reschedule to one animation frame across all agents.
     const existing = get().entries[key]
     if (existing && now - existing.lastActivityAtMs < 1_000) return
 
-    const typingUntilMs = now + TYPING_ACTIVITY_WINDOW_MS
-    set((state) => ({
-      entries: { ...state.entries, [key]: { lastActivityAtMs: now, typingUntilMs } }
-    }))
-    scheduleExpiry(key, typingUntilMs, (expiringKey, expectedTypingUntilMs) => {
-      set((state) => {
-        const entry = state.entries[expiringKey]
-        if (!entry || entry.typingUntilMs !== expectedTypingUntilMs) return state
-        const { [expiringKey]: _removed, ...rest } = state.entries
-        return { entries: rest }
-      })
-    })
+    queueActivity(key, now)
   },
 
   clear: (key) => {
+    clearPendingActivity(key)
     clearExpiryTimer(key)
     set((state) => {
       if (!(key in state.entries)) return state
@@ -74,6 +127,7 @@ export const useTypingStore = create<TypingState>((set, get) => ({
   },
 
   setFromState: (key, currentState, lastActivityAtMs) => {
+    clearPendingActivity(key)
     if (currentState !== 'working' || typeof lastActivityAtMs !== 'number') {
       clearExpiryTimer(key)
       set((state) => {
@@ -96,14 +150,7 @@ export const useTypingStore = create<TypingState>((set, get) => ({
     set((state) => ({
       entries: { ...state.entries, [key]: { lastActivityAtMs, typingUntilMs } }
     }))
-    scheduleExpiry(key, typingUntilMs, (expiringKey, expectedTypingUntilMs) => {
-      set((state) => {
-        const entry = state.entries[expiringKey]
-        if (!entry || entry.typingUntilMs !== expectedTypingUntilMs) return state
-        const { [expiringKey]: _removed, ...rest } = state.entries
-        return { entries: rest }
-      })
-    })
+    scheduleExpiry(key, typingUntilMs, expireTypingEntry)
   }
 }))
 
