@@ -14,3 +14,7 @@ relayfile-mount/
 /.agentworkforce/relay
 .claude/projects
 .claude/settings.local.json
+
+# Playwright stress harness artifacts (run-time output)
+test-results/
+tests/playwright/screenshots/

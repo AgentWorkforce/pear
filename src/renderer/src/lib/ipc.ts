@@ -6,14 +6,18 @@
 // existing `import { ..., type Foo } from '@/lib/ipc'` call sites keep
 // working unchanged.
 
-import type { PearAPI } from '@shared/types/ipc'
+import type { PearAPI as PearAPIType } from '@shared/types/ipc'
+import { pear as electronPear } from './ipc-electron'
+import { pearMock, pearMockHarness } from './ipc-mock'
 
 export * from '@shared/types/ipc'
 
-declare global {
-  interface Window {
-    pear: PearAPI
-  }
+const useMockIpc = import.meta.env.VITE_PEAR_MOCK_IPC === 'true'
+
+if (useMockIpc && typeof window !== 'undefined') {
+  window.__pearMock = pearMockHarness
 }
 
-export const pear = window.pear
+export const pear: PearAPIType = useMockIpc
+  ? pearMock
+  : electronPear

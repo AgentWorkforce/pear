@@ -63,9 +63,11 @@ beforeEach(async () => {
 })
 
 afterEach(() => {
+  agentStoreModule.useAgentStore.setState({ agents: [] })
   cleanup()
   document.body.innerHTML = ''
   vi.clearAllMocks()
+  vi.useRealTimers()
 })
 
 interface ProbeProps {
@@ -168,5 +170,43 @@ describe('useTerminal — ref stability', () => {
     expect(betaTerm).not.toBeNull()
     expect(betaTerm).not.toBe(alphaTerm)
     expect(createdTerminals.length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('does not programmatically focus xterm when remounting an existing runtime', async () => {
+    vi.useFakeTimers()
+    const rafSpy = vi
+      .spyOn(globalThis, 'requestAnimationFrame')
+      .mockImplementation((cb) => setTimeout(() => cb(performance.now()), 0))
+
+    try {
+      seedAgents([{ projectId: 'p', name: 'alpha' }])
+      const probe = renderProbe('alpha', 'p')
+      await probe.settle()
+      await act(async () => {
+        await vi.runOnlyPendingTimersAsync()
+      })
+
+      const term = createdTerminals[0]
+      expect(term).toBeDefined()
+      const focusSpy = vi.spyOn(term, 'focus')
+      focusSpy.mockClear()
+
+      probe.unmount()
+      await flushAsync()
+
+      const remount = renderProbe('alpha', 'p')
+      await remount.settle()
+      await act(async () => {
+        await vi.runOnlyPendingTimersAsync()
+      })
+
+      expect(remount.termHolder.current).toBe(term)
+      expect(createdTerminals).toHaveLength(1)
+      expect(focusSpy).not.toHaveBeenCalled()
+
+      remount.unmount()
+    } finally {
+      rafSpy.mockRestore()
+    }
   })
 })

@@ -942,7 +942,7 @@ export function TerminalPane(): React.ReactNode {
         </div>
       )}
 
-      {/* Terminal instances stay mounted in tabbed mode to preserve scroll. */}
+      {/* Terminal runtimes are acquired lazily when their pane first becomes visible. */}
       {graphEnabled ? (
         <div className="min-h-0 flex-1 overflow-hidden bg-[var(--pear-bg)]">
           <GraphView />
@@ -951,23 +951,16 @@ export function TerminalPane(): React.ReactNode {
         <div className="relative min-h-0 flex-1 overflow-hidden bg-[var(--pear-bg)]">
           {splitPages.map((pageAgents, pageIndex) => {
             const visible = pageIndex === splitPage
-            // Hide non-visible pages with `display: none` rather than the
-            // translateX slide that used to live here. Sliding the WebGL
-            // canvas via CSS transform produces ghosting / scroll-trail
-            // artifacts during streaming. The page indicator + nav buttons
-            // below still work without the animation.
+            if (!visible) return null
             return (
               <div
                 key={pageAgents.map(getAgentKeyForAgent).join('|')}
                 className="absolute inset-0"
-                style={{ display: visible ? 'block' : 'none' }}
-                aria-hidden={!visible}
-                inert={!visible}
               >
                 <SplitTerminalPage
                   agents={pageAgents}
                   burnSummariesByAgentKey={burnSummariesByAgentKey}
-                  visible={visible}
+                  visible
                   activeAgentKey={activeAgentKey}
                   onActivateAgent={setActiveAgentKey}
                   onDeliveryModeChange={(agent, mode) => void handleDeliveryModeChange(agent, mode)}
@@ -1022,27 +1015,19 @@ export function TerminalPane(): React.ReactNode {
         </div>
       ) : (
         <div className="relative min-h-0 flex-1 overflow-hidden">
-          {agents.map((agent) => {
-            const agentKey = getAgentKeyForAgent(agent)
-            const active = agentKey === activeAgentKey
-
-            return (
-              <div
-                key={agentKey}
-                className="absolute inset-0"
-                style={{ display: active ? 'block' : 'none' }}
-                aria-hidden={!active}
-                inert={!active}
-              >
-                <TerminalProject
-                  agent={agent}
-                  visible={active}
-                  active={active}
-                  onActivate={() => setActiveAgentKey(agentKey)}
-                />
-              </div>
-            )
-          })}
+          {activeAgent && (
+            <div
+              key={getAgentKeyForAgent(activeAgent)}
+              className="absolute inset-0"
+            >
+              <TerminalProject
+                agent={activeAgent}
+                visible
+                active
+                onActivate={() => setActiveAgentKey(getAgentKeyForAgent(activeAgent))}
+              />
+            </div>
+          )}
         </div>
       )}
     </div>

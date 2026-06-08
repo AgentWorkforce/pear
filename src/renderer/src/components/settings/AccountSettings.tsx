@@ -472,7 +472,7 @@ export function AccountSettings(): React.ReactNode {
         return
       }
 
-      if (event.projectId === activeProjectId) {
+      if ('projectId' in event && event.projectId === activeProjectId) {
         void loadConnected()
       }
     })

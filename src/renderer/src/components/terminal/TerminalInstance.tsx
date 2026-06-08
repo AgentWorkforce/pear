@@ -20,6 +20,8 @@ export function TerminalInstance({ agentName, projectId, visible, active, mode, 
     <div
       ref={containerRef}
       tabIndex={0}
+      data-testid="terminal-instance"
+      data-agent-name={agentName}
       aria-label={`${agentName} ${mode} terminal`}
       onFocus={onActivate}
       onPointerDown={onActivate}

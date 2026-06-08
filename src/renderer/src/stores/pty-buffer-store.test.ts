@@ -18,7 +18,7 @@ describe('pty-buffer-store', () => {
   beforeEach(() => {
     vi.useFakeTimers()
     // Reset any state from earlier tests by clearing every key we use.
-    for (const key of ['k1', 'k2', 'k3', 'k-throw']) clearPtyBuffer(key)
+    for (const key of ['k1', 'k2', 'k3', 'k-no-subscriber', 'k-throw']) clearPtyBuffer(key)
   })
 
   afterEach(() => {
@@ -92,6 +92,25 @@ describe('pty-buffer-store', () => {
     // The scheduled rAF was cancelled by flushPtyChunksNow — no duplicate
     // flush fires (the snapshot-vs-replay duplicate-text class).
     expect(listener).toHaveBeenCalledTimes(1)
+  })
+
+  it('flushes immediately without subscribers and preserves chunks for future subscribers', () => {
+    appendPtyChunk('k-no-subscriber', 'before-subscribe')
+
+    expect(getPtyChunks('k-no-subscriber')).toEqual(['before-subscribe'])
+    expect(vi.getTimerCount()).toBe(0)
+
+    const listener = vi.fn()
+    subscribePtyBuffer('k-no-subscriber', listener)
+    expect(listener).not.toHaveBeenCalled()
+
+    appendPtyChunk('k-no-subscriber', 'after-subscribe')
+    expect(listener).not.toHaveBeenCalled()
+
+    flushRaf()
+    expect(listener).toHaveBeenCalledTimes(1)
+    expect(listener).toHaveBeenCalledWith(['after-subscribe'])
+    expect(getPtyChunks('k-no-subscriber')).toEqual(['before-subscribe', 'after-subscribe'])
   })
 
   it('a listener that throws does not abort delivery to siblings or escape the rAF', () => {

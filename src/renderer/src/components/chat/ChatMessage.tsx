@@ -258,7 +258,12 @@ function ChatMessageInner({
 
   if (message.kind === 'notice') {
     return (
-      <div className="flex justify-center px-2 py-2">
+      <div
+        className="flex justify-center px-2 py-2"
+        data-testid="chat-message"
+        data-message-id={message.id}
+        data-message-kind={message.kind || 'message'}
+      >
         <div className="flex max-w-full items-center gap-2 rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/45 px-2.5 py-1 text-xs text-[var(--pear-text-faint)]">
           <span className="truncate">{message.body}</span>
           <span className="shrink-0 text-[10px]">{formatClockTime(message.timestamp)}</span>
@@ -269,6 +274,9 @@ function ChatMessageInner({
 
   return (
     <div
+      data-testid="chat-message"
+      data-message-id={message.id}
+      data-message-kind={message.kind || 'message'}
       className={`group relative flex gap-3 rounded-md px-2 py-1.5 ${
         activeThread ? 'bg-[var(--pear-bg-overlay)]/70' : 'hover:bg-[var(--pear-bg-surface-hover)]/45'
       }`}
