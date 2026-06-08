@@ -123,6 +123,23 @@ export function appendPtyChunk(key: string, chunk: string): void {
   } else {
     pending.set(key, [chunk])
   }
+  const subscriberCount = listeners.get(key)?.size ?? 0
+  if (subscriberCount === 0) {
+    // No subscribers (lazy-mount: 999 of 1000 agents have no mounted
+    // terminal). Skip the rAF schedule and inline-flush into the canonical
+    // buffer. Future subscribers reading getPtyChunks() still see all
+    // accumulated chunks. Saves ~1000 rAF callbacks per frame at scale,
+    // which was producing GC stalls and 185ms longest frames on 1000-agent
+    // stress runs after the lazy-mount fix landed.
+    if (pendingFrames.has(key)) {
+      // A rAF was scheduled earlier (when a subscriber existed); cancel it
+      // since we're about to flush synchronously instead.
+      cancelRaf(pendingFrames.get(key)!)
+      pendingFrames.delete(key)
+    }
+    flushPending(key)
+    return
+  }
   if (pendingFrames.has(key)) return
   const handle = raf(() => flushPending(key))
   pendingFrames.set(key, handle)
