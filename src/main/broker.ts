@@ -3,7 +3,7 @@ import { rm } from 'fs/promises'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { delimiter, basename, isAbsolute, join } from 'path'
-import { execFileSync } from 'child_process'
+import { execFile, execFileSync } from 'child_process'
 import { app, BrowserWindow } from 'electron'
 import {
   HarnessDriverClient as AgentRelayClient,
@@ -320,22 +320,25 @@ export function parseBrokerInitCliFlags(helpText: string): BrokerInitCliFlags {
   }
 }
 
-function inspectBrokerInitCliFlags(binaryPath: string): BrokerInitCliFlags {
-  try {
-    const help = execFileSync(binaryPath, ['init', '--help'], {
+function inspectBrokerInitCliFlags(binaryPath: string): Promise<BrokerInitCliFlags> {
+  return new Promise((resolve) => {
+    execFile(binaryPath, ['init', '--help'], {
       encoding: 'utf8',
       timeout: 2_000,
-      stdio: ['ignore', 'pipe', 'pipe']
+      windowsHide: true
+    }, (err, stdout) => {
+      if (err) {
+        console.warn(`[broker] Failed to inspect broker init CLI for ${binaryPath}:`, err)
+        resolve({
+          supportsInstanceName: true,
+          supportsName: true,
+          supportsWorkspaceKey: true
+        })
+        return
+      }
+      resolve(parseBrokerInitCliFlags(stdout))
     })
-    return parseBrokerInitCliFlags(help)
-  } catch (err) {
-    console.warn(`[broker] Failed to inspect broker init CLI for ${binaryPath}:`, err)
-    return {
-      supportsInstanceName: true,
-      supportsName: true,
-      supportsWorkspaceKey: true
-    }
-  }
+  })
 }
 
 function brokerBinaryCompatShimSource(): string {
@@ -387,7 +390,11 @@ child.on('error', (error) => {
 
 child.on('exit', (code, signal) => {
   if (signal) {
-    process.kill(process.pid, signal)
+    try {
+      process.kill(process.pid, signal)
+    } catch {
+      process.exit(1)
+    }
     return
   }
   process.exit(code ?? 0)
@@ -417,9 +424,9 @@ function ensureBrokerBinaryCompatShim(): string {
   return shimPath
 }
 
-function resolveHarnessBrokerBinary(workspaceKey?: string): { binaryPath: string; env: NodeJS.ProcessEnv } {
+async function resolveHarnessBrokerBinary(workspaceKey?: string): Promise<{ binaryPath: string; env: NodeJS.ProcessEnv }> {
   const binaryPath = resolveBundledBrokerBinary()
-  const flags = inspectBrokerInitCliFlags(binaryPath)
+  const flags = await inspectBrokerInitCliFlags(binaryPath)
 
   if (workspaceKey && !flags.supportsWorkspaceKey) {
     throw new Error(
@@ -1537,7 +1544,7 @@ export class BrokerManager {
 
       // Phase 1 of #125: the local broker stays the workspace creator, so the
       // key is only threaded when explicitly pinned via env.
-      const brokerBinary = resolveHarnessBrokerBinary(explicitWorkspaceKey)
+      const brokerBinary = await resolveHarnessBrokerBinary(explicitWorkspaceKey)
       const opts: AgentRelaySpawnOptions = {
         cwd,
         brokerName: name,

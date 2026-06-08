@@ -267,10 +267,18 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('broker:list-personas', async (_, projectId: string, cwd?: string) => {
     const personaCwd = cwd?.trim()
-    if (personaCwd && !isDirectory(personaCwd)) {
-      return []
+    if (personaCwd) {
+      const resolved = resolve(personaCwd)
+      const pathProjectId = getProjectIdForPath(resolved)
+      if (!pathProjectId || pathProjectId !== projectId.trim()) {
+        throw new Error(`Path is outside project roots for project ${projectId}: ${resolved}`)
+      }
+      if (!isDirectory(resolved)) {
+        return []
+      }
+      return brokerManager.listPersonas(projectId, resolved)
     }
-    return brokerManager.listPersonas(projectId, personaCwd)
+    return brokerManager.listPersonas(projectId)
   })
 
   ipcMain.handle('broker:spawn-persona', async (_, projectId: string, personaId: string) => {
