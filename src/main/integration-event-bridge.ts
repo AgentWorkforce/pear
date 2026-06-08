@@ -2973,16 +2973,13 @@ export class IntegrationEventBridge {
         existing.committedContentHashes.size === 0 &&
         existing.provisionalContentHashes.size === 0
       ) {
-        // A blind claim (context read returned nothing) suppresses the late
-        // content-bearing alias copy, but must learn its hash so a genuine
-        // edit afterwards still injects instead of matching the blind claim.
-        if (existing.provisionalBlind) {
-          existing.provisionalContentHashes.add(contentHash)
-        } else {
-          existing.committedContentHashes.add(contentHash)
-        }
+        // A blind claim means the first delivery lacked readable content. Let
+        // the first later content-bearing replay through, then use its hash to
+        // suppress subsequent alias/retry copies while still allowing edits.
+        if (provisional) existing.provisionalContentHashes.add(contentHash)
+        else existing.committedContentHashes.add(contentHash)
         existing.expiresAt = now + ttlMs
-        return { claimed: false }
+        return { claimed: true, contentHash }
       }
       if (
         existing.committedContentHashes.has(contentHash) ||

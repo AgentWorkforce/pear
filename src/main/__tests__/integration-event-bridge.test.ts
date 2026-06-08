@@ -1593,6 +1593,61 @@ test('slack context does not inject sparse relayfile pointer fallback as message
   assert.doesNotMatch(harness.sent[0].input.text, /"deleted": false/u)
 })
 
+test('slack blind thread-reply delivery does not suppress a later content-bearing replay', async () => {
+  let readable = false
+  const replyPath = '/slack/channels/C123ABC__proj-cloud/threads/1780871788_370329/replies/1780914176_827829.json'
+  const harness = makeHarness(['alice'], {
+    readFileResponse: (_workspaceId, path) => {
+      if (!readable) throw new Error('remote file not ready')
+      return {
+        path,
+        revision: 'rev-content',
+        contentType: 'application/json',
+        content: JSON.stringify({ provider: 'slack', text: 'late thread reply content' }),
+        encoding: 'utf-8'
+      }
+    }
+  })
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        downloadHistoricalData: false,
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+  })
+
+  await harness.emit({
+    ...changeEvent(replyPath, 'slack', { digest: 'revision:blind' }),
+    expand: async () => ({
+      level: 'full',
+      path: replyPath,
+      data: {
+        path: replyPath,
+        deleted: false
+      }
+    })
+  } as ChangeEvent)
+  await waitForSent(harness, 1, 2_500)
+  assert.match(harness.sent[0].input.text, /Message: unavailable/u)
+  await waitUntil(() => (getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsInjected || 0) >= 1)
+
+  readable = true
+  await harness.emit(changeEvent(replyPath, 'slack', { digest: 'revision:content' }))
+  await waitForSent(harness, 2, 2_500)
+
+  assert.match(harness.sent[1].input.text, /Slack message event/u)
+  assert.match(harness.sent[1].input.text, /Message:\nlate thread reply content/u)
+
+  await harness.emit(changeEvent(replyPath, 'slack', { digest: 'revision:content-replay' }))
+  await waitForDropped('project-1', 1, 2_500)
+  assert.equal(harness.sent.length, 2)
+})
+
 test('integration event targeted context previews skip binary files', async () => {
   const harness = makeHarness(['alice'], {
     readFileResponse: (_workspaceId, path) => ({
