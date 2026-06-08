@@ -12,3 +12,5 @@ bin/.relayfile-mount-version
 relayfile-mount/
 .workflow-artifacts/
 /.agentworkforce/relay
+.claude/projects
+.claude/settings.local.json
