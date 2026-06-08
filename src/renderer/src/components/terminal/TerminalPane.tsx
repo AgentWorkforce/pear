@@ -962,6 +962,7 @@ export function TerminalPane(): React.ReactNode {
                 className="absolute inset-0"
                 style={{ display: visible ? 'block' : 'none' }}
                 aria-hidden={!visible}
+                inert={!visible}
               >
                 <SplitTerminalPage
                   agents={pageAgents}

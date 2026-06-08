@@ -279,11 +279,16 @@ function isHumanMessage(message: Pick<ChatMessage, 'from' | 'isHuman'>): boolean
   return message.isHuman || isHumanSender(message.from)
 }
 
-function isDuplicateHumanEcho(
+// Detects the canonical-of-optimistic case: an incoming broker record
+// that matches an existing optimistic local-UUID record by content +
+// time window. Scoped to local: true records so it doesn't collapse two
+// legitimately distinct identical user messages (e.g. "ok" then "ok").
+function isCanonicalEchoOfLocalHuman(
   messages: ChatMessage[],
   candidate: Pick<ChatMessage, 'body' | 'projectId' | 'timestamp' | 'to'>
 ): boolean {
   return messages.some((message) =>
+    message.local === true &&
     isHumanMessage(message) &&
     message.body === candidate.body &&
     (!message.projectId || !candidate.projectId || message.projectId === candidate.projectId) &&
@@ -1006,7 +1011,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
         const targetName = eventTarget.startsWith('#') ? null : normalizeMessageTarget(eventTarget)
         const alreadySeenById = state.messages.some((m) => m.id === msg.id)
         const isDuplicate = alreadySeenById ||
-          (isHuman && isDuplicateHumanEcho(state.messages, msg)) ||
+          (isHuman && isCanonicalEchoOfLocalHuman(state.messages, msg)) ||
           (!isHuman && isDuplicateAgentEcho(state.messages, msg))
         const messages = isDuplicate
           ? state.messages
@@ -1107,10 +1112,13 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
       projectId,
       local: true
     }
+    // Always append the optimistic record. The previous
+    // isDuplicateHumanEcho check here silently dropped the second of
+    // two identical sends within 10s ("ok", "ok"), losing a real
+    // message. Optimistic-vs-canonical dedup is now handled exclusively
+    // via the `local` flag in the relay_inbound + reconcile paths.
     set((state) => ({
-      messages: isDuplicateHumanEcho(state.messages, msg)
-        ? state.messages
-        : capByCount([...state.messages, msg], MAX_CHAT_MESSAGES),
+      messages: capByCount([...state.messages, msg], MAX_CHAT_MESSAGES),
       lastHumanMessageSentAt: timestamp
     }))
   },
