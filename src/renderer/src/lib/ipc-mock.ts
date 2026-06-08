@@ -153,7 +153,16 @@ const defaultProject: MockProject = {
 
 function createState(): MockState {
   return {
-    projects: [{ ...defaultProject, roots: [...defaultProject.roots], channels: [...defaultProject.channels], integrations: [] }],
+    projects: [{
+      ...defaultProject,
+      roots: [...defaultProject.roots],
+      channels: [...defaultProject.channels],
+      // Clone nested mutable maps. Shallow spread above would share the
+      // channelPeople object reference across resets, leaking stale state
+      // between stress test runs.
+      channelPeople: { ...defaultProject.channelPeople },
+      integrations: []
+    }],
     activeId: defaultProject.id,
     agents: [],
     events: [],
