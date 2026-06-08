@@ -112,6 +112,7 @@ interface VirtualizedMessageListProps {
   canInteractWithMessages: boolean
   scrollRef: StickToBottomInstance['scrollRef']
   contentRef: StickToBottomInstance['contentRef']
+  scrollToBottom: StickToBottomInstance['scrollToBottom']
   onReply: (message: ChatMessageType) => void
   onReact: (messageId: string, emoji: string) => void
 }
@@ -125,6 +126,7 @@ function VirtualizedMessageList({
   canInteractWithMessages,
   scrollRef,
   contentRef,
+  scrollToBottom,
   onReply,
   onReact
 }: VirtualizedMessageListProps): React.ReactNode {
@@ -135,6 +137,14 @@ function VirtualizedMessageList({
     overscan: 8,
     getItemKey: (index) => messages[index]?.id || index
   })
+
+  useEffect(() => {
+    void scrollToBottom('instant')
+  }, [activeChannelName, directMessageParticipants, scrollToBottom])
+
+  useEffect(() => {
+    messageVirtualizer.measure()
+  }, [activeThreadMessageId, messageVirtualizer])
 
   return (
     <div
@@ -155,6 +165,7 @@ function VirtualizedMessageList({
             key={virtualRow.key}
             ref={messageVirtualizer.measureElement}
             data-index={index}
+            data-testid="chat-virtual-row"
             className="absolute left-0 top-0 w-full overflow-visible"
             style={{ transform: `translateY(${virtualRow.start}px)` }}
           >
@@ -679,6 +690,7 @@ export function ChatView(): React.ReactNode {
                     canInteractWithMessages={canInteractWithMessages}
                     scrollRef={scrollRef}
                     contentRef={contentRef}
+                    scrollToBottom={scrollToBottom}
                     onReply={handleReplyToMessage}
                     onReact={handleReactToMessage}
                   />
