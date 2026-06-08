@@ -1,4 +1,6 @@
 import assert from 'node:assert/strict'
+import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { beforeEach, test } from 'node:test'
 
@@ -7,12 +9,14 @@ import {
   getIntegrationEventTelemetrySnapshot,
   IntegrationEventBridge,
   createWorkspaceScopedEventClient,
+  eventPathGlobsForIntegration,
   integrationSubscriptionSummaries,
   integrationRelayFileSyncOptions,
   localWatchEventPathsForFilename,
   localWatchRootsFor,
   relayfileSdkPathFiltersFor,
-  resetIntegrationEventTelemetryForTests
+  resetIntegrationEventTelemetryForTests,
+  subscriptionSpecsFor
 } from '../integration-event-bridge.ts'
 import type { ConnectedIntegration } from '../integrations.ts'
 
@@ -147,6 +151,16 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<v
   assert.equal(predicate(), true)
 }
 
+async function waitForPathMissing(path: string, timeoutMs = 2_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (Date.now() <= deadline) {
+    const stats = await stat(path).catch(() => null)
+    if (!stats) return
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+  assert.equal(await stat(path).then(() => true).catch(() => false), false)
+}
+
 function makeHarness(
   agents = ['alice', 'bob'],
   options: {
@@ -160,9 +174,12 @@ function makeHarness(
     }
     readFileFailuresBeforeSuccess?: number
     failReadFile?: boolean
+    readFileError?: Error
     sendDelayMs?: number
     onSendStart?: (activeSends: number) => void
     waitForDeliveryNeverSettles?: boolean
+    waitForInjectedNeverSettles?: boolean
+    failInjected?: boolean
   } = {}
 ): {
   bridge: IntegrationEventBridge
@@ -171,6 +188,7 @@ function makeHarness(
   sent: SentMessage[]
   listAgentsCalls: string[]
   deliveryConfirmationCalls: SentMessage[]
+  injectedConfirmationCalls: SentMessage[]
   unsubscribedCount: () => number
   emit(event: ChangeEvent): Promise<void>
 } {
@@ -179,6 +197,7 @@ function makeHarness(
   const sent: SentMessage[] = []
   const listAgentsCalls: string[] = []
   const deliveryConfirmationCalls: SentMessage[] = []
+  const injectedConfirmationCalls: SentMessage[] = []
   const subscriptions: Subscription[] = []
   let unsubscribedCount = 0
   let activeSends = 0
@@ -201,6 +220,7 @@ function makeHarness(
           if (options.readFileFailuresBeforeSuccess && readFileAttempts <= options.readFileFailuresBeforeSuccess) {
             throw new Error('remote file not ready')
           }
+          if (options.readFileError) throw options.readFileError
           if (options.failReadFile) throw new Error('remote file not ready')
           return options.readFileResponse?.(workspaceId, path) ?? {
             path,
@@ -235,7 +255,26 @@ function makeHarness(
             deliveryConfirmationCalls.push({ projectId, input })
             await new Promise(() => undefined)
           }
-        : undefined
+        : undefined,
+      sendMessageAndWaitForInjected: async (projectId, input) => {
+        injectedConfirmationCalls.push({ projectId, input })
+        activeSends += 1
+        options.onSendStart?.(activeSends)
+        try {
+          if (options.sendDelayMs) {
+            await new Promise((resolve) => setTimeout(resolve, options.sendDelayMs))
+          }
+          if (options.failSend) throw new Error('broker unavailable')
+          sent.push({ projectId, input })
+          if (options.failInjected) throw new Error('delivery injection timed out')
+          if (options.waitForInjectedNeverSettles) {
+            await new Promise(() => undefined)
+          }
+          return { eventId: `evt-${injectedConfirmationCalls.length}`, targets: [input.to] }
+        } finally {
+          activeSends -= 1
+        }
+      }
     }
   })
 
@@ -252,6 +291,7 @@ function makeHarness(
     sent,
     listAgentsCalls,
     deliveryConfirmationCalls,
+    injectedConfirmationCalls,
     unsubscribedCount: () => unsubscribedCount,
     emit
   }
@@ -260,6 +300,7 @@ function makeHarness(
 beforeEach(() => {
   resetIntegrationEventTelemetryForTests()
   delete process.env.PEAR_INTEGRATION_EVENTS_DEBUG
+  delete process.env.PEAR_INTEGRATION_EVENT_INJECTED_CONFIRMATION_TIMEOUT_MS
 })
 
 test('relayfile sdk path filters broaden partial-segment Slack DM globs', () => {
@@ -276,6 +317,29 @@ test('relayfile sdk path filters broaden partial-segment Slack DM globs', () => 
     '/slack/dms/*/**',
     '/slack/users/*/messages/**'
   ])
+})
+
+test('slack DM watch globs use the user-message model and drop vestigial /slack/dms', () => {
+  const slackDm = integration({
+    provider: 'slack',
+    integrationId: 'slack-1',
+    mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+    scope: { listenDms: true }
+  })
+  const globs = eventPathGlobsForIntegration(slackDm)
+  assert.ok(globs.includes('/slack/users/*/messages/**'), 'canonical user-message DM watch present')
+  assert.ok(globs.includes('/slack/channels/D*/**'), 'raw-D diagnostic alias retained')
+  assert.ok(!globs.includes('/slack/dms/*/**'), 'vestigial /slack/dms watch glob dropped')
+
+  const noDm = integration({
+    provider: 'slack',
+    integrationId: 'slack-2',
+    mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+    scope: { listenDms: false }
+  })
+  const noDmGlobs = eventPathGlobsForIntegration(noDm)
+  assert.ok(!noDmGlobs.includes('/slack/users/*/messages/**'), 'no DM watch when listenDms is off')
+  assert.ok(!noDmGlobs.includes('/slack/channels/D*/**'), 'no raw-D diagnostic watch when listenDms is off')
 })
 
 test('integration event remote stream keeps a refreshable relayfile token provider', () => {
@@ -582,25 +646,16 @@ test('integration events watch selected relayfile mount paths', async () => {
 
   assert.deepEqual(harness.subscribeCalls[0].globs, [
     '/slack/channels/C123ABC/**',
-    '/slack/channels/C123ABC__proj-cloud/**',
-    '/slack/channels/D*/**',
-    '/slack/dms/*/**',
-    '/slack/users/*/messages/**'
+    '/slack/channels/C123ABC__proj-cloud/**'
   ])
   assert.deepEqual(harness.subscribeCalls[0].options?.pathScope, [
     '/slack/channels/C123ABC/**',
-    '/slack/channels/C123ABC__proj-cloud/**',
-    '/slack/channels/D*/**',
-    '/slack/dms/*/**',
-    '/slack/users/*/messages/**'
+    '/slack/channels/C123ABC__proj-cloud/**'
   ])
   assert.equal(harness.subscribeCalls[0].options?.from, 'legacy')
   assert.deepEqual(integrationSubscriptionSummaries([slackIntegration])[0].watches, [
     '.integrations/slack/channels/C123ABC/**',
-    '.integrations/slack/channels/C123ABC__proj-cloud/**',
-    '.integrations/slack/channels/D*/**',
-    '.integrations/slack/dms/*/**',
-    '.integrations/slack/users/*/messages/**'
+    '.integrations/slack/channels/C123ABC__proj-cloud/**'
   ])
 
   const selectedPath = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
@@ -645,8 +700,7 @@ test('integration events watch selected relayfile mount paths', async () => {
   assert.deepEqual(harness.sent, [])
 
   await harness.emit(changeEvent('/slack/channels/D123ABC/messages/1780668180_000000/meta.json', 'slack'))
-  await waitForSent(harness, 1)
-  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
+  assert.deepEqual(harness.sent, [])
 })
 
 test('slack raw-id and slug alias paths with distinct revisions inject once per logical message', async () => {
@@ -776,6 +830,368 @@ test('slack raw-id and slug alias duplicates suppress when one context read is s
   assert.match(harness.sent[0].input.text, /Message:\nreadable Slack message/u)
 })
 
+test('slack raw-id event resolves context through mounted slug alias', async () => {
+  let messageText = 'original Slack message'
+  const harness = makeHarness(['alice'], {
+    readFileResponse: (_workspaceId, path) => {
+      if (!path.includes('__proj-cloud')) throw new Error('remote file not ready')
+      return {
+        path,
+        revision: 'rev-context',
+        contentType: 'application/json',
+        content: JSON.stringify({ provider: 'slack', text: messageText }),
+        encoding: 'utf-8'
+      }
+    }
+  })
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        downloadHistoricalData: false,
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+  })
+
+  // Raw-id copy first: the raw targeted read fails, then the bridge retries the
+  // selected mounted slug alias so the injection has usable context.
+  await harness.emit({
+    ...changeEvent(
+      '/slack/channels/C123ABC/messages/1780668000_000000/meta.json',
+      'slack',
+      { digest: 'revision:raw-copy' }
+    ),
+    expand: async () => ({
+      level: 'full',
+      path: '/slack/channels/C123ABC/messages/1780668000_000000/meta.json',
+      data: {
+        path: '/slack/channels/C123ABC/messages/1780668000_000000/meta.json',
+        deleted: false
+      }
+    })
+  } as ChangeEvent)
+  await waitForSent(harness, 1, 2_500)
+  assert.equal(harness.sent.length, 1)
+  assert.match(harness.sent[0].input.text, /Message:\noriginal Slack message/u)
+  assert.match(harness.sent[0].input.text, /Path: \.integrations\/slack\/channels\/C123ABC__proj-cloud\/messages\/1780668000_000000\/meta\.json/u)
+  assert.deepEqual(harness.readFileCalls.slice(0, 2), [
+    {
+      workspaceId: 'workspace-id',
+      path: '/slack/channels/C123ABC/messages/1780668000_000000/meta.json'
+    },
+    {
+      workspaceId: 'workspace-id',
+      path: '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
+    }
+  ])
+
+  // The slug alias copy of the same record is now a duplicate of the
+  // content-bearing raw delivery.
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json',
+    'slack',
+    { digest: 'revision:slug-copy' }
+  ))
+  await waitForDropped('project-1', 1, 2_500)
+  assert.equal(harness.sent.length, 1)
+
+  // A genuine edit changes the content hash and must inject again.
+  messageText = 'edited Slack message'
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json',
+    'slack',
+    { digest: 'revision:slug-edit' }
+  ))
+  await waitForSent(harness, 2)
+  assert.equal(harness.sent.length, 2)
+  assert.match(harness.sent[1].input.text, /Message:\nedited Slack message/u)
+})
+
+test('slack raw-id event falls back to matched local suffixed mount when remote read misses', async () => {
+  const tempRoot = await mkdtemp(join(tmpdir(), 'pear-slack-local-context-'))
+  const localRoot = join(tempRoot, 'workspace-id', 'slack', 'channels', 'C123ABC__proj-cloud')
+  const remotePath = '/slack/channels/C123ABC/messages/1780668000_000000/meta.json'
+  const localRemotePath = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
+
+  try {
+    await mkdir(join(localRoot, 'messages', '1780668000_000000'), { recursive: true })
+    await writeFile(
+      join(localRoot, 'messages', '1780668000_000000', 'meta.json'),
+      JSON.stringify({ provider: 'slack', text: 'local mounted Slack message' })
+    )
+    const harness = makeHarness(['alice'], {
+      failReadFile: true
+    })
+
+    await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+      await harness.bridge.reconcile('project-1', [
+        integration({
+          provider: 'slack',
+          integrationId: 'slack-1',
+          mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+          localMountPaths: [localRoot],
+          downloadHistoricalData: false,
+          scope: { notifyAgents: ['alice'] }
+        })
+      ])
+    })
+
+    await harness.emit({
+      ...changeEvent(
+        remotePath,
+        'slack',
+        { digest: 'revision:raw-copy' }
+      ),
+      expand: async () => ({
+        level: 'full',
+        path: remotePath,
+        data: {
+          path: remotePath,
+          deleted: false
+        }
+      })
+    } as ChangeEvent)
+    await waitForSent(harness, 1, 2_500)
+
+    assert.match(harness.sent[0].input.text, /Message:\nlocal mounted Slack message/u)
+    assert.match(harness.sent[0].input.text, /Path: \.integrations\/slack\/channels\/C123ABC__proj-cloud\/messages\/1780668000_000000\/meta\.json/u)
+    assert.equal(harness.sent[0].input.data?.path, localRemotePath)
+    assert.deepEqual(
+      (harness.sent[0].input.data?.resource as { path?: string } | undefined)?.path,
+      localRemotePath
+    )
+    assert.equal((harness.sent[0].input.data?.contextPreview as { path?: string } | undefined)?.path, localRemotePath)
+    assert.deepEqual(harness.readFileCalls.slice(0, 2), [
+      {
+        workspaceId: 'workspace-id',
+        path: remotePath
+      },
+      {
+        workspaceId: 'workspace-id',
+        path: localRemotePath
+      }
+    ])
+
+    await harness.emit(changeEvent(
+      localRemotePath,
+      'slack',
+      { digest: 'revision:slug-copy' }
+    ))
+    await waitForDropped('project-1', 1, 2_500)
+
+    assert.equal(harness.sent.length, 1)
+    assert.deepEqual(harness.readFileCalls.slice(8, 10), [
+      {
+        workspaceId: 'workspace-id',
+        path: localRemotePath
+      },
+      {
+        workspaceId: 'workspace-id',
+        path: remotePath
+      }
+    ])
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true })
+  }
+})
+
+test('slack local context fallback rejects traversal outside matched mount root', async () => {
+  const tempRoot = await mkdtemp(join(tmpdir(), 'pear-slack-local-traversal-'))
+  const localRoot = join(tempRoot, 'workspace-id', 'slack', 'channels', 'C123ABC__proj-cloud')
+  const escapedRoot = join(tempRoot, 'workspace-id', 'slack', 'leaked')
+  const remotePath = '/slack/channels/C123ABC/messages/1780668000_000000/../../../../leaked/meta.json'
+  const localRemotePath = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/../../../../leaked/meta.json'
+
+  try {
+    await mkdir(escapedRoot, { recursive: true })
+    await writeFile(
+      join(escapedRoot, 'meta.json'),
+      JSON.stringify({ provider: 'slack', text: 'escaped Slack message' })
+    )
+    const harness = makeHarness(['alice'], {
+      failReadFile: true
+    })
+
+    await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+      await harness.bridge.reconcile('project-1', [
+        integration({
+          provider: 'slack',
+          integrationId: 'slack-1',
+          mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+          localMountPaths: [localRoot],
+          downloadHistoricalData: false,
+          scope: { notifyAgents: ['alice'] }
+        })
+      ])
+    })
+
+    await harness.emit({
+      ...changeEvent(
+        remotePath,
+        'slack',
+        { digest: 'revision:traversal-copy' }
+      ),
+      expand: async () => ({
+        level: 'full',
+        path: remotePath,
+        data: {
+          path: remotePath,
+          deleted: false
+        }
+      })
+    } as ChangeEvent)
+    await waitForSent(harness, 1, 2_500)
+
+    assert.doesNotMatch(harness.sent[0].input.text, /escaped Slack message/u)
+    assert.match(harness.sent[0].input.text, /Message: unavailable/u)
+    assert.equal(harness.sent[0].input.data?.contextPreview, undefined)
+    assert.deepEqual(harness.readFileCalls.slice(0, 2), [
+      {
+        workspaceId: 'workspace-id',
+        path: remotePath
+      },
+      {
+        workspaceId: 'workspace-id',
+        path: localRemotePath
+      }
+    ])
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true })
+  }
+})
+
+test('slack unchanged-content replay re-drives after injected delivery is not confirmed', async () => {
+  const options = { failInjected: true }
+  const harness = makeHarness(['alice'], options)
+  const warnCalls: unknown[][] = []
+  const originalWarn = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnCalls.push(args)
+  }
+
+  try {
+    await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+      await harness.bridge.reconcile('project-1', [
+        integration({
+          provider: 'slack',
+          integrationId: 'slack-1',
+          mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+          scope: { notifyAgents: ['alice'] }
+        })
+      ])
+    })
+
+    const path = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
+    await harness.emit(changeEvent(path, 'slack'))
+    await waitForSent(harness, 1)
+    await waitUntil(() => warnCalls.some((call) => call[0] === '[integration-events] delivery injected confirmation failed'))
+
+    options.failInjected = false
+    await harness.emit(changeEvent(path, 'slack'))
+    await waitForSent(harness, 2)
+  } finally {
+    console.warn = originalWarn
+  }
+
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'alice'])
+})
+
+test('content-present slack replay waits for hung injected delivery then re-drives after timeout release', async () => {
+  process.env.PEAR_INTEGRATION_EVENT_INJECTED_CONFIRMATION_TIMEOUT_MS = '20'
+  const options = { waitForInjectedNeverSettles: true }
+  const harness = makeHarness(['slack-comms'], options)
+  const warnCalls: unknown[][] = []
+  const originalWarn = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnCalls.push(args)
+  }
+
+  try {
+    await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+      await harness.bridge.reconcile('project-1', [
+        integration({
+          provider: 'slack',
+          integrationId: 'slack-1',
+          mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+          scope: { notifyAgents: ['slack-comms'] }
+        })
+      ])
+    })
+
+    const path = '/slack/channels/C123ABC__proj-cloud/threads/1780893336_601259/replies/1780893336_601259.json'
+    await harness.emit(changeEvent(path, 'slack'))
+    await waitForSent(harness, 1)
+
+    // A replay of the same human message arrives while the original steer has
+    // been accepted but has not produced delivery_injected. It must not be
+    // finalized as a duplicate skip; after timeout releases the provisional
+    // claim, this replay re-drives delivery.
+    options.waitForInjectedNeverSettles = false
+    await harness.emit(changeEvent(path, 'slack'))
+    await waitForSent(harness, 2, 1_500)
+    await waitUntil(() => warnCalls.some((call) => call[0] === '[integration-events] delivery injected confirmation failed'))
+  } finally {
+    console.warn = originalWarn
+  }
+
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['slack-comms', 'slack-comms'])
+  assert.match(harness.sent[0].input.text, /Message:\ntargeted Slack context/u)
+  assert.match(harness.sent[1].input.text, /Message:\ntargeted Slack context/u)
+  assert.equal(getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsDropped || 0, 0)
+  assert.equal(getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsInjected, 1)
+})
+
+test('slack unchanged-content replay is suppressed after injected delivery commits', async () => {
+  const harness = makeHarness(['alice'])
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+  })
+
+  const path = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
+  await harness.emit(changeEvent(path, 'slack'))
+  await waitForSent(harness, 1)
+  await harness.emit(changeEvent(path, 'slack'))
+  await waitForDropped('project-1', 1)
+
+  assert.equal(harness.sent.length, 1)
+})
+
+test('slack channel targets do not pin unresolved injected-delivery claims', async () => {
+  const harness = makeHarness(['alice'])
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        scope: { notifyChannels: ['#triage'] }
+      })
+    ])
+  })
+
+  const path = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
+  await harness.emit(changeEvent(path, 'slack'))
+  await waitForSent(harness, 1)
+  await harness.emit(changeEvent(path, 'slack'))
+  await waitForSent(harness, 2)
+
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['#triage', '#triage'])
+  assert.equal(harness.injectedConfirmationCalls.length, 0)
+})
+
 test('remote replayed events older than the subscription session are dropped by default', async () => {
   const harness = makeHarness()
 
@@ -875,7 +1291,7 @@ test('historical download subscriptions can receive older remote events', async 
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
 })
 
-test('slack direct message event scope can be disabled', async () => {
+test('slack direct message event scope is opt-in', async () => {
   const harness = makeHarness()
   const slackIntegration = integration({
     provider: 'slack',
@@ -996,13 +1412,77 @@ test('slack context falls back to expanded event data when targeted remote previ
   assert.match(harness.sent[0].input.text, /Slack message event/u)
   assert.match(harness.sent[0].input.text, /Author: Khaliq/u)
   assert.match(harness.sent[0].input.text, /Message:\nexpanded Slack context/u)
-  assert.equal(harness.readFileCalls.length, 4)
-  assert.deepEqual(harness.readFileCalls[0], {
-    workspaceId: 'workspace-id',
-    path: messagePath
-  })
+  assert.equal(harness.readFileCalls.length, 8)
+  assert.deepEqual(harness.readFileCalls.slice(0, 2), [
+    {
+      workspaceId: 'workspace-id',
+      path: messagePath
+    },
+    {
+      workspaceId: 'workspace-id',
+      path: '/slack/channels/C123ABC/messages/1780668000_000000/meta.json'
+    }
+  ])
   assert.equal((harness.sent[0].input.data?.contextPreview as { kind?: string } | undefined)?.kind, 'text')
   assert.equal((harness.sent[0].input.data?.contextPreview as { content?: string } | undefined)?.content, undefined)
+})
+
+test('slack DM context uses materialized local file when targeted remote preview is missing', async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), 'pear-event-preview-'))
+  const localRoot = join(workspaceRoot, 'workspace-id', 'slack', 'users', 'U0ADJH4P83T', 'messages')
+  const messagePath = '/slack/users/U0ADJH4P83T/messages/1780905125_300069/meta.json'
+  await mkdir(join(localRoot, '1780905125_300069'), { recursive: true })
+  await writeFile(
+    join(localRoot, '1780905125_300069', 'meta.json'),
+    JSON.stringify({
+      provider: 'slack',
+      text: 'local Slack DM context',
+      user: 'U123',
+      dm_user_id: 'U0ADJH4P83T'
+    })
+  )
+
+  try {
+    const harness = makeHarness(['alice'], { failReadFile: true })
+
+    await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+      await harness.bridge.reconcile('project-1', [
+        integration({
+          provider: 'slack',
+          integrationId: 'slack-1',
+          mountPaths: ['/slack/users/U0ADJH4P83T/messages'],
+          localMountPaths: [localRoot],
+          downloadHistoricalData: false,
+          scope: { listenDms: true, notifyAgents: ['alice'] }
+        })
+      ])
+    })
+
+    await harness.emit({
+      ...changeEvent(messagePath, 'slack'),
+      expand: async () => ({
+        level: 'full',
+        path: messagePath,
+        data: {
+          path: messagePath,
+          deleted: false
+        }
+      })
+    } as ChangeEvent)
+    await waitForSent(harness, 1, 2_500)
+
+    assert.match(harness.sent[0].input.text, /Slack message event/u)
+    assert.match(harness.sent[0].input.text, /Location: User U0ADJH4P83T/u)
+    assert.match(harness.sent[0].input.text, /Author: U123/u)
+    assert.match(harness.sent[0].input.text, /Message:\nlocal Slack DM context/u)
+    assert.doesNotMatch(harness.sent[0].input.text, /Message: unavailable/u)
+    assert.equal(
+      (harness.sent[0].input.data?.contextPreview as { path?: string } | undefined)?.path,
+      messagePath
+    )
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true })
+  }
 })
 
 test('slack context retries targeted remote preview before falling back to sparse event data', async () => {
@@ -1016,7 +1496,7 @@ test('slack context retries targeted remote preview before falling back to spars
         integrationId: 'slack-1',
         mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
         downloadHistoricalData: false,
-        scope: { notifyAgents: ['alice'] }
+        scope: { listenDms: true, notifyAgents: ['alice'] }
       })
     ])
   })
@@ -1040,6 +1520,45 @@ test('slack context retries targeted remote preview before falling back to spars
   assert.doesNotMatch(harness.sent[0].input.text, /"deleted": false/u)
 })
 
+test('slack context stops targeted remote preview retries on auth failures', async () => {
+  const error = new Error('http 403 forbidden') as Error & { status: number }
+  error.status = 403
+  const harness = makeHarness(['alice'], { readFileError: error })
+  const messagePath = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        downloadHistoricalData: false,
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+  })
+
+  await harness.emit({
+    ...changeEvent(messagePath, 'slack'),
+    expand: async () => ({
+      level: 'full',
+      path: messagePath,
+      data: {
+        text: 'expanded Slack context'
+      }
+    })
+  } as ChangeEvent)
+  await waitForSent(harness, 1, 2_500)
+
+  assert.deepEqual(harness.readFileCalls, [
+    {
+      workspaceId: 'workspace-id',
+      path: messagePath
+    }
+  ])
+  assert.match(harness.sent[0].input.text, /Message:\nexpanded Slack context/u)
+})
+
 test('slack context does not inject sparse relayfile pointer fallback as message content', async () => {
   const harness = makeHarness(['alice'], { failReadFile: true })
   const messagePath = '/slack/channels/D123ABC/messages/1780668000_000000/meta.json'
@@ -1051,7 +1570,7 @@ test('slack context does not inject sparse relayfile pointer fallback as message
         integrationId: 'slack-1',
         mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
         downloadHistoricalData: false,
-        scope: { notifyAgents: ['alice'] }
+        scope: { listenDms: true, notifyAgents: ['alice'] }
       })
     ])
   })
@@ -1380,6 +1899,30 @@ test('local fallback watchers use the shared Slack users command-root grammar', 
   )
 })
 
+test('subscription specs include concrete local roots for Slack user message mounts', () => {
+  const localRoot = join('/tmp', 'relayfile', 'workspaces', 'workspace-id', 'slack', 'users', 'U123', 'messages')
+  const specs = subscriptionSpecsFor(
+    [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/users/U123/messages'],
+        localMountPaths: [localRoot],
+        scope: { listenDms: true }
+      })
+    ],
+    'workspace-id'
+  )
+
+  assert.equal(specs.length, 1)
+  assert.deepEqual(specs[0].localMountRoots, [
+    {
+      localRoot,
+      remoteRoot: '/slack/users/U123/messages'
+    }
+  ])
+})
+
 test('local watcher path construction does not duplicate remote path segments', () => {
   const messageLocalRoot = join('/tmp', 'relayfile', 'workspaces', 'workspace-id', 'slack', 'channels', 'C0AD7UU0J1G', 'messages', '1780019742_971719')
   const messageRemoteRoot = '/slack/channels/C0AD7UU0J1G/messages/1780019742_971719'
@@ -1423,16 +1966,10 @@ test('integration events preserve discovery mount paths', async () => {
   await harness.bridge.reconcile('project-1', [slackIntegration])
 
   assert.deepEqual(harness.subscribeCalls[0].globs, [
-    '/discovery/slack/**',
-    '/slack/channels/D*/**',
-    '/slack/dms/*/**',
-    '/slack/users/*/messages/**'
+    '/discovery/slack/**'
   ])
   assert.deepEqual(integrationSubscriptionSummaries([slackIntegration])[0].watches, [
-    '.integrations/discovery/slack/**',
-    '.integrations/slack/channels/D*/**',
-    '.integrations/slack/dms/*/**',
-    '.integrations/slack/users/*/messages/**'
+    '.integrations/discovery/slack/**'
   ])
 
   await harness.emit(changeEvent('/discovery/slack/actions/create-message/.schema.json', 'slack'))
@@ -1575,6 +2112,68 @@ test('integration events ignore index, discovery, tmp, dotfile, and local writeb
 
   assert.deepEqual(harness.sent, [])
   assert.deepEqual(harness.listAgentsCalls, [])
+})
+
+test('confirmed Slack writeback success removes the local draft command file', async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), 'pear-writeback-cleanup-'))
+  const localRoot = join(workspaceRoot, 'workspace-id', 'slack', 'channels', 'C123ABC', 'messages')
+  const localDraftPath = join(localRoot, 'reply-confirmed.json')
+  const remoteDraftPath = '/slack/channels/C123ABC/messages/reply-confirmed.json'
+  await mkdir(localRoot, { recursive: true })
+  await writeFile(localDraftPath, JSON.stringify({ text: 'confirmed send' }))
+
+  try {
+    const harness = makeHarness(['alice'])
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC/messages'],
+        localMountPaths: [localRoot],
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+
+    await harness.emit({
+      ...changeEvent(remoteDraftPath, 'slack'),
+      type: 'writeback.succeeded'
+    } as ChangeEvent)
+    await waitForPathMissing(localDraftPath)
+
+    assert.deepEqual(harness.sent, [])
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true })
+  }
+})
+
+test('Slack writeback draft cleanup waits for confirmed dispatch', async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), 'pear-writeback-cleanup-'))
+  const localRoot = join(workspaceRoot, 'workspace-id', 'slack', 'channels', 'C123ABC', 'messages')
+  const localDraftPath = join(localRoot, 'reply-pending.json')
+  const remoteDraftPath = '/slack/channels/C123ABC/messages/reply-pending.json'
+  await mkdir(localRoot, { recursive: true })
+  await writeFile(localDraftPath, JSON.stringify({ text: 'pending send' }))
+
+  try {
+    const harness = makeHarness(['alice'])
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC/messages'],
+        localMountPaths: [localRoot],
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+
+    await harness.emit(changeEvent(remoteDraftPath, 'slack'))
+    await waitForDispatcherTick()
+
+    assert.equal(await stat(localDraftPath).then(() => true).catch(() => false), true)
+    assert.deepEqual(harness.sent, [])
+  } finally {
+    await rm(workspaceRoot, { recursive: true, force: true })
+  }
 })
 
 test('integration events notify nested non-numeric Slack message records', async () => {
@@ -1734,8 +2333,8 @@ test('integration event delivery failures use aggregated warn cadence by default
 
   assert.equal(debugCalls.length, 0)
   assert.equal(warnCalls.length, 2)
-  assert.equal(warnCalls[0][0], '[integration-events] event delivery failed')
-  assert.equal(warnCalls[1][0], '[integration-events] event delivery failed')
+  assert.equal(warnCalls[0][0], '[integration-events] delivery injected confirmation failed')
+  assert.equal(warnCalls[1][0], '[integration-events] delivery injected confirmation failed')
   assert.deepEqual(warnCalls.map((call) => (call[1] as { occurrences: number }).occurrences), [1, 26])
   assert.deepEqual(
     warnCalls.map((call) => (call[1] as { suppressedSinceLastLog: number }).suppressedSinceLastLog),
@@ -1749,7 +2348,7 @@ test('integration event delivery failures use aggregated warn cadence by default
     eventsInjected: 0,
     eventsCoalesced: 0,
     eventsDropped: 0,
-    brokerSends: 0,
+    brokerSends: 26,
     brokerSendsDeferred: 0,
     queueDepth: 0,
     mountCount: 0,
@@ -1780,7 +2379,7 @@ test('failed deliveries release the dedupe key so duplicate events retry', async
 
     const path = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
     await harness.emit(changeEvent(path, 'slack'))
-    await waitUntil(() => warnCalls.some((call) => call[0] === '[integration-events] event delivery failed'))
+    await waitUntil(() => warnCalls.some((call) => call[0] === '[integration-events] delivery injected confirmation failed'))
     assert.equal(harness.sent.length, 0)
 
     // The same logical change arrives again (remote copy of a local mount
@@ -1983,16 +2582,10 @@ test('integration event dispatcher coalesces rapid distinct revisions for the sa
   })
 })
 
-test('integration event fanout sends to recipients sequentially', async () => {
-  let maxActiveSends = 0
+test('integration event fanout sends to recipients in stable order', async () => {
   const harness = makeHarness(
     Array.from({ length: 12 }, (_, index) => `agent-${index}`),
-    {
-      sendDelayMs: 2,
-      onSendStart: (activeSends) => {
-        maxActiveSends = Math.max(maxActiveSends, activeSends)
-      }
-    }
+    { sendDelayMs: 2 }
   )
 
   await harness.bridge.reconcile('project-1', [
@@ -2006,7 +2599,6 @@ test('integration event fanout sends to recipients sequentially', async () => {
   await harness.emit(changeEvent('/linear/issues/AR-1.json', 'linear'))
   await waitUntil(() => harness.sent.length === 12)
 
-  assert.equal(maxActiveSends, 1)
   assert.deepEqual(harness.sent.map((message) => message.input.to), [
     'agent-0',
     'agent-1',

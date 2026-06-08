@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { existsSync, watch, type FSWatcher } from 'node:fs'
-import { appendFile, mkdir, stat } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import {
@@ -38,9 +38,15 @@ const INTEGRATION_EVENT_LOG_PATH = join(homedir(), '.agentworkforce', 'pear', 'i
 const AGGREGATED_WARNING_REPEAT_EVERY = 25
 const MAX_AGGREGATED_WARNING_KEYS = 256
 const SLACK_LIVE_EVENT_WINDOW_MS = 30 * 60 * 1_000
+// DM event watch globs. Canonical 1:1 DM surface is the user-recipient model
+// `/slack/users/<U>/messages` (where the adapter materializes message.im once
+// D→U mapping lands). `/slack/channels/D*` is retained only as a diagnostic
+// alias for raw Slack IM conversation ids the adapter still materializes
+// channel-style today. `/slack/dms/*` was vestigial residue — no adapter
+// resource or record ever materialized there — so it is intentionally dropped;
+// it must not imply mounted/readable DM content.
 const SLACK_DM_EVENT_GLOBS = [
   '/slack/channels/D*/**',
-  '/slack/dms/*/**',
   '/slack/users/*/messages/**'
 ]
 const MAX_EVENT_CONTEXT_PREVIEW_BYTES = 32 * 1024
@@ -50,6 +56,7 @@ const MAX_DISPATCH_SUMMARY_GROUPS = 10
 const MAX_DISPATCHED_EVENTS_PER_SECOND = 25
 const PROJECT_AGENT_RECIPIENT_CACHE_TTL_MS = 2_000
 const MAX_BROKER_SENDS_PER_SECOND = 25
+const DEFAULT_DELIVERY_INJECTED_CONFIRMATION_TIMEOUT_MS = 5_000
 const REMOTE_STREAM_ERROR_POLLING_FALLBACK_THRESHOLD = 5
 const REMOTE_STREAM_POLL_INTERVAL_MS = 5_000
 
@@ -76,10 +83,16 @@ type SubscriptionSpec = {
   integrationId: string
   provider: string
   mountPaths: string[]
+  localMountRoots: LocalMountRoot[]
   eventPathGlobs: string[]
   watches: WatchRegistration[]
   targets: DeliveryTargets
   allowHistoricalReplay: boolean
+}
+
+type LocalMountRoot = {
+  localRoot: string
+  remoteRoot: string
 }
 
 type ProjectSubscription = {
@@ -99,7 +112,29 @@ type EventContextPreviewMetadata = Omit<EventContextPreview, 'content'>
 
 type SlackLogicalInjectionState = {
   expiresAt: number
-  contentHashes?: Set<string>
+  committedBlind: boolean
+  committedContentHashes: Set<string>
+  provisionalBlind: boolean
+  provisionalContentHashes: Set<string>
+}
+
+type RecentInjectionState = {
+  expiresAt: number
+  provisional: boolean
+}
+
+type DeliveryDedupeClaim = {
+  key: string
+  isSlackLogicalKey: boolean
+  ttlMs: number
+  contentHash?: string
+}
+
+type DeliveryDedupeClaimOutcome = 'committed' | 'released'
+
+type InFlightDedupeClaim = {
+  promise: Promise<DeliveryDedupeClaimOutcome>
+  settle: (outcome: DeliveryDedupeClaimOutcome) => void
 }
 
 type DispatchItem = {
@@ -163,6 +198,18 @@ type BrokerEventBridge = {
     },
     options?: { timeoutMs?: number }
   ) => Promise<unknown>
+  sendMessageAndWaitForInjected?: (
+    projectId: string,
+    input: {
+      to: string
+      text: string
+      from?: string
+      data?: Record<string, unknown>
+      priority?: number
+      mode?: 'wait' | 'steer'
+    },
+    options?: { timeoutMs?: number }
+  ) => Promise<{ eventId: string; targets: string[] }>
 }
 
 type RelayfileEventClient = {
@@ -335,6 +382,21 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
+function deliveryInjectedConfirmationTimeoutMs(): number {
+  const value = Number.parseInt(process.env.PEAR_INTEGRATION_EVENT_INJECTED_CONFIRMATION_TIMEOUT_MS || '', 10)
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_DELIVERY_INJECTED_CONFIRMATION_TIMEOUT_MS
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs)
+  })
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
 }
@@ -346,6 +408,18 @@ function stringList(value: unknown): string[] {
 
 function dedupeStrings(values: string[]): string[] {
   return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean))).sort()
+}
+
+function dedupeStringsInOrder(values: string[]): string[] {
+  const seen = new Set<string>()
+  const deduped: string[] = []
+  for (const value of values) {
+    const trimmed = value.trim()
+    if (!trimmed || seen.has(trimmed)) continue
+    seen.add(trimmed)
+    deduped.push(trimmed)
+  }
+  return deduped
 }
 
 function sameStringList(left: string[], right: string[]): boolean {
@@ -372,7 +446,7 @@ function scopeBooleanDefault(scope: Record<string, unknown>, keys: string[], def
 
 function slackListenDms(integration: ConnectedIntegration): boolean {
   if (!isSlackProvider(integration.provider)) return false
-  return scopeBooleanDefault(integration.scope, ['listenDms', 'listenDirectMessages', 'directMessages'], true)
+  return scopeBooleanDefault(integration.scope, ['listenDms', 'listenDirectMessages', 'directMessages'], false)
 }
 
 function pathSegments(path: string): string[] {
@@ -434,7 +508,7 @@ function watchGlobForPath(path: string): string {
   return root.endsWith('/**') ? root : `${root || '/'}/**`
 }
 
-function eventPathGlobsForIntegration(integration: ConnectedIntegration): string[] {
+export function eventPathGlobsForIntegration(integration: ConnectedIntegration): string[] {
   return dedupeStrings([
     ...canonicalMountPaths(integration).map(watchGlobForPath),
     ...(slackListenDms(integration) ? SLACK_DM_EVENT_GLOBS : [])
@@ -494,7 +568,10 @@ function targetLabels(targets: DeliveryTargets): string[] {
   return [...targets.agents.map((agent) => `@${agent}`), ...targets.channels]
 }
 
-function subscriptionSpecsFor(integrations: ConnectedIntegration[]): SubscriptionSpec[] {
+export function subscriptionSpecsFor(
+  integrations: ConnectedIntegration[],
+  localMountWorkspaceId?: string
+): SubscriptionSpec[] {
   return integrations.map((integration) => {
     const mountPaths = canonicalMountPaths(integration)
     const eventPathGlobs = eventPathGlobsForIntegration(integration)
@@ -502,6 +579,9 @@ function subscriptionSpecsFor(integrations: ConnectedIntegration[]): Subscriptio
       integrationId: integration.integrationId,
       provider: integration.provider,
       mountPaths,
+      localMountRoots: localMountWorkspaceId
+        ? concreteLocalMountRootsForIntegration(localMountWorkspaceId, integration, mountPaths)
+        : [],
       eventPathGlobs,
       watches: eventPathGlobs.map((glob) => ({
         glob,
@@ -910,6 +990,34 @@ function hasWatchableLocalIntegrationFor(
   )
 }
 
+function concreteLocalMountRootsForIntegration(
+  workspaceId: string,
+  integration: ConnectedIntegration,
+  mountPaths: string[]
+): LocalMountRoot[] {
+  const roots = new Map<string, LocalMountRoot>()
+  const addRoot = (localRoot: string, remoteRoot: string): void => {
+    if (remoteRoot.includes('*')) return
+    if (!mountPaths.some((mountPath) =>
+      pathIsInsideMount(remoteRoot, mountPath) || pathIsInsideMount(mountPath, remoteRoot)
+    )) {
+      return
+    }
+    const normalizedLocalRoot = resolve(localRoot)
+    roots.set(`${remoteRoot}:${normalizedLocalRoot}`, {
+      localRoot: normalizedLocalRoot,
+      remoteRoot
+    })
+  }
+
+  for (const localRoot of integration.localMountPaths || []) {
+    const remoteRoot = remoteRootForLocalMountPath(workspaceId, localRoot)
+    if (remoteRoot) addRoot(localRoot, remoteRoot)
+  }
+
+  return Array.from(roots.values())
+}
+
 function remoteRootForWatchGlob(glob: string): string | null {
   const trimmed = glob.trim()
   if (!trimmed.startsWith('/')) return null
@@ -983,6 +1091,11 @@ function normalizeRelayfilePath(path: string): string {
 function localPathForRemotePathInsideRoot(localRoot: string, remoteRoot: string, remotePath: string): string {
   const tail = pathTailAfterMount(remotePath, remoteRoot)
   return tail === '/' ? resolve(localRoot) : join(resolve(localRoot), ...pathSegments(tail))
+}
+
+function localPathIsInsideRoot(localRoot: string, localPath: string): boolean {
+  const relativePath = relative(resolve(localRoot), resolve(localPath))
+  return relativePath === '' || (!!relativePath && !relativePath.startsWith('..') && !isAbsolute(relativePath))
 }
 
 export function localWatchEventPathsForFilename(
@@ -1680,6 +1793,112 @@ function slackEventContextPath(path: string): boolean {
   return /^\/slack\/(?:channels|dms|users)\/[^/]+\/(?:messages|threads)\/.+\.json$/u.test(path)
 }
 
+function slackContextReadCandidatePaths(path: string, specs: SubscriptionSpec[]): string[] {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`
+  if (!slackEventContextPath(normalizedPath)) return [normalizedPath]
+
+  const match = normalizedPath.match(/^\/slack\/channels\/([^/]+)(\/(?:messages|threads)\/.+\.json)$/u)
+  if (!match?.[1] || !match[2]) return [normalizedPath]
+
+  const currentChannel = match[1]
+  const channelId = canonicalSlackChannelSegment(currentChannel)
+  const tail = match[2]
+  const candidates = [normalizedPath]
+
+  for (const spec of specs) {
+    for (const mountPath of spec.mountPaths) {
+      const mountMatch = mountPath.match(/^\/slack\/channels\/([^/]+)(?:\/|$)/u)
+      const mountedChannel = mountMatch?.[1]
+      if (!mountedChannel || canonicalSlackChannelSegment(mountedChannel) !== channelId) {
+        continue
+      }
+      candidates.push(`/slack/channels/${mountedChannel}${tail}`)
+    }
+  }
+
+  return dedupeStringsInOrder(candidates)
+}
+
+function isSuffixedSlackChannelPath(path: string): boolean {
+  return /^\/slack\/channels\/[^/]+__[^/]+\//u.test(path)
+}
+
+function resolvedSlackContextPath(path: string, specs: SubscriptionSpec[]): string {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`
+  if (!slackEventContextPath(normalizedPath)) return normalizedPath
+  const candidates = slackContextReadCandidatePaths(normalizedPath, specs)
+  return candidates.find((candidate) =>
+    isSuffixedSlackChannelPath(candidate) &&
+    specs.some((spec) =>
+      spec.mountPaths.some((mountPath) => pathIsInsideMount(candidate, mountPath))
+    )
+  ) || candidates[0] || normalizedPath
+}
+
+function contentTypeForLocalPath(localPath: string): string | undefined {
+  if (/\.json$/u.test(localPath)) return 'application/json'
+  if (/\.(?:txt|md|markdown)$/u.test(localPath)) return 'text/plain'
+  return undefined
+}
+
+async function readLocalEventContextPreview(
+  remotePath: string,
+  specs: SubscriptionSpec[]
+): Promise<EventContextPreview | undefined> {
+  for (const spec of specs) {
+    for (const root of spec.localMountRoots) {
+      if (!pathIsInsideMount(remotePath, root.remoteRoot)) continue
+      const localPath = localPathForRemotePathInsideRoot(root.localRoot, root.remoteRoot, remotePath)
+      if (!localPathIsInsideRoot(root.localRoot, localPath)) continue
+      const stats = await stat(localPath).catch(() => null)
+      if (!stats || stats.isDirectory()) continue
+      try {
+        const buffer = await readFile(localPath)
+        logIntegrationEvent('event context local fallback read', {
+          integrationId: spec.integrationId,
+          remotePath,
+          localRoot: root.localRoot
+        })
+        return eventContextPreviewFromBuffer(remotePath, buffer, contentTypeForLocalPath(localPath))
+      } catch {
+        // Try the next matched concrete root/candidate. Missing or transient local
+        // reads should not mask the remote expand fallback.
+      }
+    }
+  }
+  return undefined
+}
+
+async function cleanupConfirmedSlackWritebackDraft(
+  projectId: string,
+  event: ChangeEvent,
+  specs: SubscriptionSpec[]
+): Promise<void> {
+  if (event.type !== 'writeback.succeeded') return
+  const remotePath = eventSummaryValue(event.resource.path)
+  if (!remotePath || !isLikelyLocalWritebackCommandPath(remotePath)) return
+
+  for (const spec of specs) {
+    if (spec.provider !== 'slack') continue
+    for (const root of spec.localMountRoots) {
+      if (!isSlackWritebackCommandRoot(root.remoteRoot)) continue
+      if (!pathIsInsideMount(remotePath, root.remoteRoot)) continue
+      const localPath = localPathForRemotePathInsideRoot(root.localRoot, root.remoteRoot, remotePath)
+      if (!localPathIsInsideRoot(root.localRoot, localPath)) continue
+      const stats = await stat(localPath).catch(() => null)
+      if (!stats || stats.isDirectory()) continue
+      await rm(localPath, { force: true })
+      logIntegrationEvent('confirmed Slack writeback draft cleaned', {
+        projectId,
+        eventId: event.id,
+        remotePath,
+        localRoot: root.localRoot
+      })
+      return
+    }
+  }
+}
+
 function slackScopeLabel(path: string): string | undefined {
   const segments = pathSegments(path)
   const channelIndex = segments.indexOf('channels')
@@ -1695,15 +1914,17 @@ function slackScopeLabel(path: string): string | undefined {
 
 function formatSlackIntegrationEventMessage(
   event: ChangeEvent,
-  contextPreview?: EventContextPreview
+  contextPreview?: EventContextPreview,
+  resolvedPath?: string
 ): string | null {
   const resource = isRecord(event.resource) ? event.resource : {}
   const provider = eventSummaryValue(resource.provider) || eventProvider(event)
   const relayfilePath = eventSummaryValue(resource.path)
   if (provider !== 'slack' || !relayfilePath || !slackEventContextPath(relayfilePath)) return null
 
-  const projectPath = projectIntegrationPathForRelayfilePath(relayfilePath)
-  const scopeLabel = slackScopeLabel(relayfilePath)
+  const contextPath = contextPreview?.path || resolvedPath || relayfilePath
+  const projectPath = projectIntegrationPathForRelayfilePath(contextPath)
+  const scopeLabel = slackScopeLabel(contextPath)
   const messageText = slackPreviewText(contextPreview)
   const author = slackPreviewAuthor(contextPreview)
   const lines = [
@@ -1729,16 +1950,18 @@ function formatSlackIntegrationEventMessage(
 
 function formatIntegrationEventMessage(
   event: ChangeEvent,
-  contextPreview?: EventContextPreview
+  contextPreview?: EventContextPreview,
+  resolvedPath?: string
 ): string {
-  const slackMessage = formatSlackIntegrationEventMessage(event, contextPreview)
+  const slackMessage = formatSlackIntegrationEventMessage(event, contextPreview, resolvedPath)
   if (slackMessage) return slackMessage
 
   const summary = isRecord(event.summary) ? event.summary : {}
   const resource = isRecord(event.resource) ? event.resource : {}
   const provider = eventSummaryValue(resource.provider) || 'integration'
   const relayfilePath = eventSummaryValue(resource.path)
-  const projectPath = relayfilePath ? projectIntegrationPathForRelayfilePath(relayfilePath) : undefined
+  const displayPath = resolvedPath || relayfilePath
+  const projectPath = displayPath ? projectIntegrationPathForRelayfilePath(displayPath) : undefined
   const resourceKind = eventSummaryValue(resource.kind)
   const resourceId = eventSummaryValue(resource.id)
   const title = eventSummaryValue(summary.title)
@@ -1766,8 +1989,8 @@ function formatIntegrationEventMessage(
   if (actor) lines.push(`Actor: ${actor}`)
   if (fieldsChanged) lines.push(`Fields changed: ${fieldsChanged}`)
   if (labels) lines.push(`Labels: ${labels}`)
-  if (relayfilePath) {
-    lines.push(`Targeted context path: ${relayfilePath}`)
+  if (displayPath) {
+    lines.push(`Targeted context path: ${displayPath}`)
   }
   if (contextPreview) {
     if (contextPreview.kind === 'text') {
@@ -1947,6 +2170,7 @@ class ProjectEventDispatcher {
 class ProjectBrokerSendPacer {
   private readonly queue: Array<{
     input: BrokerMessageInput
+    send?: (input: BrokerMessageInput) => Promise<void>
     resolve: () => void
     reject: (error: unknown) => void
   }> = []
@@ -1963,12 +2187,12 @@ class ProjectBrokerSendPacer {
     this.send = send
   }
 
-  enqueue(input: BrokerMessageInput): Promise<void> {
+  enqueue(input: BrokerMessageInput, send?: (input: BrokerMessageInput) => Promise<void>): Promise<void> {
     if (!this.active) return Promise.resolve()
     const deferred = this.queue.length > 0 || this.nextRateLimitDelayMs() > 0 || this.draining
     if (deferred) incrementIntegrationEventCounter(this.projectId, 'brokerSendsDeferred')
     return new Promise((resolveSend, rejectSend) => {
-      this.queue.push({ input, resolve: resolveSend, reject: rejectSend })
+      this.queue.push({ input, send, resolve: resolveSend, reject: rejectSend })
       this.updateDepthGauge()
       this.scheduleDrain(0)
     })
@@ -2007,7 +2231,7 @@ class ProjectBrokerSendPacer {
         this.updateDepthGauge()
         this.sentInWindow += 1
         try {
-          await this.send(item.input)
+          await (item.send ?? this.send)(item.input)
           incrementIntegrationEventCounter(this.projectId, 'brokerSends')
           item.resolve()
         } catch (error) {
@@ -2041,8 +2265,9 @@ class ProjectBrokerSendPacer {
 export class IntegrationEventBridge {
   private subscriptions = new Map<string, ProjectSubscription>()
   private dispatchers = new Map<string, ProjectEventDispatcher>()
-  private recentInjections = new Map<string, number>()
+  private recentInjections = new Map<string, RecentInjectionState>()
   private slackLogicalInjections = new Map<string, SlackLogicalInjectionState>()
+  private inFlightDedupeClaims = new Map<string, Set<Promise<DeliveryDedupeClaimOutcome>>>()
   private projectAgentRecipientCache = new Map<string, ProjectAgentRecipientCacheEntry>()
   private notificationTargetCache = new Map<string, NotificationTargetCacheEntry>()
   private brokerSendPacers = new Map<string, ProjectBrokerSendPacer>()
@@ -2074,7 +2299,8 @@ export class IntegrationEventBridge {
       return
     }
 
-    const specs = subscriptionSpecsFor(subscribed)
+    const handle = await this.getWorkspaceHandle()
+    const specs = subscriptionSpecsFor(subscribed, handle.localMountWorkspaceId)
     const watches = dedupeStrings(specs.flatMap((spec) => spec.watches.map((watch) => watch.glob))).map((glob) => ({
       glob,
       coalesceMs: 750
@@ -2084,7 +2310,6 @@ export class IntegrationEventBridge {
       return
     }
 
-    const handle = await this.getWorkspaceHandle()
     const signature = JSON.stringify({
       workspaceId: handle.workspaceId,
       localMountWorkspaceId: handle.localMountWorkspaceId,
@@ -2093,6 +2318,7 @@ export class IntegrationEventBridge {
         integrationId: spec.integrationId,
         provider: spec.provider,
         mountPaths: spec.mountPaths,
+        localMountRoots: spec.localMountRoots,
         eventPathGlobs: spec.eventPathGlobs,
         allowHistoricalReplay: spec.allowHistoricalReplay,
         targets: spec.targets
@@ -2118,6 +2344,7 @@ export class IntegrationEventBridge {
           integrationId: spec.integrationId,
           provider: spec.provider,
           mountPaths: spec.mountPaths,
+          localMountRoots: spec.localMountRoots,
           eventPathGlobs: spec.eventPathGlobs,
           allowHistoricalReplay: spec.allowHistoricalReplay,
           targets: targetLabels(spec.targets)
@@ -2133,6 +2360,18 @@ export class IntegrationEventBridge {
               eventId: event.id,
               type: event.type,
               path: event.resource.path
+            })
+            void cleanupConfirmedSlackWritebackDraft(projectId, event, specs).catch((error) => {
+              warnIntegrationEventAggregated(
+                `confirmed writeback cleanup failed:${projectId}`,
+                'confirmed writeback cleanup failed',
+                {
+                  projectId,
+                  eventId: event.id,
+                  path: event.resource.path,
+                  error: toErrorMessage(error)
+                }
+              )
             })
             void this.enqueueEvent(projectId, event, specs, {
               source: 'remote',
@@ -2242,7 +2481,11 @@ export class IntegrationEventBridge {
     )
   }
 
-  private async readEventContextPreview(projectId: string, event: ChangeEvent): Promise<EventContextPreview | undefined> {
+  private async readEventContextPreview(
+    projectId: string,
+    event: ChangeEvent,
+    matchedSpecs: SubscriptionSpec[]
+  ): Promise<EventContextPreview | undefined> {
     if (event.type === 'file.deleted' || event.type === 'relayfile.changed.summary') return undefined
     const path = eventSummaryValue(event.resource.path)
     if (!path) return undefined
@@ -2252,16 +2495,25 @@ export class IntegrationEventBridge {
       const readDelays = slackEventContextPath(path) ? [0, ...EVENT_CONTEXT_READ_RETRY_DELAYS_MS] : [0]
       const handle = await this.getWorkspaceHandle()
       const client = handle.client()
+      const candidatePaths = slackEventContextPath(path)
+        ? slackContextReadCandidatePaths(path, matchedSpecs)
+        : [path]
       if (typeof client.readFile === 'function') {
         for (const [index, delayMs] of readDelays.entries()) {
           if (delayMs > 0) await delay(delayMs)
-          try {
-            return eventContextPreviewFromFile(await client.readFile(handle.workspaceId, path))
-          } catch (error) {
-            readFileError = error
-            if (index === readDelays.length - 1) break
+          for (const candidatePath of candidatePaths) {
+            try {
+              return eventContextPreviewFromFile(await client.readFile(handle.workspaceId, candidatePath))
+            } catch (error) {
+              readFileError = error
+              if (isUnauthorizedError(error)) throw error
+            }
           }
         }
+      }
+      for (const candidatePath of candidatePaths) {
+        const localPreview = await readLocalEventContextPreview(candidatePath, matchedSpecs)
+        if (localPreview) return localPreview
       }
     } catch (error) {
       readFileError = error
@@ -2351,20 +2603,6 @@ export class IntegrationEventBridge {
     let dedupe = eventDedupeKeyWithFingerprint(duplicateKey, fingerprint)
     let dedupeClaimed = false
 
-    if (!needsSlackContentAwareDedupe) {
-      if (this.wasRecentlyInjected(dedupe.key, dedupe.ttlMs)) {
-        incrementIntegrationEventCounter(projectId, 'eventsDropped')
-        logIntegrationEvent('skipped duplicate path', {
-          projectId,
-          eventId: event.id,
-          path: event.resource.path,
-          duplicateKey: dedupe.key
-        })
-        return
-      }
-      dedupeClaimed = true
-    }
-
     const bridge = await this.bridge()
     const uniqueRecipients = await this.recipientsForMatchedSpecs(projectId, matchedSpecs, bridge)
     if (uniqueRecipients.length === 0) {
@@ -2386,35 +2624,101 @@ export class IntegrationEventBridge {
     }
 
     const eventMetadata = integrationEventMetadata(event)
-    const contextPreview = await this.readEventContextPreview(projectId, event)
-    if (needsSlackContentAwareDedupe) {
-      dedupe = eventDedupeKeyWithFingerprint(duplicateKey, fingerprint)
-      if (!this.claimSlackLogicalInjection(dedupe.key, contextPreview, dedupe.ttlMs)) {
-        incrementIntegrationEventCounter(projectId, 'eventsDropped')
-        logIntegrationEvent('skipped duplicate path', {
+    const contextPreview = await this.readEventContextPreview(projectId, event, matchedSpecs)
+    const resolvedPath = contextPreview?.path || resolvedSlackContextPath(event.resource.path, matchedSpecs)
+    const usesConcreteAgentTargets = uniqueRecipients.every((recipient) => !recipient.startsWith('#'))
+    const canTrackInjectedDelivery = usesConcreteAgentTargets && typeof bridge.sendMessageAndWaitForInjected === 'function'
+    const shouldTrackDedupe = canTrackInjectedDelivery
+    if (!usesConcreteAgentTargets) {
+      warnIntegrationEventAggregated(
+        `delivery injected tracking skipped for channel targets:${projectId}`,
+        'delivery injected tracking skipped for channel targets',
+        {
           projectId,
           eventId: event.id,
           path: event.resource.path,
-          duplicateKey: dedupe.key
-        })
+          recipients: uniqueRecipients
+        }
+      )
+    } else if (!canTrackInjectedDelivery) {
+      throw new Error('Broker delivery_injected confirmation is unavailable')
+    }
+
+    let deliveryClaim: DeliveryDedupeClaim | undefined
+    if (needsSlackContentAwareDedupe && shouldTrackDedupe) {
+      dedupe = eventDedupeKeyWithFingerprint(duplicateKey, fingerprint)
+      const slackClaim = this.claimSlackLogicalInjection(dedupe.key, contextPreview, dedupe.ttlMs, shouldTrackDedupe)
+      if (!slackClaim.claimed) {
+        const inFlightOutcome = await this.waitForInFlightDedupeClaims(dedupe.key)
+        if (inFlightOutcome === 'released') {
+          logIntegrationEvent('retrying duplicate path after unconfirmed delivery', {
+            projectId,
+            eventId: event.id,
+            path: event.resource.path,
+            duplicateKey: dedupe.key
+          })
+          return this.injectEvent(projectId, event, matchedSpecs)
+        }
+        incrementIntegrationEventCounter(projectId, 'eventsDropped')
+        this.reportSkippedDuplicatePath(projectId, event, dedupe.key)
+        return
+      }
+      dedupeClaimed = shouldTrackDedupe
+      if (shouldTrackDedupe) {
+        deliveryClaim = {
+          key: dedupe.key,
+          isSlackLogicalKey: true,
+          ttlMs: dedupe.ttlMs,
+          contentHash: slackClaim.contentHash
+        }
+      }
+    } else if (shouldTrackDedupe) {
+      if (!this.claimRecentInjection(dedupe.key, dedupe.ttlMs, true)) {
+        const inFlightOutcome = await this.waitForInFlightDedupeClaims(dedupe.key)
+        if (inFlightOutcome === 'released') {
+          logIntegrationEvent('retrying duplicate path after unconfirmed delivery', {
+            projectId,
+            eventId: event.id,
+            path: event.resource.path,
+            duplicateKey: dedupe.key
+          })
+          return this.injectEvent(projectId, event, matchedSpecs)
+        }
+        incrementIntegrationEventCounter(projectId, 'eventsDropped')
+        this.reportSkippedDuplicatePath(projectId, event, dedupe.key)
         return
       }
       dedupeClaimed = true
+      deliveryClaim = {
+        key: dedupe.key,
+        isSlackLogicalKey: false,
+        ttlMs: dedupe.ttlMs
+      }
+    } else if (!needsSlackContentAwareDedupe) {
+      // Channel/untracked targets must not be falsely committed based on an
+      // unresolved target list. Keep delivery flowing and leave dedupe to
+      // relay/replay identity rather than pinning a local claim.
+      dedupeClaimed = false
     }
+    const inFlightClaim = deliveryClaim ? this.trackInFlightDedupeClaim(deliveryClaim.key) : undefined
     const contextPreviewData = contextPreview ? eventContextPreviewMetadata(contextPreview) : undefined
+    const resolvedResource = isRecord(event.resource)
+      ? { ...event.resource, path: resolvedPath }
+      : undefined
     logIntegrationEvent('injecting', {
       projectId,
       eventId: event.id,
-      path: event.resource.path,
+      path: resolvedPath,
       recipients: uniqueRecipients
     })
     let deliveredCount = 0
     const sendErrors: Array<{ recipient: string; error: unknown }> = []
+    const injectedConfirmations: Array<Promise<unknown>> = []
     for (const recipient of uniqueRecipients) {
       const input = {
         to: recipient,
         from: 'integration',
-        text: formatIntegrationEventMessage(event, contextPreview),
+        text: formatIntegrationEventMessage(event, contextPreview, resolvedPath),
         priority: 0,
         mode: 'steer',
         data: {
@@ -2423,14 +2727,17 @@ export class IntegrationEventBridge {
           eventId: event.id,
           eventType: event.type,
           occurredAt: event.occurredAt,
-          resource: isRecord(event.resource) ? { ...event.resource } : undefined,
-          path: event.resource.path,
+          resource: resolvedResource,
+          path: resolvedPath,
           contextPreview: contextPreviewData,
           ...eventMetadata
         }
       } as const
       try {
-        await this.sendBrokerMessage(projectId, input, bridge)
+        const sendResult = await this.sendBrokerMessage(projectId, input, bridge, {
+          waitForInjected: canTrackInjectedDelivery
+        })
+        if (sendResult.injectedConfirmation) injectedConfirmations.push(sendResult.injectedConfirmation)
         deliveredCount += 1
       } catch (error) {
         sendErrors.push({ recipient, error })
@@ -2441,6 +2748,7 @@ export class IntegrationEventBridge {
       // this event (remote copy of a local change, coalesced update) retries
       // delivery instead of being dropped as a recent injection.
       if (dedupeClaimed) this.releaseDedupeKey(dedupe.key, needsSlackContentAwareDedupe)
+      inFlightClaim?.settle('released')
       throw sendErrors[0].error
     }
     if (sendErrors.length > 0) {
@@ -2456,7 +2764,47 @@ export class IntegrationEventBridge {
         }
       )
     }
-    incrementIntegrationEventCounter(projectId, 'eventsInjected')
+    if (deliveryClaim && injectedConfirmations.length > 0) {
+      void Promise.all(injectedConfirmations)
+        .then(() => {
+          this.commitDedupeKey(deliveryClaim)
+          incrementIntegrationEventCounter(projectId, 'eventsInjected')
+          inFlightClaim?.settle('committed')
+        })
+        .catch((error) => {
+          this.releaseDedupeKey(deliveryClaim.key, deliveryClaim.isSlackLogicalKey, deliveryClaim.contentHash)
+          warnIntegrationEventAggregated(
+            `delivery injected confirmation failed:${projectId}`,
+            'delivery injected confirmation failed',
+            {
+              projectId,
+              eventId: event.id,
+              path: event.resource.path,
+              duplicateKey: deliveryClaim.key,
+              error: toErrorMessage(error)
+            }
+          )
+          inFlightClaim?.settle('released')
+        })
+    } else if (deliveryClaim) {
+      this.releaseDedupeKey(deliveryClaim.key, deliveryClaim.isSlackLogicalKey, deliveryClaim.contentHash)
+      inFlightClaim?.settle('released')
+    } else {
+      incrementIntegrationEventCounter(projectId, 'eventsInjected')
+    }
+  }
+
+  private reportSkippedDuplicatePath(projectId: string, event: ChangeEvent, duplicateKey: string): void {
+    warnIntegrationEventAggregated(
+      `skipped duplicate path:${projectId}`,
+      'skipped duplicate path',
+      {
+        projectId,
+        eventId: event.id,
+        path: event.resource.path,
+        duplicateKey
+      }
+    )
   }
 
   private async recipientsForMatchedSpecs(
@@ -2541,8 +2889,9 @@ export class IntegrationEventBridge {
   private async sendBrokerMessage(
     projectId: string,
     input: BrokerMessageInput,
-    bridge: BrokerEventBridge
-  ): Promise<void> {
+    bridge: BrokerEventBridge,
+    options: { waitForInjected?: boolean } = {}
+  ): Promise<{ injectedConfirmation?: Promise<unknown> }> {
     let pacer = this.brokerSendPacers.get(projectId)
     if (!pacer) {
       // Integration-event delivery is paced on broker send acceptance. Waiting
@@ -2553,24 +2902,48 @@ export class IntegrationEventBridge {
       )
       this.brokerSendPacers.set(projectId, pacer)
     }
-    await pacer.enqueue(input)
+    if (!options.waitForInjected) {
+      await pacer.enqueue(input)
+      return {}
+    }
+
+    if (!bridge.sendMessageAndWaitForInjected) {
+      throw new Error('Broker delivery_injected confirmation is unavailable')
+    }
+
+    let injectedConfirmation: Promise<unknown> | undefined
+    const timeoutMs = deliveryInjectedConfirmationTimeoutMs()
+    await pacer.enqueue(input, (message) => {
+      injectedConfirmation = withTimeout(
+        bridge.sendMessageAndWaitForInjected!(
+          projectId,
+          message,
+          { timeoutMs }
+        ),
+        timeoutMs + 250,
+        `Timed out waiting for broker delivery_injected confirmation for ${message.to}`
+      )
+      return Promise.resolve()
+    })
+    return injectedConfirmation ? { injectedConfirmation } : {}
   }
 
-  private wasRecentlyInjected(key: string, ttlMs = RECENT_INJECTION_TTL_MS): boolean {
+  private claimRecentInjection(key: string, ttlMs = RECENT_INJECTION_TTL_MS, provisional = false): boolean {
     const now = Date.now()
-    for (const [entryKey, expiresAt] of this.recentInjections.entries()) {
-      if (expiresAt <= now) this.recentInjections.delete(entryKey)
+    for (const [entryKey, entry] of this.recentInjections.entries()) {
+      if (entry.expiresAt <= now) this.recentInjections.delete(entryKey)
     }
-    if (this.recentInjections.has(key)) return true
-    this.recentInjections.set(key, now + ttlMs)
-    return false
+    if (this.recentInjections.has(key)) return false
+    this.recentInjections.set(key, { expiresAt: now + ttlMs, provisional })
+    return true
   }
 
   private claimSlackLogicalInjection(
     key: string,
     contextPreview: EventContextPreview | undefined,
-    ttlMs: number
-  ): boolean {
+    ttlMs: number,
+    provisional: boolean
+  ): { claimed: boolean; contentHash?: string } {
     const now = Date.now()
     for (const [entryKey, entry] of this.slackLogicalInjections.entries()) {
       if (entry.expiresAt <= now) this.slackLogicalInjections.delete(entryKey)
@@ -2581,24 +2954,133 @@ export class IntegrationEventBridge {
       : undefined
     const existing = this.slackLogicalInjections.get(key)
     if (existing) {
-      if (!contentHash || !existing.contentHashes || existing.contentHashes.has(contentHash)) {
-        return false
+      if (!contentHash) {
+        if (
+          existing.committedBlind ||
+          existing.provisionalBlind ||
+          existing.committedContentHashes.size > 0 ||
+          existing.provisionalContentHashes.size > 0
+        ) {
+          return { claimed: false }
+        }
+        existing.provisionalBlind = provisional
+        existing.committedBlind = !provisional
+        existing.expiresAt = now + ttlMs
+        return { claimed: true }
       }
-      existing.contentHashes.add(contentHash)
+      if (
+        (existing.committedBlind || existing.provisionalBlind) &&
+        existing.committedContentHashes.size === 0 &&
+        existing.provisionalContentHashes.size === 0
+      ) {
+        // A blind claim (context read returned nothing) suppresses the late
+        // content-bearing alias copy, but must learn its hash so a genuine
+        // edit afterwards still injects instead of matching the blind claim.
+        if (existing.provisionalBlind) {
+          existing.provisionalContentHashes.add(contentHash)
+        } else {
+          existing.committedContentHashes.add(contentHash)
+        }
+        existing.expiresAt = now + ttlMs
+        return { claimed: false }
+      }
+      if (
+        existing.committedContentHashes.has(contentHash) ||
+        existing.provisionalContentHashes.has(contentHash)
+      ) {
+        return { claimed: false }
+      }
+      if (provisional) {
+        existing.provisionalContentHashes.add(contentHash)
+      } else {
+        existing.committedContentHashes.add(contentHash)
+      }
       existing.expiresAt = now + ttlMs
-      return true
+      return { claimed: true, contentHash }
     }
 
     this.slackLogicalInjections.set(key, {
       expiresAt: now + ttlMs,
-      contentHashes: contentHash ? new Set([contentHash]) : undefined
+      committedBlind: !contentHash && !provisional,
+      committedContentHashes: !provisional && contentHash ? new Set([contentHash]) : new Set(),
+      provisionalBlind: !contentHash && provisional,
+      provisionalContentHashes: provisional && contentHash ? new Set([contentHash]) : new Set()
     })
-    return true
+    return { claimed: true, contentHash }
   }
 
-  private releaseDedupeKey(key: string, isSlackLogicalKey: boolean): void {
+  private commitDedupeKey(claim: DeliveryDedupeClaim): void {
+    const now = Date.now()
+    if (!claim.isSlackLogicalKey) {
+      const entry = this.recentInjections.get(claim.key)
+      if (entry) {
+        entry.provisional = false
+        entry.expiresAt = now + claim.ttlMs
+      }
+      return
+    }
+
+    const entry = this.slackLogicalInjections.get(claim.key)
+    if (!entry) return
+    if (claim.contentHash) {
+      if (entry.provisionalContentHashes.delete(claim.contentHash)) {
+        entry.committedContentHashes.add(claim.contentHash)
+      }
+    } else if (entry.provisionalBlind) {
+      entry.provisionalBlind = false
+      entry.committedBlind = true
+      for (const contentHash of entry.provisionalContentHashes) {
+        entry.committedContentHashes.add(contentHash)
+      }
+      entry.provisionalContentHashes.clear()
+    }
+    entry.expiresAt = now + claim.ttlMs
+  }
+
+  private trackInFlightDedupeClaim(key: string): InFlightDedupeClaim {
+    let settle: (outcome: DeliveryDedupeClaimOutcome) => void = () => undefined
+    const promise = new Promise<DeliveryDedupeClaimOutcome>((resolve) => {
+      settle = resolve
+    })
+    let claims = this.inFlightDedupeClaims.get(key)
+    if (!claims) {
+      claims = new Set()
+      this.inFlightDedupeClaims.set(key, claims)
+    }
+    claims.add(promise)
+    void promise.finally(() => {
+      const current = this.inFlightDedupeClaims.get(key)
+      current?.delete(promise)
+      if (current?.size === 0) this.inFlightDedupeClaims.delete(key)
+    })
+    return { promise, settle }
+  }
+
+  private async waitForInFlightDedupeClaims(key: string): Promise<DeliveryDedupeClaimOutcome | null> {
+    const claims = Array.from(this.inFlightDedupeClaims.get(key) ?? [])
+    if (claims.length === 0) return null
+    const outcomes = await Promise.all(claims)
+    return outcomes.includes('released') ? 'released' : 'committed'
+  }
+
+  private releaseDedupeKey(key: string, isSlackLogicalKey: boolean, contentHash?: string): void {
     if (isSlackLogicalKey) {
-      this.slackLogicalInjections.delete(key)
+      const entry = this.slackLogicalInjections.get(key)
+      if (!entry) return
+      if (contentHash) {
+        entry.provisionalContentHashes.delete(contentHash)
+      } else {
+        entry.provisionalBlind = false
+        entry.provisionalContentHashes.clear()
+      }
+      if (
+        !entry.committedBlind &&
+        !entry.provisionalBlind &&
+        entry.committedContentHashes.size === 0 &&
+        entry.provisionalContentHashes.size === 0
+      ) {
+        this.slackLogicalInjections.delete(key)
+      }
     } else {
       this.recentInjections.delete(key)
     }

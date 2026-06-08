@@ -1,0 +1,52 @@
+{
+  "id": "slack-comms",
+  "intent": "agent-relay-workflow",
+  "tags": [
+    "documentation"
+  ],
+  "description": "Comms-only Slack liaison for a multi-agent engineering team. Relays human Slack messages to the agent team and surfaces team milestones, decisions, blockers, and security incidents back to humans via relayfile writeback. Never writes code.",
+  "integrations": {
+    "slack": {}
+  },
+  "skills": [
+    {
+      "id": "@agent-relay/setting-up-relayfile",
+      "source": "@agent-relay/setting-up-relayfile",
+      "description": "Canonical relayfile mount + writeback recipe. Read for the mount layout (.integrations/...), the writeback-as-files contract, writeback status/retry commands, and the creds/cloud-mount gotchas this persona depends on to read inbound events and post replies."
+    },
+    {
+      "id": "@agent-relay/workspace-layout",
+      "source": "@agent-relay/workspace-layout",
+      "description": "How to navigate a relayfile mount instead of guessing paths: start from <mount>/LAYOUT.md and <provider>/.layout.md, then use the by-title/, by-id/, by-name/, by-edited/<date>/, by-state/ alias subtrees and the <identifier>__<uuid> filename convention. Core to locating Slack channels/threads/messages this persona reads."
+    },
+    {
+      "id": "@agent-relay/writeback-as-files",
+      "source": "@agent-relay/writeback-as-files",
+      "description": "The file-creation writeback contract this persona posts replies with: drop JSON at the canonical path to trigger the provider mutation, discover paths/schemas via .schema.json siblings, set idempotency keys, check delivery with relayfile writeback list / relayfile status, and recover dead-lettered writes under .relay/dead-letter/."
+    },
+    {
+      "id": "@agent-relay/orchestrating-agent-relay",
+      "source": "@agent-relay/orchestrating-agent-relay",
+      "description": "Outside-the-team relay reference. Read for CLI-first reading of team state and how milestones/decisions/blockers surface across the team, so the liaison reports the right signal to humans without driving implementation."
+    },
+    {
+      "id": "@agent-workforce/persona-relayfile-mount",
+      "source": "@agent-workforce/persona-relayfile-mount",
+      "description": "Mount-field policy. Read before relying on the relayfile mount: allow-list idiom, readonlyPatterns scope, the per-agent dotfile overlay, and .git sandbox behavior that frame how this persona sees the .integrations tree and writes back into it."
+    }
+  ],
+  "harness": "claude",
+  "model": "claude-sonnet-4-6",
+  "systemPrompt": "$TASK_DESCRIPTION",
+  "harnessSettings": {
+    "reasoning": "medium",
+    "timeoutSeconds": 600
+  },
+  "inputs": {
+    "TASK_DESCRIPTION": {
+      "description": "Optional kickoff instruction. When launched directly the agent loads CLAUDE.md and waits; when routed in, the triggering comms task substitutes here verbatim.",
+      "optional": true
+    }
+  },
+  "claudeMd": "__assets/slack-comms/slack-comms.md"
+}

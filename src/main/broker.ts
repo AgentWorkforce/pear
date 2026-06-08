@@ -139,6 +139,18 @@ export function resolveAgentRelayMcpCommand(): string | undefined {
   })
 }
 
+// Strict-join failures from the broker (#125): an explicitly pinned workspace
+// key never falls back to creating a fresh workspace. Auth rejection (401/403,
+// "was rejected") is fatal — the key is bad or revoked; rate limiting (429,
+// "was rate-limited") is retryable. Contract strings from agent-relay-broker
+// relaycast/auth.rs, verified in the T3 review.
+export function classifyWorkspaceJoinFailure(err: unknown): 'rejected' | 'rate-limited' | null {
+  const message = toErrorMessage(err)
+  if (/explicit workspace key .* was rate-limited/iu.test(message)) return 'rate-limited'
+  if (/explicit workspace key .* was rejected/iu.test(message)) return 'rejected'
+  return null
+}
+
 function parseAgentWorkforceJson<T>(output: string, label: string): T {
   try {
     return JSON.parse(output) as T
@@ -301,6 +313,13 @@ export interface CloudAgentSandboxHandle {
   execUrl: string
   apiKey?: string
   relayfileMountPath?: string
+  /**
+   * The relay workspace key provisioning actually sent on POST /box (#125).
+   * Set only when the warm path resolved a local key — its presence arms the
+   * attach-time tripwire that detects a sandbox broker silently ignoring
+   * AGENT_RELAY_WORKSPACE_KEY (stale, pre-strict-join binary).
+   */
+  sentWorkspaceKey?: string
 }
 
 type BrokerEventObserver = (projectId: string, event: BrokerEvent) => void
@@ -365,6 +384,8 @@ const MAX_BROKER_TIMEOUTS_BEFORE_REVIVE = 2
 const BROKER_REVIVE_TERM_GRACE_MS = 1_500
 const PERSONA_REGISTRATION_TIMEOUT_MS = 5_000
 const PERSONA_REGISTRATION_STABILITY_MS = 1_000
+const PERSONA_HARNESS_READY_TIMEOUT_MS = 120_000
+const PERSONA_READY_PROBE_TIMEOUT_MS = 5_000
 const AGENTWORKFORCE_CLI_VERSION = '3.0.50'
 
 function delay(ms: number): Promise<void> {
@@ -406,6 +427,11 @@ type BrokerSpawnResult = {
   cli?: string
 }
 
+type PersonaBrokerSpawnResult = BrokerSpawnResult & {
+  workerStreamBaselineSeq?: number
+  workerStreamBaselineCount: number
+}
+
 function normalizeSpawnPtyResult(value: unknown, fallbackName: string, cli?: string): BrokerSpawnResult {
   const record = isRecord(value) ? value : {}
   const name = typeof record.name === 'string' && record.name.trim()
@@ -429,17 +455,20 @@ function brokerEventString(event: BrokerEvent, key: string): string | undefined 
   return typeof value === 'string' ? value : undefined
 }
 
-function isDeliveryEventForMessage(event: BrokerEvent, eventId: string, targets: string[]): boolean {
-  const kind = brokerEventString(event, 'kind')
-  if (![
+function isDeliveryEventForMessage(
+  event: BrokerEvent,
+  eventId: string,
+  targets: string[],
+  allowedKinds: string[] = [
     'delivery_ack',
     'delivery_verified',
     'delivery_failed',
     'message_delivery_confirmed',
     'message_delivery_failed'
-  ].includes(kind || '')) {
-    return false
-  }
+  ]
+): boolean {
+  const kind = brokerEventString(event, 'kind')
+  if (!allowedKinds.includes(kind || '')) return false
   if (brokerEventString(event, 'event_id') !== eventId) return false
   const name = brokerEventString(event, 'name')
   return !name || targets.length === 0 || targets.includes(name)
@@ -450,6 +479,33 @@ function deliveryFailureMessage(event: BrokerEvent): string {
   const reason = typeof event.reason === 'string' ? event.reason : undefined
   const lastError = typeof event.lastError === 'string' ? event.lastError : undefined
   return reason || lastError || 'Broker delivery failed'
+}
+
+function isWorkerStreamForAgent(event: BrokerEvent, name: string): boolean {
+  return brokerEventString(event, 'kind') === 'worker_stream' && brokerEventString(event, 'name') === name
+}
+
+function brokerEventChunk(event: BrokerEvent): string {
+  const value = (event as unknown as Record<string, unknown>).chunk
+  return typeof value === 'string' ? value : ''
+}
+
+function brokerEventNumber(event: BrokerEvent, key: string): number | undefined {
+  const value = (event as unknown as Record<string, unknown>)[key]
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function personaHarnessReadyFromOutput(output: string): boolean {
+  return /Sandbox mount ready/i.test(output)
+}
+
+function personaHarnessFailedFromOutput(output: string): string | undefined {
+  const match = output.match(/(Failed to (?:launch sandbox mount|spawn "[^"]+"(?: inside sandbox mount)?|set up sandbox mount)[^\r\n]*)/i)
+  return match?.[1]
+}
+
+function tailText(text: string, maxChars = 2_000): string {
+  return text.length > maxChars ? text.slice(text.length - maxChars) : text
 }
 
 interface PearLineageEntry {
@@ -1207,7 +1263,8 @@ export class BrokerManager {
   private sessions = new Map<string, BrokerSession>()
   private startPromises = new Map<string, Promise<boolean | void>>()
   private revivePromises = new Map<string, Promise<boolean>>()
-  private inFlightSpawnRequests = new Map<string, Promise<BrokerSpawnResult>>()
+  private inFlightSpawnRequests = new Map<string, Promise<{ name: string; runtime: string }>>()
+  private inFlightPersonaSpawnRequests = new Map<string, Promise<BrokerSpawnResult>>()
   // Which broker sessions (by session key) an agent name is registered on.
   // Both a project's local and cloud brokers join the same relay workspace,
   // so agent names are project-unique in practice — the set tracks which
@@ -1226,6 +1283,7 @@ export class BrokerManager {
   // Consecutive broker read timeouts per project/operation; after MAX we
   // respawn the wedged broker. Reset whenever that operation succeeds.
   private brokerTimeoutCounts = new Map<string, number>()
+  private pendingPersonaReadiness = new Set<string>()
   private eventStreamGenerationCounter = 0
   private eventObservers = new Set<BrokerEventObserver>()
   private eventHistory: BrokerEventRecord[] = []
@@ -1297,7 +1355,8 @@ export class BrokerManager {
     }
 
     const startBroker = async (): Promise<boolean> => {
-      const existingClient = await this.connectExistingBroker(normalizedProjectId, cwd)
+      const explicitWorkspaceKey = process.env.AGENT_RELAY_WORKSPACE_KEY?.trim() || undefined
+      const existingClient = await this.connectExistingBroker(normalizedProjectId, cwd, explicitWorkspaceKey)
       if (existingClient) {
         const eventStreamGeneration = this.nextEventStreamGeneration()
         const unsubEvent = this.attachClient(normalizedProjectId, existingClient, win, eventStreamGeneration)
@@ -1335,12 +1394,15 @@ export class BrokerManager {
         console.warn('[broker] Agent Relay MCP command could not be resolved; broker will use its default MCP command')
       }
 
+      // Phase 1 of #125: the local broker stays the workspace creator, so the
+      // key is only threaded when explicitly pinned via env.
       const opts: AgentRelaySpawnOptions = {
         cwd,
         brokerName: name,
         channels: nextChannels,
         binaryArgs: { persist: true },
         binaryPath: resolveBundledBrokerBinary(),
+        ...(explicitWorkspaceKey ? { workspaceKey: explicitWorkspaceKey } : {}),
         env: {
           PATH: augmentedPath(),
           ...(agentRelayMcpCommand ? { AGENT_RELAY_MCP_COMMAND: agentRelayMcpCommand } : {})
@@ -1350,7 +1412,11 @@ export class BrokerManager {
         }
       }
 
-      console.log('[broker] Starting with opts:', JSON.stringify({ ...opts, projectId: normalizedProjectId }))
+      console.log('[broker] Starting with opts:', JSON.stringify({
+        ...opts,
+        ...(explicitWorkspaceKey ? { workspaceKey: `${explicitWorkspaceKey.slice(0, 8)}…` } : {}),
+        projectId: normalizedProjectId
+      }))
       const client = await AgentRelayClient.spawn(opts)
       console.log('[broker] Started successfully for project:', normalizedProjectId)
       const eventStreamGeneration = this.nextEventStreamGeneration()
@@ -1387,7 +1453,13 @@ export class BrokerManager {
       return await startPromise
     } catch (err) {
       console.error(`[broker] Failed to start for project ${normalizedProjectId}:`, err)
-      this.sendStatusToWindow(win, normalizedProjectId, 'error', String(err))
+      const joinFailure = classifyWorkspaceJoinFailure(err)
+      const statusMessage = joinFailure === 'rate-limited'
+        ? `Workspace join rate-limited (retryable): ${String(err)}`
+        : joinFailure === 'rejected'
+          ? `Workspace key rejected — broker refused to create a fresh workspace: ${String(err)}`
+          : String(err)
+      this.sendStatusToWindow(win, normalizedProjectId, 'error', statusMessage)
       throw err
     } finally {
       if (this.startPromises.get(normalizedProjectId) === startPromise) {
@@ -1396,7 +1468,11 @@ export class BrokerManager {
     }
   }
 
-  private async connectExistingBroker(projectId: string, cwd: string): Promise<AgentRelayClient | null> {
+  private async connectExistingBroker(
+    projectId: string,
+    cwd: string,
+    expectedWorkspaceKey?: string
+  ): Promise<AgentRelayClient | null> {
     const connectionPaths = brokerConnectionPathCandidates(cwd).filter((candidate) => existsSync(candidate))
     if (connectionPaths.length === 0) {
       return null
@@ -1406,7 +1482,19 @@ export class BrokerManager {
       let client: AgentRelayClient | undefined
       try {
         client = AgentRelayClient.connect({ cwd, connectionPath })
-        await client.getSession()
+        const metadata = await client.getSession()
+        if (expectedWorkspaceKey && metadata.workspace_key !== expectedWorkspaceKey) {
+          console.warn(
+            `[broker] Existing broker connection workspace key does not match explicit pin for project ${projectId}; starting a pinned broker instead`,
+            {
+              connectionPath,
+              expectedWorkspaceKeyPrefix: expectedWorkspaceKey.slice(0, 8),
+              actualWorkspaceKeyPrefix: metadata.workspace_key?.slice(0, 8) ?? '(none)'
+            }
+          )
+          client.disconnect()
+          continue
+        }
         console.log(`[broker] Reusing existing broker for project ${projectId}: ${connectionPath}`)
         return client
       } catch (err) {
@@ -1491,6 +1579,27 @@ export class BrokerManager {
   }
 
   /**
+   * The local broker creates the project's relay workspace; its workspace_key
+   * is what cloud sandbox brokers must join so local and cloud agents share
+   * one workspace (#125). Non-throwing: resolves undefined until a local
+   * session exists and exposes a key, so provisioning can proceed without it.
+   */
+  async workspaceKeyForProject(projectId: string): Promise<string | undefined> {
+    const normalizedProjectId = projectId.trim()
+    if (!normalizedProjectId) return undefined
+    const startPromise = this.startPromises.get(normalizedProjectId)
+    if (startPromise) await startPromise.catch(() => undefined)
+    const session = this.sessions.get(normalizedProjectId)
+    if (!session) return undefined
+    try {
+      const metadata = await session.client.getSession()
+      return metadata.workspace_key || undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /**
    * Attach to an already-provisioned cloud sandbox (used by CloudAgentManager
    * which warms the box via the cloud-agents/{id}/box endpoint). connectCloud
    * is the legacy ad-hoc path that creates a sandbox here.
@@ -1546,7 +1655,28 @@ export class BrokerManager {
         baseUrl: execUrl,
         ...(apiKey ? { apiKey } : {})
       })
-      await client.getSession()
+      const sessionMetadata = await client.getSession()
+
+      // #125 tripwire: provisioning asked this sandbox broker to JOIN an
+      // explicit workspace. A different key in the session means the broker
+      // ignored AGENT_RELAY_WORKSPACE_KEY (a pre-strict-join binary, e.g. a
+      // stale snapshot bake) and silently created an isolated workspace —
+      // exactly the failure #125 fixed. Compare only when a key was actually
+      // sent; prefixes keep the event diagnosable from logs without leaking
+      // whole keys.
+      const sentWorkspaceKey = handle.sentWorkspaceKey?.trim() || undefined
+      const sandboxWorkspaceKey = sessionMetadata.workspace_key || undefined
+      const workspaceKeyMismatch = !!sentWorkspaceKey && sandboxWorkspaceKey !== sentWorkspaceKey
+      if (workspaceKeyMismatch) {
+        console.error(
+          `[broker] Cloud sandbox broker ignored workspace key for project ${normalizedProjectId} — stale broker binary?`,
+          {
+            sandboxId,
+            sentWorkspaceKeyPrefix: sentWorkspaceKey?.slice(0, 8),
+            sandboxWorkspaceKeyPrefix: sandboxWorkspaceKey?.slice(0, 8) ?? '(none)'
+          }
+        )
+      }
 
       const eventStreamGeneration = this.nextEventStreamGeneration()
       const unsubEvent = this.attachClient(sessionKey, client, win, eventStreamGeneration)
@@ -1575,6 +1705,15 @@ export class BrokerManager {
       })
       client.connectEvents()
 
+      if (workspaceKeyMismatch) {
+        this.publishBrokerEvent(sessionKey, normalizedProjectId, win, {
+          kind: 'cloud_workspace_key_mismatch',
+          cloudSandboxId: sandboxId,
+          sentWorkspaceKeyPrefix: sentWorkspaceKey?.slice(0, 8) ?? null,
+          sandboxWorkspaceKeyPrefix: sandboxWorkspaceKey?.slice(0, 8) ?? null,
+          detail: 'sandbox broker ignored AGENT_RELAY_WORKSPACE_KEY — stale broker binary?'
+        })
+      }
       this.publishBrokerEvent(sessionKey, normalizedProjectId, win, {
         kind: 'broker_initialized',
         name: `cloud-${normalizedProjectId}`,
@@ -2228,6 +2367,22 @@ export class BrokerManager {
     return `${sessionKey}:${name}`
   }
 
+  private personaReadinessKey(sessionKey: string, name: string): string {
+    return `${sessionKey}:${name}`
+  }
+
+  private markPersonaReadinessPending(session: BrokerSession, name: string): void {
+    this.pendingPersonaReadiness.add(this.personaReadinessKey(sessionKeyFor(session), name))
+  }
+
+  private clearPersonaReadinessPending(session: BrokerSession, name: string): void {
+    this.pendingPersonaReadiness.delete(this.personaReadinessKey(sessionKeyFor(session), name))
+  }
+
+  private isPersonaReadinessPending(session: BrokerSession, name: string): boolean {
+    return this.pendingPersonaReadiness.has(this.personaReadinessKey(sessionKeyFor(session), name))
+  }
+
   // Returns the input stream for an agent plus whether it is *ready* to send on
   // (the broker has acked pty_input_ready). The WS handshake runs in the
   // background and is never awaited here, so a keystroke is never blocked on the
@@ -2337,12 +2492,12 @@ export class BrokerManager {
     projectId: string,
     spawnInput: SpawnPtyInput & { broker?: 'local' | 'cloud' },
     options: { parentAgentName?: string } = {}
-  ): Promise<BrokerSpawnResult> {
+  ): Promise<{ name: string; runtime: string }> {
     const requestKey = spawnRequestKey(projectId, spawnInput, options)
     const inFlight = this.inFlightSpawnRequests.get(requestKey)
     if (inFlight) return inFlight
 
-    let promise!: Promise<BrokerSpawnResult>
+    let promise!: Promise<{ name: string; runtime: string }>
     promise = this.spawnAgentOnce(projectId, spawnInput, options).finally(() => {
       if (this.inFlightSpawnRequests.get(requestKey) === promise) {
         this.inFlightSpawnRequests.delete(requestKey)
@@ -2356,7 +2511,7 @@ export class BrokerManager {
     projectId: string,
     spawnInput: SpawnPtyInput & { broker?: 'local' | 'cloud' },
     options: { parentAgentName?: string } = {}
-  ): Promise<BrokerSpawnResult> {
+  ): Promise<{ name: string; runtime: string }> {
     // `broker` selects which of the project's sessions the agent spawns on.
     // Default: local-first via getSessionForProject (cloud only when no local
     // broker is running, preserving the cloud-only flow).
@@ -2408,8 +2563,7 @@ export class BrokerManager {
           )
         }
         const spawned = await session.client.spawnPty(nextInput)
-        const safeSpawned = normalizeSpawnPtyResult(spawned, nextInput.name)
-        const spawnedName = safeSpawned.name
+        const spawnedName = spawned.name || nextInput.name
         this.rememberAgentSession(spawnedName, sessionKeyFor(session))
         const burnInput = { ...nextInput, name: spawnedName }
         const lineage = session.pearLineage.get(spawnedName)
@@ -2425,7 +2579,7 @@ export class BrokerManager {
         ).catch((err) => {
           console.warn('[burn-spawn-hook] post-spawn burn stamp failed:', err)
         })
-        return safeSpawned
+        return spawned
       } catch (err) {
         if (!isAgentNameConflict(err)) {
           throw buildSpawnFailureError(err, nextInput, session.cloudSandboxId ? 'cloud' : 'local')
@@ -2459,16 +2613,16 @@ export class BrokerManager {
     }
 
     const requestKey = personaSpawnRequestKey(projectId, trimmedPersonaId)
-    const inFlight = this.inFlightSpawnRequests.get(requestKey)
+    const inFlight = this.inFlightPersonaSpawnRequests.get(requestKey)
     if (inFlight) return inFlight
 
     let promise!: Promise<BrokerSpawnResult>
     promise = this.spawnPersonaOnce(projectId, trimmedPersonaId).finally(() => {
-      if (this.inFlightSpawnRequests.get(requestKey) === promise) {
-        this.inFlightSpawnRequests.delete(requestKey)
+      if (this.inFlightPersonaSpawnRequests.get(requestKey) === promise) {
+        this.inFlightPersonaSpawnRequests.delete(requestKey)
       }
     })
-    this.inFlightSpawnRequests.set(requestKey, promise)
+    this.inFlightPersonaSpawnRequests.set(requestKey, promise)
     return promise
   }
 
@@ -2479,9 +2633,9 @@ export class BrokerManager {
     const persona = findWorkforcePersona(session.cwd, trimmedPersonaId, command)
 
     // Resolve the harness from `agentworkforce show --json`. The actual spawn
-    // is delegated to the workforce CLI (`agent --install-in-repo`), which
-    // reads the full inherited persona itself, so the broker only needs the
-    // harness for the informational `cli` field it returns.
+    // is delegated to the workforce CLI (`agent <persona>`), which reads the
+    // full inherited persona itself, stages skills, materializes sidecars in
+    // its sandbox mount, and injects relaycast MCP from the broker env.
     const resolvedHarness = persona.spec.harness ?? 'claude'
     const spawned = await this.spawnPersonaWithMode(session, {
       personaId: trimmedPersonaId,
@@ -2495,19 +2649,31 @@ export class BrokerManager {
         projectId: session.projectId,
         personaId: trimmedPersonaId,
         name: spawned.name,
-        mode: 'cli-install-in-repo',
+        mode: 'cli-sandbox',
         runtime: registeredAgent.runtime,
         cli: registeredAgent.cli,
         currentState: registeredAgent.current_state
       })
-      return spawned
+      this.markPersonaReadinessPending(session, spawned.name)
+      try {
+        await this.verifyPersonaHarnessReady(session, spawned.name, trimmedPersonaId, {
+          workerStreamBaselineSeq: spawned.workerStreamBaselineSeq,
+          workerStreamBaselineCount: spawned.workerStreamBaselineCount
+        })
+      } catch (err) {
+        await this.releaseUnreadyPersona(session, spawned.name, 'persona harness readiness verification failed')
+        throw err
+      } finally {
+        this.clearPersonaReadinessPending(session, spawned.name)
+      }
+      return {
+        name: spawned.name,
+        runtime: spawned.runtime,
+        ...(spawned.cli ? { cli: spawned.cli } : {})
+      }
     }
 
-    await session.client.release(spawned.name, 'persona broker registration verification failed').catch((err) => {
-      if (!isMissingAgentError(err)) {
-        console.warn(`[broker] Failed to release unverified persona agent ${spawned.name}:`, err)
-      }
-    })
+    await this.releaseUnreadyPersona(session, spawned.name, 'persona broker registration verification failed')
     throw new Error(
       `Workforce persona ${trimmedPersonaId} launched but did not stay registered with the broker`
     )
@@ -2521,11 +2687,11 @@ export class BrokerManager {
       command: { cli: string; args: string[] }
       resolvedHarness: string
     }
-  ): Promise<BrokerSpawnResult> {
+  ): Promise<PersonaBrokerSpawnResult> {
     const existingNames = new Set(
       (await session.client.listAgents()).map((agent) => agent.name)
     )
-    const personaArgs = ['agent', '--install-in-repo', input.personaId]
+    const personaArgs = ['agent', input.personaId]
     let nextInput: SpawnPtyInput = {
       name: getAvailableAgentName(input.baseName, existingNames),
       cli: input.command.cli,
@@ -2536,12 +2702,20 @@ export class BrokerManager {
     }
 
     for (let attempt = 0; attempt < 20; attempt += 1) {
+      const requestedName = nextInput.name
+      this.markPersonaReadinessPending(session, requestedName)
       try {
+        const baseline = this.workerStreamBaseline(session, requestedName)
         const spawned = await session.client.spawnPty(nextInput)
         const safeSpawned = normalizeSpawnPtyResult(spawned, nextInput.name, input.resolvedHarness)
+        if (safeSpawned.name !== requestedName) {
+          this.clearPersonaReadinessPending(session, requestedName)
+          this.markPersonaReadinessPending(session, safeSpawned.name)
+        }
         this.rememberAgentSession(safeSpawned.name, sessionKeyFor(session))
-        return safeSpawned
+        return { ...safeSpawned, ...baseline }
       } catch (err) {
+        this.clearPersonaReadinessPending(session, requestedName)
         if (!isAgentNameConflict(err)) {
           throw err
         }
@@ -2659,6 +2833,170 @@ export class BrokerManager {
 
     this.rememberAgentSession(stableAgent.name, sessionKeyFor(session))
     return stableAgent
+  }
+
+  private async releaseUnreadyPersona(session: BrokerSession, name: string, reason: string): Promise<void> {
+    this.clearPersonaReadinessPending(session, name)
+    this.forgetAgentSession(name, sessionKeyFor(session))
+    await session.client.release(name, reason).catch((err) => {
+      if (!isMissingAgentError(err)) {
+        console.warn(`[broker] Failed to release unready persona agent ${name}:`, err)
+      }
+    })
+  }
+
+  private workerStreamEvents(session: BrokerSession, name: string, limit: number): BrokerEvent[] {
+    const queryEvents = (session.client as unknown as {
+      queryEvents?: (filter: { kind: string; name: string; limit: number }) => BrokerEvent[]
+    }).queryEvents
+    return typeof queryEvents === 'function'
+      ? queryEvents.call(session.client, { kind: 'worker_stream', name, limit })
+      : []
+  }
+
+  private workerStreamBaseline(session: BrokerSession, name: string): {
+    workerStreamBaselineSeq?: number
+    workerStreamBaselineCount: number
+  } {
+    const events = this.workerStreamEvents(session, name, 1000)
+    const seqs = events
+      .map((event) => brokerEventNumber(event, 'seq'))
+      .filter((seq): seq is number => seq !== undefined)
+    return {
+      workerStreamBaselineSeq: seqs.length > 0 ? Math.max(...seqs) : undefined,
+      workerStreamBaselineCount: events.length
+    }
+  }
+
+  private isWorkerStreamAfterBaseline(
+    event: BrokerEvent,
+    index: number,
+    baseline: { workerStreamBaselineSeq?: number; workerStreamBaselineCount: number }
+  ): boolean {
+    const seq = brokerEventNumber(event, 'seq')
+    if (baseline.workerStreamBaselineSeq !== undefined) {
+      return seq !== undefined && seq > baseline.workerStreamBaselineSeq
+    }
+    return index >= baseline.workerStreamBaselineCount
+  }
+
+  private async verifyPersonaHarnessReady(
+    session: BrokerSession,
+    name: string,
+    personaId: string,
+    baseline: { workerStreamBaselineSeq?: number; workerStreamBaselineCount: number }
+  ): Promise<void> {
+    const timeoutMs = parsePositiveIntegerEnv('PEAR_PERSONA_HARNESS_READY_TIMEOUT_MS', PERSONA_HARNESS_READY_TIMEOUT_MS)
+    const deadline = Date.now() + timeoutMs
+    await this.waitForPersonaHarnessReadyOutput(session, name, personaId, deadline, baseline)
+    await this.waitForPersonaDeliveryReadiness(session, name, personaId, deadline)
+    console.info('[broker] Workforce persona harness readiness verified', {
+      projectId: session.projectId,
+      personaId,
+      name
+    })
+  }
+
+  private async waitForPersonaHarnessReadyOutput(
+    session: BrokerSession,
+    name: string,
+    personaId: string,
+    deadline: number,
+    baseline: { workerStreamBaselineSeq?: number; workerStreamBaselineCount: number }
+  ): Promise<void> {
+    let output = ''
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let settled = false
+    let resolveReady: (() => void) | undefined
+    let rejectReady: ((error: Error) => void) | undefined
+
+    const finish = (error?: Error): void => {
+      if (settled) return
+      settled = true
+      if (timer) clearTimeout(timer)
+      if (error) {
+        rejectReady?.(error)
+      } else {
+        resolveReady?.()
+      }
+    }
+
+    const observe = (event: BrokerEvent): void => {
+      if (!isWorkerStreamForAgent(event, name)) return
+      output += brokerEventChunk(event)
+      const failure = personaHarnessFailedFromOutput(output)
+      if (failure) {
+        finish(new Error(`Workforce persona ${personaId} failed during harness startup: ${failure}`))
+        return
+      }
+      if (personaHarnessReadyFromOutput(output)) {
+        finish()
+      }
+    }
+
+    const remainingMs = Math.max(1, deadline - Date.now())
+    if (remainingMs <= 1) {
+      throw new Error(`Timed out waiting for Workforce persona ${personaId} to prepare its harness`)
+    }
+
+    const readyPromise = new Promise<void>((resolve, reject) => {
+      resolveReady = resolve
+      rejectReady = reject
+      timer = setTimeout(() => {
+        finish(new Error(
+          `Timed out waiting for Workforce persona ${personaId} to prepare its harness. Last output:\n${tailText(output) || '(no output)'}`
+        ))
+      }, remainingMs)
+    })
+    const unsubscribe = session.client.onEvent((event) => {
+      observe(event)
+    })
+
+    try {
+      const events = this.workerStreamEvents(session, name, 1000)
+      for (const [index, event] of events.entries()) {
+        if (this.isWorkerStreamAfterBaseline(event, index, baseline)) {
+          observe(event)
+          if (settled) break
+        }
+      }
+      await readyPromise
+    } finally {
+      if (timer) clearTimeout(timer)
+      unsubscribe()
+    }
+  }
+
+  private async waitForPersonaDeliveryReadiness(
+    session: BrokerSession,
+    name: string,
+    personaId: string,
+    deadline: number
+  ): Promise<void> {
+    try {
+      const confirmation = await this.sendMessageAndWaitForInjected(session.projectId, {
+        to: name,
+        from: 'pear',
+        text: 'Persona launch readiness check. No action required.',
+        priority: -100,
+        mode: 'steer',
+        data: {
+          kind: 'persona-readiness-check',
+          system: true,
+          personaId
+        }
+      } as SendMessageInput, {
+        timeoutMs: Math.min(PERSONA_READY_PROBE_TIMEOUT_MS, Math.max(1, deadline - Date.now()))
+      })
+      if (confirmation.eventId === 'unsupported_operation' || !confirmation.targets.includes(name)) {
+        throw new Error(`Broker did not confirm delivery injection for ${name}`)
+      }
+      return
+    } catch (err) {
+      throw new Error(
+        `Workforce persona ${personaId} launched but did not become ready for broker delivery: ${toErrorMessage(err)}`
+      )
+    }
   }
 
   async generateCommitDraft(projectId: string, diff: string): Promise<GeneratedCommitDraft> {
@@ -3106,6 +3444,99 @@ export class BrokerManager {
     }
   }
 
+  async sendMessageAndWaitForInjected(
+    projectId: string | undefined,
+    input: SendMessageInput,
+    options: { timeoutMs?: number } = {}
+  ): Promise<DeliveryConfirmationResult> {
+    const session = input.to.startsWith('#')
+      ? this.getSessionForProject(projectId || '')
+      : this.getSessionForAgent(input.to, projectId)
+    const timeoutMs = Math.max(1, options.timeoutMs ?? DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS)
+    const observedEvents: BrokerEvent[] = []
+    let eventId: string | undefined
+    let targets: string[] = []
+    let pendingTargets = new Set<string>()
+    let settled = false
+    let timer: ReturnType<typeof setTimeout> | undefined
+    let resolveWait: (() => void) | undefined
+    let rejectWait: ((error: Error) => void) | undefined
+
+    const waitForInjection = new Promise<void>((resolve, reject) => {
+      resolveWait = resolve
+      rejectWait = reject
+      timer = setTimeout(() => {
+        if (settled) return
+        settled = true
+        const pending = Array.from(pendingTargets)
+        const targetSummary = pending.length > 0 ? ` (${pending.join(', ')})` : ''
+        reject(new Error(`Timed out waiting for delivery injection for ${eventId || input.to}${targetSummary}`))
+      }, timeoutMs)
+    })
+
+    const maybeComplete = (event: BrokerEvent): void => {
+      if (settled || !eventId) return
+      if (!isDeliveryEventForMessage(event, eventId, targets, [
+        'delivery_injected',
+        'delivery_failed',
+        'message_delivery_failed'
+      ])) {
+        return
+      }
+      const name = brokerEventString(event, 'name')
+
+      if (event.kind === 'delivery_injected') {
+        if (!name || pendingTargets.size === 0) {
+          settled = true
+          resolveWait?.()
+          return
+        }
+        pendingTargets.delete(name)
+        if (pendingTargets.size === 0) {
+          settled = true
+          resolveWait?.()
+        }
+        return
+      }
+
+      if (event.kind === 'delivery_failed' || event.kind === 'message_delivery_failed') {
+        settled = true
+        rejectWait?.(new Error(deliveryFailureMessage(event)))
+      }
+    }
+
+    const unsubscribe = session.client.onEvent((event) => {
+      observedEvents.push(event)
+      maybeComplete(event)
+    })
+
+    try {
+      const rawResult = await session.client.sendMessage(input) as unknown
+      const result = isRecord(rawResult) ? rawResult : {}
+      eventId = typeof result.event_id === 'string' ? result.event_id : 'unsupported_operation'
+      const reportedTargets = Array.isArray(result.targets)
+        ? result.targets.filter((target): target is string => typeof target === 'string' && target.trim().length > 0)
+        : []
+      targets = reportedTargets.length > 0 || input.to.startsWith('#')
+        ? reportedTargets
+        : [input.to]
+      pendingTargets = new Set(targets)
+      if (targets.length === 0 || eventId === 'unsupported_operation') {
+        settled = true
+        return { eventId, targets }
+      }
+      for (const event of observedEvents) {
+        maybeComplete(event)
+        if (settled) break
+      }
+      await waitForInjection
+      return { eventId, targets }
+    } finally {
+      if (timer) clearTimeout(timer)
+      unsubscribe()
+    }
+  }
+
   async subscribeAgentChannel(projectId: string | undefined, name: string, channel: string): Promise<void> {
     const trimmedName = name.trim()
     const [channelName] = normalizeChannels([channel])
@@ -3284,7 +3715,8 @@ export class BrokerManager {
     inboundDeliveryMode?: InboundDeliveryMode
     brokerKind?: 'local' | 'cloud'
   }>> {
-    const agents = await session.client.listAgents()
+    const agents = (await session.client.listAgents())
+      .filter((agent) => !this.isPersonaReadinessPending(session, agent.name))
     // A successful poll means the broker is answering again — clear any wedge
     // streak so a future timeout starts counting from zero.
     this.brokerTimeoutCounts.delete(`${session.projectId}:listAgents`)
@@ -3400,14 +3832,15 @@ export class BrokerManager {
         'Broker status'
       )
       return {
-        agents: status.agents,
+        agents: status.agents.filter((agent) => !this.isPersonaReadinessPending(session, agent.name)),
         pendingDeliveryCount: status.pending_delivery_count,
         auth: status.auth
       }
     } catch (statusErr) {
       try {
         return {
-          agents: await withBrokerDetailsTimeout(session.client.listAgents(), 'Agent list'),
+          agents: (await withBrokerDetailsTimeout(session.client.listAgents(), 'Agent list'))
+            .filter((agent) => !this.isPersonaReadinessPending(session, agent.name)),
           pendingDeliveryCount: 0
         }
       } catch (listErr) {

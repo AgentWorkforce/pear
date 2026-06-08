@@ -65,7 +65,8 @@ const mock = vi.hoisted(() => {
     brokerManager: {
       onBrokerEvent: vi.fn(),
       attachCloudSandbox: vi.fn(async () => undefined),
-      detachCloudSandbox: vi.fn(async () => undefined)
+      detachCloudSandbox: vi.fn(async () => undefined),
+      workspaceKeyForProject: vi.fn(async () => undefined)
     },
     fetch: vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const normalizedUrl = String(url)
@@ -221,6 +222,8 @@ describe('CloudAgentManager', () => {
     mock.brokerManager.onBrokerEvent.mockClear()
     mock.brokerManager.attachCloudSandbox.mockClear()
     mock.brokerManager.detachCloudSandbox.mockClear()
+    mock.brokerManager.workspaceKeyForProject.mockClear()
+    mock.brokerManager.workspaceKeyForProject.mockResolvedValue(undefined)
     mock.loadStore.mockClear()
     mock.saveStore.mockClear()
     mock.resolveCloudAuth.mockClear()
@@ -259,6 +262,26 @@ describe('CloudAgentManager', () => {
   async function flushMicrotasks(): Promise<void> {
     await Promise.resolve()
     await Promise.resolve()
+  }
+
+  function boxRequest(method: string): { url: string; init?: RequestInit } | undefined {
+    return mock.fetchCalls.find((call) =>
+      call.init?.method === method &&
+      call.url.includes('/cloud-agents/cloud-agent-1/box')
+    )
+  }
+
+  function boxRequestBody(method: string): Record<string, unknown> {
+    const request = boxRequest(method)
+    if (!request?.init?.body) throw new Error(`missing ${method} box request body`)
+    return JSON.parse(String(request.init.body)) as Record<string, unknown>
+  }
+
+  function expectBoxPostBody(expected: Record<string, unknown>): void {
+    expect(boxRequestBody('POST')).toEqual({
+      brokerName: 'cloud-cloud-ag',
+      ...expected
+    })
   }
 
   it('keeps a newly created cloud agent visible while the cloud list catches up', async () => {
@@ -302,12 +325,82 @@ describe('CloudAgentManager', () => {
     expect(boxPost?.url).toBe(
       'https://cloud.example/api/v1/workspaces/account-workspace-id/cloud-agents/cloud-agent-1/box?async=true'
     )
-    expect(JSON.parse(String(boxPost?.init?.body))).toEqual({
+    expectBoxPostBody({
       relayfileMountPaths: ['/integrations/github', '/workspace']
     })
+    expect(boxRequestBody('POST')).not.toHaveProperty('workspaceKey')
     expect(boxPost?.url).not.toContain('relay-workspace-id')
     expect(mock.fetchCalls.filter((call) => call.url.endsWith('/api/v1/auth/whoami'))).toHaveLength(1)
     expect(mock.mountInputs[0]?.workspaceId).toBe('relay-workspace-id')
+  })
+
+  it('passes the local relay workspace key and stable cloud broker name when warming a box', async () => {
+    mock.brokerManager.workspaceKeyForProject.mockResolvedValueOnce('rk_live_project')
+    const manager = new CloudAgentManager()
+
+    await manager.attach('project-1', 'cloud-agent-1')
+
+    expect(mock.brokerManager.workspaceKeyForProject).toHaveBeenCalledWith('project-1')
+    expectBoxPostBody({
+      relayfileMountPaths: ['/integrations/github', '/workspace'],
+      workspaceKey: 'rk_live_project'
+    })
+    expect(mock.brokerManager.attachCloudSandbox).toHaveBeenCalledWith(
+      'project-1',
+      expect.objectContaining({
+        sandboxId: 'sandbox-1',
+        sentWorkspaceKey: 'rk_live_project'
+      }),
+      undefined
+    )
+  })
+
+  it('does not pass a sent workspace key for keyless warms', async () => {
+    const manager = new CloudAgentManager()
+
+    await manager.attach('project-1', 'cloud-agent-1')
+
+    expect(mock.brokerManager.attachCloudSandbox).toHaveBeenCalledWith(
+      'project-1',
+      expect.not.objectContaining({
+        sentWorkspaceKey: expect.anything()
+      }),
+      undefined
+    )
+  })
+
+  it('clears the sent workspace key when a cloud agent detaches', async () => {
+    mock.brokerManager.workspaceKeyForProject.mockResolvedValueOnce('rk_live_project')
+    const manager = new CloudAgentManager()
+    await manager.attach('project-1', 'cloud-agent-1')
+    await manager.detach('project-1')
+    mock.brokerManager.attachCloudSandbox.mockClear()
+
+    await (manager as unknown as {
+      connectBroker: (projectId: string, sandbox: {
+        sandboxId: string
+        execUrl: string
+        filesUrl: string
+        relayfileToken: string
+        relayfileMountPath: string
+        status: 'ready'
+      }) => Promise<void>
+    }).connectBroker('project-1', {
+      sandboxId: 'sandbox-2',
+      execUrl: 'https://sandbox-2.example',
+      filesUrl: 'https://sandbox-2.example/files',
+      relayfileToken: 'relayfile-token-2',
+      relayfileMountPath: '/remote/project-1',
+      status: 'ready'
+    })
+
+    expect(mock.brokerManager.attachCloudSandbox).toHaveBeenCalledWith(
+      'project-1',
+      expect.not.objectContaining({
+        sentWorkspaceKey: expect.anything()
+      }),
+      undefined
+    )
   })
 
   it('reuses a warm-on-intent box when attach is clicked', async () => {
@@ -373,8 +466,7 @@ describe('CloudAgentManager', () => {
 
     await manager.attach('project-1', 'cloud-agent-1')
 
-    const boxPost = mock.fetchCalls.find((call) => call.init?.method === 'POST')
-    expect(JSON.parse(String(boxPost?.init?.body))).toEqual({
+    expectBoxPostBody({
       relayfileMountPaths: ['/integrations/github', '/workspace'],
       workspaceSource: expect.objectContaining({
         kind: 'git-overlay',
@@ -428,8 +520,7 @@ describe('CloudAgentManager', () => {
 
     await manager.attach('project-1', 'cloud-agent-1')
 
-    const boxPost = mock.fetchCalls.find((call) => call.init?.method === 'POST')
-    expect(JSON.parse(String(boxPost?.init?.body))).toEqual({
+    expectBoxPostBody({
       relayfileMountPaths: ['/integrations/github', '/workspace'],
       workspaceSource: {
         kind: 'git-overlay',
@@ -449,8 +540,7 @@ describe('CloudAgentManager', () => {
 
     await manager.attach('project-1', 'cloud-agent-1')
 
-    const boxPost = mock.fetchCalls.find((call) => call.init?.method === 'POST')
-    expect(JSON.parse(String(boxPost?.init?.body))).toEqual({
+    expectBoxPostBody({
       relayfileMountPaths: ['/integrations/github'],
       workspaceSource: expect.objectContaining({
         kind: 'git',
@@ -533,5 +623,18 @@ describe('CloudAgentManager', () => {
     const manager = new CloudAgentManager()
 
     await expect(manager.attach('project-1', 'cloud-agent-1')).rejects.toThrow('broker failed to start')
+  })
+
+  it('keeps mount-path PATCH bodies scoped to mount paths only', async () => {
+    mock.brokerManager.workspaceKeyForProject.mockResolvedValueOnce('rk_live_project')
+    const manager = new CloudAgentManager()
+    await manager.attach('project-1', 'cloud-agent-1')
+    mock.fetchCalls.length = 0
+
+    await manager.updateMountPaths('project-1', ['/integrations/slack'])
+
+    expect(boxRequestBody('PATCH')).toEqual({
+      relayfileMountPaths: ['/integrations/slack', '/workspace']
+    })
   })
 })

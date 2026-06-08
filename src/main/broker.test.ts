@@ -28,15 +28,25 @@ type MockClient = {
   unsubscribeChannels: ReturnType<typeof vi.fn>
   getStatus: ReturnType<typeof vi.fn>
   sendMessage: ReturnType<typeof vi.fn>
+  queryEvents: ReturnType<typeof vi.fn>
   brokerPid?: number
   baseUrl?: string
   agentNames: string[]
+  eventHistory: unknown[]
+  eventListeners: Set<(event: unknown) => void>
+  emitEvent: (event: unknown) => void
 }
 
 const mock = vi.hoisted(() => {
   function createMockClient(agentNames: string[] = []): MockClient {
     const client: MockClient = {
       agentNames: [...agentNames],
+      eventHistory: [],
+      eventListeners: new Set(),
+      emitEvent: (event: unknown) => {
+        client.eventHistory.push(event)
+        for (const listener of client.eventListeners) listener(event)
+      },
       getSession: vi.fn(async () => ({})),
       listAgents: vi.fn(async () => client.agentNames.map((name) => ({ name, runtime: 'pty', channels: [] }))),
       getInboundDeliveryMode: vi.fn(async () => 'passthrough'),
@@ -52,7 +62,22 @@ const mock = vi.hoisted(() => {
         agents: client.agentNames.map((name) => ({ name, runtime: 'pty', channels: [] })),
         pending_delivery_count: 0
       })),
-      onEvent: vi.fn(() => () => undefined),
+      queryEvents: vi.fn((filter: { kind?: string; name?: string; limit?: number }) => {
+        const events = client.eventHistory.filter((event) => {
+          if (!event || typeof event !== 'object') return false
+          const record = event as Record<string, unknown>
+          if (filter.kind && record.kind !== filter.kind) return false
+          if (filter.name && record.name !== filter.name) return false
+          return true
+        })
+        return events.slice(-(filter.limit ?? events.length))
+      }),
+      onEvent: vi.fn((listener: (event: unknown) => void) => {
+        client.eventListeners.add(listener)
+        return () => {
+          client.eventListeners.delete(listener)
+        }
+      }),
       addListener: vi.fn(() => () => undefined),
       connectEvents: vi.fn(),
       disconnectEvents: vi.fn(),
@@ -62,7 +87,20 @@ const mock = vi.hoisted(() => {
       release: vi.fn(async () => undefined),
       subscribeChannels: vi.fn(async () => undefined),
       unsubscribeChannels: vi.fn(async () => undefined),
-      sendMessage: vi.fn(async () => ({ event_id: 'evt-message', targets: [] })),
+      sendMessage: vi.fn(async (input: { to?: string }) => {
+        const target = input.to || ''
+        const eventId = `evt-${Math.random().toString(16).slice(2)}`
+        if (target && !target.startsWith('#')) {
+          setImmediate(() => {
+            client.emitEvent({
+              kind: 'delivery_injected',
+              event_id: eventId,
+              name: target
+            })
+          })
+        }
+        return { event_id: eventId, targets: target && !target.startsWith('#') ? [target] : [] }
+      }),
       brokerPid: 4242
     }
     return client
@@ -74,7 +112,9 @@ const mock = vi.hoisted(() => {
     connectedClients: [] as MockClient[],
     nextLocalAgents: [] as string[],
     nextCloudAgents: [] as string[],
+    nextCloudSessionMetadata: [] as Array<Record<string, unknown>>,
     nextConnectedAgents: [] as string[],
+    nextConnectedSessionMetadata: [] as Array<Record<string, unknown>>,
     nextConnectedSessionErrors: [] as Error[]
   }
 
@@ -87,6 +127,10 @@ const mock = vi.hoisted(() => {
 
     static connect = vi.fn(() => {
       const client = createMockClient(state.nextConnectedAgents.splice(0))
+      const metadata = state.nextConnectedSessionMetadata.shift()
+      if (metadata) {
+        client.getSession.mockResolvedValueOnce(metadata)
+      }
       const sessionError = state.nextConnectedSessionErrors.shift()
       if (sessionError) {
         client.getSession.mockRejectedValueOnce(sessionError)
@@ -97,6 +141,10 @@ const mock = vi.hoisted(() => {
 
     constructor() {
       const client = createMockClient(state.nextCloudAgents.splice(0))
+      const metadata = state.nextCloudSessionMetadata.shift()
+      if (metadata) {
+        client.getSession.mockResolvedValueOnce(metadata)
+      }
       state.constructedClients.push(client)
       // Re-key `this` as the mock client.
       return client as unknown as HarnessDriverClient
@@ -150,6 +198,7 @@ const originalResourcesPathDescriptor = Object.getOwnPropertyDescriptor(process,
 const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
 const originalPublicEnv = process.env.PUBLIC
 const originalProgramDataEnv = process.env.ProgramData
+const originalPersonaHarnessReadyTimeoutEnv = process.env.PEAR_PERSONA_HARNESS_READY_TIMEOUT_MS
 
 function setProcessPlatform(platform: NodeJS.Platform): void {
   Object.defineProperty(process, 'platform', {
@@ -241,6 +290,14 @@ async function writeAgentWorkforceFixture(projectDir: string): Promise<void> {
   await chmod(jsBin, 0o755)
   await chmod(posixBin, 0o755)
   await chmod(winBin, 0o755)
+}
+
+function emitPersonaHarnessReady(client: MockClient, name: string): void {
+  client.emitEvent({
+    kind: 'worker_stream',
+    name,
+    chunk: 'Sandbox mount ready -> /tmp/agentworkforce-session\n'
+  })
 }
 
 describe('resolveAgentRelayMcpCommand', () => {
@@ -352,22 +409,36 @@ describe('resolveAgentRelayMcpCommand', () => {
 
 describe('BrokerManager local + cloud coexistence', () => {
   let personaTempDir: string | null = null
+  const inheritedWorkspaceKey = process.env.AGENT_RELAY_WORKSPACE_KEY
 
   beforeEach(() => {
+    delete process.env.AGENT_RELAY_WORKSPACE_KEY
     mock.state.spawnedClients.length = 0
     mock.state.constructedClients.length = 0
     mock.state.connectedClients.length = 0
     mock.state.nextLocalAgents = []
     mock.state.nextCloudAgents = []
+    mock.state.nextCloudSessionMetadata = []
     mock.state.nextConnectedAgents = []
+    mock.state.nextConnectedSessionMetadata = []
     mock.state.nextConnectedSessionErrors = []
     mock.HarnessDriverClient.spawn.mockClear()
     mock.HarnessDriverClient.connect.mockClear()
   })
 
   afterEach(async () => {
+    if (originalPersonaHarnessReadyTimeoutEnv === undefined) {
+      delete process.env.PEAR_PERSONA_HARNESS_READY_TIMEOUT_MS
+    } else {
+      process.env.PEAR_PERSONA_HARNESS_READY_TIMEOUT_MS = originalPersonaHarnessReadyTimeoutEnv
+    }
     if (personaTempDir) await rm(personaTempDir, { recursive: true, force: true })
     personaTempDir = null
+    if (inheritedWorkspaceKey === undefined) {
+      delete process.env.AGENT_RELAY_WORKSPACE_KEY
+    } else {
+      process.env.AGENT_RELAY_WORKSPACE_KEY = inheritedWorkspaceKey
+    }
   })
 
   it('keeps the local session alive when a cloud sandbox attaches', async () => {
@@ -405,6 +476,120 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('passes an explicit workspace key env pin to local broker spawn options', async () => {
+    const previousWorkspaceKey = process.env.AGENT_RELAY_WORKSPACE_KEY
+    process.env.AGENT_RELAY_WORKSPACE_KEY = 'rk_live_pinned'
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const manager = new BrokerManager()
+
+    try {
+      await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', undefined as never, [])
+
+      expect(mock.HarnessDriverClient.spawn).toHaveBeenCalledWith(expect.objectContaining({
+        brokerName: 'pear-project-1',
+        workspaceKey: 'rk_live_pinned'
+      }))
+      const logged = logSpy.mock.calls.map((call) => call.join(' ')).join('\n')
+      expect(logged).toContain('rk_live_…')
+      expect(logged).not.toContain('rk_live_pinned')
+    } finally {
+      logSpy.mockRestore()
+      if (previousWorkspaceKey === undefined) {
+        delete process.env.AGENT_RELAY_WORKSPACE_KEY
+      } else {
+        process.env.AGENT_RELAY_WORKSPACE_KEY = previousWorkspaceKey
+      }
+      await manager.shutdown()
+    }
+  })
+
+  it('reads the local broker workspace key for cloud provisioning', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager)
+    local.getSession.mockResolvedValueOnce({ workspace_key: 'rk_live_project' })
+
+    await expect(manager.workspaceKeyForProject(PROJECT_ID)).resolves.toBe('rk_live_project')
+
+    await manager.shutdown()
+  })
+
+  it('omits the project workspace key when no local broker exposes one', async () => {
+    const manager = new BrokerManager()
+    await startLocal(manager)
+
+    await expect(manager.workspaceKeyForProject(PROJECT_ID)).resolves.toBeUndefined()
+    await expect(manager.workspaceKeyForProject('missing-project')).resolves.toBeUndefined()
+
+    await manager.shutdown()
+  })
+
+  it('emits a cloud workspace mismatch event when the sandbox ignores the sent key', async () => {
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    mock.state.nextCloudSessionMetadata.push({ workspace_key: 'rk_sand_456' })
+
+    await manager.attachCloudSandbox(PROJECT_ID, {
+      sandboxId: 'sandbox-1',
+      execUrl: 'https://sandbox.example',
+      sentWorkspaceKey: 'rk_sent_123'
+    }, win)
+
+    expect(win.webContents.send).toHaveBeenCalledWith(
+      'broker:event',
+      expect.objectContaining({
+        kind: 'cloud_workspace_key_mismatch',
+        projectId: PROJECT_ID,
+        cloudSandboxId: 'sandbox-1',
+        sentWorkspaceKeyPrefix: 'rk_sent_',
+        sandboxWorkspaceKeyPrefix: 'rk_sand_',
+        detail: expect.stringContaining('stale broker binary')
+      })
+    )
+
+    await manager.shutdown()
+  })
+
+  it('does not emit a cloud workspace mismatch event when the sandbox joins the sent key', async () => {
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    mock.state.nextCloudSessionMetadata.push({ workspace_key: 'rk_live_same' })
+
+    await manager.attachCloudSandbox(PROJECT_ID, {
+      sandboxId: 'sandbox-1',
+      execUrl: 'https://sandbox.example',
+      sentWorkspaceKey: 'rk_live_same'
+    }, win)
+
+    const mismatchEvents = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([channel, payload]) =>
+        channel === 'broker:event' &&
+        (payload as { kind?: string }).kind === 'cloud_workspace_key_mismatch'
+      )
+    expect(mismatchEvents).toHaveLength(0)
+
+    await manager.shutdown()
+  })
+
+  it('does not emit a cloud workspace mismatch event on keyless legacy attaches', async () => {
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    mock.state.nextCloudSessionMetadata.push({ workspace_key: 'rk_live_sandbox' })
+
+    await manager.attachCloudSandbox(PROJECT_ID, {
+      sandboxId: 'sandbox-1',
+      execUrl: 'https://sandbox.example'
+    }, win)
+
+    const mismatchEvents = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([channel, payload]) =>
+        channel === 'broker:event' &&
+        (payload as { kind?: string }).kind === 'cloud_workspace_key_mismatch'
+      )
+    expect(mismatchEvents).toHaveLength(0)
+
+    await manager.shutdown()
+  })
+
   it('reuses current harness-driver connection files instead of spawning another broker', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'pear-current-connection-'))
     const connectionPath = join(tempDir, '.agentworkforce', 'relay', 'connection.json')
@@ -428,6 +613,43 @@ describe('BrokerManager local + cloud coexistence', () => {
 
       await manager.shutdown()
     } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('does not reuse an existing connection with a mismatched explicit workspace key', async () => {
+    const previousWorkspaceKey = process.env.AGENT_RELAY_WORKSPACE_KEY
+    process.env.AGENT_RELAY_WORKSPACE_KEY = 'rk_live_pinned'
+    const tempDir = await mkdtemp(join(tmpdir(), 'pear-pinned-connection-'))
+    const connectionPath = join(tempDir, '.agentworkforce', 'relay', 'connection.json')
+    await mkdir(dirname(connectionPath), { recursive: true })
+    await writeFile(connectionPath, JSON.stringify({
+      url: 'http://127.0.0.1:43210',
+      apiKey: 'test-key',
+      pid: 4242
+    }))
+
+    try {
+      const manager = new BrokerManager()
+      mock.state.nextConnectedSessionMetadata.push({ workspace_key: 'rk_live_other' })
+
+      const started = await manager.start(PROJECT_ID, tempDir, 'pear-project-1', undefined as never, [])
+
+      expect(started).toBe(true)
+      expect(mock.HarnessDriverClient.connect).toHaveBeenCalledWith({ cwd: tempDir, connectionPath })
+      expect(mock.state.connectedClients[0]?.disconnect).toHaveBeenCalled()
+      expect(mock.HarnessDriverClient.spawn).toHaveBeenCalledWith(expect.objectContaining({
+        brokerName: 'pear-project-1',
+        workspaceKey: 'rk_live_pinned'
+      }))
+
+      await manager.shutdown()
+    } finally {
+      if (previousWorkspaceKey === undefined) {
+        delete process.env.AGENT_RELAY_WORKSPACE_KEY
+      } else {
+        process.env.AGENT_RELAY_WORKSPACE_KEY = previousWorkspaceKey
+      }
       await rm(tempDir, { recursive: true, force: true })
     }
   })
@@ -547,26 +769,6 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
-  it('normalizes spawn results to structured-clone-safe data', async () => {
-    const manager = new BrokerManager()
-    const local = await startLocal(manager, [])
-    local.spawnPty.mockImplementationOnce(async (input: { name: string }) => {
-      local.agentNames.push(input.name)
-      return {
-        name: input.name,
-        runtime: 'pty',
-        client: () => undefined
-      }
-    })
-
-    const spawned = await manager.spawnAgent(PROJECT_ID, { name: 'worker', cli: 'fake-cli' })
-
-    expect(spawned).toEqual({ name: 'worker', runtime: 'pty' })
-    expect(() => structuredClone(spawned)).not.toThrow()
-
-    await manager.shutdown()
-  })
-
   it('coalesces concurrent duplicate spawn requests', async () => {
     const manager = new BrokerManager()
     const local = await startLocal(manager, [])
@@ -605,6 +807,7 @@ describe('BrokerManager local + cloud coexistence', () => {
     const local = lastSpawned()
     local.spawnPty.mockImplementationOnce(async (input: { name: string }) => {
       local.agentNames.push(input.name)
+      setImmediate(() => emitPersonaHarnessReady(local, input.name))
       return {
         name: input.name,
         runtime: 'pty',
@@ -615,6 +818,12 @@ describe('BrokerManager local + cloud coexistence', () => {
 
     const result = await manager.spawnPersona(PROJECT_ID, 'autonomous-actor')
 
+    expect(local.spawnPty).toHaveBeenCalledWith(expect.objectContaining({
+      args: ['agent', 'autonomous-actor']
+    }))
+    expect(local.spawnPty).not.toHaveBeenCalledWith(expect.objectContaining({
+      args: expect.arrayContaining(['--install-in-repo'])
+    }))
     expect(result).toEqual({
       name: 'autonomous-actor',
       runtime: 'pty',
@@ -639,6 +848,7 @@ describe('BrokerManager local + cloud coexistence', () => {
         releaseSpawn = resolve
       })
       local.agentNames.push(input.name)
+      setImmediate(() => emitPersonaHarnessReady(local, input.name))
       return {
         name: input.name,
         runtime: 'pty',
@@ -663,6 +873,178 @@ describe('BrokerManager local + cloud coexistence', () => {
     expect(() => structuredClone(results[0])).not.toThrow()
     expect(() => structuredClone(results[1])).not.toThrow()
     expect(local.agentNames).toEqual(['autonomous-actor'])
+
+    await manager.shutdown()
+  })
+
+  it('releases a workforce persona wrapper that never reaches harness readiness', async () => {
+    personaTempDir = await mkdtemp(join(tmpdir(), 'pear-persona-spawn-'))
+    await writeAgentWorkforceFixture(personaTempDir)
+    process.env.PEAR_PERSONA_HARNESS_READY_TIMEOUT_MS = '20'
+
+    const manager = new BrokerManager()
+    mock.state.nextLocalAgents = []
+    await manager.start(PROJECT_ID, personaTempDir, 'pear-project-1', undefined as never, [])
+    const local = lastSpawned()
+    local.spawnPty.mockImplementationOnce(async (input: { name: string }) => {
+      local.agentNames.push(input.name)
+      return {
+        name: input.name,
+        runtime: 'pty',
+        cli: 'agentworkforce'
+      }
+    })
+
+    await expect(manager.spawnPersona(PROJECT_ID, 'autonomous-actor')).rejects.toThrow(
+      /Timed out waiting for Workforce persona autonomous-actor to prepare its harness/
+    )
+    expect(local.release).toHaveBeenCalledWith(
+      'autonomous-actor',
+      'persona harness readiness verification failed'
+    )
+
+    delete process.env.PEAR_PERSONA_HARNESS_READY_TIMEOUT_MS
+    await manager.shutdown()
+  })
+
+  it('does not expose a workforce persona to listAgents until harness readiness passes', async () => {
+    personaTempDir = await mkdtemp(join(tmpdir(), 'pear-persona-spawn-'))
+    await writeAgentWorkforceFixture(personaTempDir)
+
+    const manager = new BrokerManager()
+    mock.state.nextLocalAgents = []
+    await manager.start(PROJECT_ID, personaTempDir, 'pear-project-1', undefined as never, [])
+    const local = lastSpawned()
+    let releaseSpawn!: () => void
+    local.spawnPty.mockImplementationOnce(async (input: { name: string }) => {
+      local.agentNames.push(input.name)
+      await new Promise<void>((resolve) => {
+        releaseSpawn = resolve
+      })
+      setImmediate(() => emitPersonaHarnessReady(local, input.name))
+      return {
+        name: input.name,
+        runtime: 'pty',
+        cli: 'agentworkforce'
+      }
+    })
+
+    const spawned = manager.spawnPersona(PROJECT_ID, 'autonomous-actor')
+    await Promise.resolve()
+    await Promise.resolve()
+
+    await expect(manager.listAgents(PROJECT_ID)).resolves.toEqual([])
+    releaseSpawn()
+    await expect(spawned).resolves.toEqual({
+      name: 'autonomous-actor',
+      runtime: 'pty',
+      cli: 'claude'
+    })
+    expect((await manager.listAgents(PROJECT_ID)).map((agent) => agent.name)).toEqual(['autonomous-actor'])
+
+    await manager.shutdown()
+  })
+
+  it('does not expose a workforce persona to broker details until harness readiness passes', async () => {
+    personaTempDir = await mkdtemp(join(tmpdir(), 'pear-persona-spawn-'))
+    await writeAgentWorkforceFixture(personaTempDir)
+
+    const manager = new BrokerManager()
+    mock.state.nextLocalAgents = []
+    await manager.start(PROJECT_ID, personaTempDir, 'pear-project-1', undefined as never, [])
+    const local = lastSpawned()
+    let releaseSpawn!: () => void
+    local.spawnPty.mockImplementationOnce(async (input: { name: string }) => {
+      local.agentNames.push(input.name)
+      await new Promise<void>((resolve) => {
+        releaseSpawn = resolve
+      })
+      setImmediate(() => emitPersonaHarnessReady(local, input.name))
+      return {
+        name: input.name,
+        runtime: 'pty',
+        cli: 'agentworkforce'
+      }
+    })
+
+    const spawned = manager.spawnPersona(PROJECT_ID, 'autonomous-actor')
+    await Promise.resolve()
+    await Promise.resolve()
+
+    const [pendingDetails] = await manager.listBrokerDetails()
+    expect(pendingDetails.agentCount).toBe(0)
+    expect(pendingDetails.agents).toEqual([])
+
+    releaseSpawn()
+    await expect(spawned).resolves.toEqual({
+      name: 'autonomous-actor',
+      runtime: 'pty',
+      cli: 'claude'
+    })
+
+    const [readyDetails] = await manager.listBrokerDetails()
+    expect(readyDetails.agentCount).toBe(1)
+    expect(readyDetails.agents.map((agent) => agent.name)).toEqual(['autonomous-actor'])
+
+    await manager.shutdown()
+  })
+
+  it('releases a workforce persona when broker delivery readiness is not confirmed', async () => {
+    personaTempDir = await mkdtemp(join(tmpdir(), 'pear-persona-spawn-'))
+    await writeAgentWorkforceFixture(personaTempDir)
+    process.env.PEAR_PERSONA_HARNESS_READY_TIMEOUT_MS = '50'
+
+    const manager = new BrokerManager()
+    mock.state.nextLocalAgents = []
+    await manager.start(PROJECT_ID, personaTempDir, 'pear-project-1', undefined as never, [])
+    const local = lastSpawned()
+    local.spawnPty.mockImplementationOnce(async (input: { name: string }) => {
+      local.agentNames.push(input.name)
+      setImmediate(() => emitPersonaHarnessReady(local, input.name))
+      return {
+        name: input.name,
+        runtime: 'pty',
+        cli: 'agentworkforce'
+      }
+    })
+    local.sendMessage.mockResolvedValueOnce({
+      event_id: 'evt-readiness-never-injected',
+      targets: ['autonomous-actor']
+    })
+
+    await expect(manager.spawnPersona(PROJECT_ID, 'autonomous-actor')).rejects.toThrow(
+      /did not become ready for broker delivery/
+    )
+    expect(local.release).toHaveBeenCalledWith(
+      'autonomous-actor',
+      'persona harness readiness verification failed'
+    )
+
+    await manager.shutdown()
+  })
+
+  it('does not reuse old sandbox-ready output for a new workforce persona launch', async () => {
+    personaTempDir = await mkdtemp(join(tmpdir(), 'pear-persona-spawn-'))
+    await writeAgentWorkforceFixture(personaTempDir)
+    process.env.PEAR_PERSONA_HARNESS_READY_TIMEOUT_MS = '20'
+
+    const manager = new BrokerManager()
+    mock.state.nextLocalAgents = []
+    await manager.start(PROJECT_ID, personaTempDir, 'pear-project-1', undefined as never, [])
+    const local = lastSpawned()
+    emitPersonaHarnessReady(local, 'autonomous-actor')
+    local.spawnPty.mockImplementationOnce(async (input: { name: string }) => {
+      local.agentNames.push(input.name)
+      return {
+        name: input.name,
+        runtime: 'pty',
+        cli: 'agentworkforce'
+      }
+    })
+
+    await expect(manager.spawnPersona(PROJECT_ID, 'autonomous-actor')).rejects.toThrow(
+      /Timed out waiting for Workforce persona autonomous-actor to prepare its harness/
+    )
 
     await manager.shutdown()
   })
@@ -1078,6 +1460,167 @@ describe('BrokerManager local + cloud coexistence', () => {
       text: '<integration-event>ping</integration-event>'
     })).resolves.toEqual({
       eventId: 'evt-integration',
+      targets: ['claude-1']
+    })
+
+    await manager.shutdown()
+  })
+
+  it('waits for injection using the addressed agent when broker send result omits targets', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, ['claude-1'])
+    local.sendMessage.mockResolvedValueOnce({ event_id: 'evt-injected' })
+    local.onEvent.mockImplementationOnce((listener) => {
+      setImmediate(() => {
+        listener({
+          kind: 'delivery_injected',
+          event_id: 'evt-injected',
+          name: 'claude-1'
+        })
+      })
+      return () => undefined
+    })
+
+    await expect(manager.sendMessageAndWaitForInjected(PROJECT_ID, {
+      to: 'claude-1',
+      text: '<integration-event>ping</integration-event>'
+    })).resolves.toEqual({
+      eventId: 'evt-injected',
+      targets: ['claude-1']
+    })
+
+    await manager.shutdown()
+  })
+
+  it('does not treat delivery ack or verification as an injection confirmation', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, ['claude-1'])
+    local.sendMessage.mockResolvedValueOnce({ event_id: 'evt-not-injected' })
+    local.onEvent.mockImplementationOnce((listener) => {
+      setImmediate(() => {
+        listener({
+          kind: 'delivery_ack',
+          event_id: 'evt-not-injected',
+          name: 'claude-1'
+        })
+        listener({
+          kind: 'delivery_verified',
+          event_id: 'evt-not-injected',
+          name: 'claude-1'
+        })
+      })
+      return () => undefined
+    })
+
+    await expect(manager.sendMessageAndWaitForInjected(PROJECT_ID, {
+      to: 'claude-1',
+      text: '<integration-event>ping</integration-event>'
+    }, { timeoutMs: 10 })).rejects.toThrow(
+      'Timed out waiting for delivery injection for evt-not-injected (claude-1)'
+    )
+
+    await manager.shutdown()
+  })
+
+  it.each([
+    ['delivery_failed', 'PTY write failed'],
+    ['message_delivery_failed', 'broker send failed']
+  ] as const)('rejects injection wait on %s', async (kind, reason) => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, ['claude-1'])
+    local.sendMessage.mockResolvedValueOnce({ event_id: `evt-${kind}` })
+    local.onEvent.mockImplementationOnce((listener) => {
+      setImmediate(() => {
+        listener({
+          kind,
+          event_id: `evt-${kind}`,
+          name: 'claude-1',
+          reason
+        })
+      })
+      return () => undefined
+    })
+
+    await expect(manager.sendMessageAndWaitForInjected(PROJECT_ID, {
+      to: 'claude-1',
+      text: '<integration-event>ping</integration-event>'
+    })).rejects.toThrow(reason)
+
+    await manager.shutdown()
+  })
+
+  it('waits for every reported target before confirming injection', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, ['claude-1', 'codex-1'])
+    local.sendMessage.mockResolvedValueOnce({
+      event_id: 'evt-multi-injected',
+      targets: ['claude-1', 'codex-1']
+    })
+    local.onEvent.mockImplementationOnce((listener) => {
+      setImmediate(() => {
+        listener({
+          kind: 'delivery_injected',
+          event_id: 'evt-multi-injected',
+          name: 'claude-1'
+        })
+        listener({
+          kind: 'delivery_injected',
+          event_id: 'evt-multi-injected',
+          name: 'codex-1'
+        })
+      })
+      return () => undefined
+    })
+
+    await expect(manager.sendMessageAndWaitForInjected(PROJECT_ID, {
+      to: 'claude-1',
+      text: '<integration-event>ping</integration-event>'
+    })).resolves.toEqual({
+      eventId: 'evt-multi-injected',
+      targets: ['claude-1', 'codex-1']
+    })
+
+    await manager.shutdown()
+  })
+
+  it('returns without waiting for injection when a channel send has no concrete targets', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, ['claude-1'])
+    local.sendMessage.mockResolvedValueOnce({ event_id: 'evt-channel', targets: [] })
+
+    await expect(manager.sendMessageAndWaitForInjected(PROJECT_ID, {
+      to: '#general',
+      text: '<integration-event>ping</integration-event>'
+    }, { timeoutMs: 1 })).resolves.toEqual({
+      eventId: 'evt-channel',
+      targets: []
+    })
+
+    await manager.shutdown()
+  })
+
+  it('replays injection events observed before sendMessage resolves', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, ['claude-1'])
+    let eventListener: ((event: unknown) => void) | undefined
+    local.onEvent.mockImplementationOnce((listener) => {
+      eventListener = listener
+      return () => undefined
+    })
+    local.sendMessage.mockImplementationOnce(async () => {
+      eventListener?.({
+        kind: 'delivery_injected',
+        event_id: 'evt-early-injected',
+        name: 'claude-1'
+      })
+      return { event_id: 'evt-early-injected' }
+    })
+
+    await expect(manager.sendMessageAndWaitForInjected(PROJECT_ID, {
+      to: 'claude-1',
+      text: '<integration-event>ping</integration-event>'
+    })).resolves.toEqual({
+      eventId: 'evt-early-injected',
       targets: ['claude-1']
     })
 

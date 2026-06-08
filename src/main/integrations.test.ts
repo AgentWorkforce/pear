@@ -500,7 +500,9 @@ describe('IntegrationsManager', () => {
     })).toEqual([
       '/discovery/slack',
       '/slack/channels/C123/messages',
+      '/slack/channels/C123/threads',
       '/slack/dms/D123/messages',
+      '/slack/dms/D123/threads',
       '/slack/users/U123/messages'
     ])
   })
@@ -534,6 +536,7 @@ describe('IntegrationsManager', () => {
 
     expect(message).toContain('create writeback files under .integrations/slack/channels/C123/messages')
     expect(message).toContain('Writeback command roots are mounted at .integrations/slack/channels/C123/messages')
+    expect(message).toContain('live thread context roots are mounted at .integrations/slack/channels/C123/threads')
     expect(message).not.toContain('create writeback files under .integrations/slack/channels/C123, not under discovery')
   })
 
@@ -577,6 +580,16 @@ describe('IntegrationsManager', () => {
     await vi.waitFor(() => {
       expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalled()
     })
+    expect(mock.integrationMountManager.ensureMounted).toHaveBeenLastCalledWith([
+      {
+        provider: 'slack',
+        mountPaths: [
+          '/discovery/slack',
+          '/slack/channels/C123/messages',
+          '/slack/channels/C123/threads'
+        ]
+      }
+    ])
 
     finishMountReconcile()
   })
@@ -742,6 +755,38 @@ describe('IntegrationsManager', () => {
         text: expect.stringContaining('<integrations-update>')
       })
     )
+  })
+
+  it('passes current local mount paths into integration event reconciliation', async () => {
+    mock.store.projects[0].integrations[0] = {
+      ...mock.store.projects[0].integrations[0],
+      mountPaths: ['/slack/users/U0ADJH4P83T/messages'],
+      scope: { listenDms: true },
+      subscribeAgent: true
+    }
+    mock.integrationMountManager.currentWorkspaceId.mockReturnValue('workspace-id')
+    mock.integrationMountManager.localPathsFor.mockReturnValue([
+      '/tmp/relayfile/workspace-id/slack/users/U0ADJH4P83T/messages'
+    ])
+    const manager = new IntegrationsManager()
+
+    await manager.refreshAgentState('project-1')
+
+    expect(mock.integrationEventBridge.reconcile).toHaveBeenCalledWith(
+      'project-1',
+      [
+        expect.objectContaining({
+          provider: 'slack',
+          integrationId: 'slack-integration-1',
+          mountPaths: ['/slack/users/U0ADJH4P83T/messages'],
+          localMountPaths: ['/tmp/relayfile/workspace-id/slack/users/U0ADJH4P83T/messages']
+        })
+      ]
+    )
+    expect(mock.integrationMountManager.localPathsFor).toHaveBeenCalledWith('workspace-id', {
+      provider: 'slack',
+      mountPaths: ['/discovery/slack', '/slack/users/U0ADJH4P83T/messages']
+    })
   })
 
   it('retries active integration event subscriptions after startup mount hydration', async () => {
