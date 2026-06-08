@@ -21,7 +21,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links'
 import { WebglAddon } from '@xterm/addon-webgl'
 import { pear, type TerminalAttachMode } from '@/lib/ipc'
 import { getAgentKey } from '@/stores/agent-store'
-import { getPtyChunks, subscribePtyBuffer } from '@/stores/pty-buffer-store'
+import { clearPtyBuffer, getPtyChunks, subscribePtyBuffer } from '@/stores/pty-buffer-store'
 import { recordChunkEchoed } from '@/lib/typing-trace'
 import { createPredictiveEcho } from '@/lib/predictive-echo'
 import type { PredictiveEcho } from '@agent-relay/harness-driver/predictive-echo'
@@ -235,6 +235,14 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
   let unsubBuffer: (() => void) | null = null
   let writtenChunks = 0
   let attachSeeded = false
+  let pendingInitFrame: number | null = null
+
+  const cancelPendingInit = (): void => {
+    if (pendingInitFrame !== null) {
+      cancelAnimationFrame(pendingInitFrame)
+      pendingInitFrame = null
+    }
+  }
 
   // xterm has only ever been opened into `host`. React containers come and
   // go, but the `host` div is the immutable parent of the xterm canvas.
@@ -297,6 +305,7 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
     const liveTerm = term
 
     const writeFromBuffer = (ptyBuffer: string[]): void => {
+      if (disposed || !term) return
       if (ptyBuffer.length < writtenChunks) {
         writtenChunks = 0
       }
@@ -368,7 +377,19 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
 
   const initIfReady = async (container: HTMLElement): Promise<void> => {
     if (!term || disposed) return
-    if (!hasLayout(container)) return
+    if (!hasLayout(container)) {
+      // Split-page / hidden-tab mount: the container is 0×0 right now
+      // (e.g. display:none). Schedule a retry next frame so we don't sit
+      // forever waiting for a mount() that never comes back.
+      if (pendingInitFrame !== null) return
+      pendingInitFrame = requestAnimationFrame(() => {
+        pendingInitFrame = null
+        if (disposed) return
+        void initIfReady(container)
+      })
+      return
+    }
+    cancelPendingInit()
 
     openOnce()
     let initialSize = tryFit()
@@ -420,11 +441,12 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
     host,
     mount(container: HTMLElement): void {
       if (disposed || !term) return
-      if (container === host.parentElement && mounted) return
       if (host.parentElement !== container) {
         container.appendChild(host)
       }
       mounted = true
+      // Always run initIfReady so a split-page / hidden-tab mount that
+      // landed without layout gets a retry once it becomes visible.
       void initIfReady(container)
     },
     detach(): void {
@@ -437,6 +459,12 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
     },
     dispose(): void {
       if (disposed) return
+      // Cancel any rAF that would otherwise fire a flush into a disposed
+      // terminal. Do this BEFORE flipping `disposed`/nulling `term` so the
+      // writeFromBuffer notification triggered by clearPtyBuffer (with [])
+      // runs while the closure is still consistent.
+      cancelPendingInit()
+      clearPtyBuffer(key)
       disposed = true
       mounted = false
       unsubBuffer?.()
