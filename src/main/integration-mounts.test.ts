@@ -118,7 +118,7 @@ vi.mock('./relayfile-mount-launcher', () => ({
   createPearMountLauncher: vi.fn((options) => ({ start: mock.startMount, __options: options }))
 }))
 
-import { IntegrationMountManager } from './integration-mounts'
+import { IntegrationMountManager, readStalledInjectedRevisions } from './integration-mounts'
 
 describe('IntegrationMountManager', () => {
   beforeEach(() => {
@@ -841,5 +841,95 @@ describe('IntegrationMountManager', () => {
       reason: 'account-workspace-required',
       message: 'account-workspace-required'
     })
+  })
+})
+
+describe('readStalledInjectedRevisions', () => {
+  const NOW = '2026-06-08T13:00:00.000Z'
+  const REMOTE_PATH = '/slack/channels/C123__slug/threads'
+  const REPLY_PATH = '/slack/channels/C123__slug/threads/1780871788_370329/replies/1780921813_531539.json'
+
+  const injectingLine = (path: string, timestamp: string): string => JSON.stringify({
+    timestamp,
+    message: 'injecting',
+    metadata: { projectId: 'p', eventId: 'ws:file.created:rev_1', path, recipients: ['slack-comms'] }
+  })
+
+  const stateWith = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+    status: 'ready',
+    lastSuccessfulReconcileAt: '2026-06-08T12:55:00.000Z',
+    files: {},
+    ...overrides
+  })
+
+  beforeEach(() => {
+    mock.readFile.mockClear()
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date(NOW))
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('flags an injected revision that aged past the grace window and never landed in state.files', async () => {
+    mock.readFile.mockResolvedValueOnce(injectingLine(REPLY_PATH, '2026-06-08T12:40:00.000Z'))
+
+    const result = await readStalledInjectedRevisions(REMOTE_PATH, stateWith())
+
+    expect(result).toEqual({
+      missingCount: 1,
+      oldestInjectedAt: '2026-06-08T12:40:00.000Z',
+      examples: [REPLY_PATH]
+    })
+  })
+
+  it('does not flag a revision still within the grace window', async () => {
+    mock.readFile.mockResolvedValueOnce(injectingLine(REPLY_PATH, '2026-06-08T12:55:30.000Z'))
+
+    expect(await readStalledInjectedRevisions(REMOTE_PATH, stateWith())).toBeNull()
+  })
+
+  it('does not flag a revision the mount has already tracked in state.files', async () => {
+    mock.readFile.mockResolvedValueOnce(injectingLine(REPLY_PATH, '2026-06-08T12:40:00.000Z'))
+
+    const result = await readStalledInjectedRevisions(
+      REMOTE_PATH,
+      stateWith({ files: { [REPLY_PATH]: { revision: 'rev_1', status: 'ready' } } })
+    )
+
+    expect(result).toBeNull()
+  })
+
+  it('does not restart a mount that has not reconciled since the revision arrived', async () => {
+    mock.readFile.mockResolvedValueOnce(injectingLine(REPLY_PATH, '2026-06-08T12:40:00.000Z'))
+
+    // lastSuccessfulReconcileAt predates the injected revision → no chance to pull it yet.
+    expect(await readStalledInjectedRevisions(
+      REMOTE_PATH,
+      stateWith({ lastSuccessfulReconcileAt: '2026-06-08T12:30:00.000Z' })
+    )).toBeNull()
+  })
+
+  it('does not restart a mount that has never reconciled (omitted lastSuccessfulReconcileAt)', async () => {
+    mock.readFile.mockResolvedValueOnce(injectingLine(REPLY_PATH, '2026-06-08T12:40:00.000Z'))
+
+    const state = stateWith()
+    delete state.lastSuccessfulReconcileAt
+    expect(await readStalledInjectedRevisions(REMOTE_PATH, state)).toBeNull()
+  })
+
+  it('ignores injected revisions for a different mount root', async () => {
+    mock.readFile.mockResolvedValueOnce(
+      injectingLine('/slack/channels/C999__other/threads/1/replies/2.json', '2026-06-08T12:40:00.000Z')
+    )
+
+    expect(await readStalledInjectedRevisions(REMOTE_PATH, stateWith())).toBeNull()
+  })
+
+  it('returns null when the events log is unreadable', async () => {
+    mock.readFile.mockRejectedValueOnce(new Error('ENOENT'))
+
+    expect(await readStalledInjectedRevisions(REMOTE_PATH, stateWith())).toBeNull()
   })
 })
