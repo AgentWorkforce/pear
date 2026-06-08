@@ -2,6 +2,8 @@ import { create } from 'zustand'
 import type { AgentCurrentState } from '@/lib/ipc'
 
 export const TYPING_ACTIVITY_WINDOW_MS = 12_000
+const FLUSH_INTERVAL_MS = 250
+const FLUSH_THRESHOLD_KEYS = 50
 
 export interface TypingEntry {
   lastActivityAtMs: number
@@ -17,17 +19,7 @@ interface TypingState {
 
 const expiryTimers = new Map<string, number>()
 const pendingActivity = new Map<string, number>()
-let pendingActivityFrame: number | null = null
-
-const scheduleAnimationFrame: (cb: FrameRequestCallback) => number =
-  typeof requestAnimationFrame === 'function'
-    ? requestAnimationFrame
-    : ((cb: FrameRequestCallback) => setTimeout(() => cb(performance.now()), 16) as unknown as number)
-
-const cancelScheduledAnimationFrame: (handle: number) => void =
-  typeof cancelAnimationFrame === 'function'
-    ? cancelAnimationFrame
-    : ((handle: number) => clearTimeout(handle as unknown as ReturnType<typeof setTimeout>))
+let pendingActivityTimer: ReturnType<typeof setTimeout> | null = null
 
 function clearExpiryTimer(key: string): void {
   const existing = expiryTimers.get(key)
@@ -62,7 +54,7 @@ function expireTypingEntry(key: string, expectedTypingUntilMs: number): void {
 }
 
 function flushPendingActivity(): void {
-  pendingActivityFrame = null
+  pendingActivityTimer = null
   const queued = Array.from(pendingActivity.entries())
   pendingActivity.clear()
   if (queued.length === 0) return
@@ -91,15 +83,23 @@ function flushPendingActivity(): void {
 
 function queueActivity(key: string, now: number): void {
   pendingActivity.set(key, Math.max(pendingActivity.get(key) ?? now, now))
-  if (pendingActivityFrame !== null) return
-  pendingActivityFrame = scheduleAnimationFrame(flushPendingActivity)
+  if (pendingActivity.size >= FLUSH_THRESHOLD_KEYS) {
+    if (pendingActivityTimer !== null) {
+      clearTimeout(pendingActivityTimer)
+      pendingActivityTimer = null
+    }
+    flushPendingActivity()
+    return
+  }
+  if (pendingActivityTimer !== null) return
+  pendingActivityTimer = setTimeout(flushPendingActivity, FLUSH_INTERVAL_MS)
 }
 
 function clearPendingActivity(key: string): void {
   pendingActivity.delete(key)
-  if (pendingActivity.size === 0 && pendingActivityFrame !== null) {
-    cancelScheduledAnimationFrame(pendingActivityFrame)
-    pendingActivityFrame = null
+  if (pendingActivity.size === 0 && pendingActivityTimer !== null) {
+    clearTimeout(pendingActivityTimer)
+    pendingActivityTimer = null
   }
 }
 
@@ -108,8 +108,7 @@ export const useTypingStore = create<TypingState>((set, get) => ({
 
   noteActivity: (key, now = Date.now()) => {
     // Bursty PTY output can produce 100+ chunks/sec; only refresh the typing
-    // entry once per second, and batch the actual state rebuild + timer
-    // reschedule to one animation frame across all agents.
+    // entry once per second, and batch the actual state rebuild across agents.
     const existing = get().entries[key]
     if (existing && now - existing.lastActivityAtMs < 1_000) return
 

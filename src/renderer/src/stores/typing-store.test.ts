@@ -4,8 +4,8 @@ type TypingStoreModule = typeof import('./typing-store')
 
 let typingStoreModule: TypingStoreModule
 
-function flushRaf(): void {
-  vi.advanceTimersByTime(20)
+function flushActivity(): void {
+  vi.advanceTimersByTime(250)
 }
 
 async function loadTypingStore(): Promise<TypingStoreModule> {
@@ -18,12 +18,6 @@ describe('typing-store', () => {
   beforeEach(async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
-    vi.stubGlobal('requestAnimationFrame', (cb: FrameRequestCallback) =>
-      setTimeout(() => cb(performance.now()), 16) as unknown as number
-    )
-    vi.stubGlobal('cancelAnimationFrame', (handle: number) =>
-      clearTimeout(handle as unknown as ReturnType<typeof setTimeout>)
-    )
     vi.stubGlobal('window', {
       setTimeout,
       clearTimeout
@@ -39,7 +33,7 @@ describe('typing-store', () => {
     vi.useRealTimers()
   })
 
-  it('coalesces noteActivity bursts into one per-frame entries update', () => {
+  it('coalesces noteActivity bursts into one timer-paced entries update', () => {
     const { useTypingStore } = typingStoreModule
     const updates: unknown[] = []
     const unsubscribe = useTypingStore.subscribe((state) => {
@@ -52,7 +46,7 @@ describe('typing-store', () => {
     store.noteActivity('p1:agent-b')
     expect(updates).toHaveLength(0)
 
-    flushRaf()
+    flushActivity()
     expect(updates).toHaveLength(1)
     expect(Object.keys(useTypingStore.getState().entries).sort()).toEqual([
       'p1:agent-a',
@@ -62,22 +56,22 @@ describe('typing-store', () => {
     updates.length = 0
     vi.advanceTimersByTime(500)
     store.noteActivity('p1:agent-a')
-    flushRaf()
+    flushActivity()
     expect(updates).toHaveLength(0)
 
     vi.advanceTimersByTime(500)
     store.noteActivity('p1:agent-a')
-    flushRaf()
+    flushActivity()
     expect(updates).toHaveLength(1)
     unsubscribe()
   })
 
-  it('clear cancels pending noteActivity before the frame flushes', () => {
+  it('clear cancels pending noteActivity before the timer flushes', () => {
     const { useTypingStore } = typingStoreModule
     const store = useTypingStore.getState()
     store.noteActivity('p1:agent-a')
     store.clear('p1:agent-a')
-    flushRaf()
+    flushActivity()
 
     expect(useTypingStore.getState().entries['p1:agent-a']).toBeUndefined()
   })
@@ -86,7 +80,7 @@ describe('typing-store', () => {
     const { TYPING_ACTIVITY_WINDOW_MS, useTypingStore } = typingStoreModule
     const store = useTypingStore.getState()
     store.noteActivity('p1:agent-a')
-    flushRaf()
+    flushActivity()
     expect(useTypingStore.getState().entries['p1:agent-a']).toBeDefined()
 
     vi.advanceTimersByTime(TYPING_ACTIVITY_WINDOW_MS + 60)
@@ -100,7 +94,7 @@ describe('typing-store', () => {
 
     const lastActivityAtMs = Date.now() + 200
     store.setFromState('p1:agent-a', 'working', lastActivityAtMs)
-    flushRaf()
+    flushActivity()
 
     expect(useTypingStore.getState().entries['p1:agent-a']).toEqual({
       lastActivityAtMs,
