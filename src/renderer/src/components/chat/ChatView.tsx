@@ -38,54 +38,6 @@ function isChannelMessage(message: ChatMessageType, channelName: string): boolea
   return normalizeMessageChannel(message.to) === channelName
 }
 
-function isHumanMessage(message: ChatMessageType): boolean {
-  return message.isHuman || message.from.trim().toLowerCase() === 'human'
-}
-
-function areDuplicateHumanMessages(left: ChatMessageType, right: ChatMessageType): boolean {
-  return isHumanMessage(left) &&
-    isHumanMessage(right) &&
-    left.body === right.body &&
-    (!left.projectId || !right.projectId || left.projectId === right.projectId) &&
-    normalizeMessageChannel(left.to) === normalizeMessageChannel(right.to) &&
-    Math.abs(left.timestamp - right.timestamp) < 10_000
-}
-
-function dedupeHumanMessages(messages: ChatMessageType[]): ChatMessageType[] {
-  const deduped: ChatMessageType[] = []
-  // Collapsing near-simultaneous human echoes used to be O(n²): a findIndex over
-  // the whole deduped list per message, so the cost grew with chat length and
-  // ran on every new message (via the messages useMemo). Track the most recently
-  // kept human message per `${to}\0${body}` key instead, making each message O(1).
-  // Only human messages dedupe against each other, and duplicates fall inside a
-  // 10s window, so the latest kept entry for a key is the only one a new message
-  // can collide with — the result is identical to the previous scan.
-  const lastHumanIndexByKey = new Map<string, number>()
-
-  for (const message of messages) {
-    if (!isHumanMessage(message)) {
-      deduped.push(message)
-      continue
-    }
-
-    const key = `${normalizeMessageChannel(message.to)}\0${message.body}`
-    const priorIndex = lastHumanIndexByKey.get(key)
-    const prior = priorIndex !== undefined ? deduped[priorIndex] : undefined
-
-    if (prior && areDuplicateHumanMessages(prior, message)) {
-      if (message.isHuman && !prior.isHuman) {
-        deduped[priorIndex!] = message
-      }
-      continue
-    }
-
-    deduped.push(message)
-    lastHumanIndexByKey.set(key, deduped.length - 1)
-  }
-
-  return deduped
-}
-
 function isSameDay(left: number, right: number): boolean {
   const leftDate = new Date(left)
   const rightDate = new Date(right)
@@ -396,15 +348,18 @@ export function ChatView(): React.ReactNode {
       : allMessages,
     [activeProjectId, allMessages]
   )
+  // The store is the source of truth for message identity — each chat message
+  // arrives with a unique `id` (broker event_id) and the store's
+  // reconcileChatMessages / isDuplicateHumanEcho paths handle dedupe on insert.
+  // Trust those ids here and just scope to the current channel/DM so we don't
+  // re-run a content+timestamp heuristic on every render that could collapse
+  // legitimately distinct messages (or miss duplicates outside the 10s window).
   const messages = useMemo(
-    () => {
-      const scopedMessages = directMessageParticipants
-        ? projectMessages.filter((message) => messageMatchesDirectMessageRoom(message, directMessageParticipants))
-        : activeChannelName
-        ? projectMessages.filter((message) => isChannelMessage(message, activeChannelName))
-        : projectMessages
-      return dedupeHumanMessages(scopedMessages)
-    },
+    () => directMessageParticipants
+      ? projectMessages.filter((message) => messageMatchesDirectMessageRoom(message, directMessageParticipants))
+      : activeChannelName
+      ? projectMessages.filter((message) => isChannelMessage(message, activeChannelName))
+      : projectMessages,
     [activeChannelName, directMessageParticipants, projectMessages]
   )
   const agents = useMemo(
