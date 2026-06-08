@@ -96,7 +96,12 @@ interface ChatComposerInputProps {
   value: string
   placeholder: string
   sendLabel: string
-  runningAgents: Array<Pick<Agent, 'name'> & Partial<Pick<Agent, 'cli' | 'status' | 'pendingDeliveryIds'>>>
+  runningAgents: Array<
+    Pick<Agent, 'name'> &
+    Partial<Pick<Agent, 'cli' | 'status' | 'pendingDeliveryIds'>> & {
+      hasPendingDeliveries?: boolean
+    }
+  >
   activeProjectId?: string | null
   disabled?: boolean
   canSend?: boolean
@@ -348,7 +353,7 @@ export function ChatComposerInput({
                     <div className="min-w-0 flex-1">
                       <div className="flex items-center gap-2">
                         <span className="truncate text-sm font-medium text-[inherit]">{agent.name}</span>
-                        {(agent.pendingDeliveryIds?.length ?? 0) > 0 && (
+                        {(agent.hasPendingDeliveries ?? ((agent.pendingDeliveryIds?.length ?? 0) > 0)) && (
                           <span className="text-[10px] text-[var(--pear-text-faint)]">thinking</span>
                         )}
                       </div>

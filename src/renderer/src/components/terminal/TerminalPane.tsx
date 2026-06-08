@@ -22,7 +22,9 @@ interface TerminalAgentRef {
   name: string
   rootPath?: string
   cli: string
+  status: Agent['status']
   terminalMode: TerminalAttachMode
+  hasPendingDeliveries: boolean
 }
 
 let terminalAgentRefsCache:
@@ -38,7 +40,9 @@ function selectTerminalAgentRefs(allAgents: Agent[], activeProjectId: string | n
       name: agent.name,
       rootPath: agent.rootPath,
       cli: agent.cli,
-      terminalMode: agent.terminalMode
+      status: agent.status,
+      terminalMode: agent.terminalMode,
+      hasPendingDeliveries: agent.pendingDeliveryIds.length > 0
     }))
 
   if (
@@ -64,7 +68,9 @@ function areTerminalAgentRefsEqual(left: TerminalAgentRef[], right: TerminalAgen
       a.name !== b.name ||
       a.rootPath !== b.rootPath ||
       a.cli !== b.cli ||
-      a.terminalMode !== b.terminalMode
+      a.status !== b.status ||
+      a.terminalMode !== b.terminalMode ||
+      a.hasPendingDeliveries !== b.hasPendingDeliveries
     ) {
       return false
     }
