@@ -786,6 +786,7 @@ export class IntegrationsManager {
   private localMountCloudHydrationStartedAt = 0
   private localMountCloudHydrationPromise: Promise<void> | null = null
   private authRecoveryState: IntegrationAuthRecoveryState | null = null
+  private authRecoveryRetryPromise: Promise<void> | null = null
   private authRecoveryRetryTimer: ReturnType<typeof setTimeout> | null = null
 
   constructor() {
@@ -822,34 +823,45 @@ export class IntegrationsManager {
    * Re-run the cloud auth check after a fresh login and clear the
    * "Cloud sign-in required" banner if the new credentials resolve. The
    * `auth:login` IPC handler calls this on a successful sign-in. Without it,
-   * `authRecoveryState` set by an earlier cloud-auth failure stays stale —
-   * the background retry only ever re-checks local mounts (`hydrateCloud:
-   * false`), so the banner used to linger until the integrations settings
-   * page happened to re-hydrate the cloud workspace.
+   * the user would have to wait up to 30 s for the background retry to
+   * re-check cloud auth (`scheduleAuthRecoveryRetry`), so the banner would
+   * linger visibly after a successful login instead of clearing immediately.
    *
    * No-op when there's no banner to clear. On success `syncLocalMounts`
    * clears the state and emits `integration-auth-recovered`; on a fresh auth
    * failure it re-sets the state — either way this never rejects.
    */
   async retryAuthRecovery(): Promise<void> {
+    if (this.authRecoveryRetryPromise) return this.authRecoveryRetryPromise
     if (!this.authRecoveryState) return
-    // Deliberate user action (just logged in) — bypass the hydration throttle
-    // so the cloud re-check isn't skipped as a too-recent attempt, and drop any
-    // in-flight hydration so we don't await a check that began before login
-    // (hydrateCloudIntegrationsForLocalMounts reuses a pending promise). The
-    // older promise's own `finally` only nulls the field when it still points
-    // at itself, so clearing it here can't clobber the fresh hydration.
-    this.localMountCloudHydrationStartedAt = 0
-    this.localMountCloudHydrationPromise = null
-    try {
-      await this.syncLocalMounts({ hydrateCloud: true })
-    } catch (error) {
-      if (!isIntegrationAuthRecoveryError(error)) {
-        console.warn('[integrations] retryAuthRecovery failed:', toErrorMessage(error))
+
+    const pending = (async () => {
+      // Deliberate user action (just logged in) — bypass the hydration throttle
+      // so the cloud re-check isn't skipped as a too-recent attempt, and drop any
+      // in-flight hydration so we don't await a check that began before login
+      // (hydrateCloudIntegrationsForLocalMounts reuses a pending promise). The
+      // older promise's own `finally` only nulls the field when it still points
+      // at itself, so clearing it here can't clobber the fresh hydration.
+      this.localMountCloudHydrationStartedAt = 0
+      this.localMountCloudHydrationPromise = null
+      try {
+        await this.syncLocalMounts({ hydrateCloud: true })
+      } catch (error) {
+        if (!isIntegrationAuthRecoveryError(error)) {
+          console.warn('[integrations] retryAuthRecovery failed:', toErrorMessage(error))
+        }
+        // syncLocalMounts re-sets the recovery state on auth errors; the banner
+        // stays up correctly and the retry timer keeps trying.
       }
-      // syncLocalMounts re-sets the recovery state on auth errors; the banner
-      // stays up correctly and the retry timer keeps trying.
-    }
+    })()
+      .finally(() => {
+        if (this.authRecoveryRetryPromise === pending) {
+          this.authRecoveryRetryPromise = null
+        }
+      })
+
+    this.authRecoveryRetryPromise = pending
+    return pending
   }
 
   private setAuthRecoveryState(

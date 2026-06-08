@@ -501,6 +501,62 @@ describe('IntegrationsManager', () => {
     expect(mock.integrationMountManager.ensureMounted).not.toHaveBeenCalled()
   })
 
+  it('coalesces concurrent retryAuthRecovery calls into one cloud re-check', async () => {
+    const manager = new IntegrationsManager()
+    mock.fetch.mockImplementationOnce(async () => ({
+      ok: false,
+      status: 403,
+      statusText: 'Forbidden',
+      json: async () => ({ error: 'Forbidden' })
+    }))
+
+    await expect(manager.listConnectedForSettings('project-1'))
+      .rejects.toThrow('cloud-auth-required:workspace-access-revoked')
+
+    let finishCloudHydration!: () => void
+    mock.fetch.mockImplementationOnce(async () => {
+      await new Promise<void>((resolve) => {
+        finishCloudHydration = resolve
+      })
+      return {
+        ok: true,
+        status: 200,
+        statusText: 'OK',
+        json: async () => ({
+          integrations: [
+            {
+              provider: 'slack',
+              integrationId: 'slack-integration-1',
+              mountPaths: ['/slack/channels'],
+              scope: {},
+              connectedAt: '2026-06-05T00:00:00.000Z',
+              ready: true
+            }
+          ]
+        })
+      }
+    })
+
+    const firstRetry = manager.retryAuthRecovery()
+    const secondRetry = manager.retryAuthRecovery()
+
+    await vi.waitFor(() => {
+      expect(mock.fetch.mock.calls.filter(([url]) =>
+        new URL(String(url)).pathname === '/api/v1/workspaces/account-workspace-id/integrations'
+      )).toHaveLength(2)
+    })
+    expect(mock.integrationMountManager.ensureMounted).not.toHaveBeenCalled()
+
+    finishCloudHydration()
+    await Promise.all([firstRetry, secondRetry])
+
+    expect(mock.fetch.mock.calls.filter(([url]) =>
+      new URL(String(url)).pathname === '/api/v1/workspaces/account-workspace-id/integrations'
+    )).toHaveLength(2)
+    expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalledTimes(1)
+    expect(manager.getAuthRecoveryState()).toBeNull()
+  })
+
   it('relays mount-manager auth recovery alerts to renderer integration events', () => {
     const manager = new IntegrationsManager()
     const events: unknown[] = []
