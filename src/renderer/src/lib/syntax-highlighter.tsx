@@ -107,8 +107,8 @@ export async function highlightCode(
   }
 
   const highlighted = codeToTokensBase(code, {
-    lang,
-    theme: themeMap[theme]
+    lang: lang as never,
+    theme: themeMap[theme] as never
   }).then((lines) =>
     lines.map((line) =>
       line.map((token) => ({

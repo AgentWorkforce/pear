@@ -103,7 +103,7 @@ export function StatusBar(): React.ReactNode {
       cancelled = true
       window.clearInterval(interval)
     }
-  }, [projectRootPathKey, projectSummary?.branch])
+  }, [projectRootPathKey])
 
   const statusColor =
     brokerStatus === 'connected'

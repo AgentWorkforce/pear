@@ -1,5 +1,6 @@
 import { useEffect, useMemo } from 'react'
 import { getDirectMessageRoomId } from '@/lib/direct-messages'
+import { pear } from '@/lib/ipc'
 import { useAgentStore, type ChatMessage } from '@/stores/agent-store'
 import { useProjectStore } from '@/stores/project-store'
 import { type AppTab, useUIStore } from '@/stores/ui-store'
@@ -8,7 +9,7 @@ import type {
   BrokerReconciledChatMessage,
   BrokerReconcileMessagesInput,
   PearAPI
-} from '@shared/types/ipc'
+} from '@/lib/ipc'
 
 const DEFAULT_RECONCILE_LIMIT = 50
 const DEFAULT_RECONCILE_DEBOUNCE_MS = 750
@@ -206,7 +207,7 @@ function debugReconciliation(event: MessageReconciliationDebugEvent): void {
 
 function refreshEventStream(reason: string): void {
   const projectId = useProjectStore.getState().activeProjectId || undefined
-  const broker = window.pear?.broker as (PearAPI['broker'] & BrokerWithMessageReconciliation) | undefined
+  const broker = pear.broker as PearAPI['broker'] & BrokerWithMessageReconciliation
   void broker?.refreshEventStream?.(projectId, reason)?.catch(() => undefined)
 }
 
@@ -233,7 +234,7 @@ export function useMessageReconciliation(): void {
       })
     },
     reconcileMessages: (input) => {
-      const broker = window.pear?.broker as (PearAPI['broker'] & BrokerWithMessageReconciliation) | undefined
+      const broker = pear.broker as PearAPI['broker'] & BrokerWithMessageReconciliation
       return broker?.reconcileMessages?.(input) ?? Promise.resolve([])
     },
     mergeMessages: mergeReconciledMessages,
@@ -287,7 +288,7 @@ export function useMessageReconciliation(): void {
   }, [reconciler])
 
   useEffect(() => {
-    return window.pear?.broker?.onStatus?.((status) => {
+    return pear.broker.onStatus((status) => {
       if (BROKER_CONNECTED_STATUSES.has(status.status)) {
         refreshEventStream(`broker:${status.status}`)
         reconciler.schedule(`broker:${status.status}`)
@@ -296,7 +297,7 @@ export function useMessageReconciliation(): void {
   }, [reconciler])
 
   useEffect(() => {
-    const broker = window.pear?.broker as (PearAPI['broker'] & BrokerWithMessageReconciliation) | undefined
+    const broker = pear.broker as PearAPI['broker'] & BrokerWithMessageReconciliation
     if (!broker?.onEventStreamDiagnostic) return
     return broker.onEventStreamDiagnostic((event) => {
       if (EVENT_STREAM_RECONCILED_STATUSES.has(event.status)) {

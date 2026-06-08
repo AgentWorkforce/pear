@@ -1752,7 +1752,7 @@ export function DiffPane(): React.ReactNode {
   const historyFilesListRef = useRef<HTMLDivElement>(null)
   const windowFocused = useWindowFocused()
   const activeProject = useProjectStore((s) => s.getActiveProject())
-  const root = useProjectStore((s) => s.getActiveRoot())
+  const root = useProjectStore((s) => s.getActiveRoot()) as ProjectRoot
   const activeProjectId = useProjectStore((s) => s.activeProjectId)
   const setActiveRoot = useProjectStore((s) => s.setActiveRoot)
   const agents = useAgentStore((s) => s.agents)

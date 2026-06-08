@@ -139,14 +139,14 @@ export function GraphView(): React.ReactNode {
   const initialEdges: Edge[] = useMemo(() => {
     const agentKeys = new Set(agents.map(getAgentKeyForAgent))
     const hierarchyEdges: Edge[] = agents
-      .map((agent) => {
-        if (!agent.parent) return null
+      .flatMap((agent): Edge[] => {
+        if (!agent.parent) return []
 
         const source = getAgentKey(agent.projectId, agent.parent)
         const target = getAgentKeyForAgent(agent)
-        if (!agentKeys.has(source)) return null
+        if (!agentKeys.has(source)) return []
 
-        return {
+        return [{
           id: `hierarchy:${source}->${target}`,
           source,
           target,
@@ -154,9 +154,8 @@ export function GraphView(): React.ReactNode {
           selectable: false,
           focusable: false,
           zIndex: 0
-        } satisfies Edge
+        }]
       })
-      .filter((edge): edge is Edge => edge !== null)
 
     const edgeMap = new Map<string, { count: number; lastBody: string; lastTimestamp: number }>()
     for (const msg of relayMessages) {
