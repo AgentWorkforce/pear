@@ -1,4 +1,5 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -162,10 +163,22 @@ const electronMock = vi.hoisted(() => ({
   }
 }))
 
+const childProcessMock = vi.hoisted(() => ({
+  execFile: vi.fn()
+}))
+
 vi.mock('electron', () => ({
   app: electronMock.app,
   BrowserWindow: class {}
 }))
+
+vi.mock('child_process', async () => {
+  const actual = await vi.importActual<typeof import('child_process')>('child_process')
+  return {
+    ...actual,
+    execFile: childProcessMock.execFile
+  }
+})
 
 vi.mock('@agent-relay/harness-driver', () => ({
   HarnessDriverClient: mock.HarnessDriverClient
@@ -212,6 +225,39 @@ function setProcessResourcesPath(resourcesPath: string): void {
     configurable: true,
     value: resourcesPath
   })
+}
+
+function mockBrokerInitHelp(helpText: string): void {
+  childProcessMock.execFile.mockImplementationOnce((
+    _binaryPath: string,
+    _args: string[],
+    _options: Record<string, unknown>,
+    callback: (err: Error | null, stdout: string) => void
+  ) => {
+    callback(null, helpText)
+    return {} as never
+  })
+}
+
+function mockCurrentBrokerInitHelp(): void {
+  mockBrokerInitHelp(`
+Usage: agent-relay-broker init [OPTIONS]
+
+Options:
+      --name <NAME>                    Legacy broker instance name flag. Prefer --instance-name [default: ]
+      --instance-name <INSTANCE_NAME>  Stable broker instance name within the Relay workspace
+      --workspace-key <WORKSPACE_KEY>  Join an existing Relay workspace instead of creating a fresh one
+`)
+}
+
+function mockLegacyBrokerInitHelp(): void {
+  mockBrokerInitHelp(`
+Usage: agent-relay-broker init [OPTIONS]
+
+Options:
+      --name <NAME>            [default: ]
+      --channels <CHANNELS>    [default: general]
+`)
 }
 
 function restoreProcessResourcesPath(): void {
@@ -459,6 +505,23 @@ describe('BrokerManager local + cloud coexistence', () => {
 
   beforeEach(() => {
     delete process.env.AGENT_RELAY_WORKSPACE_KEY
+    childProcessMock.execFile.mockReset()
+    childProcessMock.execFile.mockImplementation((
+      _binaryPath: string,
+      _args: string[],
+      _options: Record<string, unknown>,
+      callback: (err: Error | null, stdout: string) => void
+    ) => {
+      callback(null, `
+Usage: agent-relay-broker init [OPTIONS]
+
+Options:
+      --name <NAME>                    Legacy broker instance name flag. Prefer --instance-name [default: ]
+      --instance-name <INSTANCE_NAME>  Stable broker instance name within the Relay workspace
+      --workspace-key <WORKSPACE_KEY>  Join an existing Relay workspace instead of creating a fresh one
+`)
+      return {} as never
+    })
     mock.state.spawnedClients.length = 0
     mock.state.constructedClients.length = 0
     mock.state.connectedClients.length = 0
@@ -547,6 +610,110 @@ describe('BrokerManager local + cloud coexistence', () => {
       }
       await manager.shutdown()
     }
+  })
+
+  it('launches current broker binaries directly after CLI flag inspection', async () => {
+    const manager = new BrokerManager()
+    mockCurrentBrokerInitHelp()
+
+    await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', undefined as never, [])
+
+    expect(mock.HarnessDriverClient.spawn).toHaveBeenCalledWith(expect.objectContaining({
+      binaryPath: expect.stringMatching(/agent-relay-broker/),
+      env: expect.not.objectContaining({
+        PEAR_AGENT_RELAY_BROKER_BINARY: expect.any(String)
+      })
+    }))
+
+    await manager.shutdown()
+  })
+
+  it('launches legacy broker binaries through the compat shim with stable env', async () => {
+    const manager = new BrokerManager()
+    const tempDir = await mkdtemp(join(tmpdir(), 'pear-broker-compat-'))
+    mockLegacyBrokerInitHelp()
+
+    try {
+      const firstStart = await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', undefined as never, [])
+      const secondStart = await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', undefined as never, [])
+      const spawnOptions = mock.HarnessDriverClient.spawn.mock.calls[0]?.[0] as {
+        binaryPath: string
+        env: Record<string, string>
+      }
+      const expectedShimPath = join(
+        '/tmp/pear-user-data',
+        'broker-compat',
+        process.platform === 'win32' ? 'agent-relay-broker-compat.cmd' : 'agent-relay-broker-compat'
+      )
+
+      expect(firstStart).toBe(true)
+      expect(secondStart).toBe(false)
+      expect(mock.HarnessDriverClient.spawn).toHaveBeenCalledTimes(1)
+      expect(spawnOptions.binaryPath).toBe(expectedShimPath)
+      expect(spawnOptions.env).toEqual(expect.objectContaining({
+        PEAR_AGENT_RELAY_BROKER_BINARY: expect.stringMatching(/agent-relay-broker/),
+        PEAR_AGENT_RELAY_BROKER_SUPPORTS_INSTANCE_NAME: '0',
+        PEAR_AGENT_RELAY_BROKER_SUPPORTS_WORKSPACE_KEY: '0'
+      }))
+      await expect(readFile(spawnOptions.binaryPath, 'utf8')).resolves.toContain(process.execPath)
+      await expect(readFile(join(dirname(spawnOptions.binaryPath), 'agent-relay-broker-compat.js'), 'utf8'))
+        .resolves.not.toContain('/usr/bin/env node')
+
+      if (process.platform !== 'win32') {
+        const fakeBroker = join(tempDir, 'agent-relay-broker')
+        await writeFile(fakeBroker, '#!/bin/sh\nprintf "%s\\n" "$@"\n')
+        await chmod(fakeBroker, 0o755)
+        const output = execFileSync(
+          spawnOptions.binaryPath,
+          ['init', '--instance-name', 'pear-project-1', '--workspace-key', 'rk_live_123', '--channels=general'],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PEAR_AGENT_RELAY_BROKER_BINARY: fakeBroker,
+              PEAR_AGENT_RELAY_BROKER_SUPPORTS_INSTANCE_NAME: '0',
+              PEAR_AGENT_RELAY_BROKER_SUPPORTS_WORKSPACE_KEY: '0'
+            }
+          }
+        )
+        expect(output.trim().split('\n')).toEqual(['init', '--name', 'pear-project-1', '--channels=general'])
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+      await manager.shutdown()
+    }
+  })
+
+  it('falls back to the legacy compat shim when broker CLI inspection fails', async () => {
+    const manager = new BrokerManager()
+    childProcessMock.execFile.mockImplementationOnce((
+      _binaryPath: string,
+      _args: string[],
+      _options: Record<string, unknown>,
+      callback: (err: Error, stdout: string) => void
+    ) => {
+      callback(new Error('help failed'), '')
+      return {} as never
+    })
+
+    await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', undefined as never, [])
+    const spawnOptions = mock.HarnessDriverClient.spawn.mock.calls[0]?.[0] as {
+      binaryPath: string
+      env: Record<string, string>
+    }
+
+    expect(spawnOptions.binaryPath).toBe(join(
+      '/tmp/pear-user-data',
+      'broker-compat',
+      process.platform === 'win32' ? 'agent-relay-broker-compat.cmd' : 'agent-relay-broker-compat'
+    ))
+    expect(spawnOptions.env).toEqual(expect.objectContaining({
+      PEAR_AGENT_RELAY_BROKER_BINARY: expect.stringMatching(/agent-relay-broker/),
+      PEAR_AGENT_RELAY_BROKER_SUPPORTS_INSTANCE_NAME: '0',
+      PEAR_AGENT_RELAY_BROKER_SUPPORTS_WORKSPACE_KEY: '0'
+    }))
+
+    await manager.shutdown()
   })
 
   it('reads the local broker workspace key for cloud provisioning', async () => {

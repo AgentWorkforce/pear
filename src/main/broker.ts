@@ -330,9 +330,9 @@ function inspectBrokerInitCliFlags(binaryPath: string): Promise<BrokerInitCliFla
       if (err) {
         console.warn(`[broker] Failed to inspect broker init CLI for ${binaryPath}:`, err)
         resolve({
-          supportsInstanceName: true,
+          supportsInstanceName: false,
           supportsName: true,
-          supportsWorkspaceKey: true
+          supportsWorkspaceKey: false
         })
         return
       }
@@ -342,8 +342,7 @@ function inspectBrokerInitCliFlags(binaryPath: string): Promise<BrokerInitCliFla
 }
 
 function brokerBinaryCompatShimSource(): string {
-  return `#!/usr/bin/env node
-const { spawn } = require('node:child_process')
+  return `const { spawn } = require('node:child_process')
 
 const realBinary = process.env.PEAR_AGENT_RELAY_BROKER_BINARY
 if (!realBinary) {
@@ -402,24 +401,30 @@ child.on('exit', (code, signal) => {
 `
 }
 
+function shellSingleQuote(value: string): string {
+  return `'${value.replace(/'/g, "'\\''")}'`
+}
+
+function windowsCmdQuote(value: string): string {
+  return `"${value.replace(/"/g, '""').replace(/%/g, '%%')}"`
+}
+
 function ensureBrokerBinaryCompatShim(): string {
   const shimDir = join(app.getPath('userData'), 'broker-compat')
+  const jsPath = join(shimDir, 'agent-relay-broker-compat.js')
   const shimPath = join(shimDir, process.platform === 'win32' ? 'agent-relay-broker-compat.cmd' : 'agent-relay-broker-compat')
+  const jsSource = brokerBinaryCompatShimSource()
   const source = process.platform === 'win32'
-    ? `@echo off\r\nnode "%~dp0agent-relay-broker-compat.js" %*\r\n`
-    : brokerBinaryCompatShimSource()
+    ? `@echo off\r\n${windowsCmdQuote(process.execPath)} "%~dp0agent-relay-broker-compat.js" %*\r\n`
+    : `#!/bin/sh\nexec ${shellSingleQuote(process.execPath)} "$0.js" "$@"\n`
 
   mkdirSync(shimDir, { recursive: true })
+  if (!existsSync(jsPath) || readFileSync(jsPath, 'utf8') !== jsSource) {
+    writeFileSync(jsPath, jsSource)
+  }
   if (!existsSync(shimPath) || readFileSync(shimPath, 'utf8') !== source) {
     writeFileSync(shimPath, source)
     chmodSync(shimPath, 0o755)
-  }
-  if (process.platform === 'win32') {
-    const jsPath = join(shimDir, 'agent-relay-broker-compat.js')
-    const jsSource = brokerBinaryCompatShimSource()
-    if (!existsSync(jsPath) || readFileSync(jsPath, 'utf8') !== jsSource) {
-      writeFileSync(jsPath, jsSource)
-    }
   }
   return shimPath
 }
