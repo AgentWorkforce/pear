@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto'
 import { existsSync, watch, type FSWatcher } from 'node:fs'
-import { appendFile, mkdir, readFile, stat } from 'node:fs/promises'
+import { appendFile, mkdir, readFile, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import {
@@ -568,7 +568,7 @@ function targetLabels(targets: DeliveryTargets): string[] {
   return [...targets.agents.map((agent) => `@${agent}`), ...targets.channels]
 }
 
-function subscriptionSpecsFor(
+export function subscriptionSpecsFor(
   integrations: ConnectedIntegration[],
   localMountWorkspaceId?: string
 ): SubscriptionSpec[] {
@@ -1869,6 +1869,36 @@ async function readLocalEventContextPreview(
   return undefined
 }
 
+async function cleanupConfirmedSlackWritebackDraft(
+  projectId: string,
+  event: ChangeEvent,
+  specs: SubscriptionSpec[]
+): Promise<void> {
+  if (event.type !== 'writeback.succeeded') return
+  const remotePath = eventSummaryValue(event.resource.path)
+  if (!remotePath || !isLikelyLocalWritebackCommandPath(remotePath)) return
+
+  for (const spec of specs) {
+    if (spec.provider !== 'slack') continue
+    for (const root of spec.localMountRoots) {
+      if (!isSlackWritebackCommandRoot(root.remoteRoot)) continue
+      if (!pathIsInsideMount(remotePath, root.remoteRoot)) continue
+      const localPath = localPathForRemotePathInsideRoot(root.localRoot, root.remoteRoot, remotePath)
+      if (!localPathIsInsideRoot(root.localRoot, localPath)) continue
+      const stats = await stat(localPath).catch(() => null)
+      if (!stats || stats.isDirectory()) continue
+      await rm(localPath, { force: true })
+      logIntegrationEvent('confirmed Slack writeback draft cleaned', {
+        projectId,
+        eventId: event.id,
+        remotePath,
+        localRoot: root.localRoot
+      })
+      return
+    }
+  }
+}
+
 function slackScopeLabel(path: string): string | undefined {
   const segments = pathSegments(path)
   const channelIndex = segments.indexOf('channels')
@@ -2330,6 +2360,18 @@ export class IntegrationEventBridge {
               eventId: event.id,
               type: event.type,
               path: event.resource.path
+            })
+            void cleanupConfirmedSlackWritebackDraft(projectId, event, specs).catch((error) => {
+              warnIntegrationEventAggregated(
+                `confirmed writeback cleanup failed:${projectId}`,
+                'confirmed writeback cleanup failed',
+                {
+                  projectId,
+                  eventId: event.id,
+                  path: event.resource.path,
+                  error: toErrorMessage(error)
+                }
+              )
             })
             void this.enqueueEvent(projectId, event, specs, {
               source: 'remote',

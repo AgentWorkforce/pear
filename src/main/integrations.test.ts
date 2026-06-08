@@ -757,6 +757,38 @@ describe('IntegrationsManager', () => {
     )
   })
 
+  it('passes current local mount paths into integration event reconciliation', async () => {
+    mock.store.projects[0].integrations[0] = {
+      ...mock.store.projects[0].integrations[0],
+      mountPaths: ['/slack/users/U0ADJH4P83T/messages'],
+      scope: { listenDms: true },
+      subscribeAgent: true
+    }
+    mock.integrationMountManager.currentWorkspaceId.mockReturnValue('workspace-id')
+    mock.integrationMountManager.localPathsFor.mockReturnValue([
+      '/tmp/relayfile/workspace-id/slack/users/U0ADJH4P83T/messages'
+    ])
+    const manager = new IntegrationsManager()
+
+    await manager.refreshAgentState('project-1')
+
+    expect(mock.integrationEventBridge.reconcile).toHaveBeenCalledWith(
+      'project-1',
+      [
+        expect.objectContaining({
+          provider: 'slack',
+          integrationId: 'slack-integration-1',
+          mountPaths: ['/slack/users/U0ADJH4P83T/messages'],
+          localMountPaths: ['/tmp/relayfile/workspace-id/slack/users/U0ADJH4P83T/messages']
+        })
+      ]
+    )
+    expect(mock.integrationMountManager.localPathsFor).toHaveBeenCalledWith('workspace-id', {
+      provider: 'slack',
+      mountPaths: ['/discovery/slack', '/slack/users/U0ADJH4P83T/messages']
+    })
+  })
+
   it('retries active integration event subscriptions after startup mount hydration', async () => {
     mock.store.projects[0].integrations[0].subscribeAgent = true
     const manager = new IntegrationsManager()
