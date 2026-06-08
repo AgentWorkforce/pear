@@ -284,9 +284,15 @@ export function useTerminal(
     } catch {
       // ignore
     }
-    if (!active) return
-    const timer = setTimeout(() => runtimeRef.current?.term.focus(), 50)
-    return () => clearTimeout(timer)
+    // Intentionally do NOT call term.focus() on visibility change.
+    // When the PTY application has enabled DECSET ?1004 (focus events) —
+    // which Claude Code's TUI does — term.focus() emits "\x1b[I" to the
+    // PTY. The application interprets it as "user just looked at me" and
+    // redraws its UI. On a stacked TUI card layout, that redraw appends a
+    // duplicate card instead of overwriting in place, so every tab switch
+    // back stacks another card in scrollback. User clicks on the terminal
+    // already focus the textarea via the pointerdown handler in the main
+    // effect; the visibility effect doesn't need to reinforce it.
   }, [visible, active, agentName, projectId, containerRef])
 
   useEffect(() => {
