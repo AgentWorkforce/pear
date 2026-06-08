@@ -7,6 +7,9 @@ const LOGICAL_EVENTS_PER_AGENT_PER_SECOND = 10
 const AGENT_BATCH_SIZE = 4
 const CHAT_BUFFER_CAP = 5_000
 const DEFAULT_PTY_AGGREGATE_TICKS = 10
+// Lazy terminal mounting keeps the default pty-heavy 1k-agent profile from
+// allocating one xterm scrollback per agent up front.
+const DEFAULT_PROFILE_HEAP_LIMIT_MB = 200
 const SCREENSHOT_PATH = 'tests/playwright/screenshots/stress-1000-agents.png'
 const STRESS_PROFILE = process.env.STRESS_PROFILE === 'chat-heavy' ? 'chat-heavy' : 'pty-heavy'
 const CHAT_EVERY_TICKS = STRESS_PROFILE === 'chat-heavy' ? 6 : null
@@ -18,6 +21,7 @@ type StressResult = {
   minFps: number
   avgFps: number
   longestFrameMs: number
+  finalHeapMb: number | null
   terminalSampleAgent: string
 }
 
@@ -155,6 +159,10 @@ test('renderer survives synthetic 1000-agent broker load', async ({ page }) => {
         const windowEnd = windowStart + 1_000
         return frameTimes.filter((time) => time >= windowStart && time < windowEnd).length
       })
+      const memory = (performance as Performance & { memory?: { usedJSHeapSize?: number } }).memory
+      const finalHeapMb = typeof memory?.usedJSHeapSize === 'number'
+        ? memory.usedJSHeapSize / (1024 * 1024)
+        : null
       return {
         chatEvents,
         ptyEvents,
@@ -162,6 +170,7 @@ test('renderer survives synthetic 1000-agent broker load', async ({ page }) => {
         minFps: Math.min(...frameWindows),
         avgFps: 1000 / avgFrameMs,
         longestFrameMs,
+        finalHeapMb,
         terminalSampleAgent: 'agent-0001'
       }
     },
@@ -177,7 +186,7 @@ test('renderer survives synthetic 1000-agent broker load', async ({ page }) => {
   )
 
   console.info(
-    `[stress] profile=${STRESS_PROFILE} events=${result.totalEvents} chat=${result.chatEvents} pty=${result.ptyEvents} minFps=${result.minFps.toFixed(1)} avgFps=${result.avgFps.toFixed(1)} longestFrameMs=${result.longestFrameMs.toFixed(1)}`
+    `[stress] profile=${STRESS_PROFILE} events=${result.totalEvents} chat=${result.chatEvents} pty=${result.ptyEvents} minFps=${result.minFps.toFixed(1)} avgFps=${result.avgFps.toFixed(1)} longestFrameMs=${result.longestFrameMs.toFixed(1)} finalHeapMb=${result.finalHeapMb?.toFixed(1) ?? 'n/a'}`
   )
 
   expect(result.totalEvents, 'synthetic load event count').toBeGreaterThanOrEqual(
@@ -212,6 +221,9 @@ test('renderer survives synthetic 1000-agent broker load', async ({ page }) => {
   expect(visibleIds.every((id) => stateMessageIdSet.has(id)), 'visible chat DOM contains unknown message IDs').toBe(true)
 
   expect(result.minFps, `frame rate dropped below 30 FPS; min window ${result.minFps.toFixed(1)} FPS, longest frame ${result.longestFrameMs.toFixed(1)}ms`).toBeGreaterThanOrEqual(30)
+  if (STRESS_PROFILE === 'pty-heavy' && result.finalHeapMb !== null) {
+    expect(result.finalHeapMb, `final JS heap exceeded ${DEFAULT_PROFILE_HEAP_LIMIT_MB} MB`).toBeLessThan(DEFAULT_PROFILE_HEAP_LIMIT_MB)
+  }
 
   await page.locator('button').filter({ hasText: result.terminalSampleAgent }).first().click()
   const terminal = page.locator(`[data-testid="terminal-instance"][data-agent-name="${result.terminalSampleAgent}"]`)
