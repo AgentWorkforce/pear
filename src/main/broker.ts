@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from 'fs'
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import { rm } from 'fs/promises'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
@@ -304,6 +304,147 @@ function resolveBundledBrokerBinary(): string {
     `agent-relay-broker-${suffix}${process.platform === 'win32' ? '.exe' : ''}`
   )
   return unpackIfPackaged(brokerBinary)
+}
+
+interface BrokerInitCliFlags {
+  supportsInstanceName: boolean
+  supportsName: boolean
+  supportsWorkspaceKey: boolean
+}
+
+export function parseBrokerInitCliFlags(helpText: string): BrokerInitCliFlags {
+  return {
+    supportsInstanceName: /(?:^|\s)--instance-name(?:\s|[<=[,]|$)/.test(helpText),
+    supportsName: /(?:^|\s)--name(?:\s|[<=[,]|$)/.test(helpText),
+    supportsWorkspaceKey: /(?:^|\s)--workspace-key(?:\s|[<=[,]|$)/.test(helpText)
+  }
+}
+
+function inspectBrokerInitCliFlags(binaryPath: string): BrokerInitCliFlags {
+  try {
+    const help = execFileSync(binaryPath, ['init', '--help'], {
+      encoding: 'utf8',
+      timeout: 2_000,
+      stdio: ['ignore', 'pipe', 'pipe']
+    })
+    return parseBrokerInitCliFlags(help)
+  } catch (err) {
+    console.warn(`[broker] Failed to inspect broker init CLI for ${binaryPath}:`, err)
+    return {
+      supportsInstanceName: true,
+      supportsName: true,
+      supportsWorkspaceKey: true
+    }
+  }
+}
+
+function brokerBinaryCompatShimSource(): string {
+  return `#!/usr/bin/env node
+const { spawn } = require('node:child_process')
+
+const realBinary = process.env.PEAR_AGENT_RELAY_BROKER_BINARY
+if (!realBinary) {
+  console.error('[pear-broker-compat] PEAR_AGENT_RELAY_BROKER_BINARY is required')
+  process.exit(127)
+}
+
+const supportsInstanceName = process.env.PEAR_AGENT_RELAY_BROKER_SUPPORTS_INSTANCE_NAME === '1'
+const supportsWorkspaceKey = process.env.PEAR_AGENT_RELAY_BROKER_SUPPORTS_WORKSPACE_KEY === '1'
+const inputArgs = process.argv.slice(2)
+const outputArgs = []
+
+for (let index = 0; index < inputArgs.length; index += 1) {
+  const arg = inputArgs[index]
+  if (!supportsInstanceName && arg === '--instance-name') {
+    outputArgs.push('--name')
+    if (index + 1 < inputArgs.length) outputArgs.push(inputArgs[++index])
+    continue
+  }
+  if (!supportsInstanceName && arg.startsWith('--instance-name=')) {
+    outputArgs.push('--name=' + arg.slice('--instance-name='.length))
+    continue
+  }
+  if (!supportsWorkspaceKey && arg === '--workspace-key') {
+    index += 1
+    continue
+  }
+  if (!supportsWorkspaceKey && arg.startsWith('--workspace-key=')) {
+    continue
+  }
+  outputArgs.push(arg)
+}
+
+const child = spawn(realBinary, outputArgs, {
+  cwd: process.cwd(),
+  env: process.env,
+  stdio: 'inherit'
+})
+
+child.on('error', (error) => {
+  console.error('[pear-broker-compat] failed to launch broker:', error instanceof Error ? error.message : String(error))
+  process.exit(127)
+})
+
+child.on('exit', (code, signal) => {
+  if (signal) {
+    process.kill(process.pid, signal)
+    return
+  }
+  process.exit(code ?? 0)
+})
+`
+}
+
+function ensureBrokerBinaryCompatShim(): string {
+  const shimDir = join(app.getPath('userData'), 'broker-compat')
+  const shimPath = join(shimDir, process.platform === 'win32' ? 'agent-relay-broker-compat.cmd' : 'agent-relay-broker-compat')
+  const source = process.platform === 'win32'
+    ? `@echo off\r\nnode "%~dp0agent-relay-broker-compat.js" %*\r\n`
+    : brokerBinaryCompatShimSource()
+
+  mkdirSync(shimDir, { recursive: true })
+  if (!existsSync(shimPath) || readFileSync(shimPath, 'utf8') !== source) {
+    writeFileSync(shimPath, source)
+    chmodSync(shimPath, 0o755)
+  }
+  if (process.platform === 'win32') {
+    const jsPath = join(shimDir, 'agent-relay-broker-compat.js')
+    const jsSource = brokerBinaryCompatShimSource()
+    if (!existsSync(jsPath) || readFileSync(jsPath, 'utf8') !== jsSource) {
+      writeFileSync(jsPath, jsSource)
+    }
+  }
+  return shimPath
+}
+
+function resolveHarnessBrokerBinary(workspaceKey?: string): { binaryPath: string; env: NodeJS.ProcessEnv } {
+  const binaryPath = resolveBundledBrokerBinary()
+  const flags = inspectBrokerInitCliFlags(binaryPath)
+
+  if (workspaceKey && !flags.supportsWorkspaceKey) {
+    throw new Error(
+      `Broker binary does not support --workspace-key: ${binaryPath}. Rebuild or update agent-relay-broker, or unset AGENT_RELAY_WORKSPACE_KEY.`
+    )
+  }
+
+  if (flags.supportsInstanceName) {
+    return { binaryPath, env: {} }
+  }
+
+  if (!flags.supportsName) {
+    throw new Error(`Broker binary supports neither --instance-name nor --name: ${binaryPath}`)
+  }
+
+  const shimPath = ensureBrokerBinaryCompatShim()
+  console.warn(`[broker] Broker binary uses legacy --name flag; launching through compatibility shim: ${binaryPath}`)
+  return {
+    binaryPath: shimPath,
+    env: {
+      PEAR_AGENT_RELAY_BROKER_BINARY: binaryPath,
+      PEAR_AGENT_RELAY_BROKER_SUPPORTS_INSTANCE_NAME: flags.supportsInstanceName ? '1' : '0',
+      PEAR_AGENT_RELAY_BROKER_SUPPORTS_WORKSPACE_KEY: flags.supportsWorkspaceKey ? '1' : '0'
+    }
+  }
 }
 
 type TerminalAttachMode = 'view' | 'drive' | 'passthrough'
@@ -1396,15 +1537,17 @@ export class BrokerManager {
 
       // Phase 1 of #125: the local broker stays the workspace creator, so the
       // key is only threaded when explicitly pinned via env.
+      const brokerBinary = resolveHarnessBrokerBinary(explicitWorkspaceKey)
       const opts: AgentRelaySpawnOptions = {
         cwd,
         brokerName: name,
         channels: nextChannels,
         binaryArgs: { persist: true },
-        binaryPath: resolveBundledBrokerBinary(),
+        binaryPath: brokerBinary.binaryPath,
         ...(explicitWorkspaceKey ? { workspaceKey: explicitWorkspaceKey } : {}),
         env: {
           PATH: augmentedPath(),
+          ...brokerBinary.env,
           ...(agentRelayMcpCommand ? { AGENT_RELAY_MCP_COMMAND: agentRelayMcpCommand } : {})
         },
         onStderr: (line: string) => {
@@ -2595,8 +2738,24 @@ export class BrokerManager {
     throw new Error(`Unable to allocate an agent name for ${relayAwareInput.name}`)
   }
 
-  async listPersonas(projectId: string): Promise<WorkforcePersona[]> {
-    const session = this.getSessionForProject(projectId)
+  async listPersonas(projectId: string, cwd?: string): Promise<WorkforcePersona[]> {
+    const personaCwd = cwd?.trim()
+    if (personaCwd) {
+      try {
+        return listWorkforcePersonas(personaCwd)
+      } catch (err) {
+        console.warn(`[broker] Failed to list workforce personas for project ${projectId} at ${personaCwd}:`, err)
+        return []
+      }
+    }
+
+    let session: BrokerSession
+    try {
+      ;[session] = await this.getOrAwaitSessionsForProject(projectId)
+    } catch (err) {
+      if (isWorkspaceNotStartedError(err)) return []
+      throw err
+    }
 
     try {
       return listWorkforcePersonas(session.cwd)

@@ -265,8 +265,12 @@ export function registerIpcHandlers(): void {
     return toBrokerSpawnAgentResult(result)
   })
 
-  ipcMain.handle('broker:list-personas', async (_, projectId: string) => {
-    return brokerManager.listPersonas(projectId)
+  ipcMain.handle('broker:list-personas', async (_, projectId: string, cwd?: string) => {
+    const personaCwd = cwd?.trim()
+    if (personaCwd && !isDirectory(personaCwd)) {
+      return []
+    }
+    return brokerManager.listPersonas(projectId, personaCwd)
   })
 
   ipcMain.handle('broker:spawn-persona', async (_, projectId: string, personaId: string) => {

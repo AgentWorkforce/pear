@@ -858,7 +858,7 @@ export interface PearAPI {
     ) => Promise<{ removed: string[] }>
     connectCloud: () => Promise<string>
     spawnAgent: (projectId: string, input: BrokerSpawnAgentInput) => Promise<BrokerSpawnAgentResult>
-    listPersonas: (projectId: string) => Promise<WorkforcePersona[]>
+    listPersonas: (projectId: string, cwd?: string) => Promise<WorkforcePersona[]>
     spawnPersona: (projectId: string, personaId: string) => Promise<BrokerSpawnAgentResult>
     attachTerminal: (input: BrokerAttachTerminalInput) => Promise<BrokerAttachTerminalResult>
     sendInput: (

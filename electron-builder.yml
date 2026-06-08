@@ -19,6 +19,8 @@ asarUnpack:
   - resources/**
   - bin/**
   - node_modules/@agent-relay/sdk/bin/**
+  - node_modules/@agent-relay/broker-*/bin/**
+  - node_modules/agent-relay/node_modules/@agent-relay/broker-*/bin/**
 
 mac:
   category: public.app-category.developer-tools
