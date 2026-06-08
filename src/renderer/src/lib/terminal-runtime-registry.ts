@@ -401,6 +401,31 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
     }
 
     seedBufferSubscription()
+
+    // SIGWINCH bounce: 200ms after attach completes, send a one-pixel
+    // size change then back. Some TUIs (notably Ink-based, including
+    // Claude Code) cache their row/col count from initial state and
+    // only recompute on a winsize *change*. Without this bounce, their
+    // cursor-positioning sequences in subsequent redraws can land at
+    // the wrong row — the visible failure is each redraw appending to
+    // scrollback instead of overwriting in place, producing stacked
+    // duplicate cards. The bounce was dropped in Fix #8/#9 as a
+    // perceived perf optimization but is load-bearing for this class
+    // of TUI. lastSentRows/Cols are intentionally NOT updated for the
+    // (rows-1) intermediate, so the second resize re-fires.
+    const liveTerm = term
+    setTimeout(() => {
+      if (disposed || !liveTerm) return
+      const { rows, cols } = liveTerm
+      if (rows <= 1 || cols <= 0) return
+      pear.broker
+        .resizePty(opts.projectId, opts.agentName, rows - 1, cols)
+        .then(() => {
+          if (disposed) return
+          return pear.broker.resizePty(opts.projectId, opts.agentName, rows, cols)
+        })
+        .catch(() => {})
+    }, 200)
   }
 
   // Initial open into the parked host. We need the host in the document
