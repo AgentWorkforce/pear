@@ -201,6 +201,7 @@ export function useTerminal(
     let resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null
     let srttPoll: ReturnType<typeof setInterval> | null = null
     let focusTimers: ReturnType<typeof setTimeout>[] = []
+    let mountToken: symbol | null = null
     const containerEl = containerRef.current
 
     const focusTerminal = (requireActive = false): void => {
@@ -221,7 +222,7 @@ export function useTerminal(
     // we still call mount() so the runtime can defer its init() to the
     // first frame with layout.
     if (containerEl) {
-      runtime.mount(containerEl)
+      mountToken = runtime.mount(containerEl)
       focusTerminal(true)
       focusTimers = [0, 50, 150, 300].map((delay) =>
         setTimeout(() => focusTerminal(true), delay)
@@ -277,7 +278,9 @@ export function useTerminal(
       // Don't dispose the runtime — detach so xterm + subscription survive
       // the React unmount. The runtime is only torn down when the agent
       // itself goes away (see effect below).
-      runtime.detach()
+      if (mountToken) {
+        runtime.detach(mountToken)
+      }
     }
   }, [containerRef, agentName, projectId, sendInput])
 

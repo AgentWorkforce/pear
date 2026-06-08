@@ -9,9 +9,10 @@
 //
 // The fix is to decouple the xterm lifecycle from React: each agent gets a
 // runtime that owns its `Terminal`, its addons, its PTY subscription, and
-// its parked DOM host. React `mount(container)` / `detach()` calls just
-// reparent the host element; xterm never tears down until the agent is
-// fully released.
+// its parked DOM host. React `mount(container)` calls return ownership
+// tokens, and `detach(token)` only parks the host for the current token.
+// This lets a newer cross-tree mount win while stale React cleanup no-ops;
+// xterm never tears down until the agent is fully released.
 //
 // Model is based on superset-sh/superset's `terminal-runtime-registry.ts`.
 
@@ -125,8 +126,8 @@ export interface TerminalRuntime {
   readonly key: string
   readonly term: Terminal
   readonly host: HTMLDivElement
-  mount(container: HTMLElement): void
-  detach(): void
+  mount(container: HTMLElement): symbol
+  detach(token: symbol): void
   dispose(): void
   isMounted(): boolean
   setTheme(theme: Theme): void
@@ -241,7 +242,7 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
   let currentMode: TerminalAttachMode = opts.terminalMode
   let currentTheme: Theme = opts.theme
   let disposed = false
-  let mounted = false
+  let currentToken: symbol | null = null
   let webglAddon: WebglAddon | null = null
   let predictiveEcho: PredictiveEcho | null = null
   let disposePredictiveEcho: (() => void) | null = null
@@ -254,7 +255,6 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
   // backend reacts to no-op resizes by reflowing.
   let lastSentRows = -1
   let lastSentCols = -1
-  let lastMountedContainer: HTMLElement | null = null
   // Holder for the current input-SRTT getter. The predictive echo engine
   // captures this once on construction, so we wrap it in a trampoline and
   // let setInputSrttGetter swap the underlying getter on each effect run.
@@ -471,37 +471,22 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
       return term as Terminal
     },
     host,
-    mount(container: HTMLElement): void {
-      if (disposed || !term) return
-      // Fix #12: refuse a second concurrent mount into a different
-      // container. Currently chunkAgents doesn't trigger this, but future
-      // split layouts could — and silently reparenting would tear the
-      // canvas out from under the first owner.
-      if (mounted && host.parentElement && host.parentElement !== container) {
-        console.warn('[terminal-runtime] refusing second concurrent mount for', key)
-        return
-      }
+    mount(container: HTMLElement): symbol {
+      if (disposed || !term) return Symbol('disposed')
       if (host.parentElement !== container) {
         container.appendChild(host)
       }
-      mounted = true
-      lastMountedContainer = container
+      const token = Symbol('mount')
+      currentToken = token
       // Always run initIfReady so a split-page / hidden-tab mount that
       // landed without layout gets a retry once it becomes visible.
       void initIfReady(container)
+      return token
     },
-    detach(): void {
+    detach(token: symbol): void {
       if (disposed) return
-      mounted = false
-      // Fix #14: a cross-tree React commit order can produce
-      //   componentB.mount(B) → componentA.cleanup → detach()
-      // where the host has already been moved to container B. Parking
-      // would yank the canvas out from under B. Only park when the host
-      // is still in the container we last mounted into.
-      if (lastMountedContainer && host.parentElement !== lastMountedContainer) {
-        return
-      }
-      lastMountedContainer = null
+      if (token !== currentToken) return
+      currentToken = null
       const park = getParkedContainer()
       if (host.parentElement !== park) {
         park.appendChild(host)
@@ -516,7 +501,7 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
       cancelPendingInit()
       clearPtyBuffer(key)
       disposed = true
-      mounted = false
+      currentToken = null
       unsubBuffer?.()
       unsubBuffer = null
       disposePredictiveEcho?.()
@@ -539,7 +524,7 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
       }
     },
     isMounted(): boolean {
-      return mounted
+      return currentToken !== null
     },
     setTheme(theme: Theme): void {
       if (!term) return
