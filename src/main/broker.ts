@@ -386,7 +386,7 @@ const PERSONA_REGISTRATION_TIMEOUT_MS = 5_000
 const PERSONA_REGISTRATION_STABILITY_MS = 1_000
 const PERSONA_HARNESS_READY_TIMEOUT_MS = 120_000
 const PERSONA_READY_PROBE_TIMEOUT_MS = 5_000
-const AGENTWORKFORCE_CLI_VERSION = '3.0.50'
+const AGENTWORKFORCE_CLI_VERSION = '3.0.51'
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
