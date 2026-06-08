@@ -324,8 +324,6 @@ export class IntegrationMountManager {
               error: syncWedge.message
             }
           )
-        } else {
-          this.handledHealthErrorKeys.set(remotePath, healthErrorKey)
         }
       }
     }

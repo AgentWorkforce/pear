@@ -649,6 +649,49 @@ describe('IntegrationMountManager', () => {
     expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/threads')).toHaveLength(3)
   })
 
+  it('retries the same sync wedge after a throttled restart attempt', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-06T14:00:00.000Z'))
+    const manager = new IntegrationMountManager()
+    mock.readFile.mockImplementation(async (path: string) => {
+      if (path.endsWith('/.relay/mount.log')) {
+        return [
+          '2026/06/06 14:00:00 mount sync cycle failed: context deadline exceeded',
+          '2026/06/06 14:00:45 mount sync cycle failed: context deadline exceeded',
+          '2026/06/06 14:01:30 mount sync cycle failed: context deadline exceeded'
+        ].join('\n')
+      }
+      return JSON.stringify({
+        files: {},
+        eventsCursor: 'evt_1'
+      })
+    })
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/channels/C123/threads']
+      }
+    ])
+
+    const internals = manager as unknown as {
+      authRestartedAt: Map<string, number>
+    }
+    internals.authRestartedAt.set('/slack/channels/C123/threads', Date.now())
+
+    await vi.advanceTimersByTimeAsync(45_000)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/threads')).toHaveLength(1)
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/threads')).toHaveLength(2)
+  })
+
   it('does not restart when sync deadline failures are followed by a completed cycle', async () => {
     vi.useFakeTimers()
     const manager = new IntegrationMountManager()
