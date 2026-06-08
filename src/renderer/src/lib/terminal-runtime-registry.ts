@@ -1,0 +1,506 @@
+// Module-level registry of long-lived xterm runtimes, keyed by agent.
+//
+// Background: previously the `Terminal` instance lived inside a React
+// useEffect. Every tab switch unmounted and remounted the host component,
+// which tore down xterm and re-attached + replayed the chunk buffer. While
+// the new mount was replaying, the broker kept streaming more bytes into
+// the snapshot pipeline — those bytes would be written *again* on the next
+// frame, producing the "duplicate text" the user reported.
+//
+// The fix is to decouple the xterm lifecycle from React: each agent gets a
+// runtime that owns its `Terminal`, its addons, its PTY subscription, and
+// its parked DOM host. React `mount(container)` / `detach()` calls just
+// reparent the host element; xterm never tears down until the agent is
+// fully released.
+//
+// Model is based on superset-sh/superset's `terminal-runtime-registry.ts`.
+
+import { Terminal } from '@xterm/xterm'
+import { FitAddon } from '@xterm/addon-fit'
+import { WebLinksAddon } from '@xterm/addon-web-links'
+import { WebglAddon } from '@xterm/addon-webgl'
+import { pear, type TerminalAttachMode } from '@/lib/ipc'
+import { getAgentKey } from '@/stores/agent-store'
+import { getPtyChunks, subscribePtyBuffer } from '@/stores/pty-buffer-store'
+import { recordChunkEchoed } from '@/lib/typing-trace'
+import { createPredictiveEcho } from '@/lib/predictive-echo'
+import type { PredictiveEcho } from '@agent-relay/harness-driver/predictive-echo'
+import { awaitFontSettle } from '@/lib/font-settle'
+import type { Theme } from '@/stores/ui-store'
+
+const DARK_THEME = {
+  background: '#0b1017',
+  foreground: '#d7e0ea',
+  cursor: '#74b8e2',
+  selectionBackground: '#203247',
+  black: '#121a24',
+  red: '#f0727f',
+  green: '#6bd4bc',
+  yellow: '#e6d78d',
+  blue: '#74b8e2',
+  magenta: '#c9a7ff',
+  cyan: '#04d1f6',
+  white: '#d7e0ea',
+  brightBlack: '#64707d',
+  brightRed: '#ff8a96',
+  brightGreen: '#89e4cb',
+  brightYellow: '#f1e5a7',
+  brightBlue: '#94cbef',
+  brightMagenta: '#dcc6ff',
+  brightCyan: '#6fe7ff',
+  brightWhite: '#edf4fb'
+}
+
+const LIGHT_THEME = {
+  background: '#f7fafc',
+  foreground: '#111827',
+  cursor: '#4a90c2',
+  selectionBackground: '#d7e7f4',
+  black: '#111827',
+  red: '#d95b63',
+  green: '#2e9f92',
+  yellow: '#c89934',
+  blue: '#4a90c2',
+  magenta: '#8b72d8',
+  cyan: '#2e9f92',
+  white: '#f7fafc',
+  brightBlack: '#6b7280',
+  brightRed: '#ea717a',
+  brightGreen: '#4fb4a7',
+  brightYellow: '#d8ac4f',
+  brightBlue: '#6aa7d2',
+  brightMagenta: '#a28ae7',
+  brightCyan: '#4fbab0',
+  brightWhite: '#ffffff'
+}
+
+export function getXtermTheme(theme: Theme): typeof DARK_THEME {
+  return theme === 'light' ? LIGHT_THEME : DARK_THEME
+}
+
+const TERMINAL_FONT_FAMILY =
+  "'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, monospace"
+
+// Default-on, demoted to DOM after the first webgl failure for the rest of
+// the session. We don't recover: if webgl construction blew up once we
+// assume the context is unhealthy.
+let suggestedRenderer: 'webgl' | 'dom' = 'webgl'
+
+function hasLayout(el: HTMLElement): boolean {
+  return el.clientWidth > 0 && el.clientHeight > 0
+}
+
+function isViewportPinnedToBottom(term: Terminal): boolean {
+  const buffer = term.buffer.active
+  return buffer.viewportY === buffer.baseY
+}
+
+// Off-DOM parking area for detached runtime hosts. We need them in the
+// document so xterm's internal measurements stay valid, but invisible and
+// non-interactive while their owning React component is unmounted.
+let parkedContainer: HTMLDivElement | null = null
+
+function getParkedContainer(): HTMLDivElement {
+  if (parkedContainer && parkedContainer.isConnected) return parkedContainer
+  const node = document.createElement('div')
+  node.setAttribute('data-pear-terminal-park', 'true')
+  node.style.position = 'absolute'
+  node.style.width = '0'
+  node.style.height = '0'
+  node.style.overflow = 'hidden'
+  node.style.pointerEvents = 'none'
+  node.style.visibility = 'hidden'
+  node.setAttribute('aria-hidden', 'true')
+  document.body.appendChild(node)
+  parkedContainer = node
+  return node
+}
+
+export interface TerminalRuntime {
+  readonly key: string
+  readonly term: Terminal
+  readonly host: HTMLDivElement
+  mount(container: HTMLElement): void
+  detach(): void
+  dispose(): void
+  isMounted(): boolean
+  setTheme(theme: Theme): void
+  setTerminalMode(mode: TerminalAttachMode): void
+  getTerminalMode(): TerminalAttachMode
+  fit(): { rows: number; cols: number } | null
+  fitAndSync(): { rows: number; cols: number } | null
+  getPredictiveEcho(): PredictiveEcho | null
+  // Install a handler for `term.onData`. Returns the previous handler so the
+  // caller can re-install it later (e.g. on unmount while keeping the
+  // runtime alive). The runtime forwards via an internal mutable slot, so
+  // setting null disables forwarding without tearing down the xterm
+  // listener.
+  setOnData(handler: ((data: string) => void) | null): void
+}
+
+interface AcquireOptions {
+  projectId: string | undefined
+  agentName: string
+  terminalMode: TerminalAttachMode
+  theme: Theme
+  getInputSrtt: () => number | null
+}
+
+interface RuntimeRecord {
+  runtime: TerminalRuntime
+  refCount: number
+}
+
+const runtimes = new Map<string, RuntimeRecord>()
+
+export function acquireTerminalRuntime(opts: AcquireOptions): TerminalRuntime {
+  const key = getAgentKey(opts.projectId, opts.agentName)
+  const existing = runtimes.get(key)
+  if (existing) {
+    existing.refCount += 1
+    existing.runtime.setTheme(opts.theme)
+    existing.runtime.setTerminalMode(opts.terminalMode)
+    return existing.runtime
+  }
+  const runtime = createRuntime(key, opts)
+  runtimes.set(key, { runtime, refCount: 1 })
+  return runtime
+}
+
+export function releaseTerminalRuntime(key: string, dispose = false): void {
+  const record = runtimes.get(key)
+  if (!record) return
+  record.refCount = Math.max(0, record.refCount - 1)
+  if (dispose) {
+    runtimes.delete(key)
+    record.runtime.dispose()
+    return
+  }
+  // Reference counting is just bookkeeping; runtime stays alive until the
+  // caller explicitly disposes (typically when the agent itself goes away).
+}
+
+export function disposeTerminalRuntime(key: string): void {
+  const record = runtimes.get(key)
+  if (!record) return
+  runtimes.delete(key)
+  record.runtime.dispose()
+}
+
+export function hasTerminalRuntime(key: string): boolean {
+  return runtimes.has(key)
+}
+
+function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
+  const host = document.createElement('div')
+  host.setAttribute('data-pear-terminal-runtime', key)
+  host.style.width = '100%'
+  host.style.height = '100%'
+  // Park immediately so xterm can attach without React having to provide a
+  // container on the first frame.
+  getParkedContainer().appendChild(host)
+
+  let term: Terminal | null = new Terminal({
+    theme: getXtermTheme(opts.theme),
+    fontFamily: TERMINAL_FONT_FAMILY,
+    fontSize: 13,
+    lineHeight: 1.2,
+    letterSpacing: 0.5,
+    cursorBlink: true,
+    cursorStyle: 'bar',
+    scrollback: 3000,
+    fastScrollModifier: 'alt',
+    macOptionIsMeta: false,
+    allowProposedApi: true
+  })
+
+  const fitAddon = new FitAddon()
+  term.loadAddon(fitAddon)
+  term.loadAddon(new WebLinksAddon())
+
+  let onDataHandler: ((data: string) => void) | null = null
+  term.onData((data) => {
+    onDataHandler?.(data)
+  })
+
+  // Track current attach mode + theme so re-acquires can update without
+  // re-creating the runtime.
+  let currentMode: TerminalAttachMode = opts.terminalMode
+  let currentTheme: Theme = opts.theme
+  let disposed = false
+  let mounted = false
+  let webglAddon: WebglAddon | null = null
+  let predictiveEcho: PredictiveEcho | null = null
+  let disposePredictiveEcho: (() => void) | null = null
+  let unsubBuffer: (() => void) | null = null
+  let writtenChunks = 0
+  let attachSeeded = false
+
+  // xterm has only ever been opened into `host`. React containers come and
+  // go, but the `host` div is the immutable parent of the xterm canvas.
+  // Reparenting `host` between containers (in mount/detach) keeps xterm
+  // measuring against the same DOM node it was opened with.
+  let opened = false
+  const openOnce = (): void => {
+    if (!term || opened) return
+    if (!hasLayout(host)) return
+    term.open(host)
+    opened = true
+  }
+
+  const tryFit = (): { rows: number; cols: number } | null => {
+    if (!term) return null
+    const container = host
+    if (!hasLayout(container)) return null
+    try {
+      fitAddon.fit()
+    } catch {
+      return null
+    }
+    const { rows, cols } = term
+    if (rows > 0 && cols > 0) {
+      return { rows, cols }
+    }
+    return null
+  }
+
+  // Lazy-load WebGL on the next frame so the terminal opens with the DOM
+  // renderer first (avoiding a hard sync boot on the GPU path) and upgrades
+  // only after the first frame paints. If WebGL fails for any reason we
+  // demote the whole session to the DOM renderer.
+  const loadWebglOnNextFrame = (): void => {
+    if (suggestedRenderer === 'dom' || !term) return
+    requestAnimationFrame(() => {
+      if (!term || disposed || webglAddon) return
+      try {
+        const addon = new WebglAddon()
+        addon.onContextLoss(() => {
+          suggestedRenderer = 'dom'
+          try {
+            addon.dispose()
+          } catch {
+            // ignore
+          }
+          if (webglAddon === addon) webglAddon = null
+        })
+        term.loadAddon(addon)
+        webglAddon = addon
+      } catch (err) {
+        console.warn('[terminal] WebGL renderer unavailable, falling back to DOM:', err)
+        suggestedRenderer = 'dom'
+      }
+    })
+  }
+
+  const seedBufferSubscription = (): void => {
+    if (unsubBuffer || !term || disposed) return
+    const liveTerm = term
+
+    const writeFromBuffer = (ptyBuffer: string[]): void => {
+      if (ptyBuffer.length < writtenChunks) {
+        writtenChunks = 0
+      }
+      const newChunks = ptyBuffer.slice(writtenChunks)
+      if (newChunks.length === 0) return
+      const wasPinned = isViewportPinnedToBottom(liveTerm)
+      for (const chunk of newChunks) {
+        recordChunkEchoed(chunk)
+        if (predictiveEcho) {
+          void predictiveEcho.onServerOutput(chunk)
+        } else {
+          liveTerm.write(chunk)
+        }
+      }
+      writtenChunks = ptyBuffer.length
+      if (wasPinned) liveTerm.scrollToBottom()
+    }
+
+    unsubBuffer = subscribePtyBuffer(key, writeFromBuffer)
+    writeFromBuffer(getPtyChunks(key))
+  }
+
+  const attachAndSeed = async (
+    initialSize: { rows: number; cols: number } | null
+  ): Promise<void> => {
+    if (!term || disposed || attachSeeded) return
+    attachSeeded = true
+
+    let shouldReplay = true
+    try {
+      const result = await pear.broker.attachTerminal({
+        projectId: opts.projectId,
+        name: opts.agentName,
+        rows: initialSize?.rows,
+        cols: initialSize?.cols,
+        mode: currentMode
+      })
+      if (disposed || !term) return
+      if (
+        result.snapshot?.screen &&
+        hasVisibleTerminalContent(result.snapshot.screen)
+      ) {
+        term.write(result.snapshot.screen)
+        await predictiveEcho?.seed(result.snapshot.screen)
+        writtenChunks = getPtyChunks(key).length
+        shouldReplay = false
+      }
+    } catch (err) {
+      console.error('[terminal] attachTerminal failed:', err)
+    }
+
+    if (disposed || !term) return
+
+    if (shouldReplay) {
+      writtenChunks = 0
+      await predictiveEcho?.seed('')
+    }
+
+    seedBufferSubscription()
+  }
+
+  // Initial open into the parked host. We need the host in the document
+  // for xterm's renderers to measure, but layout() inside the parked area
+  // returns 0×0. We defer the actual open() + size sync to the first
+  // mount() that has real layout.
+  // However, xterm's loadAddon(WebglAddon) needs the renderer running and
+  // wants the terminal opened first; we therefore lazy-init the
+  // GPU/DOM-bound bits in initIfReady, called from mount().
+
+  const initIfReady = async (container: HTMLElement): Promise<void> => {
+    if (!term || disposed) return
+    if (!hasLayout(container)) return
+
+    openOnce()
+    let initialSize = tryFit()
+
+    // Spin up predictive echo and SRTT once we have real measurements.
+    if (!predictiveEcho) {
+      const liveTerm = term
+      const handle = createPredictiveEcho({
+        write: (data) => liveTerm.write(data),
+        cols: term.cols,
+        rows: term.rows,
+        getInputSrtt: opts.getInputSrtt
+      })
+      predictiveEcho = handle.engine
+      disposePredictiveEcho = handle.dispose
+    }
+
+    loadWebglOnNextFrame()
+
+    // Wait for the actual font to load before locking in cell metrics.
+    // If JetBrains Mono lands later the fallback measurement is wrong and
+    // glyphs appear smeared until the next resize.
+    await awaitFontSettle(TERMINAL_FONT_FAMILY)
+    if (disposed || !term) return
+
+    const refitted = tryFit()
+    if (refitted) {
+      try {
+        term.refresh(0, term.rows - 1)
+      } catch {
+        // ignore
+      }
+      initialSize = refitted
+    }
+
+    if (!attachSeeded) {
+      void attachAndSeed(initialSize)
+    }
+  }
+
+  const runtime: TerminalRuntime = {
+    key,
+    get term() {
+      // We expose `term` as non-null since callers only interact with the
+      // runtime while it's alive; dispose() flips a flag and clears it
+      // immediately after.
+      return term as Terminal
+    },
+    host,
+    mount(container: HTMLElement): void {
+      if (disposed || !term) return
+      if (container === host.parentElement && mounted) return
+      if (host.parentElement !== container) {
+        container.appendChild(host)
+      }
+      mounted = true
+      void initIfReady(container)
+    },
+    detach(): void {
+      if (disposed) return
+      mounted = false
+      const park = getParkedContainer()
+      if (host.parentElement !== park) {
+        park.appendChild(host)
+      }
+    },
+    dispose(): void {
+      if (disposed) return
+      disposed = true
+      mounted = false
+      unsubBuffer?.()
+      unsubBuffer = null
+      disposePredictiveEcho?.()
+      disposePredictiveEcho = null
+      predictiveEcho = null
+      try {
+        webglAddon?.dispose()
+      } catch {
+        // ignore
+      }
+      webglAddon = null
+      try {
+        term?.dispose()
+      } catch {
+        // ignore
+      }
+      term = null
+      if (host.parentElement) {
+        host.parentElement.removeChild(host)
+      }
+    },
+    isMounted(): boolean {
+      return mounted
+    },
+    setTheme(theme: Theme): void {
+      if (!term) return
+      if (currentTheme === theme) return
+      currentTheme = theme
+      term.options.theme = getXtermTheme(theme)
+    },
+    setTerminalMode(mode: TerminalAttachMode): void {
+      currentMode = mode
+    },
+    getTerminalMode(): TerminalAttachMode {
+      return currentMode
+    },
+    fit(): { rows: number; cols: number } | null {
+      return tryFit()
+    },
+    fitAndSync(): { rows: number; cols: number } | null {
+      const size = tryFit()
+      if (size) {
+        predictiveEcho?.onResize(size.cols, size.rows)
+        pear.broker.resizePty(opts.projectId, opts.agentName, size.rows, size.cols).catch(() => {})
+      }
+      return size
+    },
+    getPredictiveEcho(): PredictiveEcho | null {
+      return predictiveEcho
+    },
+    setOnData(handler: ((data: string) => void) | null): void {
+      onDataHandler = handler
+    }
+  }
+
+  return runtime
+}
+
+function hasVisibleTerminalContent(screen: string): boolean {
+  const stripped = screen.replace(
+    /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07]*(?:\x07|\x1b\\)|[@-Z\\-_])/g,
+    ''
+  )
+  return /\S/.test(stripped)
+}
