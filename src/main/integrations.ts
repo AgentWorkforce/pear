@@ -2028,7 +2028,7 @@ export class IntegrationsManager {
       await integrationEventBridge.closeAllExcept(projectId)
       await integrationEventBridge.reconcile(
         projectId,
-        this.visibleIntegrationsForProject(projectId)
+        this.withCurrentLocalMountPaths(this.visibleIntegrationsForProject(projectId))
       )
       return true
     } catch (error) {
@@ -2155,10 +2155,7 @@ export class IntegrationsManager {
     }))
   }
 
-  private async withLocalMountPaths(integrations: ConnectedIntegration[]): Promise<ConnectedIntegration[]> {
-    await this.syncLocalMounts({ hydrateCloud: false }).catch((error) => {
-      if (!isIntegrationAuthRecoveryError(error)) throw error
-    })
+  private withCurrentLocalMountPaths(integrations: ConnectedIntegration[]): ConnectedIntegration[] {
     const workspaceId = integrationMountManager.currentWorkspaceId()
     if (!workspaceId) return integrations
     return integrations.map((integration) => {
@@ -2170,6 +2167,13 @@ export class IntegrationsManager {
         })
       }
     })
+  }
+
+  private async withLocalMountPaths(integrations: ConnectedIntegration[]): Promise<ConnectedIntegration[]> {
+    await this.syncLocalMounts({ hydrateCloud: false }).catch((error) => {
+      if (!isIntegrationAuthRecoveryError(error)) throw error
+    })
+    return this.withCurrentLocalMountPaths(integrations)
   }
 
   private async resolveIntegrationMountPath(projectId: string, integrationId: string, targetPath: string): Promise<string> {
