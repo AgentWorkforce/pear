@@ -96,7 +96,7 @@ export function flushPtyChunksNow(key: string): void {
 // don't pay the per-chunk console.log cost.
 let __diagPtyChecked = false
 let __diagPtyEnabled = false
-function __diagPtyOn(): boolean {
+export function diagPtyEnabled(): boolean {
   if (__diagPtyChecked) return __diagPtyEnabled
   __diagPtyChecked = true
   try {
@@ -112,7 +112,7 @@ function __previewChunk(chunk: string): string {
 }
 
 export function appendPtyChunk(key: string, chunk: string): void {
-  if (__diagPtyOn()) {
+  if (diagPtyEnabled()) {
     __appendSeq += 1
     // eslint-disable-next-line no-console
     console.log(`[diag:pty-append] #${__appendSeq} key=${key} bytes=${chunk.length} preview="${__previewChunk(chunk)}"`)

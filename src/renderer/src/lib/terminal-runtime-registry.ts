@@ -24,6 +24,7 @@ import { pear, type TerminalAttachMode } from '@/lib/ipc'
 import { getAgentKey } from '@/stores/agent-store'
 import {
   clearPtyBuffer,
+  diagPtyEnabled,
   flushPtyChunksNow,
   getPtyChunks,
   subscribePtyBuffer
@@ -331,8 +332,9 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
       if (disposed || !term) return
       if (newChunks.length === 0) return
       // Optional diagnostic, gated on localStorage.PEAR_DIAG_PTY === '1'.
-      // See pty-buffer-store.ts for the enable instructions.
-      if (typeof localStorage !== 'undefined' && localStorage.getItem('PEAR_DIAG_PTY') === '1') {
+      // See pty-buffer-store.ts for the enable instructions. Flag is
+      // cached to avoid a per-batch localStorage read.
+      if (diagPtyEnabled()) {
         // eslint-disable-next-line no-console
         console.log(`[diag:runtime:writeChunks] key=${key} count=${newChunks.length} firstPreview="${newChunks[0]?.slice(0, 80).replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\x1b/g, '\\e')}"`)
       }
