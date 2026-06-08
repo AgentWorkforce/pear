@@ -410,6 +410,13 @@ function spawnRequestKey(
   })
 }
 
+function personaSpawnRequestKey(projectId: string, personaId: string): string {
+  return JSON.stringify({
+    projectId,
+    personaId
+  })
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
 }
@@ -1257,6 +1264,7 @@ export class BrokerManager {
   private startPromises = new Map<string, Promise<boolean | void>>()
   private revivePromises = new Map<string, Promise<boolean>>()
   private inFlightSpawnRequests = new Map<string, Promise<{ name: string; runtime: string }>>()
+  private inFlightPersonaSpawnRequests = new Map<string, Promise<BrokerSpawnResult>>()
   // Which broker sessions (by session key) an agent name is registered on.
   // Both a project's local and cloud brokers join the same relay workspace,
   // so agent names are project-unique in practice — the set tracks which
@@ -2598,12 +2606,28 @@ export class BrokerManager {
     }
   }
 
-  async spawnPersona(projectId: string, personaId: string): Promise<{ name: string; runtime: string; cli?: string }> {
-    const session = this.getSessionForProject(projectId)
+  async spawnPersona(projectId: string, personaId: string): Promise<BrokerSpawnResult> {
     const trimmedPersonaId = personaId.trim()
     if (!trimmedPersonaId) {
       throw new Error('Persona id is required')
     }
+
+    const requestKey = personaSpawnRequestKey(projectId, trimmedPersonaId)
+    const inFlight = this.inFlightPersonaSpawnRequests.get(requestKey)
+    if (inFlight) return inFlight
+
+    let promise!: Promise<BrokerSpawnResult>
+    promise = this.spawnPersonaOnce(projectId, trimmedPersonaId).finally(() => {
+      if (this.inFlightPersonaSpawnRequests.get(requestKey) === promise) {
+        this.inFlightPersonaSpawnRequests.delete(requestKey)
+      }
+    })
+    this.inFlightPersonaSpawnRequests.set(requestKey, promise)
+    return promise
+  }
+
+  private async spawnPersonaOnce(projectId: string, trimmedPersonaId: string): Promise<BrokerSpawnResult> {
+    const session = this.getSessionForProject(projectId)
 
     const command = resolveAgentWorkforceCommand(session.cwd)
     const persona = findWorkforcePersona(session.cwd, trimmedPersonaId, command)
