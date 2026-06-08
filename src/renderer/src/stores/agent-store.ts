@@ -119,6 +119,105 @@ function matchesAgent(agent: Agent, projectId: string | undefined, name: string)
   return agent.name === name
 }
 
+interface PendingActiveAgentMark {
+  projectId: string | undefined
+  name: string
+  generations: Map<string, number>
+}
+
+const pendingActiveAgentMarks = new Map<string, PendingActiveAgentMark>()
+const agentStateGenerations = new Map<string, number>()
+let pendingActiveAgentFrame: number | null = null
+
+const scheduleAnimationFrame: (cb: FrameRequestCallback) => number =
+  typeof requestAnimationFrame === 'function'
+    ? requestAnimationFrame
+    : ((cb: FrameRequestCallback) => setTimeout(() => cb(performance.now()), 16) as unknown as number)
+
+const cancelScheduledAnimationFrame: (handle: number) => void =
+  typeof cancelAnimationFrame === 'function'
+    ? cancelAnimationFrame
+    : ((handle: number) => clearTimeout(handle as unknown as ReturnType<typeof setTimeout>))
+
+function getPendingActiveAgentMarkKey(projectId: string | undefined, name: string): string {
+  return `${projectId ?? '*'}\0${name}`
+}
+
+function getAgentStateGeneration(key: string): number {
+  return agentStateGenerations.get(key) ?? 0
+}
+
+function bumpAgentStateGenerationKey(key: string): void {
+  agentStateGenerations.set(key, getAgentStateGeneration(key) + 1)
+}
+
+function getAgentGenerationSnapshot(projectId: string | undefined, name: string): Map<string, number> {
+  const generations = new Map<string, number>()
+  for (const agent of useAgentStore.getState().agents) {
+    if (!matchesAgent(agent, projectId, name)) continue
+    const key = getAgentKeyForAgent(agent)
+    generations.set(key, getAgentStateGeneration(key))
+  }
+  return generations
+}
+
+function bumpMatchingAgentStateGenerations(projectId: string | undefined, name: string): void {
+  let matched = false
+  for (const agent of useAgentStore.getState().agents) {
+    if (!matchesAgent(agent, projectId, name)) continue
+    matched = true
+    bumpAgentStateGenerationKey(getAgentKeyForAgent(agent))
+  }
+  if (!matched && projectId !== undefined) {
+    bumpAgentStateGenerationKey(getAgentKey(projectId, name))
+  }
+}
+
+function clearPendingActiveAgentMarks(): void {
+  if (pendingActiveAgentFrame !== null) {
+    cancelScheduledAnimationFrame(pendingActiveAgentFrame)
+    pendingActiveAgentFrame = null
+  }
+  pendingActiveAgentMarks.clear()
+  agentStateGenerations.clear()
+}
+
+function queueActiveAgentMark(projectId: string | undefined, name: string): void {
+  const generations = getAgentGenerationSnapshot(projectId, name)
+  if (generations.size === 0) return
+  pendingActiveAgentMarks.set(getPendingActiveAgentMarkKey(projectId, name), { projectId, name, generations })
+  if (pendingActiveAgentFrame !== null) return
+
+  pendingActiveAgentFrame = scheduleAnimationFrame(() => {
+    pendingActiveAgentFrame = null
+    const queued = Array.from(pendingActiveAgentMarks.values())
+    pendingActiveAgentMarks.clear()
+    if (queued.length === 0) return
+
+    const eligibleKeys = new Set<string>()
+    for (const mark of queued) {
+      for (const [agentKey, generation] of mark.generations) {
+        if (getAgentStateGeneration(agentKey) === generation) {
+          eligibleKeys.add(agentKey)
+        }
+      }
+    }
+    if (eligibleKeys.size === 0) return
+
+    useAgentStore.setState((state) => {
+      let changed = false
+      const agents = state.agents.map((agent) => {
+        if (agent.activity === 'active' && agent.currentState === 'working') return agent
+        if (!eligibleKeys.has(getAgentKeyForAgent(agent))) return agent
+        changed = true
+        return { ...agent, activity: 'active' as const, currentState: 'working' as const }
+      })
+
+      return changed ? { agents } : state
+    })
+  })
+}
+
 // Matches the real BrokerEvent discriminated union from @agent-relay/harness-driver
 interface BrokerEvent {
   kind: string
@@ -583,18 +682,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
   // Used by the PTY-chunk fast path to flip an agent into active/working on
   // the first chunk after idle, without sending a full handleBrokerEvent
   // through the regular pipeline.
-  markAgentActive: (projectId, name) => {
-    const agent = get().agents.find((a) => matchesAgent(a, projectId, name))
-    if (!agent) return
-    if (agent.activity === 'active' && agent.currentState === 'working') return
-    set((state) => ({
-      agents: state.agents.map((a) =>
-        matchesAgent(a, projectId, name)
-          ? { ...a, activity: 'active', currentState: 'working' }
-          : a
-      )
-    }))
-  },
+  markAgentActive: (projectId, name) => queueActiveAgentMark(projectId, name),
 
   setAgentTerminalMode: (projectId, name, mode) => {
     set((state) => ({
@@ -610,6 +698,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
     const activity = activityFromCurrentState(currentState)
     const lastActivityAtMs = getActivityTimestampMs(options?.lastActivityAt, options?.lastActivityMs)
     const channels = normalizeChannelList(options?.channels)
+    bumpMatchingAgentStateGenerations(projectId, name)
     set((state) => ({
       agents: state.agents.some((a) => matchesAgent(a, projectId, name))
         ? state.agents.map((a) =>
@@ -661,6 +750,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
         if (!liveAgent) {
           if (snapshotProjectId && agent.projectId === snapshotProjectId) {
             staleKeys.push(key)
+            bumpAgentStateGenerationKey(key)
             return [{
               ...agent,
               status: 'exited' as const,
@@ -681,6 +771,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
         )
         const terminalMode = terminalModeFromInboundDeliveryMode(liveAgent.inboundDeliveryMode)
         useTypingStore.getState().setFromState(getAgentKeyForAgent(agent), currentState, lastActivityAtMs)
+        bumpAgentStateGenerationKey(key)
 
         return [{
           ...agent,
@@ -703,6 +794,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
         const lastActivityAtMs = getActivityTimestampMs(liveAgent.last_activity_at, liveAgent.last_activity_ms, now)
         const channels = normalizeChannelList(liveAgent.channels)
         useTypingStore.getState().setFromState(key, currentState, lastActivityAtMs)
+        bumpAgentStateGenerationKey(key)
         nextAgents.push({
           name: liveAgent.name,
           cli: liveAgent.cli || 'unknown',
@@ -820,6 +912,11 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
         const currentState: AgentCurrentState = 'idle'
         const channels = normalizeChannelList(event.channels)
         const existingAgent = state.agents.find((a) => matchesAgent(a, projectId, event.name!))
+        if (existingAgent) {
+          bumpAgentStateGenerationKey(getAgentKeyForAgent(existingAgent))
+        } else {
+          bumpAgentStateGenerationKey(agentKey)
+        }
         const existingChannels = existingAgent?.channels || []
         const notices = channels
           ? channels
@@ -915,6 +1012,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
       })
     } else if ((kind === 'agent_exited' || kind === 'agent_released') && event.name) {
       const removedKeyForExpiry = getAgentKey(event.projectId, event.name!)
+      bumpMatchingAgentStateGenerations(event.projectId, event.name!)
       set((state) => {
         const removed = state.agents.find((a) => matchesAgent(a, event.projectId, event.name!))
         const removedKey = removed ? getAgentKeyForAgent(removed) : removedKeyForExpiry
@@ -1050,6 +1148,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
         }
       })
     } else if (kind === 'agent_blocked_on_send' && event.name) {
+      bumpMatchingAgentStateGenerations(event.projectId, event.name!)
       set((state) => ({
         agents: state.agents.map((a) => {
           if (!matchesAgent(a, event.projectId, event.name!)) return a
@@ -1058,6 +1157,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
         })
       }))
     } else if (kind === 'agent_idle' && event.name) {
+      bumpMatchingAgentStateGenerations(event.projectId, event.name!)
       set((state) => ({
         agents: state.agents.map((a) => {
           if (!matchesAgent(a, event.projectId, event.name!)) return a
@@ -1264,7 +1364,8 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
     })
   },
 
-  clearAll: () =>
+  clearAll: () => {
+    clearPendingActiveAgentMarks()
     set({
       agents: [],
       activeAgentKey: null,
@@ -1275,7 +1376,8 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
       brokerErrors: [],
       brokerEvents: [],
       lastHumanMessageSentAt: 0
-    }),
+    })
+  },
 
   getAgentBuffer: (projectId, name) => getPtyChunks(getAgentKey(projectId, name))
 })))

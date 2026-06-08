@@ -34,6 +34,10 @@ import type { BrokerReconciledChatMessage } from '@shared/types/ipc'
 
 const MAX_CHAT_MESSAGES = 5_000
 
+function flushRaf(): void {
+  vi.advanceTimersByTime(20)
+}
+
 // Matches the shape `agent-store.handleBrokerEvent` expects for relay_inbound;
 // the index signature aligns with the internal BrokerEvent discriminated
 // union that requires `[key: string]: unknown`.
@@ -169,6 +173,55 @@ describe('agent-store stress', () => {
     expect(humanLocal.length).toBe(100)
     const ids = new Set(humanLocal.map((m) => m.id))
     expect(ids.size).toBe(100)
+  })
+
+  it('markAgentActive collapses duplicate same-frame marks into one agents update', () => {
+    const store = useAgentStore.getState()
+    store.trackSpawnedAgent('agent-a', 'p1', undefined, 'codex', undefined, { currentState: 'idle' })
+    store.trackSpawnedAgent('agent-b', 'p1', undefined, 'claude', undefined, { currentState: 'idle' })
+
+    const agentUpdates: unknown[] = []
+    const unsubscribe = useAgentStore.subscribe(
+      (state) => state.agents,
+      (agents) => agentUpdates.push(agents)
+    )
+
+    store.markAgentActive('p1', 'agent-a')
+    store.markAgentActive('p1', 'agent-a')
+    store.markAgentActive('p1', 'agent-b')
+    expect(agentUpdates).toHaveLength(0)
+
+    flushRaf()
+    expect(agentUpdates).toHaveLength(1)
+    expect(useAgentStore.getState().agents.map((agent) => [agent.name, agent.activity, agent.currentState])).toEqual([
+      ['agent-a', 'active', 'working'],
+      ['agent-b', 'active', 'working']
+    ])
+
+    const agentsRef = useAgentStore.getState().agents
+    agentUpdates.length = 0
+    store.markAgentActive('p1', 'agent-a')
+    store.markAgentActive('p1', 'agent-b')
+    flushRaf()
+
+    expect(agentUpdates).toHaveLength(0)
+    expect(useAgentStore.getState().agents).toBe(agentsRef)
+    unsubscribe()
+  })
+
+  it('markAgentActive skips stale marks after a newer lifecycle state transition', () => {
+    const store = useAgentStore.getState()
+    store.trackSpawnedAgent('agent-a', 'p1', undefined, 'codex', undefined, { currentState: 'idle' })
+
+    store.markAgentActive('p1', 'agent-a')
+    store.handleBrokerEvent({ kind: 'agent_idle', name: 'agent-a', projectId: 'p1' })
+    flushRaf()
+
+    expect(useAgentStore.getState().agents[0]).toMatchObject({
+      name: 'agent-a',
+      activity: 'idle',
+      currentState: 'idle'
+    })
   })
 
   it('cross-project agent dedupe does not false-positive — identical body, different projectId survives twice', () => {
