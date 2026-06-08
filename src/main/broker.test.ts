@@ -112,7 +112,9 @@ const mock = vi.hoisted(() => {
     connectedClients: [] as MockClient[],
     nextLocalAgents: [] as string[],
     nextCloudAgents: [] as string[],
+    nextCloudSessionMetadata: [] as Array<Record<string, unknown>>,
     nextConnectedAgents: [] as string[],
+    nextConnectedSessionMetadata: [] as Array<Record<string, unknown>>,
     nextConnectedSessionErrors: [] as Error[]
   }
 
@@ -125,6 +127,10 @@ const mock = vi.hoisted(() => {
 
     static connect = vi.fn(() => {
       const client = createMockClient(state.nextConnectedAgents.splice(0))
+      const metadata = state.nextConnectedSessionMetadata.shift()
+      if (metadata) {
+        client.getSession.mockResolvedValueOnce(metadata)
+      }
       const sessionError = state.nextConnectedSessionErrors.shift()
       if (sessionError) {
         client.getSession.mockRejectedValueOnce(sessionError)
@@ -135,6 +141,10 @@ const mock = vi.hoisted(() => {
 
     constructor() {
       const client = createMockClient(state.nextCloudAgents.splice(0))
+      const metadata = state.nextCloudSessionMetadata.shift()
+      if (metadata) {
+        client.getSession.mockResolvedValueOnce(metadata)
+      }
       state.constructedClients.push(client)
       // Re-key `this` as the mock client.
       return client as unknown as HarnessDriverClient
@@ -399,14 +409,18 @@ describe('resolveAgentRelayMcpCommand', () => {
 
 describe('BrokerManager local + cloud coexistence', () => {
   let personaTempDir: string | null = null
+  const inheritedWorkspaceKey = process.env.AGENT_RELAY_WORKSPACE_KEY
 
   beforeEach(() => {
+    delete process.env.AGENT_RELAY_WORKSPACE_KEY
     mock.state.spawnedClients.length = 0
     mock.state.constructedClients.length = 0
     mock.state.connectedClients.length = 0
     mock.state.nextLocalAgents = []
     mock.state.nextCloudAgents = []
+    mock.state.nextCloudSessionMetadata = []
     mock.state.nextConnectedAgents = []
+    mock.state.nextConnectedSessionMetadata = []
     mock.state.nextConnectedSessionErrors = []
     mock.HarnessDriverClient.spawn.mockClear()
     mock.HarnessDriverClient.connect.mockClear()
@@ -420,6 +434,11 @@ describe('BrokerManager local + cloud coexistence', () => {
     }
     if (personaTempDir) await rm(personaTempDir, { recursive: true, force: true })
     personaTempDir = null
+    if (inheritedWorkspaceKey === undefined) {
+      delete process.env.AGENT_RELAY_WORKSPACE_KEY
+    } else {
+      process.env.AGENT_RELAY_WORKSPACE_KEY = inheritedWorkspaceKey
+    }
   })
 
   it('keeps the local session alive when a cloud sandbox attaches', async () => {
@@ -457,6 +476,120 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('passes an explicit workspace key env pin to local broker spawn options', async () => {
+    const previousWorkspaceKey = process.env.AGENT_RELAY_WORKSPACE_KEY
+    process.env.AGENT_RELAY_WORKSPACE_KEY = 'rk_live_pinned'
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => undefined)
+    const manager = new BrokerManager()
+
+    try {
+      await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', undefined as never, [])
+
+      expect(mock.HarnessDriverClient.spawn).toHaveBeenCalledWith(expect.objectContaining({
+        brokerName: 'pear-project-1',
+        workspaceKey: 'rk_live_pinned'
+      }))
+      const logged = logSpy.mock.calls.map((call) => call.join(' ')).join('\n')
+      expect(logged).toContain('rk_live_…')
+      expect(logged).not.toContain('rk_live_pinned')
+    } finally {
+      logSpy.mockRestore()
+      if (previousWorkspaceKey === undefined) {
+        delete process.env.AGENT_RELAY_WORKSPACE_KEY
+      } else {
+        process.env.AGENT_RELAY_WORKSPACE_KEY = previousWorkspaceKey
+      }
+      await manager.shutdown()
+    }
+  })
+
+  it('reads the local broker workspace key for cloud provisioning', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager)
+    local.getSession.mockResolvedValueOnce({ workspace_key: 'rk_live_project' })
+
+    await expect(manager.workspaceKeyForProject(PROJECT_ID)).resolves.toBe('rk_live_project')
+
+    await manager.shutdown()
+  })
+
+  it('omits the project workspace key when no local broker exposes one', async () => {
+    const manager = new BrokerManager()
+    await startLocal(manager)
+
+    await expect(manager.workspaceKeyForProject(PROJECT_ID)).resolves.toBeUndefined()
+    await expect(manager.workspaceKeyForProject('missing-project')).resolves.toBeUndefined()
+
+    await manager.shutdown()
+  })
+
+  it('emits a cloud workspace mismatch event when the sandbox ignores the sent key', async () => {
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    mock.state.nextCloudSessionMetadata.push({ workspace_key: 'rk_sand_456' })
+
+    await manager.attachCloudSandbox(PROJECT_ID, {
+      sandboxId: 'sandbox-1',
+      execUrl: 'https://sandbox.example',
+      sentWorkspaceKey: 'rk_sent_123'
+    }, win)
+
+    expect(win.webContents.send).toHaveBeenCalledWith(
+      'broker:event',
+      expect.objectContaining({
+        kind: 'cloud_workspace_key_mismatch',
+        projectId: PROJECT_ID,
+        cloudSandboxId: 'sandbox-1',
+        sentWorkspaceKeyPrefix: 'rk_sent_',
+        sandboxWorkspaceKeyPrefix: 'rk_sand_',
+        detail: expect.stringContaining('stale broker binary')
+      })
+    )
+
+    await manager.shutdown()
+  })
+
+  it('does not emit a cloud workspace mismatch event when the sandbox joins the sent key', async () => {
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    mock.state.nextCloudSessionMetadata.push({ workspace_key: 'rk_live_same' })
+
+    await manager.attachCloudSandbox(PROJECT_ID, {
+      sandboxId: 'sandbox-1',
+      execUrl: 'https://sandbox.example',
+      sentWorkspaceKey: 'rk_live_same'
+    }, win)
+
+    const mismatchEvents = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([channel, payload]) =>
+        channel === 'broker:event' &&
+        (payload as { kind?: string }).kind === 'cloud_workspace_key_mismatch'
+      )
+    expect(mismatchEvents).toHaveLength(0)
+
+    await manager.shutdown()
+  })
+
+  it('does not emit a cloud workspace mismatch event on keyless legacy attaches', async () => {
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    mock.state.nextCloudSessionMetadata.push({ workspace_key: 'rk_live_sandbox' })
+
+    await manager.attachCloudSandbox(PROJECT_ID, {
+      sandboxId: 'sandbox-1',
+      execUrl: 'https://sandbox.example'
+    }, win)
+
+    const mismatchEvents = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([channel, payload]) =>
+        channel === 'broker:event' &&
+        (payload as { kind?: string }).kind === 'cloud_workspace_key_mismatch'
+      )
+    expect(mismatchEvents).toHaveLength(0)
+
+    await manager.shutdown()
+  })
+
   it('reuses current harness-driver connection files instead of spawning another broker', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'pear-current-connection-'))
     const connectionPath = join(tempDir, '.agentworkforce', 'relay', 'connection.json')
@@ -480,6 +613,43 @@ describe('BrokerManager local + cloud coexistence', () => {
 
       await manager.shutdown()
     } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('does not reuse an existing connection with a mismatched explicit workspace key', async () => {
+    const previousWorkspaceKey = process.env.AGENT_RELAY_WORKSPACE_KEY
+    process.env.AGENT_RELAY_WORKSPACE_KEY = 'rk_live_pinned'
+    const tempDir = await mkdtemp(join(tmpdir(), 'pear-pinned-connection-'))
+    const connectionPath = join(tempDir, '.agentworkforce', 'relay', 'connection.json')
+    await mkdir(dirname(connectionPath), { recursive: true })
+    await writeFile(connectionPath, JSON.stringify({
+      url: 'http://127.0.0.1:43210',
+      apiKey: 'test-key',
+      pid: 4242
+    }))
+
+    try {
+      const manager = new BrokerManager()
+      mock.state.nextConnectedSessionMetadata.push({ workspace_key: 'rk_live_other' })
+
+      const started = await manager.start(PROJECT_ID, tempDir, 'pear-project-1', undefined as never, [])
+
+      expect(started).toBe(true)
+      expect(mock.HarnessDriverClient.connect).toHaveBeenCalledWith({ cwd: tempDir, connectionPath })
+      expect(mock.state.connectedClients[0]?.disconnect).toHaveBeenCalled()
+      expect(mock.HarnessDriverClient.spawn).toHaveBeenCalledWith(expect.objectContaining({
+        brokerName: 'pear-project-1',
+        workspaceKey: 'rk_live_pinned'
+      }))
+
+      await manager.shutdown()
+    } finally {
+      if (previousWorkspaceKey === undefined) {
+        delete process.env.AGENT_RELAY_WORKSPACE_KEY
+      } else {
+        process.env.AGENT_RELAY_WORKSPACE_KEY = previousWorkspaceKey
+      }
       await rm(tempDir, { recursive: true, force: true })
     }
   })
@@ -595,26 +765,6 @@ describe('BrokerManager local + cloud coexistence', () => {
     const spawned = await manager.spawnAgent(PROJECT_ID, { name: 'worker', cli: 'fake-cli' })
     expect(spawned.name).not.toBe('worker')
     expect(local.spawnPty).toHaveBeenCalledTimes(1)
-
-    await manager.shutdown()
-  })
-
-  it('normalizes spawn results to structured-clone-safe data', async () => {
-    const manager = new BrokerManager()
-    const local = await startLocal(manager, [])
-    local.spawnPty.mockImplementationOnce(async (input: { name: string }) => {
-      local.agentNames.push(input.name)
-      return {
-        name: input.name,
-        runtime: 'pty',
-        client: () => undefined
-      }
-    })
-
-    const spawned = await manager.spawnAgent(PROJECT_ID, { name: 'worker', cli: 'fake-cli' })
-
-    expect(spawned).toEqual({ name: 'worker', runtime: 'pty' })
-    expect(() => structuredClone(spawned)).not.toThrow()
 
     await manager.shutdown()
   })

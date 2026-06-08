@@ -14,14 +14,8 @@ extraResources:
   - from: node_modules
     to: agent-relay-mcp/node_modules
     filter:
-      - '@agent-relay/broker-darwin-arm64/**'
-      - '@agent-relay/broker-darwin-x64/**'
-      - '@agent-relay/broker-linux-arm64/**'
-      - '@agent-relay/broker-linux-x64/**'
-      - '@agent-relay/broker-win32-x64/**'
       - '@agent-relay/cloud/**'
       - '@agent-relay/config/**'
-      - '@agent-relay/harness-driver/**'
       - '@agent-relay/sdk/**'
       - '@agent-relay/utils/**'
       - '@aws-crypto/crc32/**'
@@ -120,6 +114,12 @@ extraResources:
       - 'accepts/node_modules/mime-db/**'
       - 'accepts/node_modules/mime-types/**'
       - 'agent-relay/**'
+      - 'agent-relay/node_modules/@agent-relay/broker-darwin-arm64/**'
+      - 'agent-relay/node_modules/@agent-relay/broker-darwin-x64/**'
+      - 'agent-relay/node_modules/@agent-relay/broker-linux-arm64/**'
+      - 'agent-relay/node_modules/@agent-relay/broker-linux-x64/**'
+      - 'agent-relay/node_modules/@agent-relay/broker-win32-x64/**'
+      - 'agent-relay/node_modules/@agent-relay/harness-driver/**'
       - 'agent-relay/node_modules/@esbuild/aix-ppc64/**'
       - 'agent-relay/node_modules/@esbuild/android-arm/**'
       - 'agent-relay/node_modules/@esbuild/android-arm64/**'
