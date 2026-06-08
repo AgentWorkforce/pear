@@ -19,6 +19,24 @@ const MOUNT_AUTH_RESTART_THROTTLE_MS = 60_000
 // coalesce into one restart instead of racing it.
 const MOUNT_HEALTH_POLL_INTERVAL_MS = 45_000
 const MOUNT_SYNC_WEDGE_FAILURES = 3
+// Defense-in-depth backstop for a silently-dropped incremental sync event (the
+// class of bug fixed server-side by cloud#2010 — an event whose path the mount's
+// literal-prefix filter rejected, so the mount cycles status:ready yet never
+// tracks the revision). Under normal operation a received revision lands within
+// one reconcile (incremental applies in seconds; a ws->poll fallback within
+// ~5min), so a revision still absent after this window — while the mount keeps
+// reconciling — indicates a real drop, not an in-flight pull. 15min wall-clock
+// clears normal latency (incl. the ~5min poll fallback) with wide margin and is
+// well under the ~100min periodic full-pull self-heal, so it recovers a drop far
+// sooner than a scheduled full pull would. Wall-clock (not cycle-count) stays
+// correct if the mount's interval/transport knobs change. Paired with an
+// alive-guard (lastSuccessfulReconcileAt > injectedAt) so we only restart a mount
+// that has demonstrably reconciled since receipt yet still lacks the revision.
+const STALLED_REVISION_GRACE_MS = 15 * 60_000
+const STALLED_REVISION_LOG_SCAN_LINES = 500
+// Mirrors integration-event-bridge.ts INTEGRATION_EVENT_LOG_PATH. Duplicated to
+// avoid a mounts->bridge import cycle; hoist to a shared module if it grows.
+const INTEGRATION_EVENT_LOG_PATH = join(homedir(), '.agentworkforce', 'pear', 'integration-events.log')
 export const MAX_LOCAL_INTEGRATION_MOUNT_PATHS = 24
 
 type IntegrationMountInput = {
@@ -325,6 +343,32 @@ export class IntegrationMountManager {
           )
         } else {
           this.handledHealthErrorKeys.set(remotePath, healthErrorKey)
+        }
+      }
+
+      // Defense-in-depth backstop for a silently-dropped incremental event: the
+      // mount keeps cycling status:ready with no lastError, so the auth and
+      // sync-wedge checks above never fire. If the event-bridge injected a
+      // revision under this mount that the mount's own state.json still does not
+      // list past the grace window — and the mount has reconciled since it arrived
+      // — force a clearState restart so the next full pull re-pulls it.
+      if (state) {
+        const stalled = await readStalledInjectedRevisions(remotePath, state)
+        if (stalled) {
+          const healthErrorKey = ['stalled-events', stalled.oldestInjectedAt, stalled.missingCount].join('|')
+          if (this.handledHealthErrorKeys.get(remotePath) === healthErrorKey) continue
+          const queued = this.queueForcedRestart(remotePath, 'stalled events', { clearState: true })
+          this.handledHealthErrorKeys.set(remotePath, healthErrorKey)
+          if (queued) {
+            console.warn(
+              `[integration-mounts] Mount stalled (injected revisions never materialized) for ${remotePath}; restarting with fresh full pull`,
+              {
+                missing: stalled.missingCount,
+                oldestInjectedAt: stalled.oldestInjectedAt,
+                examples: stalled.examples
+              }
+            )
+          }
         }
       }
     }
@@ -670,6 +714,74 @@ async function readMountSyncWedge(localDir: string): Promise<MountSyncWedge | nu
 
 function isMountSyncWedgeOutput(text: string): boolean {
   return /context deadline exceeded|i\/o timeout|Client\.Timeout exceeded/i.test(text)
+}
+
+type StalledInjectedRevisions = {
+  missingCount: number
+  oldestInjectedAt: string
+  examples: string[]
+}
+
+// Detects revisions the event-bridge has injected for this mount (logged as
+// "injecting" with the resolved suffixed path) that the mount's own state.json
+// still has not tracked — the signature of a silently-dropped incremental event,
+// which leaves the mount cycling status:ready with no error. `state.files` is
+// keyed by the full normalized (suffixed) remote path, so it compares
+// apples-to-apples with the injected path. Fires only when a path is absent for
+// longer than the full-pull grace window AND the mount has successfully reconciled
+// since the revision arrived (lastSuccessfulReconcileAt > injectedAt) — proving
+// the mount is alive and had a chance to pull it, so absence is a real drop rather
+// than a slow pull or a never-reconciled/booting mount.
+export async function readStalledInjectedRevisions(
+  remotePath: string,
+  state: Record<string, unknown>
+): Promise<StalledInjectedRevisions | null> {
+  let logText: string
+  try {
+    logText = await readFile(INTEGRATION_EVENT_LOG_PATH, 'utf8')
+  } catch {
+    return null
+  }
+
+  const syncedPaths = new Set(Object.keys(asRecord(state.files) ?? {}))
+  // omitempty in the daemon's publicState: a never-reconciled mount omits this,
+  // so lastReconcileMs stays null and every candidate is skipped below.
+  const lastReconcileMs = parseTimestamp(
+    typeof state.lastSuccessfulReconcileAt === 'string' ? state.lastSuccessfulReconcileAt : null
+  )
+  const prefix = `${remotePath}/`
+  const now = Date.now()
+  const missing: Array<{ path: string; injectedAt: string }> = []
+  const seen = new Set<string>()
+
+  for (const line of logText.trim().split(/\r?\n/u).slice(-STALLED_REVISION_LOG_SCAN_LINES)) {
+    if (!line.includes('"injecting"')) continue
+    let entry: Record<string, unknown> | null
+    try {
+      entry = asRecord(JSON.parse(line))
+    } catch {
+      continue
+    }
+    if (!entry || entry.message !== 'injecting') continue
+    const meta = asRecord(entry.metadata)
+    const path = meta && typeof meta.path === 'string' ? meta.path : null
+    const injectedAt = typeof entry.timestamp === 'string' ? entry.timestamp : null
+    if (!path || !injectedAt || !path.startsWith(prefix) || seen.has(path)) continue
+    seen.add(path)
+    const injectedMs = parseTimestamp(injectedAt)
+    if (injectedMs === null || now - injectedMs < STALLED_REVISION_GRACE_MS) continue
+    if (lastReconcileMs === null || lastReconcileMs <= injectedMs) continue
+    if (syncedPaths.has(path)) continue
+    missing.push({ path, injectedAt })
+  }
+
+  if (!missing.length) return null
+  missing.sort((a, b) => a.injectedAt.localeCompare(b.injectedAt))
+  return {
+    missingCount: missing.length,
+    oldestInjectedAt: missing[0].injectedAt,
+    examples: missing.slice(0, 3).map((entry) => entry.path)
+  }
 }
 
 function mountPathsForIntegrations(integrations: IntegrationMountInput[]): string[] {
