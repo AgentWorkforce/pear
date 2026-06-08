@@ -286,6 +286,7 @@ function makeHarness(
 beforeEach(() => {
   resetIntegrationEventTelemetryForTests()
   delete process.env.PEAR_INTEGRATION_EVENTS_DEBUG
+  delete process.env.PEAR_INTEGRATION_EVENT_INJECTED_CONFIRMATION_TIMEOUT_MS
 })
 
 test('relayfile sdk path filters broaden partial-segment Slack DM globs', () => {
@@ -907,6 +908,51 @@ test('slack unchanged-content replay re-drives after injected delivery is not co
   }
 
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'alice'])
+})
+
+test('content-present slack replay waits for hung injected delivery then re-drives after timeout release', async () => {
+  process.env.PEAR_INTEGRATION_EVENT_INJECTED_CONFIRMATION_TIMEOUT_MS = '20'
+  const options = { waitForInjectedNeverSettles: true }
+  const harness = makeHarness(['slack-comms'], options)
+  const warnCalls: unknown[][] = []
+  const originalWarn = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnCalls.push(args)
+  }
+
+  try {
+    await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+      await harness.bridge.reconcile('project-1', [
+        integration({
+          provider: 'slack',
+          integrationId: 'slack-1',
+          mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+          scope: { notifyAgents: ['slack-comms'] }
+        })
+      ])
+    })
+
+    const path = '/slack/channels/C123ABC__proj-cloud/threads/1780893336_601259/replies/1780893336_601259.json'
+    await harness.emit(changeEvent(path, 'slack'))
+    await waitForSent(harness, 1)
+
+    // A replay of the same human message arrives while the original steer has
+    // been accepted but has not produced delivery_injected. It must not be
+    // finalized as a duplicate skip; after timeout releases the provisional
+    // claim, this replay re-drives delivery.
+    options.waitForInjectedNeverSettles = false
+    await harness.emit(changeEvent(path, 'slack'))
+    await waitForSent(harness, 2, 1_500)
+    await waitUntil(() => warnCalls.some((call) => call[0] === '[integration-events] delivery injected confirmation failed'))
+  } finally {
+    console.warn = originalWarn
+  }
+
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['slack-comms', 'slack-comms'])
+  assert.match(harness.sent[0].input.text, /Message:\ntargeted Slack context/u)
+  assert.match(harness.sent[1].input.text, /Message:\ntargeted Slack context/u)
+  assert.equal(getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsDropped || 0, 0)
+  assert.equal(getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsInjected, 1)
 })
 
 test('slack unchanged-content replay is suppressed after injected delivery commits', async () => {
@@ -1965,7 +2011,7 @@ test('integration event delivery failures use aggregated warn cadence by default
   assert.equal(telemetry.brokerSendsDeferred >= 0, true)
   assert.deepEqual({ ...telemetry, brokerSendsDeferred: 0 }, {
     eventsReceived: 26,
-    eventsInjected: 26,
+    eventsInjected: 0,
     eventsCoalesced: 0,
     eventsDropped: 0,
     brokerSends: 26,

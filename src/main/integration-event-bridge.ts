@@ -50,7 +50,7 @@ const MAX_DISPATCH_SUMMARY_GROUPS = 10
 const MAX_DISPATCHED_EVENTS_PER_SECOND = 25
 const PROJECT_AGENT_RECIPIENT_CACHE_TTL_MS = 2_000
 const MAX_BROKER_SENDS_PER_SECOND = 25
-const DELIVERY_INJECTED_CONFIRMATION_TIMEOUT_MS = 5_000
+const DEFAULT_DELIVERY_INJECTED_CONFIRMATION_TIMEOUT_MS = 5_000
 const REMOTE_STREAM_ERROR_POLLING_FALLBACK_THRESHOLD = 5
 const REMOTE_STREAM_POLL_INTERVAL_MS = 5_000
 
@@ -116,6 +116,13 @@ type DeliveryDedupeClaim = {
   isSlackLogicalKey: boolean
   ttlMs: number
   contentHash?: string
+}
+
+type DeliveryDedupeClaimOutcome = 'committed' | 'released'
+
+type InFlightDedupeClaim = {
+  promise: Promise<DeliveryDedupeClaimOutcome>
+  settle: (outcome: DeliveryDedupeClaimOutcome) => void
 }
 
 type DispatchItem = {
@@ -361,6 +368,21 @@ function isUnauthorizedError(error: unknown): boolean {
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function deliveryInjectedConfirmationTimeoutMs(): number {
+  const value = Number.parseInt(process.env.PEAR_INTEGRATION_EVENT_INJECTED_CONFIRMATION_TIMEOUT_MS || '', 10)
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_DELIVERY_INJECTED_CONFIRMATION_TIMEOUT_MS
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs)
+  })
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -2111,6 +2133,7 @@ export class IntegrationEventBridge {
   private dispatchers = new Map<string, ProjectEventDispatcher>()
   private recentInjections = new Map<string, RecentInjectionState>()
   private slackLogicalInjections = new Map<string, SlackLogicalInjectionState>()
+  private inFlightDedupeClaims = new Map<string, Set<Promise<DeliveryDedupeClaimOutcome>>>()
   private projectAgentRecipientCache = new Map<string, ProjectAgentRecipientCacheEntry>()
   private notificationTargetCache = new Map<string, NotificationTargetCacheEntry>()
   private brokerSendPacers = new Map<string, ProjectBrokerSendPacer>()
@@ -2473,13 +2496,18 @@ export class IntegrationEventBridge {
       dedupe = eventDedupeKeyWithFingerprint(duplicateKey, fingerprint)
       const slackClaim = this.claimSlackLogicalInjection(dedupe.key, contextPreview, dedupe.ttlMs, shouldTrackDedupe)
       if (!slackClaim.claimed) {
+        const inFlightOutcome = await this.waitForInFlightDedupeClaims(dedupe.key)
+        if (inFlightOutcome === 'released') {
+          logIntegrationEvent('retrying duplicate path after unconfirmed delivery', {
+            projectId,
+            eventId: event.id,
+            path: event.resource.path,
+            duplicateKey: dedupe.key
+          })
+          return this.injectEvent(projectId, event, matchedSpecs)
+        }
         incrementIntegrationEventCounter(projectId, 'eventsDropped')
-        logIntegrationEvent('skipped duplicate path', {
-          projectId,
-          eventId: event.id,
-          path: event.resource.path,
-          duplicateKey: dedupe.key
-        })
+        this.reportSkippedDuplicatePath(projectId, event, dedupe.key)
         return
       }
       dedupeClaimed = shouldTrackDedupe
@@ -2493,13 +2521,18 @@ export class IntegrationEventBridge {
       }
     } else if (shouldTrackDedupe) {
       if (!this.claimRecentInjection(dedupe.key, dedupe.ttlMs, true)) {
+        const inFlightOutcome = await this.waitForInFlightDedupeClaims(dedupe.key)
+        if (inFlightOutcome === 'released') {
+          logIntegrationEvent('retrying duplicate path after unconfirmed delivery', {
+            projectId,
+            eventId: event.id,
+            path: event.resource.path,
+            duplicateKey: dedupe.key
+          })
+          return this.injectEvent(projectId, event, matchedSpecs)
+        }
         incrementIntegrationEventCounter(projectId, 'eventsDropped')
-        logIntegrationEvent('skipped duplicate path', {
-          projectId,
-          eventId: event.id,
-          path: event.resource.path,
-          duplicateKey: dedupe.key
-        })
+        this.reportSkippedDuplicatePath(projectId, event, dedupe.key)
         return
       }
       dedupeClaimed = true
@@ -2514,6 +2547,7 @@ export class IntegrationEventBridge {
       // relay/replay identity rather than pinning a local claim.
       dedupeClaimed = false
     }
+    const inFlightClaim = deliveryClaim ? this.trackInFlightDedupeClaim(deliveryClaim.key) : undefined
     const contextPreviewData = contextPreview ? eventContextPreviewMetadata(contextPreview) : undefined
     logIntegrationEvent('injecting', {
       projectId,
@@ -2558,6 +2592,7 @@ export class IntegrationEventBridge {
       // this event (remote copy of a local change, coalesced update) retries
       // delivery instead of being dropped as a recent injection.
       if (dedupeClaimed) this.releaseDedupeKey(dedupe.key, needsSlackContentAwareDedupe)
+      inFlightClaim?.settle('released')
       throw sendErrors[0].error
     }
     if (sendErrors.length > 0) {
@@ -2574,9 +2609,11 @@ export class IntegrationEventBridge {
       )
     }
     if (deliveryClaim && injectedConfirmations.length > 0) {
-      Promise.all(injectedConfirmations)
+      void Promise.all(injectedConfirmations)
         .then(() => {
           this.commitDedupeKey(deliveryClaim)
+          incrementIntegrationEventCounter(projectId, 'eventsInjected')
+          inFlightClaim?.settle('committed')
         })
         .catch((error) => {
           this.releaseDedupeKey(deliveryClaim.key, deliveryClaim.isSlackLogicalKey, deliveryClaim.contentHash)
@@ -2591,11 +2628,27 @@ export class IntegrationEventBridge {
               error: toErrorMessage(error)
             }
           )
+          inFlightClaim?.settle('released')
         })
     } else if (deliveryClaim) {
       this.releaseDedupeKey(deliveryClaim.key, deliveryClaim.isSlackLogicalKey, deliveryClaim.contentHash)
+      inFlightClaim?.settle('released')
+    } else {
+      incrementIntegrationEventCounter(projectId, 'eventsInjected')
     }
-    incrementIntegrationEventCounter(projectId, 'eventsInjected')
+  }
+
+  private reportSkippedDuplicatePath(projectId: string, event: ChangeEvent, duplicateKey: string): void {
+    warnIntegrationEventAggregated(
+      `skipped duplicate path:${projectId}`,
+      'skipped duplicate path',
+      {
+        projectId,
+        eventId: event.id,
+        path: event.resource.path,
+        duplicateKey
+      }
+    )
   }
 
   private async recipientsForMatchedSpecs(
@@ -2703,11 +2756,16 @@ export class IntegrationEventBridge {
     }
 
     let injectedConfirmation: Promise<unknown> | undefined
+    const timeoutMs = deliveryInjectedConfirmationTimeoutMs()
     await pacer.enqueue(input, (message) => {
-      injectedConfirmation = bridge.sendMessageAndWaitForInjected!(
-        projectId,
-        message,
-        { timeoutMs: DELIVERY_INJECTED_CONFIRMATION_TIMEOUT_MS }
+      injectedConfirmation = withTimeout(
+        bridge.sendMessageAndWaitForInjected!(
+          projectId,
+          message,
+          { timeoutMs }
+        ),
+        timeoutMs + 250,
+        `Timed out waiting for broker delivery_injected confirmation for ${message.to}`
       )
       return Promise.resolve()
     })
@@ -2821,6 +2879,32 @@ export class IntegrationEventBridge {
       entry.provisionalContentHashes.clear()
     }
     entry.expiresAt = now + claim.ttlMs
+  }
+
+  private trackInFlightDedupeClaim(key: string): InFlightDedupeClaim {
+    let settle: (outcome: DeliveryDedupeClaimOutcome) => void = () => undefined
+    const promise = new Promise<DeliveryDedupeClaimOutcome>((resolve) => {
+      settle = resolve
+    })
+    let claims = this.inFlightDedupeClaims.get(key)
+    if (!claims) {
+      claims = new Set()
+      this.inFlightDedupeClaims.set(key, claims)
+    }
+    claims.add(promise)
+    void promise.finally(() => {
+      const current = this.inFlightDedupeClaims.get(key)
+      current?.delete(promise)
+      if (current?.size === 0) this.inFlightDedupeClaims.delete(key)
+    })
+    return { promise, settle }
+  }
+
+  private async waitForInFlightDedupeClaims(key: string): Promise<DeliveryDedupeClaimOutcome | null> {
+    const claims = Array.from(this.inFlightDedupeClaims.get(key) ?? [])
+    if (claims.length === 0) return null
+    const outcomes = await Promise.all(claims)
+    return outcomes.includes('released') ? 'released' : 'committed'
   }
 
   private releaseDedupeKey(key: string, isSlackLogicalKey: boolean, contentHash?: string): void {
