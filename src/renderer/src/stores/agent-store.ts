@@ -96,6 +96,13 @@ const HUMAN_SENDER_NAME = 'human'
 const SYSTEM_NOTICE_SENDER_NAME = 'system'
 const HUMAN_MESSAGE_DEDUPE_WINDOW_MS = 10_000
 const JOIN_NOTICE_DEDUPE_WINDOW_MS = 30_000
+// Tighter window for agent-message dedupe — agents reply fast and a
+// 10s window would falsely collapse two legitimately distinct messages
+// with similar bodies. Only catches the broker-replay / cross-stream
+// case where the same logical agent message arrives twice within ~2s
+// with different event_ids (per AGENTS.md: renderer is the final
+// guardrail; stable event_id is the broker's job).
+const AGENT_MESSAGE_DEDUPE_WINDOW_MS = 2_000
 
 export function getAgentKey(projectId: string | undefined, name: string): string {
   return `${projectId || 'unknown'}:${name}`
@@ -285,6 +292,33 @@ function isDuplicateHumanEcho(
   )
 }
 
+// Same shape as the human echo guard but scoped to agent (non-human)
+// messages with a tighter 2s window. Catches the broker-replay /
+// cross-stream race where the same agent message arrives via
+// relay_inbound AND a reconcile snapshot with mismatched event_ids
+// — without this, both records survive id-based dedup and the user
+// sees the message twice. Per AGENTS.md the renderer should defend as
+// final guardrail even when the broker is supposed to provide stable ids.
+function isDuplicateAgentEcho(
+  messages: ChatMessage[],
+  candidate: Pick<ChatMessage, 'from' | 'body' | 'projectId' | 'timestamp' | 'to' | 'isHuman'>
+): boolean {
+  if (isHumanMessage(candidate)) return false
+  const candidateFrom = candidate.from.trim().toLowerCase()
+  return messages.some((message) => {
+    if (isHumanMessage(message)) return false
+    if (message.from.trim().toLowerCase() !== candidateFrom) return false
+    if (message.body !== candidate.body) return false
+    if (
+      message.projectId &&
+      candidate.projectId &&
+      message.projectId !== candidate.projectId
+    ) return false
+    if (normalizeMessageTarget(message.to) !== normalizeMessageTarget(candidate.to)) return false
+    return Math.abs(message.timestamp - candidate.timestamp) < AGENT_MESSAGE_DEDUPE_WINDOW_MS
+  })
+}
+
 function createChannelJoinNotice(
   projectId: string | undefined,
   channelName: string,
@@ -450,6 +484,17 @@ function reconcileChatMessages(
         local: false
       })
       changed = true
+      continue
+    }
+    // No id match and not an optimistic-echo case — check the
+    // agent-duplicate guardrail: if a non-human message with the
+    // same (from, body, project, target) arrived within the agent
+    // dedupe window via another stream (relay_inbound), don't append
+    // a second copy under a different id.
+    if (
+      !isHumanMessage(next) &&
+      isDuplicateAgentEcho(Array.from(byId.values()), next)
+    ) {
       continue
     }
     byId.set(next.id, next)
@@ -960,11 +1005,12 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
         }
         const targetName = eventTarget.startsWith('#') ? null : normalizeMessageTarget(eventTarget)
         const alreadySeenById = state.messages.some((m) => m.id === msg.id)
-        const messages = alreadySeenById
+        const isDuplicate = alreadySeenById ||
+          (isHuman && isDuplicateHumanEcho(state.messages, msg)) ||
+          (!isHuman && isDuplicateAgentEcho(state.messages, msg))
+        const messages = isDuplicate
           ? state.messages
-          : isHuman && isDuplicateHumanEcho(state.messages, msg)
-            ? state.messages
-            : capByCount([...state.messages, msg], MAX_CHAT_MESSAGES)
+          : capByCount([...state.messages, msg], MAX_CHAT_MESSAGES)
 
         if (messages !== state.messages && isBrokerDebugEnabled()) {
           console.info('[broker:renderer-receipt]', {
