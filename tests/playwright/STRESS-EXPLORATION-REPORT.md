@@ -46,8 +46,9 @@ For duration runs, the explorer also records first/last one-second FPS windows, 
 | Chat mix ramp | custom | 1,000 | 10 | 30s | 5% | 300,000 | 25.5 | 50.1 | 82.4ms | 0 | FAIL | Two runs: min FPS 24, 27 with 15,000 chat events. 10%/25% were skipped after this confirmed the lower break. |
 | Duration ramp | custom PTY-only | 1,000 | 10 | 2m | 0% | 1,200,000 | 50.0 | 59.1 | 75.1ms | 0 | PASS | Two runs: min FPS 49, 51. First 30s avg 58.6/58.7; last 30s avg 59.2/59.2. |
 | Duration ramp | custom PTY-only | 1,000 | 10 | 5m | 0% | 3,000,000 | 50.5 | 59.1 | 68.2ms | 0 | PASS | Two runs: min FPS 50, 51. First 30s avg 58.9/58.9; last 30s avg 59.2/59.3. |
-| Duration ramp | custom PTY-only | 1,000 | 10 | 15m | 0% | TBD | TBD | TBD | TBD | TBD | TBD | Pending. |
-| Combined high-load | custom | 5,000 | 50 | 5m | 25% | TBD | TBD | TBD | TBD | TBD | TBD | Pending. |
+| Duration ramp | custom PTY-only | 1,000 | 10 | 15m | 0% | 9,000,000 | 19.5 | 59.2 | 425.3ms | 0 | FAIL | Two runs: min FPS 18, 21; longest frame 550.4ms, 300.1ms. Last 30s avg stayed 59.4/59.2, so this is intermittent pause behavior, not sustained drift. CDP heap delta +570MB/+1,061MB. |
+| Duration ramp | custom PTY-only | 100 | 10 | 15m | 0% | 900,000 | 2.0 | 57.9 | 1,134.3ms | 0 | FAIL | Single run only; second repeat was stopped to avoid contaminating concurrent perf validation. CDP heap delta +117.6MB. Mock PTY store retained 9,100 chunks / 46.4M characters, max 464.6k chars for one agent. |
+| Combined high-load | custom | 1,000 | 25 | 5m | 1% | TBD | TBD | TBD | TBD | TBD | TBD | Pending; paused while perf implementation team reruns stress gates to avoid benchmark contention. |
 
 ## Break Point Analysis
 
@@ -73,13 +74,15 @@ The failure mode is sustained low per-second FPS during the run, not one-off lon
 
 The safe 1,000-agent PTY-only profile does not show FPS drift through 5 minutes. Both 2-minute runs and both 5-minute runs passed with min FPS at or above 49, and every run's last 30-second average FPS was slightly higher than its first 30-second average FPS.
 
-The in-page `performance.memory` reading stayed flat within each of these runs, but this appears too coarse to rely on. CDP heap sampling has been added for the remaining 15-minute and combined runs.
+The 15-minute 1,000-agent case failed twice, but not as sustained degradation. Average FPS remained around 59 and the final 30-second windows were healthy. The failures came from isolated long pauses: 550ms and 300ms longest frames, with min FPS 18 and 21. CDP heap sampling showed large growth over the run: +570MB and +1,061MB, consistent with heap-pressure/major-GC pauses.
+
+A 100-agent 15-minute scaling check also failed on one long pause, with min FPS 2 and a 1,134ms longest frame, while its final 30-second average was still 59.5 FPS. CDP heap delta was +117.6MB, much lower than the 1,000-agent runs. The mock PTY store retained 9,100 chunk entries and 46.4M characters for that run, so at least part of the heap growth is retained PTY text; the remaining gap is consistent with renderer terminal/xterm buffer structures. The second 100-agent repeat was intentionally stopped to avoid contaminating concurrent perf validation in the same checkout.
 
 ## Bottleneck Hypothesis
 
 Current data suggests the PTY-heavy break is driven more by agent/stream multiplicity than by raw PTY line count. The renderer stays smooth at 1,000 streams with up to 250k logical PTY events/sec, but drops below the FPS gate at 1,750-2,000 streams with only 17.5k-20k logical PTY events/sec.
 
-Likely contributors are per-agent terminal bookkeeping, PTY buffer fanout by agent key, store reconciliation over larger agent collections, and DOM/list work associated with many tracked agents. The known chat-heavy expected-fail remains a separate per-row chat rendering bottleneck.
+Likely contributors are per-agent terminal bookkeeping, PTY buffer fanout by agent key, store reconciliation over larger agent collections, and DOM/list work associated with many tracked agents. The 15-minute heap data strengthens the xterm/terminal-buffer hypothesis: the long-run failures look like major GC pauses after retained terminal/PTY state grows, not raw throughput collapse. The known chat-heavy expected-fail remains a separate per-row chat rendering bottleneck.
 
 The chat mix data confirms a separate chat-path bottleneck: even 3,000 live chat messages over 30s is borderline, and 7,500 chat messages fails consistently. That points at message reconciliation, chat list virtualization pressure, markdown formatting, `ChatMessage` subtree cost, and agent metadata lookups in chat rows.
 
@@ -90,6 +93,7 @@ Recommendations from the completed axes:
 - Add a perf regression target around 1,625-1,750 PTY-only agents at 10 events/sec/agent; this is the current knee.
 - Profile per-agent PTY dispatch and terminal bookkeeping before optimizing raw chunk size. The 25 events/sec result suggests throughput bytes are not the first limit.
 - Keep PTY aggregation in place for high-volume stream traffic; removing it turns the test into a per-tick chunk churn benchmark and inflates wall time.
+- Prioritize bounding retained terminal/PTY state for non-visible agents before deeper CPU tuning. The 15-minute failures are heap/GC shaped, and lazy mounting inactive terminals should directly reduce xterm scrollback allocation.
 - Add a chat-mix regression target around 1%-2.5% chat at 1,000 agents and 10 events/sec/agent; this is the current chat-path knee.
 - Treat the chat-heavy profile as a separate optimization track: reduce per-row chat render work, memoize agent metadata lookup used by chat rows, and consider batching/debouncing message reconciliation under replay bursts.
 - Add a follow-up "agents but non-rendered" explorer mode before the next production fix. If 2,000+ spawned agents stay smooth when only one `TerminalInstance` is mounted, lazy unmounting inactive terminal panes should be the highest-leverage PTY-side optimization.
