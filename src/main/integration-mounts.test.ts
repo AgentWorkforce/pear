@@ -221,7 +221,7 @@ describe('IntegrationMountManager', () => {
     ])
   })
 
-  it('mounts canonical Slack command roots exactly once in write-only mode', async () => {
+  it('mounts Slack channel message roots in mirror mode (read-down + writeback)', async () => {
     const manager = new IntegrationMountManager()
 
     await manager.ensureMounted([
@@ -236,7 +236,10 @@ describe('IntegrationMountManager', () => {
       localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/slack/channels/C123/messages',
       remotePath: '/slack/channels/C123/messages',
       localLayout: 'exact',
-      syncMode: 'write-only',
+      // Dual-purpose root: reads inbound top-level messages down AND accepts
+      // send-writebacks. Mirror is a superset of write-only, so it does both;
+      // write-only disabled inbound read-down entirely.
+      syncMode: 'mirror',
       scopes: ['relayfile:fs:read:/slack/channels/C123/messages/**', 'relayfile:fs:write:/slack/channels/C123/messages/**']
     })
     expect(mock.mountInputs[0]?.localDir).not.toContain('messages/slack/channels/C123/messages')
@@ -253,13 +256,13 @@ describe('IntegrationMountManager', () => {
     expect(mock.startMount).toHaveBeenCalledWith(expect.objectContaining({
       env: expect.objectContaining({
         RELAYFILE_MOUNT_LOCAL_LAYOUT: 'exact',
-        RELAYFILE_MOUNT_SYNC_MODE: 'write-only',
+        RELAYFILE_MOUNT_SYNC_MODE: 'mirror',
         RELAYFILE_MOUNT_TIMEOUT: '180s'
       })
     }))
   })
 
-  it('uses the shared Slack command-root grammar for write-only mode', async () => {
+  it('mounts Slack user DM roots in mirror mode so inbound DMs read down', async () => {
     const manager = new IntegrationMountManager()
 
     await manager.ensureMounted([
@@ -273,7 +276,7 @@ describe('IntegrationMountManager', () => {
       localDir: '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/slack/users/U123/messages',
       remotePath: '/slack/users/U123/messages',
       localLayout: 'exact',
-      syncMode: 'write-only'
+      syncMode: 'mirror'
     })
   })
 
