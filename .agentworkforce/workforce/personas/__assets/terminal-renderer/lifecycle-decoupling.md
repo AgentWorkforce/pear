@@ -244,6 +244,6 @@ dispose(): void {
 
 ## Companion reading
 
-- `xterm-internals-and-renderers.md` — what survives in the runtime
-- `pty-broker-streaming-pipeline.md` — the subscription lifecycle the runtime owns
-- `renderer-bug-class-triage.md` — symptoms this pattern eliminates
+- `xterm-internals.md` — what survives in the runtime
+- `pty-broker-pipeline.md` — the subscription lifecycle the runtime owns
+- `bug-class-triage.md` — symptoms this pattern eliminates

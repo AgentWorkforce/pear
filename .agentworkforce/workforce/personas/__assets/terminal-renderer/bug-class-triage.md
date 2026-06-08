@@ -81,7 +81,7 @@ The lookup table from observed symptom to specific code path. Built from the PR 
 1. Read the symptom literally. "+1 card per tab switch back" not "duplication."
 2. Find the matching row above.
 3. Open the named file/code path BEFORE forming a fix hypothesis.
-4. If the symptom doesn't match any row → instrument before guessing (see `fix-discipline-and-instrumentation.md`).
+4. If the symptom doesn't match any row → instrument before guessing (see `fix-discipline.md`).
 
 ## When the symptom is reported vaguely
 
@@ -99,6 +99,6 @@ Now you can pick the right file to open.
 
 ## Companion reading
 
-- `pty-broker-streaming-pipeline.md` — the chunk path
-- `ansi-vt-escape-sequences.md` — what cursor positioning sequences look like
-- `fix-discipline-and-instrumentation.md` — what to do when the table doesn't match
+- `pty-broker-pipeline.md` — the chunk path
+- `ansi-vt-sequences.md` — what cursor positioning sequences look like
+- `fix-discipline.md` — what to do when the table doesn't match

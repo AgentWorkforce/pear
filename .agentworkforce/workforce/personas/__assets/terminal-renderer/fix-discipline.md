@@ -32,7 +32,7 @@ The first is a fix hypothesis you can confirm or reject. The second is a paragra
 
 ## Pattern-match symptom to bug class
 
-Before opening any file, use `renderer-bug-class-triage.md` to map the symptom to a candidate file. "+1 stacked card per tab switch" is not a triage prompt — it IS the bug class signal. Open the visibility-effect code path; don't read the chunk pipeline.
+Before opening any file, use `bug-class-triage.md` to map the symptom to a candidate file. "+1 stacked card per tab switch" is not a triage prompt — it IS the bug class signal. Open the visibility-effect code path; don't read the chunk pipeline.
 
 When multiple classes fit, plan the cheapest disambiguation experiment first. Often: a temporary `console.log` at the chunk-write site counting writes per chunk. Five minutes of instrumentation beats two hours of speculative fixes.
 
@@ -80,7 +80,7 @@ if (diagEnabled()) {
 
 Enable for capture:
 
-```
+```js
 localStorage.setItem('PEAR_DIAG_PTY', '1')
 location.reload()
 // ... reproduce the bug
@@ -148,5 +148,5 @@ If you can't fill in all five, you don't have a fix yet. Say so. Propose the sma
 
 ## Companion reading
 
-- `renderer-bug-class-triage.md` — what to consult before opening any file
-- `pty-broker-streaming-pipeline.md` + `xterm-internals-and-renderers.md` — the systems the discipline applies to
+- `bug-class-triage.md` — what to consult before opening any file
+- `pty-broker-pipeline.md` + `xterm-internals.md` — the systems the discipline applies to

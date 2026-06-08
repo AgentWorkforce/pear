@@ -10,7 +10,7 @@ All escape sequences start with `\x1b` (ESC, often shown as `\e` in logs). Then:
 - `\e]...` — **OSC** (Operating System Command). Window title, hyperlinks, cursor color.
 - `\eP...` — **DCS** (Device Control String). Sixel graphics, terminfo queries.
 - `\eN ...`, `\eO ...` — **SS2 / SS3**. Single-shift to alternate character sets.
-- `\e( B`, `\e( 0` — **Character set designation**. `B` = US-ASCII, `0` = DEC special graphics.
+- `\e(B`, `\e(0` — **Character set designation** (no space between `(` and the final byte). `B` = US-ASCII, `0` = DEC special graphics.
 - `\eM`, `\eD`, `\eE` — **Cursor controls outside CSI**. Reverse index, index, next line.
 
 CSI subforms:
@@ -75,7 +75,7 @@ The modes that change behavior xterm-wide. Format: `\e[?<n>h` to set, `\e[?<n>l`
 
 **?2026 sync mode**: codex-1's TUI uses this. Each redraw frame is bracketed:
 
-```
+```text
 \e[?2026h     ← begin sync
 \e[H          ← home cursor
 <card content>
@@ -103,7 +103,7 @@ Most common: sixel graphics `\eP<params>q<data>\e\\`. Not all xterm builds suppo
 
 ## Character sets
 
-`\e( B` = US-ASCII (default). `\e( 0` = DEC special graphics (box-drawing). Some legacy TUIs switch to the special set to draw `┌─┐│` style boxes; if you see weird non-ASCII characters in scrollback after a TUI exits without restoring `\e( B`, the set wasn't restored.
+`\e(B` = US-ASCII (default). `\e(0` = DEC special graphics (box-drawing). Some legacy TUIs switch to the special set to draw `┌─┐│` style boxes; if you see weird non-ASCII characters in scrollback after a TUI exits without restoring `\e(B`, the set wasn't restored.
 
 ## TUI redraw patterns
 
@@ -148,5 +148,5 @@ A chunk like `"\\e[H\\e[5;1H\\e[K"` reads as: "home cursor, move to row 5 col 1,
 
 ## Companion reading
 
-- `pty-broker-streaming-pipeline.md` — how chunks arrive
-- `renderer-bug-class-triage.md` — symptoms ↔ specific sequences
+- `pty-broker-pipeline.md` — how chunks arrive
+- `bug-class-triage.md` — symptoms ↔ specific sequences

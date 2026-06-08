@@ -6,7 +6,7 @@ The xterm.js parser pipeline, renderer trade-offs, addon discipline, and the bit
 
 Bytes from `term.write(data)` flow through:
 
-```
+```text
 Parser → InputHandler → Buffer → Renderer
 ```
 
@@ -17,7 +17,7 @@ Parser → InputHandler → Buffer → Renderer
 
 Behavioral consequences:
 
-- Cursor movement (`CSI <r>;<c> H`) operates on the buffer grid, not on what's visible. Move up 60 lines from row 1 → cursor pegs at row 1, can't go negative.
+- Cursor movement operates on the buffer grid, not on what's visible. Absolute positioning (`CSI <r>;<c> H`) and relative movement (`CSI <n> A` for up N rows) both peg at the buffer edges — `CSI 60 A` from row 1 keeps cursor at row 1, can't go negative.
 - Alt-screen entry/exit (DECSET ?1049 h/l) swaps buffer references. State save/restore happens at the same time. Tools like vim look perfect on exit because the main buffer is exactly as you left it.
 - Scrollback trim (when `scrollback: N` is exceeded) drops oldest lines off the top of `buffer.normal`. The cursor's absolute row position adjusts accordingly. TUIs using absolute positioning (cursor up by literal row count from current) break when their target row has been trimmed.
 
@@ -100,6 +100,6 @@ The cursor blink lives on its own timer, separate from any render frame. `cursor
 
 ## Companion reading
 
-- `react-lifecycle-decoupling-and-token-ownership.md` — what owns the Terminal across React mounts
-- `pty-broker-streaming-pipeline.md` — what feeds `term.write` and how it fails
-- `ansi-vt-escape-sequences.md` — the sequence reference TUIs emit
+- `lifecycle-decoupling.md` — what owns the Terminal across React mounts
+- `pty-broker-pipeline.md` — what feeds `term.write` and how it fails
+- `ansi-vt-sequences.md` — the sequence reference TUIs emit

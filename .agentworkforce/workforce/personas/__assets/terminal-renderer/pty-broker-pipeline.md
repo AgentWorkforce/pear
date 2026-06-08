@@ -4,7 +4,7 @@ The end-to-end PTY byte path from the broker IPC into `term.write`, the races be
 
 ## Pipeline shape
 
-```
+```text
 PTY child process
    ↓ raw bytes
 broker (main process)
@@ -117,7 +117,7 @@ Plus: debounce the ResizeObserver (75ms trailing), skip zero-size entries (allot
 
 Ink-based TUIs (Claude Code) lock in their row/col count from initial state and only recompute on a winsize **change**, not initial value. If pear attaches and tells the broker `rows=42` and the TUI's notion is `rows=42`, no change happens — but the TUI was started with a default size and never matched the actual terminal. Subsequent redraws use the stale row count.
 
-Fix: 200ms after `attachAndSeed()` completes, fire a one-pixel bounce:
+Fix: 200ms after `attachAndSeed()` completes, fire a one-row bounce (resize by one terminal row, not one pixel):
 
 ```ts
 await broker.resizePty(projectId, name, rows - 1, cols)
@@ -167,6 +167,6 @@ Key invariants:
 
 ## Companion reading
 
-- `xterm-internals-and-renderers.md` — what consumes the chunks
-- `ansi-vt-escape-sequences.md` — what the chunks contain
-- `renderer-bug-class-triage.md` — pattern-match symptoms to specific pipeline bugs
+- `xterm-internals.md` — what consumes the chunks
+- `ansi-vt-sequences.md` — what the chunks contain
+- `bug-class-triage.md` — pattern-match symptoms to specific pipeline bugs
