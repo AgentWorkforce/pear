@@ -26,6 +26,7 @@ const INTEGRATION_EVENT_SCOPES = ['relayfile:fs:read:/**']
 const PROJECT_INTEGRATIONS_LINK_NAME = '.integrations'
 const RECENT_INJECTION_TTL_MS = 10_000
 const RECENT_LOGICAL_CHANGE_TTL_MS = 10 * 60_000
+const SLACK_SELF_ECHO_WRITEBACK_TTL_MS = 15 * 60_000
 // Bounded persistent window for Slack record identities: must outlast the
 // upstream queue's retry storm (max 5 retries of a batch that can stall for
 // ~13 minutes each) so time-separated replays of one logical message are
@@ -65,6 +66,7 @@ type IntegrationEventCounterName =
   | 'eventsInjected'
   | 'eventsCoalesced'
   | 'eventsDropped'
+  | 'eventsSelfEchoSuppressed'
   | 'brokerSends'
   | 'brokerSendsDeferred'
 type IntegrationEventGaugeName = 'queueDepth' | 'mountCount' | 'brokerSendQueueDepth'
@@ -173,6 +175,11 @@ type LocalMountSubscription = Subscription & {
   localRoots: string[]
 }
 
+type SlackOutboundWritebackCommand = {
+  localPath: string
+  remotePath: string
+}
+
 type BrokerEventBridge = {
   listAgents: (projectId?: string) => Promise<Array<{ name: string; projectId?: string }>>
   sendMessage: (
@@ -278,6 +285,7 @@ function emptyIntegrationEventCounters(): IntegrationEventTelemetryCounters {
     eventsInjected: 0,
     eventsCoalesced: 0,
     eventsDropped: 0,
+    eventsSelfEchoSuppressed: 0,
     brokerSends: 0,
     brokerSendsDeferred: 0,
     queueDepth: 0,
@@ -1144,6 +1152,7 @@ function watchLocalMounts(
   globs: string[],
   onChange: (event: ChangeEvent) => void,
   coalesceMs: number,
+  onSlackOutboundWriteback?: (command: SlackOutboundWritebackCommand) => void,
   telemetry?: {
     onCoalesced?: () => void
     onQueueDepth?: (depth: number) => void
@@ -1161,9 +1170,13 @@ function watchLocalMounts(
 
   const schedule = (localRoot: string, remoteRoot: string, filename: string, eventType: string): void => {
     const eventPaths = localWatchEventPathsForFilename(localRoot, remoteRoot, filename)
-    if (!eventPaths || !shouldNotifyRelayfilePath(eventPaths.remotePath)) return
+    if (!eventPaths) return
     const { localPath, remotePath } = eventPaths
-    if (!globs.some((glob) => globMatchesPath(glob, remotePath))) return
+    const matchesGlob = globs.some((glob) => globMatchesPath(glob, remotePath))
+    if (matchesGlob && isSlackLocalWritebackCommandPath(remotePath)) {
+      onSlackOutboundWriteback?.({ localPath, remotePath })
+    }
+    if (!shouldNotifyRelayfilePath(remotePath) || !matchesGlob) return
 
     const existing = pendingByPath.get(remotePath)
     if (existing) {
@@ -1414,6 +1427,37 @@ function slackLogicalChangeFingerprint(event: ChangeEvent): string | null {
 
 function stableContentFingerprint(content: string): string {
   return createHash('sha256').update(content).digest('hex').slice(0, 16)
+}
+
+function normalizedSlackOutboundText(value: string | undefined): string | null {
+  const normalized = value?.trim().replace(/\s+/gu, ' ')
+  return normalized ? normalized : null
+}
+
+function slackOutboundTextHash(text: string | undefined): string | null {
+  const normalized = normalizedSlackOutboundText(text)
+  return normalized ? stableContentFingerprint(normalized) : null
+}
+
+function slackPathScopeKey(path: string): string | null {
+  const segments = pathSegments(path)
+  const channelIndex = segments.indexOf('channels')
+  const dmIndex = segments.indexOf('dms')
+  const userIndex = segments.indexOf('users')
+  const scopeIndex = channelIndex >= 0 ? channelIndex : dmIndex >= 0 ? dmIndex : userIndex
+  if (scopeIndex < 0 || !segments[scopeIndex + 1]) return null
+
+  const scopeKind = segments[scopeIndex]
+  const scopeValue = scopeKind === 'channels'
+    ? canonicalSlackChannelSegment(segments[scopeIndex + 1])
+    : segments[scopeIndex + 1]
+  return `${scopeKind}:${scopeValue}`
+}
+
+function slackOutboundCorrelationKey(path: string, text: string | undefined): string | null {
+  const scopeKey = slackPathScopeKey(path)
+  const textHash = slackOutboundTextHash(text)
+  return scopeKey && textHash ? `${scopeKey}:${textHash}` : null
 }
 
 function eventDedupeKeyWithFingerprint(
@@ -1718,6 +1762,24 @@ function slackPreviewAuthor(preview: EventContextPreview | undefined): string | 
     eventSummaryValue(rawEvent?.user)
 }
 
+function slackPreviewAuthorUserId(preview: EventContextPreview | undefined): string | undefined {
+  const record = previewRecord(preview)
+  const payload = isRecord(record?.payload) ? record.payload : record
+  const rawEvent = isRecord(payload?.raw_event) ? payload.raw_event : undefined
+  return eventSummaryValue(payload?.user) ||
+    eventSummaryValue(record?.user) ||
+    eventSummaryValue(rawEvent?.user)
+}
+
+function slackPreviewAuthorIsBot(preview: EventContextPreview | undefined): boolean {
+  const record = previewRecord(preview)
+  const payload = isRecord(record?.payload) ? record.payload : record
+  const rawEvent = isRecord(payload?.raw_event) ? payload.raw_event : undefined
+  return payload?.user_is_bot === true ||
+    record?.user_is_bot === true ||
+    rawEvent?.user_is_bot === true
+}
+
 function shouldNotifyRelayfilePath(pathValue: string): boolean {
   const path = pathValue.trim()
   if (!path || !path.startsWith('/')) return false
@@ -1759,6 +1821,20 @@ function isLikelyLocalWritebackCommandPath(path: string): boolean {
   if (!leaf.endsWith('.json') || leaf === 'meta.json') return false
   if (parent !== 'messages' && parent !== 'replies') return false
   return !/^\d+(?:[._-]\d+)*$/u.test(stem)
+}
+
+function isSlackLocalWritebackCommandPath(path: string): boolean {
+  return pathSegments(path)[0] === 'slack' && isLikelyLocalWritebackCommandPath(path)
+}
+
+function slackOutboundWritebackTextFromBuffer(buffer: Buffer): string | undefined {
+  try {
+    const parsed = JSON.parse(buffer.toString('utf8'))
+    if (!isRecord(parsed)) return undefined
+    return eventSummaryValue(parsed.text)
+  } catch {
+    return undefined
+  }
 }
 
 function slackEventTimestampMs(path: string): number | null {
@@ -2273,6 +2349,8 @@ export class IntegrationEventBridge {
   private recentInjections = new Map<string, RecentInjectionState>()
   private slackLogicalInjections = new Map<string, SlackLogicalInjectionState>()
   private inFlightDedupeClaims = new Map<string, Set<Promise<DeliveryDedupeClaimOutcome>>>()
+  private selfBotUserIds = new Map<string, Map<string, number>>()
+  private recentOutboundWritebacks = new Map<string, Map<string, number>>()
   private projectAgentRecipientCache = new Map<string, ProjectAgentRecipientCacheEntry>()
   private notificationTargetCache = new Map<string, NotificationTargetCacheEntry>()
   private brokerSendPacers = new Map<string, ProjectBrokerSendPacer>()
@@ -2436,6 +2514,19 @@ export class IntegrationEventBridge {
           })
         },
         Math.max(...watches.map((watch) => watch.coalesceMs), 750),
+        (command) => {
+          void this.recordSlackOutboundWriteback(projectId, command).catch((error) => {
+            warnIntegrationEventAggregated(
+              `Slack outbound writeback capture failed:${projectId}`,
+              'Slack outbound writeback capture failed',
+              {
+                projectId,
+                remotePath: command.remotePath,
+                error: toErrorMessage(error)
+              }
+            )
+          })
+        },
         {
           onCoalesced: () => incrementIntegrationEventCounter(projectId, 'eventsCoalesced'),
           onQueueDepth: (depth) => setIntegrationEventGauge(projectId, 'queueDepth', depth)
@@ -2465,6 +2556,8 @@ export class IntegrationEventBridge {
     this.dispatchers.delete(projectId)
     this.brokerSendPacers.get(projectId)?.dispose()
     this.brokerSendPacers.delete(projectId)
+    this.selfBotUserIds.delete(projectId)
+    this.recentOutboundWritebacks.delete(projectId)
     this.invalidateProjectAgentCache(projectId)
     this.invalidateNotificationTargetCache(projectId)
     setIntegrationEventGauge(projectId, 'queueDepth', 0)
@@ -2545,6 +2638,120 @@ export class IntegrationEventBridge {
       )
       return undefined
     }
+  }
+
+  private pruneProjectTtlMap(entries: Map<string, number>, now = Date.now()): void {
+    for (const [key, expiresAt] of entries.entries()) {
+      if (expiresAt <= now) entries.delete(key)
+    }
+  }
+
+  private projectTtlMap(store: Map<string, Map<string, number>>, projectId: string): Map<string, number> {
+    let entries = store.get(projectId)
+    if (!entries) {
+      entries = new Map<string, number>()
+      store.set(projectId, entries)
+    }
+    this.pruneProjectTtlMap(entries)
+    return entries
+  }
+
+  private recentOutboundWritebackSeen(projectId: string, key: string): boolean {
+    return this.projectTtlMap(this.recentOutboundWritebacks, projectId).has(key)
+  }
+
+  private activeSelfBotUserIds(projectId: string): Map<string, number> {
+    return this.projectTtlMap(this.selfBotUserIds, projectId)
+  }
+
+  private learnSelfBotUserId(projectId: string, authorId: string): void {
+    const selfBotUserIds = this.activeSelfBotUserIds(projectId)
+    if (selfBotUserIds.has(authorId)) return
+    selfBotUserIds.set(authorId, Date.now() + SLACK_RECORD_REPLAY_TTL_MS)
+    logIntegrationEvent('learned Slack self bot user id', {
+      projectId,
+      authorId
+    })
+  }
+
+  private async recordSlackOutboundWriteback(
+    projectId: string,
+    command: SlackOutboundWritebackCommand
+  ): Promise<void> {
+    const buffer = await readFile(command.localPath)
+    const text = slackOutboundWritebackTextFromBuffer(buffer)
+    const correlationKey = slackOutboundCorrelationKey(command.remotePath, text)
+    if (!correlationKey) return
+
+    const recentOutboundWritebacks = this.projectTtlMap(this.recentOutboundWritebacks, projectId)
+    recentOutboundWritebacks.set(correlationKey, Date.now() + SLACK_SELF_ECHO_WRITEBACK_TTL_MS)
+    logIntegrationEvent('recorded Slack outbound writeback', {
+      projectId,
+      remotePath: command.remotePath,
+      correlationKey
+    })
+  }
+
+  private shouldSuppressSlackSelfEcho(
+    projectId: string,
+    event: ChangeEvent,
+    contextPreview: EventContextPreview | undefined,
+    resolvedPath: string
+  ): boolean {
+    if (eventProvider(event) !== 'slack') return false
+
+    const authorId = slackPreviewAuthorUserId(contextPreview)
+    const isBot = slackPreviewAuthorIsBot(contextPreview)
+    const selfBotUserIds = this.activeSelfBotUserIds(projectId)
+    if (authorId && selfBotUserIds.has(authorId)) {
+      incrementIntegrationEventCounter(projectId, 'eventsSelfEchoSuppressed')
+      logIntegrationEvent('suppressed Slack self-echo', {
+        projectId,
+        eventId: event.id,
+        path: resolvedPath,
+        authorId,
+        learnedFromWriteback: false
+      })
+      return true
+    }
+
+    if (isBot && !authorId) {
+      warnIntegrationEventAggregated(
+        `Slack bot event missing author id:${projectId}`,
+        'Slack bot event missing author id',
+        {
+          projectId,
+          eventId: event.id,
+          path: resolvedPath
+        }
+      )
+      return false
+    }
+
+    const correlationKey = slackOutboundCorrelationKey(resolvedPath, slackPreviewText(contextPreview))
+    if (
+      isBot &&
+      authorId &&
+      correlationKey &&
+      // Learn once per project so a later text collision cannot keep re-learning
+      // another bot id; the self-id TTL self-heals a bad first correlation.
+      selfBotUserIds.size === 0 &&
+      this.recentOutboundWritebackSeen(projectId, correlationKey)
+    ) {
+      this.learnSelfBotUserId(projectId, authorId)
+      incrementIntegrationEventCounter(projectId, 'eventsSelfEchoSuppressed')
+      logIntegrationEvent('suppressed Slack self-echo', {
+        projectId,
+        eventId: event.id,
+        path: resolvedPath,
+        authorId,
+        correlationKey,
+        learnedFromWriteback: true
+      })
+      return true
+    }
+
+    return false
   }
 
   private async enqueueEvent(
@@ -2631,6 +2838,9 @@ export class IntegrationEventBridge {
     const eventMetadata = integrationEventMetadata(event)
     const contextPreview = await this.readEventContextPreview(projectId, event, matchedSpecs)
     const resolvedPath = contextPreview?.path || resolvedSlackContextPath(event.resource.path, matchedSpecs)
+    if (this.shouldSuppressSlackSelfEcho(projectId, event, contextPreview, resolvedPath)) {
+      return
+    }
     const usesConcreteAgentTargets = uniqueRecipients.every((recipient) => !recipient.startsWith('#'))
     const canTrackInjectedDelivery = usesConcreteAgentTargets && typeof bridge.sendMessageAndWaitForInjected === 'function'
     const shouldTrackDedupe = canTrackInjectedDelivery

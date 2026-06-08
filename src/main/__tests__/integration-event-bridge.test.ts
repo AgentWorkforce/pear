@@ -2335,6 +2335,119 @@ test('slack channel aliases without revision inject one logical message only onc
   assert.equal(getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsDropped, 1)
 })
 
+test('slack self-bot writeback echoes are suppressed without dropping humans or other bots', async () => {
+  const workspaceRoot = await mkdtemp(join(tmpdir(), 'pear-self-echo-'))
+  const localRoot = join(workspaceRoot, 'workspace-id', 'slack', 'channels', 'C123ABC', 'messages')
+  const localDraftPath = join(localRoot, 'codex-175-self-echo.json')
+  const remoteDraftPath = '/slack/channels/C123ABC/messages/codex-175-self-echo.json'
+  const outboundText = 'Pear posted this from an agent'
+  await mkdir(localRoot, { recursive: true })
+  await writeFile(localDraftPath, JSON.stringify({ text: `  ${outboundText}\n` }))
+
+  const recordsByPath = new Map<string, Record<string, unknown>>([
+    ['/slack/channels/C123ABC/messages/1780668000_000000/meta.json', {
+      provider: 'slack',
+      payload: {
+        user: 'U0B2596R7EZ',
+        user_is_bot: true,
+        user_name: 'file_by_agent_relay',
+        text: outboundText
+      }
+    }],
+    ['/slack/channels/C123ABC/messages/1780668030_000000/meta.json', {
+      provider: 'slack',
+      payload: {
+        user: 'U0B2596R7EZ',
+        user_is_bot: true,
+        user_name: 'file_by_agent_relay',
+        text: 'a later unrelated bot post'
+      }
+    }],
+    ['/slack/channels/C123ABC/messages/1780668060_000000/meta.json', {
+      provider: 'slack',
+      payload: {
+        user: 'U0HUMAN1234',
+        user_is_bot: false,
+        user_name: 'khaliq',
+        text: outboundText
+      }
+    }],
+    ['/slack/channels/C123ABC/messages/1780668120_000000/meta.json', {
+      provider: 'slack',
+      payload: {
+        user: 'U0OTHERBOT1',
+        user_is_bot: true,
+        user_name: 'coderabbit',
+        text: 'different bot message'
+      }
+    }]
+  ])
+
+  let harness: ReturnType<typeof makeHarness> | undefined
+  try {
+    harness = makeHarness(['alice'], {
+      readFileResponse: (_workspaceId, path) => ({
+        path,
+        revision: 'rev-1',
+        contentType: 'application/json',
+        content: JSON.stringify(recordsByPath.get(path) ?? { provider: 'slack', text: 'fallback' }),
+        encoding: 'utf-8'
+      })
+    })
+    await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+      await harness!.bridge.reconcile('project-1', [
+        integration({
+          provider: 'slack',
+          integrationId: 'slack-1',
+          mountPaths: ['/slack/channels/C123ABC/messages'],
+          localMountPaths: [localRoot],
+          downloadHistoricalData: true,
+          scope: { notifyAgents: ['alice'] }
+        })
+      ])
+    })
+
+    await (harness.bridge as unknown as {
+      recordSlackOutboundWriteback: (
+        projectId: string,
+        command: { localPath: string; remotePath: string }
+      ) => Promise<void>
+    }).recordSlackOutboundWriteback('project-1', {
+      localPath: localDraftPath,
+      remotePath: remoteDraftPath
+    })
+
+    await harness.emit(changeEvent('/slack/channels/C123ABC/messages/1780668000_000000/meta.json', 'slack'))
+    await waitUntil(() =>
+      (getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsSelfEchoSuppressed || 0) === 1
+    )
+    assert.deepEqual(harness.sent, [])
+
+    await harness.emit(changeEvent('/slack/channels/C123ABC/messages/1780668030_000000/meta.json', 'slack'))
+    await waitUntil(() =>
+      (getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsSelfEchoSuppressed || 0) === 2
+    )
+    assert.deepEqual(harness.sent, [])
+
+    await harness.emit(changeEvent('/slack/channels/C123ABC/messages/1780668060_000000/meta.json', 'slack'))
+    await waitForSent(harness, 1)
+    await harness.emit(changeEvent('/slack/channels/C123ABC/messages/1780668120_000000/meta.json', 'slack'))
+    await waitForSent(harness, 2)
+
+    assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'alice'])
+    assert.match(harness.sent[0].input.text, /Author: khaliq/u)
+    assert.match(harness.sent[0].input.text, /Message:\nPear posted this from an agent/u)
+    assert.match(harness.sent[1].input.text, /Author: coderabbit/u)
+    assert.match(harness.sent[1].input.text, /Message:\ndifferent bot message/u)
+    const telemetry = getIntegrationEventTelemetrySnapshot().projects['project-1']
+    assert.equal(telemetry?.eventsSelfEchoSuppressed, 2)
+    assert.equal(telemetry?.eventsDropped, 0)
+  } finally {
+    await harness?.bridge.closeAll()
+    await rm(workspaceRoot, { recursive: true, force: true })
+  }
+})
+
 test('generic provider agent scope keys are not treated as notification targets', async () => {
   const harness = makeHarness()
 
@@ -2534,6 +2647,7 @@ test('integration event delivery is quiet by default while counters remain avail
     eventsInjected: 1,
     eventsCoalesced: 0,
     eventsDropped: 1,
+    eventsSelfEchoSuppressed: 0,
     brokerSends: 1,
     brokerSendsDeferred: 0,
     queueDepth: 0,
@@ -2620,6 +2734,7 @@ test('integration event delivery failures use aggregated warn cadence by default
     eventsInjected: 0,
     eventsCoalesced: 0,
     eventsDropped: 0,
+    eventsSelfEchoSuppressed: 0,
     brokerSends: 26,
     brokerSendsDeferred: 0,
     queueDepth: 0,
@@ -2765,6 +2880,7 @@ test('integration event dispatcher compacts large bursts into a bounded summary'
     eventsInjected: 51,
     eventsCoalesced: 950,
     eventsDropped: 0,
+    eventsSelfEchoSuppressed: 0,
     brokerSends: 51,
     brokerSendsDeferred: 0,
     queueDepth: 0,
@@ -2810,6 +2926,7 @@ test('integration event dispatcher filters noise before queue admission', async 
     eventsInjected: 1,
     eventsCoalesced: 0,
     eventsDropped: 0,
+    eventsSelfEchoSuppressed: 0,
     brokerSends: 1,
     brokerSendsDeferred: 0,
     queueDepth: 0,
@@ -2846,6 +2963,7 @@ test('integration event dispatcher coalesces rapid distinct revisions for the sa
     eventsInjected: 1,
     eventsCoalesced: 9,
     eventsDropped: 0,
+    eventsSelfEchoSuppressed: 0,
     brokerSends: 1,
     brokerSendsDeferred: 0,
     queueDepth: 0,
@@ -3019,6 +3137,7 @@ test('integration event telemetry records coalescing and queue depth callbacks',
     eventsInjected: 0,
     eventsCoalesced: 1,
     eventsDropped: 0,
+    eventsSelfEchoSuppressed: 0,
     brokerSends: 0,
     brokerSendsDeferred: 0,
     queueDepth: 7,

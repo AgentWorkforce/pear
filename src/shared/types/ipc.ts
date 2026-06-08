@@ -724,6 +724,7 @@ export type IntegrationEventTelemetryCounters = {
   eventsInjected: number
   eventsCoalesced: number
   eventsDropped: number
+  eventsSelfEchoSuppressed: number
   brokerSends: number
   brokerSendsDeferred: number
   queueDepth: number
