@@ -490,6 +490,10 @@ function createRuntime(key: string, opts: AcquireOptions): TerminalRuntime {
       if (disposed) return
       if (token !== currentToken) return
       currentToken = null
+      // Cancel any pending initIfReady rAF. Without this, a split-page
+      // mount that never gained layout would spin forever against a
+      // detached/old container — a permanent rAF loop per parked page.
+      cancelPendingInit()
       const park = getParkedContainer()
       if (host.parentElement !== park) {
         park.appendChild(host)

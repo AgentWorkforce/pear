@@ -295,21 +295,13 @@ export function useTerminal(
     // effect; the visibility effect doesn't need to reinforce it.
   }, [visible, active, agentName, projectId, containerRef])
 
-  useEffect(() => {
-    if (!visible || !active) return
-    let timer: ReturnType<typeof setTimeout> | null = null
-    const handleWindowFocus = (): void => {
-      timer = setTimeout(() => {
-        const term = runtimeRef.current?.term
-        if (term) term.focus()
-      }, 50)
-    }
-    window.addEventListener('focus', handleWindowFocus)
-    return () => {
-      window.removeEventListener('focus', handleWindowFocus)
-      if (timer) clearTimeout(timer)
-    }
-  }, [visible, active])
+  // Window-focus auto-focus was removed for the same reason as the
+  // visibility-effect focus: any TUI that has enabled DECSET ?1004
+  // receives a focus-in event on programmatic term.focus(), causing
+  // redraws and stacked TUI cards in scrollback. Alt-tabbing back to
+  // pear is rarer than tab-switching but in the same bug class.
+  // User-initiated clicks still focus the terminal via the pointerdown
+  // handler in the main effect.
 
   useEffect(() => {
     if (!visible || !active || terminalMode === 'view' || !agentName || activeDialog) return

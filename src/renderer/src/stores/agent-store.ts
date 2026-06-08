@@ -368,6 +368,34 @@ function chatMessagesEqual(left: ChatMessage, right: ChatMessage): boolean {
     threadRepliesEqual(left.threadReplies, right.threadReplies)
 }
 
+// Find an existing optimistic local-UUID human echo that matches an incoming
+// canonical broker record. Optimistic messages are appended by `addHumanMessage`
+// with `crypto.randomUUID()`; the broker subsequently reconciles the same
+// message with its canonical `event_id`. Without identity replacement, both
+// records survive id-based reconciliation and the user sees their message
+// twice. Match by (channel, body, project, time-window) — same predicate as
+// `isDuplicateHumanEcho`, just on the reconcile side.
+function findOptimisticHumanMatch(
+  byId: Map<string, ChatMessage>,
+  incoming: ChatMessage
+): ChatMessage | null {
+  if (!isHumanMessage(incoming)) return null
+  for (const existing of byId.values()) {
+    if (existing.id === incoming.id) continue
+    if (!isHumanMessage(existing)) continue
+    if (existing.body !== incoming.body) continue
+    if (
+      existing.projectId &&
+      incoming.projectId &&
+      existing.projectId !== incoming.projectId
+    ) continue
+    if (normalizeMessageTarget(existing.to) !== normalizeMessageTarget(incoming.to)) continue
+    if (Math.abs(existing.timestamp - incoming.timestamp) > HUMAN_MESSAGE_DEDUPE_WINDOW_MS) continue
+    return existing
+  }
+  return null
+}
+
 function reconcileChatMessages(
   existingMessages: ChatMessage[],
   incomingMessages: BrokerReconciledChatMessage[]
@@ -394,6 +422,22 @@ function reconcileChatMessages(
         byId.set(next.id, merged)
         changed = true
       }
+      continue
+    }
+    // No id match — check whether this is the canonical echo of an
+    // optimistic local-UUID record we already have. If so, replace
+    // (preserving any client-side UI state from the optimistic record)
+    // rather than appending and creating a visible duplicate.
+    const optimistic = findOptimisticHumanMatch(byId, next)
+    if (optimistic) {
+      byId.delete(optimistic.id)
+      byId.set(next.id, {
+        ...optimistic,
+        ...next,
+        threadReplies: next.threadReplies || optimistic.threadReplies,
+        reactions: next.reactions || optimistic.reactions
+      })
+      changed = true
       continue
     }
     byId.set(next.id, next)
