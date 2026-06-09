@@ -1,8 +1,7 @@
 import type React from 'react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, ChevronLeft, ChevronRight, Columns2, CornerUpLeft, Loader2, Network, PanelTop, X } from 'lucide-react'
+import { AlertTriangle, ChevronLeft, ChevronRight, Columns2, CornerUpLeft, Loader2, PanelTop, X } from 'lucide-react'
 import { AgentHarnessIcon, ClaudeIcon, CodexIcon } from '@/components/common/AgentIcons'
-import { GraphView } from '@/components/graph/GraphView'
 import { ChatComposerInput } from '@/components/chat/ChatComposerInput'
 import { spawnProjectAgent, type SpawnAgentCli } from '@/lib/spawn-agent'
 import { formatTokenCount } from '@/lib/format'
@@ -457,7 +456,6 @@ export function TerminalPane(): React.ReactNode {
   const [queuedPromptError, setQueuedPromptError] = useState<string | null>(null)
   const [nowMs, setNowMs] = useState(() => Date.now())
   const flushingPromptRef = useRef<string | null>(null)
-  const graphEnabled = terminalLayout === 'graph'
   const splitEnabled = terminalLayout === 'horizontal-split' && agents.length > 1
   const splitPages = splitEnabled ? chunkAgents(agents) : []
   const splitPageCount = splitPages.length
@@ -467,7 +465,6 @@ export function TerminalPane(): React.ReactNode {
     : agents.length > 1
       ? 'Show split terminal pages'
       : 'Start another agent to split terminals'
-  const graphButtonTitle = graphEnabled ? 'Show terminal tabs' : 'Show agent graph'
   const burnInputs = useMemo(() => agents.map(getBurnInputForAgent), [agents])
   const burnInputsKey = useMemo(
     () => burnInputs.map((agent) => `${agent.projectId || 'unknown'}:${agent.name}:${agent.cwd || ''}:${agent.cli || ''}`).join('|'),
@@ -894,20 +891,6 @@ export function TerminalPane(): React.ReactNode {
         >
           {splitEnabled ? <PanelTop size={14} /> : <Columns2 size={14} />}
         </button>
-        <button
-          type="button"
-          onClick={() => setTerminalLayout(graphEnabled ? 'tabs' : 'graph')}
-          aria-pressed={graphEnabled}
-          className={`rounded-xl px-3 py-2 transition-colors ${
-            graphEnabled
-              ? 'bg-[var(--pear-bg)] text-[var(--pear-text)] shadow-sm'
-              : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]'
-          }`}
-          title={graphButtonTitle}
-          aria-label={graphButtonTitle}
-        >
-          <Network size={14} />
-        </button>
       </div>
       {spawnError && (
         <div className="shrink-0 border-b border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 px-3 py-2 text-xs text-[var(--pear-red)]">
@@ -990,12 +973,8 @@ export function TerminalPane(): React.ReactNode {
         </div>
       )}
 
-      {/* Terminal runtimes are acquired lazily when their pane first becomes visible. */}
-      {graphEnabled ? (
-        <div className="min-h-0 flex-1 overflow-hidden bg-[var(--pear-bg)]">
-          <GraphView />
-        </div>
-      ) : splitEnabled ? (
+      {/* Terminal instances stay mounted in tabbed mode to preserve scroll. */}
+      {splitEnabled ? (
         <div className="relative min-h-0 flex-1 overflow-hidden bg-[var(--pear-bg)]">
           {splitPages.map((pageAgents, pageIndex) => {
             const visible = pageIndex === splitPage

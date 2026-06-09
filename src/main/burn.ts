@@ -1,6 +1,9 @@
 import { existsSync } from 'fs'
+import { spawn } from 'child_process'
+import { createRequire } from 'module'
 import { homedir } from 'os'
 import { join } from 'path'
+import { pathToFileURL } from 'url'
 import type {
   HotspotsAttributionResult,
   HotspotsBashRow,
@@ -220,6 +223,11 @@ const MAX_SESSIONS_FOR_DETAILS = 12
 const MAX_ROWS = 12
 
 let warnedUnavailable = false
+const requireForResolve = createRequire(import.meta.url)
+
+const BURN_INGEST_TOOL_RESULT_WARNING_START =
+  /^\u26a0(?:\uFE0F)? [^:]+: \d+ sessions logged tool calls without any observed tool_result content \(\d+ tool calls\)\.\r?\n$/
+const BURN_INGEST_WARNING_CONTINUATION_LINES = 3
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -229,6 +237,135 @@ function toNumber(value: number | bigint | undefined): number {
   if (typeof value === 'bigint') return Number(value)
   if (typeof value === 'number' && Number.isFinite(value)) return value
   return 0
+}
+
+export function createBurnIngestDiagnosticFilter(): {
+  filter: (chunk: string) => string
+  flush: () => string
+  suppressedCount: () => number
+} {
+  let pending = ''
+  let suppressedCount = 0
+  let suppressContinuationLines = 0
+
+  return {
+    filter(chunk: string): string {
+      pending += chunk
+      let output = ''
+
+      for (;;) {
+        const newlineIndex = pending.indexOf('\n')
+        if (newlineIndex < 0) break
+
+        const line = pending.slice(0, newlineIndex + 1)
+        pending = pending.slice(newlineIndex + 1)
+
+        if (suppressContinuationLines > 0) {
+          suppressContinuationLines -= 1
+          continue
+        }
+
+        if (BURN_INGEST_TOOL_RESULT_WARNING_START.test(line)) {
+          suppressedCount += 1
+          suppressContinuationLines = BURN_INGEST_WARNING_CONTINUATION_LINES
+          continue
+        }
+
+        output += line
+      }
+
+      return output
+    },
+    flush(): string {
+      const output = suppressContinuationLines > 0 ? '' : pending
+      pending = ''
+      suppressContinuationLines = 0
+      return output
+    },
+    suppressedCount(): number {
+      return suppressedCount
+    }
+  }
+}
+
+function buildBurnIngestChildScript(sdkUrl: string, ledgerHome: string): string {
+  return `
+const sdkUrl = ${JSON.stringify(sdkUrl)}
+const ledgerHome = ${JSON.stringify(ledgerHome)}
+
+try {
+  const burn = await import(sdkUrl)
+  await burn.ingest({ ledgerHome })
+} catch (error) {
+  const message = error && typeof error === 'object' && 'stack' in error
+    ? error.stack
+    : String(error)
+  console.error(message)
+  process.exitCode = 1
+}
+`
+}
+
+async function runBurnIngest(ledgerHome: string): Promise<void> {
+  const sdkUrl = pathToFileURL(requireForResolve.resolve('@relayburn/sdk')).href
+  const child = spawn(process.execPath, ['--input-type=module', '--eval', buildBurnIngestChildScript(sdkUrl, ledgerHome)], {
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      ELECTRON_RUN_AS_NODE: '1'
+    },
+    stdio: ['ignore', 'pipe', 'pipe']
+  })
+  const stdoutFilter = createBurnIngestDiagnosticFilter()
+  const stderrFilter = createBurnIngestDiagnosticFilter()
+  let stdoutOutput = ''
+  let stderrOutput = ''
+
+  child.stdout?.setEncoding('utf8')
+  child.stdout?.on('data', (chunk: string) => {
+    const filtered = stdoutFilter.filter(chunk)
+    if (!filtered) return
+    stdoutOutput += filtered
+    process.stdout.write(filtered)
+  })
+
+  child.stderr?.setEncoding('utf8')
+  child.stderr?.on('data', (chunk: string) => {
+    const filtered = stderrFilter.filter(chunk)
+    if (!filtered) return
+    stderrOutput += filtered
+    process.stderr.write(filtered)
+  })
+
+  await new Promise<void>((resolve, reject) => {
+    child.once('error', reject)
+    child.once('close', (code, signal) => {
+      child.removeAllListeners('error')
+      const finishOutput = (): void => {
+        const stdoutRemainder = stdoutFilter.flush()
+        if (stdoutRemainder) {
+          stdoutOutput += stdoutRemainder
+          process.stdout.write(stdoutRemainder)
+        }
+
+        const stderrRemainder = stderrFilter.flush()
+        if (stderrRemainder) {
+          stderrOutput += stderrRemainder
+          process.stderr.write(stderrRemainder)
+        }
+      }
+
+      finishOutput()
+
+      if (code === 0) {
+        resolve()
+        return
+      }
+
+      const detail = (stderrOutput || stdoutOutput).trim()
+      reject(new Error(`RelayBurn ingest exited with ${signal ? `signal ${signal}` : `code ${code ?? 'unknown'}`}${detail ? `: ${detail}` : ''}`))
+    })
+  })
 }
 
 function sortSessionRefs(sessions: BurnSessionRef[]): BurnSessionRef[] {
@@ -985,8 +1122,7 @@ class BurnManager {
 
     this.ingestPromise = (async () => {
       try {
-        const burn = await this.loadSdk()
-        await burn.ingest({ ledgerHome: getBurnLedgerHome() })
+        await runBurnIngest(getBurnLedgerHome())
         this.lastIngestAt = Date.now()
       } catch (error) {
         this.lastIngestAt = Date.now()

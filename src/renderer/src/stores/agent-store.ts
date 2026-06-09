@@ -84,9 +84,20 @@ export interface BrokerErrorEntry {
 }
 
 const MAX_BROKER_ERRORS = 12
+const brokerErrorKey = (entry: Pick<BrokerErrorEntry, 'message' | 'projectId'>): string =>
+  `${entry.projectId || 'global'}\0${entry.message}`
+
+function prependBrokerError(entries: BrokerErrorEntry[], entry: BrokerErrorEntry): BrokerErrorEntry[] {
+  const key = brokerErrorKey(entry)
+  return [
+    entry,
+    ...entries.filter((candidate) => brokerErrorKey(candidate) !== key)
+  ].slice(0, MAX_BROKER_ERRORS)
+}
+
 const MAX_BROKER_EVENTS = 3_000
 const BROKER_EVENT_RETENTION_MS = 12 * 60 * 60 * 1_000
-// Chat + relay history are display/graph buffers, not a source of truth, so cap
+// Chat + relay history are display buffers, not a source of truth, so cap
 // them the same way broker events are capped. Without this they grow for the
 // life of the session (one entry per relay_inbound), which is the dominant
 // renderer memory leak behind long-session crashes.
@@ -1095,15 +1106,15 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
         brokerStatus: nextStatus,
         brokerError: nextError,
         brokerErrors: shouldRecord
-          ? [
+          ? prependBrokerError(
+              state.brokerErrors,
               {
                 id: crypto.randomUUID(),
                 message: nextError,
                 timestamp: Date.now(),
                 projectId: status.projectId
-              },
-              ...state.brokerErrors
-            ].slice(0, MAX_BROKER_ERRORS)
+              }
+            )
           : state.brokerErrors
       }
     })

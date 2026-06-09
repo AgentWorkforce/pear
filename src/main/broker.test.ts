@@ -194,6 +194,7 @@ import { BrokerManager, parseBrokerInitCliFlags, resolveAgentRelayMcpCommand } f
 
 const PROJECT_ID = 'project-1'
 const originalMcpCommand = process.env.AGENT_RELAY_MCP_COMMAND
+const originalAgentRelayBin = process.env.AGENT_RELAY_BIN
 const originalResourcesPathDescriptor = Object.getOwnPropertyDescriptor(process, 'resourcesPath')
 const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
 const originalPublicEnv = process.env.PUBLIC
@@ -459,6 +460,11 @@ describe('BrokerManager local + cloud coexistence', () => {
 
   beforeEach(() => {
     delete process.env.AGENT_RELAY_WORKSPACE_KEY
+    if (originalAgentRelayBin === undefined) {
+      delete process.env.AGENT_RELAY_BIN
+    } else {
+      process.env.AGENT_RELAY_BIN = originalAgentRelayBin
+    }
     mock.state.spawnedClients.length = 0
     mock.state.constructedClients.length = 0
     mock.state.connectedClients.length = 0
@@ -698,6 +704,18 @@ describe('BrokerManager local + cloud coexistence', () => {
       }
       await rm(tempDir, { recursive: true, force: true })
     }
+  })
+
+  it('uses the packaged Agent Relay broker binary instead of an adjacent local relay build by default', async () => {
+    const manager = new BrokerManager()
+
+    await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', undefined as never, [])
+
+    const spawnOptions = mock.HarnessDriverClient.spawn.mock.calls[0]?.[0] as { binaryPath?: string } | undefined
+    expect(spawnOptions?.binaryPath).toContain(join('node_modules', '@agent-relay', `broker-${process.platform}-${process.arch}`, 'bin'))
+    expect(spawnOptions?.binaryPath).not.toContain(join('relay', 'target', 'debug'))
+
+    await manager.shutdown()
   })
 
   it('reports the matching connection file when a stale current file and matching legacy file coexist', async () => {

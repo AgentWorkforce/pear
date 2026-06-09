@@ -7,10 +7,10 @@ import {
 } from '@/lib/direct-messages'
 import type { BurnAgentInput } from '@/lib/ipc'
 
-export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'issues' | 'ai-hist' | 'burn-session' | 'burn-project' | 'burn-session-detail'
+export type ViewMode = 'terminal' | 'chat' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'issues' | 'ai-hist' | 'burn-session' | 'burn-project' | 'burn-session-detail'
 export type DialogType = 'add-project' | 'spawn-agent' | 'spawn-local-agent' | 'cloud-agent' | 'add-channel' | 'command-menu' | null
 const ThemeSchema = z.enum(['dark', 'light'])
-const TerminalLayoutSchema = z.enum(['tabs', 'horizontal-split', 'graph'])
+const TerminalLayoutSchema = z.enum(['tabs', 'horizontal-split'])
 const BooleanPreferenceSchema = z.enum(['true', 'false']).transform((value) => value === 'true')
 export type Theme = z.infer<typeof ThemeSchema>
 export type TerminalLayout = z.infer<typeof TerminalLayoutSchema>
@@ -232,7 +232,6 @@ function tabInputForViewMode(mode: ViewMode): AppTabInput {
       return { kind: 'agents' }
     case 'burn-session-detail':
       return { kind: 'agents' }
-    case 'graph':
     case 'terminal':
       return { kind: 'agents' }
   }
@@ -430,11 +429,7 @@ export const useUIStore = create<UIState>((set, get) => ({
   },
   toggleTerminalLayout: () => {
     const current = get().terminalLayout
-    const next = current === 'tabs'
-      ? 'horizontal-split'
-      : current === 'horizontal-split'
-        ? 'graph'
-        : 'tabs'
+    const next = current === 'tabs' ? 'horizontal-split' : 'tabs'
     localStorage.setItem('pear-terminal-layout', next)
     set({ terminalLayout: next })
   },

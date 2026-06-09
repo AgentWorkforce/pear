@@ -271,19 +271,23 @@ function findWorkforcePersona(
   }
 }
 
+function resolveBrokerBinaryOverride(): string | null {
+  const configured = process.env.AGENT_RELAY_BIN?.trim()
+  if (!configured) return null
+  if (canExecute(configured)) return configured
+  console.warn('[broker] Ignoring AGENT_RELAY_BIN because it is not executable:', configured)
+  return null
+}
+
 // Resolve the broker binary bundled with the v8 harness-driver runtime.
 // The runtime normally resolves this via import.meta.url, but that breaks when
 // electron-vite bundles the driver into the main process (import.meta.url points
 // to out/main/ instead of node_modules/).
 function resolveBundledBrokerBinary(): string {
-  // Use local relay build if available (for development)
-  const localBinary = join(__dirname, '..', '..', '..', 'relay', 'target', 'debug', 'agent-relay-broker')
-  try {
-    require('fs').accessSync(localBinary, require('fs').constants.X_OK)
-    console.log('[broker] Using local relay binary:', localBinary)
-    return localBinary
-  } catch {
-    // Fall back to SDK-bundled binary
+  const configuredBinary = resolveBrokerBinaryOverride()
+  if (configuredBinary) {
+    console.log('[broker] Using configured Agent Relay broker binary:', configuredBinary)
+    return configuredBinary
   }
 
   const suffix = `${process.platform}-${process.arch}`
@@ -296,6 +300,12 @@ function resolveBundledBrokerBinary(): string {
     process.platform === 'win32' ? 'agent-relay-broker.exe' : 'agent-relay-broker'
   )
   if (canExecute(optionalPackageBinary)) return unpackIfPackaged(optionalPackageBinary)
+
+  const localBinary = join(__dirname, '..', '..', '..', 'relay', 'target', 'debug', 'agent-relay-broker')
+  if (canExecute(localBinary)) {
+    console.warn('[broker] Bundled Agent Relay broker binary was not found; falling back to local relay build:', localBinary)
+    return localBinary
+  }
 
   // Backward-compatible fallback for SDK packages that still carry per-platform
   // broker binaries directly.
