@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { BrowserWindow, shell } from 'electron'
-import type { FileReadResponse, TreeResponse, WorkspaceHandle } from '@relayfile/sdk'
+import { RelayfileSetup, type FileReadResponse, type TreeResponse, type WorkspaceHandle } from '@relayfile/sdk'
 import { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, getApiUrl, resolveCloudAuth } from './auth'
 import { brokerManager } from './broker'
 import { cloudAgentManager } from './cloud-agent'
@@ -772,6 +772,9 @@ function collectScopeLabels(scope: Record<string, unknown>): string[] {
 }
 
 export class IntegrationsManager {
+  private integrationRemoteReaderHandle: WorkspaceHandle | null = null
+  private integrationRemoteReaderKey: string | null = null
+  private integrationRemoteReaderPromise: Promise<WorkspaceHandle> | null = null
   private listeners = new Set<(event: IntegrationsEvent) => void>()
   private sessions = new Map<string, IntegrationConnectSession>()
   private sessionMetadata = new Map<string, SessionMetadata>()
@@ -1015,7 +1018,7 @@ export class IntegrationsManager {
       throw new Error('Integration remote file is outside this project integration scope')
     }
 
-    return this.withWorkspaceHandle(async (handle) => {
+    return this.withIntegrationRemoteHandle(async (handle) => {
       const file = await handle.client().readFile(handle.workspaceId, path)
       return remoteFileReadToPreview(file)
     })
@@ -1030,7 +1033,7 @@ export class IntegrationsManager {
       throw new Error('Integration remote directory is outside this project integration scope')
     }
 
-    return this.withWorkspaceHandle(async (handle) => {
+    return this.withIntegrationRemoteHandle(async (handle) => {
       const entries: filesystem.ExplorerEntry[] = []
       let cursor: string | undefined
 
@@ -1413,6 +1416,71 @@ export class IntegrationsManager {
 
   private async withWorkspaceHandle<T>(fn: (handle: WorkspaceHandle) => Promise<T>): Promise<T> {
     return getRelayWorkspaceManager().withHandle(fn)
+  }
+
+  private async getIntegrationRemoteReaderHandle(): Promise<WorkspaceHandle> {
+    const auth = await resolveCloudAuth()
+    if (!auth) {
+      this.clearIntegrationRemoteReaderHandle()
+      throw new Error('cloud-auth-required')
+    }
+
+    const workspaceId = await getAccountWorkspaceId(accountWorkspaceReadyRetryOptions())
+    const handleKey = `${auth.apiUrl}\0${auth.accountKey}\0${workspaceId}`
+    if (this.integrationRemoteReaderHandle && this.integrationRemoteReaderKey === handleKey) {
+      return this.integrationRemoteReaderHandle
+    }
+
+    if (this.integrationRemoteReaderPromise && this.integrationRemoteReaderKey === handleKey) {
+      return this.integrationRemoteReaderPromise
+    }
+
+    this.integrationRemoteReaderKey = handleKey
+    const pending = (async (): Promise<WorkspaceHandle> => {
+      const setup = new RelayfileSetup({
+        cloudApiUrl: auth.apiUrl,
+        accessToken: () => auth.accessToken
+      })
+      const handle = await setup.joinWorkspace(workspaceId, {
+        agentName: 'pear-integrations-reader',
+        scopes: ['relayfile:fs:read:/**']
+      })
+      this.integrationRemoteReaderHandle = handle
+      return handle
+    })()
+
+    this.integrationRemoteReaderPromise = pending
+    try {
+      return await pending
+    } finally {
+      if (this.integrationRemoteReaderPromise === pending) {
+        this.integrationRemoteReaderPromise = null
+      }
+    }
+  }
+
+  private clearIntegrationRemoteReaderHandle(): void {
+    this.integrationRemoteReaderHandle = null
+    this.integrationRemoteReaderKey = null
+    this.integrationRemoteReaderPromise = null
+  }
+
+  private async withIntegrationRemoteHandle<T>(fn: (handle: WorkspaceHandle) => Promise<T>): Promise<T> {
+    const handle = await this.getIntegrationRemoteReaderHandle()
+    try {
+      return await fn(handle)
+    } catch (error) {
+      if (!isHttpStatus(error, 401) && !isHttpStatus(error, 403)) throw error
+      await handle.refreshToken().catch(() => undefined)
+      try {
+        return await fn(handle)
+      } catch (refreshError) {
+        if (!isHttpStatus(refreshError, 401) && !isHttpStatus(refreshError, 403)) throw refreshError
+        this.clearIntegrationRemoteReaderHandle()
+        const fresh = await this.getIntegrationRemoteReaderHandle()
+        return fn(fresh)
+      }
+    }
   }
 
   private async requestConnectSession(relayfileProvider: string): Promise<ConnectSessionPayload> {

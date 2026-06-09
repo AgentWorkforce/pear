@@ -7,14 +7,14 @@ import {
 } from '@/lib/direct-messages'
 import type { BurnAgentInput } from '@/lib/ipc'
 
-export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'ai-hist' | 'burn-session' | 'burn-project' | 'burn-session-detail'
+export type ViewMode = 'terminal' | 'chat' | 'graph' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'issues' | 'ai-hist' | 'burn-session' | 'burn-project' | 'burn-session-detail'
 export type DialogType = 'add-project' | 'spawn-agent' | 'spawn-local-agent' | 'cloud-agent' | 'add-channel' | 'command-menu' | null
 const ThemeSchema = z.enum(['dark', 'light'])
 const TerminalLayoutSchema = z.enum(['tabs', 'horizontal-split', 'graph'])
 const BooleanPreferenceSchema = z.enum(['true', 'false']).transform((value) => value === 'true')
 export type Theme = z.infer<typeof ThemeSchema>
 export type TerminalLayout = z.infer<typeof TerminalLayoutSchema>
-export type AppTabKind = 'agents' | 'channel' | 'dm' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'ai-hist' | 'burn-session' | 'burn-project' | 'burn-session-detail'
+export type AppTabKind = 'agents' | 'channel' | 'dm' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'issues' | 'ai-hist' | 'burn-session' | 'burn-project' | 'burn-session-detail'
 
 export interface AppTab {
   id: string
@@ -47,6 +47,13 @@ interface UIState {
   projectSwitcherExpanded: boolean
   theme: Theme
   terminalLayout: TerminalLayout
+  // Issue Control Center navigation. selectedIssueId persists the focused
+  // card on the (global) issues tab so a forward L3 jump + return restores
+  // your place. agentJumpIssueId is the transient breadcrumb origin set when
+  // you jump from a card into an agent's live workspace, surfaced as the
+  // `↩ PEAR-X` chip in the agent view header and cleared on any non-agents nav.
+  selectedIssueId: string | null
+  agentJumpIssueId: string | null
 
   setViewMode: (mode: ViewMode) => void
   openTab: (tab: AppTabInput) => void
@@ -64,6 +71,8 @@ interface UIState {
   toggleTheme: () => void
   setTerminalLayout: (layout: TerminalLayout) => void
   toggleTerminalLayout: () => void
+  setSelectedIssueId: (issueId: string | null) => void
+  setAgentJumpIssueId: (issueId: string | null) => void
 }
 
 function applyTheme(theme: Theme): void {
@@ -80,6 +89,9 @@ function readStored<T>(key: string, schema: z.ZodType<T, z.ZodTypeDef, unknown>,
 const initialTheme = readStored('pear-theme', ThemeSchema, 'dark')
 const initialTerminalLayout = readStored('pear-terminal-layout', TerminalLayoutSchema, 'horizontal-split')
 const initialProjectSwitcherExpanded = readStored('pear-project-switcher-expanded', BooleanPreferenceSchema, false)
+const initialSelectedIssueId = typeof localStorage !== 'undefined'
+  ? localStorage.getItem('pear-selected-issue')
+  : null
 
 // Apply on load
 if (typeof document !== 'undefined') {
@@ -109,6 +121,8 @@ function getTabId(tab: AppTabInput): string {
       return `broker-details:${tab.projectId || 'global'}`
     case 'source-control':
       return `source-control:${tab.projectId || 'global'}`
+    case 'issues':
+      return `issues:${tab.projectId || 'global'}`
     case 'ai-hist':
       return `ai-hist:${tab.projectId || 'global'}`
     case 'burn-session':
@@ -138,6 +152,8 @@ function getTabTitle(tab: AppTabInput): string {
       return 'Agent Relay Status'
     case 'source-control':
       return 'File Changes'
+    case 'issues':
+      return 'Issues'
     case 'ai-hist':
       return 'Conversations'
     case 'burn-session':
@@ -181,6 +197,8 @@ function viewModeForTab(tab: AppTab): ViewMode {
       return 'broker-details'
     case 'source-control':
       return 'source-control'
+    case 'issues':
+      return 'issues'
     case 'ai-hist':
       return 'ai-hist'
     case 'burn-session':
@@ -204,6 +222,8 @@ function tabInputForViewMode(mode: ViewMode): AppTabInput {
       return { kind: 'broker-details' }
     case 'source-control':
       return { kind: 'source-control' }
+    case 'issues':
+      return { kind: 'issues' }
     case 'ai-hist':
       return { kind: 'ai-hist' }
     case 'burn-session':
@@ -218,10 +238,13 @@ function tabInputForViewMode(mode: ViewMode): AppTabInput {
   }
 }
 
-const initialTab = createTab({ kind: 'agents' })
+// The browser demo build has no real projects, so default straight to the
+// Attention Inbox (the web-first surface) instead of the empty Agents view.
+const isWebMock = import.meta.env.VITE_PEAR_MOCK_IPC === 'true'
+const initialTab = createTab({ kind: isWebMock ? 'issues' : 'agents' })
 
 export const useUIStore = create<UIState>((set, get) => ({
-  viewMode: 'terminal',
+  viewMode: viewModeForTab(initialTab),
   tabs: [initialTab],
   activeTabId: initialTab.id,
   history: [initialTab.id],
@@ -232,6 +255,8 @@ export const useUIStore = create<UIState>((set, get) => ({
   projectSwitcherExpanded: initialProjectSwitcherExpanded,
   theme: initialTheme,
   terminalLayout: initialTerminalLayout,
+  selectedIssueId: initialSelectedIssueId,
+  agentJumpIssueId: null,
 
   setViewMode: (mode) => {
     get().openTab(tabInputForViewMode(mode))
@@ -257,7 +282,8 @@ export const useUIStore = create<UIState>((set, get) => ({
         viewMode: viewModeForTab(tab),
         history,
         historyIndex: history.length - 1,
-        recentTabs
+        recentTabs,
+        agentJumpIssueId: null
       }
     })
   },
@@ -279,7 +305,8 @@ export const useUIStore = create<UIState>((set, get) => ({
         viewMode: viewModeForTab(tab),
         history,
         historyIndex: history.length - 1,
-        recentTabs
+        recentTabs,
+        agentJumpIssueId: null
       }
     })
   },
@@ -343,7 +370,8 @@ export const useUIStore = create<UIState>((set, get) => ({
         activeTabId: targetTab.id,
         viewMode: viewModeForTab(targetTab),
         historyIndex: nextIndex,
-        recentTabs
+        recentTabs,
+        agentJumpIssueId: null
       }
     })
   },
@@ -370,7 +398,8 @@ export const useUIStore = create<UIState>((set, get) => ({
         activeTabId: targetTab.id,
         viewMode: viewModeForTab(targetTab),
         historyIndex: nextIndex,
-        recentTabs
+        recentTabs,
+        agentJumpIssueId: null
       }
     })
   },
@@ -408,5 +437,13 @@ export const useUIStore = create<UIState>((set, get) => ({
         : 'tabs'
     localStorage.setItem('pear-terminal-layout', next)
     set({ terminalLayout: next })
-  }
+  },
+  setSelectedIssueId: (issueId) => {
+    if (typeof localStorage !== 'undefined') {
+      if (issueId) localStorage.setItem('pear-selected-issue', issueId)
+      else localStorage.removeItem('pear-selected-issue')
+    }
+    set({ selectedIssueId: issueId })
+  },
+  setAgentJumpIssueId: (issueId) => set({ agentJumpIssueId: issueId })
 }))

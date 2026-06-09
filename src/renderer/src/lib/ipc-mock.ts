@@ -166,7 +166,41 @@ function createState(): MockState {
       integrations: []
     }],
     activeId: defaultProject.id,
-    agents: [],
+    agents: [
+      {
+        name: 'implementer',
+        projectId: defaultProject.id,
+        runtime: 'mock',
+        cli: 'codex',
+        model: 'gpt-5',
+        channels: ['general'],
+        current_state: 'working',
+        inboundDeliveryMode: 'auto_inject',
+        last_activity_ms: 90_000
+      },
+      {
+        name: 'claude-1',
+        projectId: defaultProject.id,
+        runtime: 'mock',
+        cli: 'claude',
+        model: 'claude-sonnet',
+        channels: ['general'],
+        current_state: 'working',
+        inboundDeliveryMode: 'auto_inject',
+        last_activity_ms: 180_000
+      },
+      {
+        name: 'codex-2',
+        projectId: defaultProject.id,
+        runtime: 'mock',
+        cli: 'codex',
+        model: 'gpt-5',
+        channels: ['general'],
+        current_state: 'working',
+        inboundDeliveryMode: 'auto_inject',
+        last_activity_ms: 260_000
+      }
+    ],
     events: [],
     messages: [],
     ptyChunks: {},
@@ -190,6 +224,336 @@ function createState(): MockState {
 let state = createState()
 let seq = 0
 
+const mockNow = new Date('2026-06-09T09:42:00.000Z').getTime()
+
+function isoMinutesAgo(minutes: number): string {
+  return new Date(mockNow - minutes * 60_000).toISOString()
+}
+
+const mockLinearIssues: Array<Record<string, unknown>> = [
+  {
+    id: 'lin-pear-145',
+    identifier: 'PEAR-145',
+    title: 'Review writeMount IPC contract before renderer actions',
+    description: 'Phase 2 can only land once the renderer write primitive is narrow, schema-aware, and safe for integration writeback files.',
+    priority: 1,
+    url: 'https://linear.app/agent-workforce/issue/PEAR-145/review-writemount-ipc-contract',
+    stateId: 'state-in-review',
+    state: { id: 'state-in-review', name: 'In review', type: 'started', color: '#e6d78d' },
+    teamId: 'team-pear',
+    team: { id: 'team-pear', key: 'PEAR', name: 'Pear' },
+    projectId: 'project-control-center',
+    project: { id: 'project-control-center', name: 'Issue Control Center', url: 'https://linear.app/agent-workforce/project/issue-control-center' },
+    labels: [
+      { id: 'label-human', name: 'human', color: '#f0727f' },
+      { id: 'label-review', name: 'review gate', color: '#e6d78d' }
+    ],
+    labelIds: ['label-human', 'label-review'],
+    assigneeId: 'agent-implementer',
+    assignee: { id: 'agent-implementer', name: 'implementer', email: 'implementer@agents.local' },
+    syncedWith: [
+      { id: 'gh-pr-182', service: 'github', metadata: { owner: 'AgentWorkforce', repo: 'pear', number: 182, type: 'pull_request' } }
+    ],
+    updatedAt: isoMinutesAgo(4),
+    attention: { kind: 'review', label: 'Review PR #182', action: 'Approve or reject' },
+    agentSession: {
+      agentName: 'implementer',
+      trajectoryId: 'traj_issue_control_write_mount',
+      latestMessage: 'I narrowed writeMount to selected mount roots; one preload type mismatch is left.',
+      recentMessages: [
+        'I narrowed writeMount to selected mount roots; one preload type mismatch is left.',
+        'The action buttons are still inert in Phase 1, so this is read-path only.',
+        'I am checking schema readOnly fields before proposing the write payload.'
+      ]
+    }
+  },
+  {
+    id: 'lin-pear-149',
+    identifier: 'PEAR-149',
+    title: 'Choose auth recovery wording for stalled integration mounts',
+    description: 'The agent needs the human-facing copy for a cloud auth recovery banner that appears when writebacks are queued behind expired credentials.',
+    priority: 2,
+    url: 'https://linear.app/agent-workforce/issue/PEAR-149/auth-recovery-wording',
+    stateId: 'state-planning',
+    state: { id: 'state-planning', name: 'Planning', type: 'unstarted', color: '#94cbef' },
+    teamId: 'team-pear',
+    team: { id: 'team-pear', key: 'PEAR', name: 'Pear' },
+    projectId: 'project-control-center',
+    project: { id: 'project-control-center', name: 'Issue Control Center' },
+    labels: [
+      { id: 'label-human', name: 'human', color: '#f0727f' },
+      { id: 'label-question', name: 'agent question', color: '#c9a7ff' }
+    ],
+    labelIds: ['label-human', 'label-question'],
+    assigneeId: 'agent-claude-1',
+    assignee: { id: 'agent-claude-1', name: 'claude-1', email: 'claude-1@agents.local' },
+    syncedWith: [],
+    updatedAt: isoMinutesAgo(8),
+    attention: { kind: 'question', label: 'Which auth flow?', action: 'Reply' },
+    agentSession: {
+      agentName: 'claude-1',
+      trajectoryId: 'traj_auth_copy',
+      latestMessage: 'I have two banner variants ready; I need the product voice call before wiring copy.',
+      recentMessages: [
+        'I have two banner variants ready; I need the product voice call before wiring copy.',
+        'Short copy fits the status bar, long copy explains queued writebacks.',
+        'I am holding implementation until wording is picked.'
+      ]
+    }
+  },
+  {
+    id: 'lin-pear-152',
+    identifier: 'PEAR-152',
+    title: 'Unblock Linear issue mount selection for inbox prototype',
+    description: 'The current project scope exposes Linear teams but not /linear/issues, so the real mount proof is blocked until the issue resource is selected.',
+    priority: 1,
+    url: 'https://linear.app/agent-workforce/issue/PEAR-152/linear-issue-mount-selection',
+    stateId: 'state-in-progress',
+    state: { id: 'state-in-progress', name: 'In Progress', type: 'started', color: '#6bd4bc' },
+    teamId: 'team-pear',
+    team: { id: 'team-pear', key: 'PEAR', name: 'Pear' },
+    projectId: 'project-control-center',
+    project: { id: 'project-control-center', name: 'Issue Control Center' },
+    labels: [
+      { id: 'label-human', name: 'human', color: '#f0727f' },
+      { id: 'label-blocked', name: 'blocked', color: '#f0727f' }
+    ],
+    labelIds: ['label-human', 'label-blocked'],
+    assigneeId: 'agent-implementer',
+    assignee: { id: 'agent-implementer', name: 'implementer', email: 'implementer@agents.local' },
+    syncedWith: [],
+    updatedAt: isoMinutesAgo(12),
+    attention: { kind: 'block', label: 'Mount scope blocked', action: 'Fork or unblock' },
+    agentSession: {
+      agentName: 'implementer',
+      trajectoryId: 'traj_linear_mount_scope',
+      latestMessage: 'I can render from mocks now; real Linear records need /linear/issues added to scope.',
+      recentMessages: [
+        'I can render from mocks now; real Linear records need /linear/issues added to scope.',
+        'The read IPC is wired, but the current scope guard rejects the issue path.',
+        'I am keeping the component API identical so the real mount drops in later.'
+      ]
+    }
+  },
+  {
+    id: 'lin-pear-148',
+    identifier: 'PEAR-148',
+    title: 'Build Attention Inbox web prototype',
+    description: 'Ship the web-first read-only Attention Inbox backed by mock Linear and GitHub records.',
+    priority: 1,
+    url: 'https://linear.app/agent-workforce/issue/PEAR-148/attention-inbox-web-prototype',
+    stateId: 'state-in-progress',
+    state: { id: 'state-in-progress', name: 'In Progress', type: 'started', color: '#6bd4bc' },
+    teamId: 'team-pear',
+    team: { id: 'team-pear', key: 'PEAR', name: 'Pear' },
+    projectId: 'project-control-center',
+    project: { id: 'project-control-center', name: 'Issue Control Center' },
+    labels: [
+      { id: 'label-agent', name: 'agent', color: '#6bd4bc' }
+    ],
+    labelIds: ['label-agent'],
+    assigneeId: 'agent-implementer',
+    assignee: { id: 'agent-implementer', name: 'implementer', email: 'implementer@agents.local' },
+    syncedWith: [
+      { id: 'gh-issue-184', service: 'github', metadata: { owner: 'AgentWorkforce', repo: 'pear', number: 184, type: 'issue' } }
+    ],
+    updatedAt: isoMinutesAgo(2),
+    agentSession: {
+      agentName: 'implementer',
+      trajectoryId: 'traj_attention_inbox',
+      latestMessage: 'I am wiring the inbox into the existing shell and keeping the L1 cards down to one line.',
+      recentMessages: [
+        'I am wiring the inbox into the existing shell and keeping the L1 cards down to one line.',
+        'Mock fixtures are realistic enough to exercise the browser build.',
+        'Next I am checking the collapsed in-motion band and detail panel.'
+      ]
+    }
+  },
+  {
+    id: 'lin-pear-151',
+    identifier: 'PEAR-151',
+    title: 'Add renderer refresh guard for replayed integration events',
+    description: 'The issue store should coalesce duplicate relayfile-change callbacks and ignore stale subscription generations.',
+    priority: 2,
+    url: 'https://linear.app/agent-workforce/issue/PEAR-151/renderer-refresh-guard',
+    stateId: 'state-to-do',
+    state: { id: 'state-to-do', name: 'To do', type: 'unstarted', color: '#94cbef' },
+    teamId: 'team-pear',
+    team: { id: 'team-pear', key: 'PEAR', name: 'Pear' },
+    projectId: 'project-control-center',
+    project: { id: 'project-control-center', name: 'Issue Control Center' },
+    labels: [
+      { id: 'label-agent', name: 'agent', color: '#6bd4bc' }
+    ],
+    labelIds: ['label-agent'],
+    assigneeId: 'agent-codex-2',
+    assignee: { id: 'agent-codex-2', name: 'codex-2', email: 'codex-2@agents.local' },
+    syncedWith: [],
+    updatedAt: isoMinutesAgo(26),
+    agentSession: {
+      agentName: 'codex-2',
+      trajectoryId: 'traj_refresh_guard',
+      latestMessage: 'I am adding a generation token so stale refresh callbacks cannot repaint old issue data.',
+      recentMessages: [
+        'I am adding a generation token so stale refresh callbacks cannot repaint old issue data.',
+        'The store will debounce path-level events into one reload.',
+        'I am leaving telemetry for suppressed duplicates to Phase 2.'
+      ]
+    }
+  },
+  {
+    id: 'lin-pear-153',
+    identifier: 'PEAR-153',
+    title: 'Normalize GitHub sync metadata for PR health chips',
+    description: 'Use Linear syncedWith metadata to read linked GitHub records and surface PR state without making GitHub the issue source of truth.',
+    priority: 3,
+    url: 'https://linear.app/agent-workforce/issue/PEAR-153/github-sync-health',
+    stateId: 'state-in-review',
+    state: { id: 'state-in-review', name: 'In review', type: 'started', color: '#e6d78d' },
+    teamId: 'team-pear',
+    team: { id: 'team-pear', key: 'PEAR', name: 'Pear' },
+    projectId: 'project-control-center',
+    project: { id: 'project-control-center', name: 'Issue Control Center' },
+    labels: [
+      { id: 'label-agent', name: 'agent', color: '#6bd4bc' }
+    ],
+    labelIds: ['label-agent'],
+    assigneeId: 'agent-codex-2',
+    assignee: { id: 'agent-codex-2', name: 'codex-2', email: 'codex-2@agents.local' },
+    syncedWith: [
+      { id: 'gh-pr-186', service: 'github', metadata: { owner: 'AgentWorkforce', repo: 'pear', number: 186, type: 'pull_request' } }
+    ],
+    updatedAt: isoMinutesAgo(31),
+    agentSession: {
+      agentName: 'codex-2',
+      trajectoryId: 'traj_github_sync',
+      latestMessage: 'I found the GitHub join path and I am making missing PR records degrade quietly.',
+      recentMessages: [
+        'I found the GitHub join path and I am making missing PR records degrade quietly.',
+        'The card gets a PR chip only after readRemoteFile returns text.',
+        'CI state stays in detail so the overview does not turn into a dashboard.'
+      ]
+    }
+  },
+  {
+    id: 'lin-pear-140',
+    identifier: 'PEAR-140',
+    title: 'Ship duplicate PTY chunk suppression',
+    description: 'Main and renderer both suppress repeated worker_stream chunks before they reach terminal buffers.',
+    priority: 2,
+    url: 'https://linear.app/agent-workforce/issue/PEAR-140/pty-duplicate-suppression',
+    stateId: 'state-merged',
+    state: { id: 'state-merged', name: 'Merged', type: 'completed', color: '#6ee7a8' },
+    teamId: 'team-pear',
+    team: { id: 'team-pear', key: 'PEAR', name: 'Pear' },
+    projectId: 'project-pty-hardening',
+    project: { id: 'project-pty-hardening', name: 'PTY Hardening' },
+    labels: [
+      { id: 'label-agent', name: 'agent', color: '#6bd4bc' }
+    ],
+    labelIds: ['label-agent'],
+    assigneeId: 'agent-claude-1',
+    assignee: { id: 'agent-claude-1', name: 'claude-1', email: 'claude-1@agents.local' },
+    syncedWith: [
+      { id: 'gh-pr-177', service: 'github', metadata: { owner: 'AgentWorkforce', repo: 'pear', number: 177, type: 'pull_request' } }
+    ],
+    updatedAt: isoMinutesAgo(74),
+    completedAt: isoMinutesAgo(72),
+    agentSession: {
+      agentName: 'claude-1',
+      trajectoryId: 'traj_pty_dedupe',
+      latestMessage: 'Merged with renderer guardrails intact; the remaining work is telemetry polish.',
+      recentMessages: [
+        'Merged with renderer guardrails intact; the remaining work is telemetry polish.',
+        'The replay case is covered in the broker tests.',
+        'I moved the follow-up into the inbox instead of expanding this PR.'
+      ]
+    }
+  },
+  {
+    id: 'lin-pear-136',
+    identifier: 'PEAR-136',
+    title: 'Document integration writeback discovery rules',
+    description: 'Clarify that agents read schemas in discovery but create command files only under provider writeback roots.',
+    priority: 3,
+    url: 'https://linear.app/agent-workforce/issue/PEAR-136/writeback-discovery-rules',
+    stateId: 'state-done',
+    state: { id: 'state-done', name: 'Done', type: 'completed', color: '#6ee7a8' },
+    teamId: 'team-pear',
+    team: { id: 'team-pear', key: 'PEAR', name: 'Pear' },
+    projectId: 'project-integrations',
+    project: { id: 'project-integrations', name: 'Integrations' },
+    labels: [
+      { id: 'label-human', name: 'human', color: '#f0727f' }
+    ],
+    labelIds: ['label-human'],
+    assigneeId: 'agent-docs',
+    assignee: { id: 'agent-docs', name: 'docs-agent', email: 'docs-agent@agents.local' },
+    syncedWith: [],
+    updatedAt: isoMinutesAgo(190),
+    completedAt: isoMinutesAgo(188),
+    agentSession: {
+      agentName: 'docs-agent',
+      trajectoryId: 'traj_writeback_docs',
+      latestMessage: 'Settled: discovery stays schema-only, provider roots carry the writeback files.',
+      recentMessages: [
+        'Settled: discovery stays schema-only, provider roots carry the writeback files.',
+        'The examples now call out readOnly fields explicitly.'
+      ]
+    }
+  }
+]
+
+const mockGithubRecords: Record<string, Record<string, unknown>> = {
+  '/github/repos/AgentWorkforce/pear/issues/182.json': {
+    id: 182,
+    number: 182,
+    title: 'Review writeMount IPC contract before renderer actions',
+    html_url: 'https://github.com/AgentWorkforce/pear/pull/182',
+    state: 'open',
+    pull_request: { url: 'https://api.github.com/repos/AgentWorkforce/pear/pulls/182' },
+    labels: [{ name: 'integration' }, { name: 'needs-review' }],
+    checks: { conclusion: 'pending', summary: '2 checks running' }
+  },
+  '/github/repos/AgentWorkforce/pear/issues/184.json': {
+    id: 184,
+    number: 184,
+    title: 'Attention Inbox browser prototype',
+    html_url: 'https://github.com/AgentWorkforce/pear/issues/184',
+    state: 'open',
+    labels: [{ name: 'prototype' }, { name: 'frontend' }],
+    checks: { conclusion: 'success', summary: 'mock issue' }
+  },
+  '/github/repos/AgentWorkforce/pear/issues/186.json': {
+    id: 186,
+    number: 186,
+    title: 'Normalize GitHub sync metadata for PR health chips',
+    html_url: 'https://github.com/AgentWorkforce/pear/pull/186',
+    state: 'open',
+    pull_request: { url: 'https://api.github.com/repos/AgentWorkforce/pear/pulls/186' },
+    labels: [{ name: 'github' }],
+    checks: { conclusion: 'failure', summary: '1 check failing' }
+  },
+  '/github/repos/AgentWorkforce/pear/issues/177.json': {
+    id: 177,
+    number: 177,
+    title: 'Ship duplicate PTY chunk suppression',
+    html_url: 'https://github.com/AgentWorkforce/pear/pull/177',
+    state: 'closed',
+    pull_request: { merged_at: isoMinutesAgo(72) },
+    labels: [{ name: 'duplicate-hardening' }],
+    checks: { conclusion: 'success', summary: 'all checks passed' }
+  }
+}
+
+const mockRemoteFiles: Record<string, Record<string, unknown>> = Object.fromEntries([
+  ...mockLinearIssues.map((issue) => [
+    `/linear/issues/${String(issue.identifier)}.json`,
+    issue
+  ]),
+  ...Object.entries(mockGithubRecords)
+])
+
 function clone<T>(value: T): T {
   return typeof structuredClone === 'function'
     ? structuredClone(value)
@@ -199,6 +563,11 @@ function clone<T>(value: T): T {
 function noopUnsubscribe<T>(set: Set<T>, item: T): () => void {
   set.add(item)
   return () => set.delete(item)
+}
+
+function normalizeMockRemotePath(path: string): string {
+  const segments = path.split('/').map((segment) => segment.trim()).filter(Boolean)
+  return `/${segments.join('/')}`
 }
 
 function key(projectId: string | undefined, name: string): string {
@@ -630,8 +999,36 @@ export const pearMock: PearAPI = {
       projects: {}
     }),
     listMountDir: async (): Promise<FsDirEntry[]> => [],
-    listRemoteDir: async (): Promise<FsDirEntry[]> => [],
-    readRemoteFile: async (): Promise<FsReadPreviewResult> => ({ kind: 'missing', content: '', size: 0 }),
+    listRemoteDir: async (_projectId: string, remotePath: string): Promise<FsDirEntry[]> => {
+      const normalized = normalizeMockRemotePath(remotePath)
+      if (normalized === '/linear/issues') {
+        return mockLinearIssues.map((issue) => {
+          const identifier = String(issue.identifier)
+          return {
+            name: `${identifier}.json`,
+            path: `/linear/issues/${identifier}.json`,
+            type: 'file'
+          }
+        })
+      }
+
+      if (normalized === '/github/repos/AgentWorkforce/pear/issues') {
+        return Object.keys(mockGithubRecords).map((path) => ({
+          name: path.split('/').at(-1) || path,
+          path,
+          type: 'file'
+        }))
+      }
+
+      return []
+    },
+    readRemoteFile: async (_projectId: string, remotePath: string): Promise<FsReadPreviewResult> => {
+      const normalized = normalizeMockRemotePath(remotePath)
+      const record = mockRemoteFiles[normalized]
+      if (!record) return { kind: 'missing', content: '', size: 0 }
+      const content = JSON.stringify(record, null, 2)
+      return { kind: 'text', content, size: content.length }
+    },
     readMountPreview: async (): Promise<FsReadPreviewResult> => ({ kind: 'missing', content: '', size: 0 }),
     listOptions: async (): Promise<IntegrationOption[]> => [],
     startConnect: async (_projectId: string, provider: string): Promise<IntegrationConnectSession> => ({ sessionId: `mock-${provider}`, provider, status: 'completed' }),
