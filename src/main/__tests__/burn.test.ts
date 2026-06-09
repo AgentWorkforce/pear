@@ -36,6 +36,15 @@ test('burn ingest diagnostic filter tolerates chunked native writes', () => {
   assert.equal(filter.suppressedCount(), 1)
 })
 
+test('burn ingest diagnostic filter suppresses multiple warnings in sequence', () => {
+  const filter = createBurnIngestDiagnosticFilter()
+
+  const output = filter.filter(TOOL_RESULT_WARNING + TOOL_RESULT_WARNING) + filter.flush()
+
+  assert.equal(output, 'before\nafter\nbefore\nafter\n')
+  assert.equal(filter.suppressedCount(), 2)
+})
+
 test('burn ingest diagnostic filter preserves unrelated warnings', () => {
   const filter = createBurnIngestDiagnosticFilter()
   const warning = '[burn] warning: something else happened\n'

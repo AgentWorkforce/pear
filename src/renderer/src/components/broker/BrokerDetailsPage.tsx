@@ -18,6 +18,7 @@ import { pear, type BrokerDetails, type BrokerEventRecord, type BrokerListAgent 
 import { type BrokerErrorEntry, useAgentStore } from '@/stores/agent-store'
 import { useProjectStore, type Project } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
+import { getBrokerErrorKey } from '@shared/lib/broker-errors'
 
 const errorTimeFormatter = new Intl.DateTimeFormat(undefined, {
   month: 'short',
@@ -85,10 +86,6 @@ function getAutoFixableBrokerError(
   options: { allowLivePidConflict?: boolean } = {}
 ): BrokerErrorEntry | undefined {
   return entries.find((entry) => isRecoverableBrokerRuntimeError(entry.message, options))
-}
-
-function getBrokerErrorKey(entry: BrokerErrorEntry): string {
-  return `${entry.projectId || 'global'}\0${entry.message}`
 }
 
 function dedupeBrokerErrorEntries(entries: BrokerErrorEntry[]): BrokerErrorEntry[] {
@@ -198,7 +195,7 @@ function BrokerErrorRows({
               {formatErrorTimestamp(entry.timestamp)}
             </span>
           </div>
-          <p className="mt-1 whitespace-pre-wrap break-words text-sm leading-relaxed text-[var(--pear-text)] [overflow-wrap:anywhere]">
+          <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-[var(--pear-text)] [overflow-wrap:anywhere]">
             {entry.message}
           </p>
         </div>

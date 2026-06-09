@@ -283,7 +283,11 @@ function resolveBrokerBinaryOverride(): string | null {
 // The runtime normally resolves this via import.meta.url, but that breaks when
 // electron-vite bundles the driver into the main process (import.meta.url points
 // to out/main/ instead of node_modules/).
-function resolveBundledBrokerBinary(): string {
+function brokerBinaryNameForPlatform(platform: NodeJS.Platform): string {
+  return platform === 'win32' ? 'agent-relay-broker.exe' : 'agent-relay-broker'
+}
+
+export function resolveBundledBrokerBinary(baseDir = __dirname, isPackaged = app.isPackaged): string {
   const configuredBinary = resolveBrokerBinaryOverride()
   if (configuredBinary) {
     console.log('[broker] Using configured Agent Relay broker binary:', configuredBinary)
@@ -292,16 +296,21 @@ function resolveBundledBrokerBinary(): string {
 
   const suffix = `${process.platform}-${process.arch}`
   const unpackIfPackaged = (binary: string): string =>
-    app.isPackaged ? binary.replace('app.asar', 'app.asar.unpacked') : binary
+    isPackaged ? binary.replace('app.asar', 'app.asar.unpacked') : binary
 
   // v8 ships the broker as a per-platform optional package (@agent-relay/broker-*).
+  const brokerBinaryName = brokerBinaryNameForPlatform(process.platform)
   const optionalPackageBinary = join(
-    __dirname, '..', '..', 'node_modules', '@agent-relay', `broker-${suffix}`, 'bin',
-    process.platform === 'win32' ? 'agent-relay-broker.exe' : 'agent-relay-broker'
+    baseDir, '..', '..', 'node_modules', '@agent-relay', `broker-${suffix}`, 'bin',
+    brokerBinaryName
   )
-  if (canExecute(optionalPackageBinary)) return unpackIfPackaged(optionalPackageBinary)
+  const unpackedOptionalPackageBinary = unpackIfPackaged(optionalPackageBinary)
+  if (canExecute(unpackedOptionalPackageBinary)) return unpackedOptionalPackageBinary
+  if (unpackedOptionalPackageBinary !== optionalPackageBinary && canExecute(optionalPackageBinary)) {
+    return optionalPackageBinary
+  }
 
-  const localBinary = join(__dirname, '..', '..', '..', 'relay', 'target', 'debug', 'agent-relay-broker')
+  const localBinary = join(baseDir, '..', '..', '..', 'relay', 'target', 'debug', brokerBinaryName)
   if (canExecute(localBinary)) {
     console.warn('[broker] Bundled Agent Relay broker binary was not found; falling back to local relay build:', localBinary)
     return localBinary
@@ -310,7 +319,7 @@ function resolveBundledBrokerBinary(): string {
   // Backward-compatible fallback for SDK packages that still carry per-platform
   // broker binaries directly.
   const brokerBinary = join(
-    __dirname, '..', '..', 'node_modules', '@agent-relay', 'sdk', 'bin',
+    baseDir, '..', '..', 'node_modules', '@agent-relay', 'sdk', 'bin',
     `agent-relay-broker-${suffix}${process.platform === 'win32' ? '.exe' : ''}`
   )
   return unpackIfPackaged(brokerBinary)

@@ -301,7 +301,7 @@ try {
     ? error.stack
     : String(error)
   console.error(message)
-  process.exitCode = 1
+  process.exit(1)
 }
 `
 }

@@ -14,6 +14,7 @@ import {
   compactBrokerEvent as compactBrokerEventPayload,
   normalizeEventTimestamp
 } from '@shared/lib/broker-events'
+import { getBrokerErrorKey } from '@shared/lib/broker-errors'
 import { useTypingStore } from '@/stores/typing-store'
 import { clearPtyBuffer, getPtyChunks } from '@/stores/pty-buffer-store'
 
@@ -83,15 +84,13 @@ export interface BrokerErrorEntry {
   projectId?: string
 }
 
-const MAX_BROKER_ERRORS = 12
-const brokerErrorKey = (entry: Pick<BrokerErrorEntry, 'message' | 'projectId'>): string =>
-  `${entry.projectId || 'global'}\0${entry.message}`
+export const MAX_BROKER_ERRORS = 12
 
-function prependBrokerError(entries: BrokerErrorEntry[], entry: BrokerErrorEntry): BrokerErrorEntry[] {
-  const key = brokerErrorKey(entry)
+export function prependBrokerError(entries: BrokerErrorEntry[], entry: BrokerErrorEntry): BrokerErrorEntry[] {
+  const key = getBrokerErrorKey(entry)
   return [
     entry,
-    ...entries.filter((candidate) => brokerErrorKey(candidate) !== key)
+    ...entries.filter((candidate) => getBrokerErrorKey(candidate) !== key)
   ].slice(0, MAX_BROKER_ERRORS)
 }
 
