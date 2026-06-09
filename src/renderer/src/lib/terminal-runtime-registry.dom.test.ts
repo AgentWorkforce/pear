@@ -198,6 +198,19 @@ describe('terminal-runtime-registry — pty drain coalescing', () => {
     expect(term.__writes.length).toBe(before + 1)
     expect(term.__writes[term.__writes.length - 1]).toBe('aaabbbccc')
 
+    const beforeDuplicates = term.__writes.length
+    ptyBuffer.appendPtyChunk(runtime.key, 'dup')
+    ptyBuffer.appendPtyChunk(runtime.key, 'dup')
+    ptyBuffer.appendPtyChunk(runtime.key, 'tail')
+    ptyBuffer.flushPtyChunksNow(runtime.key)
+
+    expect(term.__writes.length).toBe(beforeDuplicates + 1)
+    expect(term.__writes[term.__writes.length - 1]).toBe('dupduptail')
+
+    const afterDuplicates = term.__writes.length
+    ptyBuffer.flushPtyChunksNow(runtime.key)
+    expect(term.__writes.length).toBe(afterDuplicates)
+
     registry.disposeTerminalRuntime(runtime.key)
   })
 })
