@@ -379,13 +379,22 @@ function createRuntime(
         console.log(`[diag:runtime:writeChunks] key=${key} count=${newChunks.length} firstPreview="${newChunks[0]?.slice(0, 80).replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\x1b/g, '\\e')}"`)
       }
       const wasPinned = isViewportPinnedToBottom(liveTerm)
-      for (const chunk of newChunks) {
-        recordChunkEchoed(chunk)
-        if (predictiveEcho) {
-          void predictiveEcho.onServerOutput(chunk)
-        } else {
-          liveTerm.write(chunk)
-        }
+      // Typing-trace accounting stays per-chunk: recordChunkEchoed consumes
+      // one pending keystroke per call, so coalescing it would under-count.
+      for (const chunk of newChunks) recordChunkEchoed(chunk)
+      // Coalesce the frame's chunks into a single write. xterm's VT parser is
+      // a streaming state machine, so write(a)+write(b) ≡ write(a+b) — for the
+      // live terminal AND the predictive-echo headless model (which parses the
+      // bytes a second time). One write collapses N parser passes + N model
+      // writes + N promise ticks into one. Under heavy TUI redraw streaming
+      // that per-chunk fan-out was the drain hot path: the renderer couldn't
+      // keep up and input lagged. Byte content and order are unchanged, so the
+      // one-write-per-byte invariant holds.
+      const combined = newChunks.length === 1 ? newChunks[0] : newChunks.join('')
+      if (predictiveEcho) {
+        void predictiveEcho.onServerOutput(combined)
+      } else {
+        liveTerm.write(combined)
       }
       if (wasPinned) liveTerm.scrollToBottom()
     }
