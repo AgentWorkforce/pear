@@ -65,6 +65,7 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",
+    "@xterm/headless": "^6.0.0",
     "electron": "^42.1.0",
     "electron-builder": "^26.8.1",
     "electron-vite": "^5.0.0",
