@@ -99,6 +99,7 @@ export type IntegrationsEvent =
   | { type: 'integration-added'; projectId: string; integration: ConnectedIntegration }
   | { type: 'integration-removed'; projectId: string; integrationId: string }
   | { type: 'integration-error'; projectId: string; integrationId: string; message: string }
+  | { type: 'integrations-hydrated'; projectId: string }
   | { type: 'mount-auth-stall'; remotePath: string; status: string | null; pendingWriteback: number; message: string }
   | { type: 'integration-auth-required'; reason: 'cloud-auth-required' | 'account-workspace-required'; message: string }
   | { type: 'integration-auth-recovered' }
@@ -229,6 +230,10 @@ const SYSTEM_MESSAGE_DEBOUNCE_MS = 1_000
 const SYSTEM_MESSAGE_AGENT_WAIT_TIMEOUT_MS = 8_000
 const SYSTEM_MESSAGE_AGENT_WAIT_INTERVAL_MS = 500
 const LOCAL_MOUNT_CLOUD_HYDRATION_THROTTLE_MS = 30_000
+// Throttle for the per-project settings-list cloud hydration. Long enough that a
+// renderer refresh on `integrations-hydrated` (which re-calls the settings list)
+// cannot spin a fetch loop, short enough that reopening the page re-checks cloud.
+const PROJECT_CLOUD_HYDRATION_THROTTLE_MS = 30_000
 const AUTH_RECOVERY_RETRY_INTERVAL_MS = 30_000
 const CATALOG_PATH = '/api/v1/integrations/catalog'
 const MAX_REMOTE_DIRECTORY_ENTRIES = 5_000
@@ -789,6 +794,8 @@ export class IntegrationsManager {
   private catalogFetchedAt = 0
   private localMountCloudHydrationStartedAt = 0
   private localMountCloudHydrationPromise: Promise<void> | null = null
+  private projectCloudHydrationStartedAt = new Map<string, number>()
+  private projectCloudHydrationPromises = new Map<string, Promise<void>>()
   private authRecoveryState: IntegrationAuthRecoveryState | null = null
   private authRecoveryRetryTimer: ReturnType<typeof setTimeout> | null = null
 
@@ -956,6 +963,13 @@ export class IntegrationsManager {
       .filter((integration): integration is ConnectedIntegration => integration !== null)
   }
 
+  // Local-first: return the on-disk list immediately so the project page paints
+  // without waiting on whoami + the workspace-integrations GET (the dominant
+  // first-paint latency). Cloud hydration runs in the background and, when it
+  // changes the stored list, emits `integrations-hydrated` so the renderer swaps
+  // in the merged result. A slow/unavailable cloud no longer blocks first paint
+  // and no longer throws — auth failures raise the recovery banner through the
+  // existing `integration-auth-required` event instead.
   async listConnectedForSettings(projectId: string): Promise<ConnectedIntegration[]> {
     const local = this.listConnected(projectId)
     const project = this.findProject(projectId)
@@ -964,40 +978,63 @@ export class IntegrationsManager {
       return this.withLocalMountPaths(local)
     }
 
-    try {
+    void this.hydrateProjectCloudIntegrations(projectId)
+    return this.withLocalMountPaths(local)
+  }
+
+  // Background cloud hydration for a single project's settings list. Deduped and
+  // throttled per project so the renderer re-rendering on `integrations-hydrated`
+  // (which calls listConnectedForSettings again) cannot spin a fetch loop. Cloud
+  // failures set the auth-recovery banner via setAuthRecoveryState (which emits
+  // `integration-auth-required`) rather than throwing; first paint already
+  // returned the local list. Returns the in-flight promise so callers/tests can
+  // await convergence deterministically.
+  hydrateProjectCloudIntegrations(projectId: string): Promise<void> {
+    const existing = this.projectCloudHydrationPromises.get(projectId)
+    if (existing) return existing
+    const lastStartedAt = this.projectCloudHydrationStartedAt.get(projectId) ?? 0
+    if (Date.now() - lastStartedAt < PROJECT_CLOUD_HYDRATION_THROTTLE_MS) {
+      return Promise.resolve()
+    }
+    this.projectCloudHydrationStartedAt.set(projectId, Date.now())
+
+    const before = JSON.stringify(this.listConnected(projectId))
+    const pending = (async (): Promise<void> => {
       const cloud = await this.listCloudWorkspaceIntegrations()
       if (cloud.length === 0) {
-        console.log(`[integrations] listConnectedForSettings: cloud returned 0 integrations for workspace; using local list only (${local.length} items)`)
-        return this.withLocalMountPaths(local)
+        console.log(`[integrations] hydrateProjectCloudIntegrations: cloud returned 0 integrations; keeping local list for ${projectId}`)
+        return
       }
-      return this.withLocalMountPaths(await this.mergeCloudIntegrationsIntoProject(projectId, cloud))
-    } catch (error) {
-      if (isAccountWorkspaceRequiredError(error)) {
-        console.warn(
-          '[integrations] Account workspace unavailable; integration recovery is required'
-        )
-        const failureClass = integrationAuthRecoveryFailureClass(error)
-        this.setAuthRecoveryState('account-workspace-required', failureClass)
-        const decorated = await this.withLocalMountPaths(local)
-        this.setAuthRecoveryState('account-workspace-required', failureClass)
-        return decorated
-      }
-      if (isCloudAuthRequiredError(error)) throw error
-      if (isHttpStatus(error, 403)) {
-        this.setAuthRecoveryState('cloud-auth-required', 'workspace-access-revoked')
-        throw new Error('cloud-auth-required:workspace-access-revoked')
-      }
+      await this.mergeCloudIntegrationsIntoProject(projectId, cloud)
+    })()
+      .then(() => {
+        const after = JSON.stringify(this.listConnected(projectId))
+        if (after !== before) this.emit({ type: 'integrations-hydrated', projectId })
+      })
+      .catch((error) => {
+        if (isAccountWorkspaceRequiredError(error)) {
+          console.warn('[integrations] Account workspace unavailable; integration recovery is required')
+          this.setAuthRecoveryState('account-workspace-required', integrationAuthRecoveryFailureClass(error))
+          return
+        }
+        if (isCloudAuthRequiredError(error)) {
+          this.setAuthRecoveryState('cloud-auth-required', integrationAuthRecoveryFailureClass(error))
+          return
+        }
+        if (isHttpStatus(error, 403)) {
+          this.setAuthRecoveryState('cloud-auth-required', 'workspace-access-revoked')
+          return
+        }
+        console.warn('[integrations] Background cloud hydration failed:', toErrorMessage(error))
+      })
+      .finally(() => {
+        if (this.projectCloudHydrationPromises.get(projectId) === pending) {
+          this.projectCloudHydrationPromises.delete(projectId)
+        }
+      })
 
-      // Surface the failure to the renderer instead of silently downgrading to
-      // an empty list. The UI catches and renders this in the error banner so
-      // the user can see "cloud-auth-required" (restart needed) vs "network"
-      // vs "workspace mismatch" instead of staring at an empty Connected
-      // section with no explanation. Local list is still saved on disk and
-      // surfaced through the project-scoped APIs.
-      const message = toErrorMessage(error)
-      console.warn('[integrations] Failed to hydrate cloud workspace integrations:', message)
-      throw new Error(`Cloud integrations unavailable: ${message}`)
-    }
+    this.projectCloudHydrationPromises.set(projectId, pending)
+    return pending
   }
 
   async listMountDirectory(projectId: string, integrationId: string, dirPath: string): Promise<filesystem.ExplorerEntry[]> {

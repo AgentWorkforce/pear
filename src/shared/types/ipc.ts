@@ -708,6 +708,7 @@ export type IntegrationsEvent =
   | { type: 'integration-added'; projectId: string; integration: ConnectedIntegration }
   | { type: 'integration-removed'; projectId: string; integrationId: string }
   | { type: 'integration-error'; projectId: string; integrationId: string; message: string }
+  | { type: 'integrations-hydrated'; projectId: string }
   | { type: 'mount-auth-stall'; remotePath: string; status: string | null; pendingWriteback: number; message: string }
   | { type: 'integration-auth-required'; reason: 'cloud-auth-required' | 'account-workspace-required'; message: string }
   | { type: 'integration-auth-recovered' }
