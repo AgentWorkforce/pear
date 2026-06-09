@@ -11,7 +11,7 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { findProjectForPath, openProjectForPath, parseOpenCommand, type OpenPathDeps } from '../cli.ts'
+import { findProjectForPath, openProjectForPath, parseOpenCommand, projectContainsPath, type OpenPathDeps } from '../cli.ts'
 import type { Project } from '../store.ts'
 
 function makeProject(overrides: Partial<Project> & { roots: Project['roots'] }): Project {
@@ -55,14 +55,29 @@ test('findProjectForPath matches an exact root', () => {
   assert.equal(findProjectForPath(projects, '/work/alpha')?.id, 'a')
 })
 
+test('projectContainsPath matches an exact root', () => {
+  const project = makeProject({ id: 'a', roots: [makeRoot('/work/alpha')] })
+  assert.equal(projectContainsPath(project, '/work/alpha'), true)
+})
+
 test('findProjectForPath matches a nested directory under a root', () => {
   const projects = [makeProject({ id: 'a', roots: [makeRoot('/work/alpha')] })]
   assert.equal(findProjectForPath(projects, '/work/alpha/src/lib')?.id, 'a')
 })
 
+test('projectContainsPath matches a nested directory under a root', () => {
+  const project = makeProject({ id: 'a', roots: [makeRoot('/work/alpha')] })
+  assert.equal(projectContainsPath(project, '/work/alpha/src/lib'), true)
+})
+
 test('findProjectForPath does not match a sibling that only shares a prefix', () => {
   const projects = [makeProject({ id: 'a', roots: [makeRoot('/work/alpha')] })]
   assert.equal(findProjectForPath(projects, '/work/alpha-beta'), null)
+})
+
+test('projectContainsPath does not match a sibling that only shares a prefix', () => {
+  const project = makeProject({ id: 'a', roots: [makeRoot('/work/alpha')] })
+  assert.equal(projectContainsPath(project, '/work/alpha-beta'), false)
 })
 
 test('findProjectForPath returns the first matching project', () => {

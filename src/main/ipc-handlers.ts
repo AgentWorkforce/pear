@@ -29,7 +29,7 @@ import { aiHistManager } from './ai-hist'
 import { burnManager, type BurnAgentInput, type BurnProjectInput, type BurnSessionBreakdownInput, type BurnFingerprintInput } from './burn'
 import { resetRelayWorkspaceManager } from './relay-workspace'
 import { assertDirectory, isDirectory } from './path-utils'
-import { findProjectForPath } from './cli'
+import { findProjectForPath, projectContainsPath } from './cli'
 import type { BrokerReconcileMessagesInput, BrokerSpawnAgentResult } from '../shared/types/ipc'
 import type { ProactiveAgentDraft } from './proactive-agent.types'
 
@@ -266,19 +266,21 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('broker:list-personas', async (_, projectId: string, cwd?: string) => {
+    const normalizedProjectId = projectId.trim()
     const personaCwd = cwd?.trim()
     if (personaCwd) {
       const resolved = resolve(personaCwd)
-      const pathProjectId = getProjectIdForPath(resolved)
-      if (!pathProjectId || pathProjectId !== projectId.trim()) {
+      const { projects } = loadStore()
+      const project = projects.find((entry) => entry.id === normalizedProjectId)
+      if (!project || !projectContainsPath(project, resolved)) {
         throw new Error(`Path is outside project roots for project ${projectId}: ${resolved}`)
       }
       if (!isDirectory(resolved)) {
         return []
       }
-      return brokerManager.listPersonas(projectId, resolved)
+      return brokerManager.listPersonas(normalizedProjectId, resolved)
     }
-    return brokerManager.listPersonas(projectId)
+    return brokerManager.listPersonas(normalizedProjectId)
   })
 
   ipcMain.handle('broker:spawn-persona', async (_, projectId: string, personaId: string) => {
