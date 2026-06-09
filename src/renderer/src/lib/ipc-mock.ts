@@ -624,7 +624,7 @@ export const pearMock: PearAPI = {
     list: async (): Promise<ConnectedIntegration[]> => [],
     authRecoveryState: async (): Promise<IntegrationAuthRecoveryState | null> => null,
     telemetry: async (): Promise<IntegrationEventTelemetrySnapshot> => ({
-      totals: { eventsReceived: 0, eventsInjected: 0, eventsCoalesced: 0, eventsDropped: 0, brokerSends: 0, brokerSendsDeferred: 0, queueDepth: 0, mountCount: 0, brokerSendQueueDepth: 0 },
+      totals: { eventsReceived: 0, eventsInjected: 0, eventsCoalesced: 0, eventsDropped: 0, eventsSelfEchoSuppressed: 0, brokerSends: 0, brokerSendsDeferred: 0, queueDepth: 0, mountCount: 0, brokerSendQueueDepth: 0 },
       projects: {}
     }),
     listMountDir: async (): Promise<FsDirEntry[]> => [],
