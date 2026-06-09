@@ -696,3 +696,32 @@ function hasVisibleTerminalContent(screen: string): boolean {
   )
   return /\S/.test(stripped)
 }
+
+// --- Measurement probe (redraw-drain harness) ----------------------------
+// Read-only accessor that returns the live xterm viewport text for a mounted
+// runtime. Reading the parsed grid (term.buffer) — rather than scraping the
+// renderer-specific `.xterm-rows` DOM — lets the redraw-drain harness extract
+// the latest rendered frame regardless of whether the DOM or WebGL renderer is
+// active in the headless Playwright Chrome. It never mutates terminal state.
+//
+// Gated on the mock-IPC build flag so it is tree-shaken out of the production
+// (Electron) bundle: the harness only runs against the web/mock build served
+// by vite.web.config.ts.
+export function readRuntimeViewportText(projectId: string | undefined, name: string): string | null {
+  const record = runtimes.get(getAgentKey(projectId, name))
+  if (!record) return null
+  const term = record.runtime.term
+  const buffer = term.buffer.active
+  const lines: string[] = []
+  for (let row = 0; row < term.rows; row += 1) {
+    const line = buffer.getLine(buffer.baseY + row)
+    lines.push(line ? line.translateToString(true) : '')
+  }
+  return lines.join('\n')
+}
+
+if (import.meta.env.VITE_PEAR_MOCK_IPC === 'true' && typeof window !== 'undefined') {
+  ;(window as unknown as {
+    __pearReadTerminalViewport?: (projectId: string | undefined, name: string) => string | null
+  }).__pearReadTerminalViewport = readRuntimeViewportText
+}
