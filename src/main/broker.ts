@@ -424,7 +424,10 @@ function ensureBrokerBinaryCompatShim(): string {
   return shimPath
 }
 
-async function resolveHarnessBrokerBinary(workspaceKey?: string): Promise<{ binaryPath: string; env: NodeJS.ProcessEnv }> {
+// `binaryPath` is what Pear launches (possibly the legacy compat shim);
+// `realBinaryPath` is always the actual broker binary, for callers that hand
+// the binary itself to other processes.
+async function resolveHarnessBrokerBinary(workspaceKey?: string): Promise<{ binaryPath: string; realBinaryPath: string; env: NodeJS.ProcessEnv }> {
   const binaryPath = resolveBundledBrokerBinary()
   const flags = await inspectBrokerInitCliFlags(binaryPath)
 
@@ -435,7 +438,7 @@ async function resolveHarnessBrokerBinary(workspaceKey?: string): Promise<{ bina
   }
 
   if (flags.supportsInstanceName) {
-    return { binaryPath, env: {} }
+    return { binaryPath, realBinaryPath: binaryPath, env: {} }
   }
 
   if (!flags.supportsName) {
@@ -446,6 +449,7 @@ async function resolveHarnessBrokerBinary(workspaceKey?: string): Promise<{ bina
   console.warn(`[broker] Broker binary uses legacy --name flag; launching through compatibility shim: ${binaryPath}`)
   return {
     binaryPath: shimPath,
+    realBinaryPath: binaryPath,
     env: {
       PEAR_AGENT_RELAY_BROKER_BINARY: binaryPath,
       PEAR_AGENT_RELAY_BROKER_SUPPORTS_INSTANCE_NAME: flags.supportsInstanceName ? '1' : '0',
@@ -1555,6 +1559,13 @@ export class BrokerManager {
         env: {
           PATH: augmentedPath(),
           ...brokerBinary.env,
+          // Spawned workers inherit the broker's env. AGENT_RELAY_BIN is the
+          // ecosystem-standard broker-binary override (harness-driver
+          // broker-path, workforce runtime relay-mcp); it lets the workforce
+          // CLI's `mcp-args --register` relay-MCP injection find the same
+          // broker binary Pear runs — a PATH lookup fails in packaged
+          // installs and can hit a version-skewed global binary in dev.
+          AGENT_RELAY_BIN: brokerBinary.realBinaryPath,
           ...(agentRelayMcpCommand ? { AGENT_RELAY_MCP_COMMAND: agentRelayMcpCommand } : {})
         },
         onStderr: (line: string) => {
@@ -2858,13 +2869,18 @@ export class BrokerManager {
       (await session.client.listAgents()).map((agent) => agent.name)
     )
     const personaArgs = ['agent', input.personaId]
+    // No skipRelayPrompt here: the workforce CLI injects the agent-relay MCP
+    // into the inner harness, but it only does so when the broker stamps
+    // RELAY_AGENT_NAME (+ RELAY_AGENT_TOKEN) into the worker env — and the
+    // broker suppresses those stamps when skip_relay_prompt is set. Broker-side
+    // arg injection stays a no-op either way because `agentworkforce` is not a
+    // CLI the broker recognizes, so the wrapper command is unchanged.
     let nextInput: SpawnPtyInput = {
       name: getAvailableAgentName(input.baseName, existingNames),
       cli: input.command.cli,
       args: [...input.command.args, ...personaArgs],
       cwd: session.cwd,
-      channels: session.channels,
-      skipRelayPrompt: true
+      channels: session.channels
     }
 
     for (let attempt = 0; attempt < 20; attempt += 1) {

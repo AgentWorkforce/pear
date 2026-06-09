@@ -870,6 +870,12 @@ describe('BrokerManager local + cloud coexistence', () => {
     expect(local.spawnPty).not.toHaveBeenCalledWith(expect.objectContaining({
       args: expect.arrayContaining(['--install-in-repo'])
     }))
+    // The workforce CLI only injects the agent-relay MCP into the inner
+    // harness when the broker stamps RELAY_AGENT_NAME into the worker env,
+    // and the broker suppresses that stamp when skipRelayPrompt is set.
+    expect(local.spawnPty).not.toHaveBeenCalledWith(expect.objectContaining({
+      skipRelayPrompt: true
+    }))
     expect(result).toEqual({
       name: 'autonomous-actor',
       runtime: 'pty',
