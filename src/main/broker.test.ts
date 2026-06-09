@@ -190,10 +190,16 @@ vi.mock('./burn', () => ({
   getPearBurnAgentKey: vi.fn((projectId: string, name: string) => `${projectId}:${name}`)
 }))
 
-import { BrokerManager, parseBrokerInitCliFlags, resolveAgentRelayMcpCommand } from './broker'
+import {
+  BrokerManager,
+  parseBrokerInitCliFlags,
+  resolveAgentRelayMcpCommand,
+  resolveBundledBrokerBinary
+} from './broker'
 
 const PROJECT_ID = 'project-1'
 const originalMcpCommand = process.env.AGENT_RELAY_MCP_COMMAND
+const originalAgentRelayBin = process.env.AGENT_RELAY_BIN
 const originalResourcesPathDescriptor = Object.getOwnPropertyDescriptor(process, 'resourcesPath')
 const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
 const originalPublicEnv = process.env.PUBLIC
@@ -453,12 +459,109 @@ describe('electron-builder broker packaging', () => {
   })
 })
 
+describe('resolveBundledBrokerBinary', () => {
+  let tempDir: string | null = null
+
+  beforeEach(() => {
+    electronMock.app.isPackaged = false
+    if (originalAgentRelayBin === undefined) {
+      delete process.env.AGENT_RELAY_BIN
+    } else {
+      process.env.AGENT_RELAY_BIN = originalAgentRelayBin
+    }
+  })
+
+  afterEach(async () => {
+    electronMock.app.isPackaged = false
+    if (originalAgentRelayBin === undefined) {
+      delete process.env.AGENT_RELAY_BIN
+    } else {
+      process.env.AGENT_RELAY_BIN = originalAgentRelayBin
+    }
+    if (originalPlatformDescriptor) {
+      Object.defineProperty(process, 'platform', originalPlatformDescriptor)
+    }
+    if (tempDir) await rm(tempDir, { recursive: true, force: true })
+    tempDir = null
+  })
+
+  it('uses a valid AGENT_RELAY_BIN override', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'pear-broker-bin-'))
+    const brokerPath = join(tempDir, 'agent-relay-broker')
+    await writeFile(brokerPath, '#!/bin/sh\nexit 0\n')
+    await chmod(brokerPath, 0o755)
+    process.env.AGENT_RELAY_BIN = brokerPath
+
+    expect(resolveBundledBrokerBinary()).toBe(brokerPath)
+  })
+
+  it('ignores an invalid AGENT_RELAY_BIN override and falls back to a bundled broker', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'pear-broker-bin-'))
+    const missingBrokerPath = join(tempDir, 'missing-broker')
+    process.env.AGENT_RELAY_BIN = missingBrokerPath
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    try {
+      const resolved = resolveBundledBrokerBinary()
+
+      expect(resolved).not.toBe(missingBrokerPath)
+      expect(resolved).toContain(join('node_modules', '@agent-relay'))
+      expect(warnSpy).toHaveBeenCalledWith(
+        '[broker] Ignoring AGENT_RELAY_BIN because it is not executable:',
+        missingBrokerPath
+      )
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('checks the packaged optional broker binary in app.asar.unpacked', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'pear-broker-asar-'))
+    const baseDir = join(tempDir, 'Resources', 'app.asar', 'out', 'main')
+    const brokerPath = join(
+      tempDir,
+      'Resources',
+      'app.asar.unpacked',
+      'node_modules',
+      '@agent-relay',
+      `broker-${process.platform}-${process.arch}`,
+      'bin',
+      process.platform === 'win32' ? 'agent-relay-broker.exe' : 'agent-relay-broker'
+    )
+    await mkdir(dirname(brokerPath), { recursive: true })
+    await writeFile(brokerPath, '#!/bin/sh\nexit 0\n')
+    await chmod(brokerPath, 0o755)
+    electronMock.app.isPackaged = true
+
+    expect(resolveBundledBrokerBinary(baseDir)).toBe(brokerPath)
+  })
+
+  it('uses an .exe broker name on win32 fallback paths', () => {
+    delete process.env.AGENT_RELAY_BIN
+    setProcessPlatform('win32')
+
+    const resolved = resolveBundledBrokerBinary('/tmp/pear-no-broker')
+
+    expect(resolved).toContain('win32')
+    expect(resolved).toMatch(/\.exe$/)
+  })
+})
+
 describe('BrokerManager local + cloud coexistence', () => {
   let personaTempDir: string | null = null
   const inheritedWorkspaceKey = process.env.AGENT_RELAY_WORKSPACE_KEY
 
   beforeEach(() => {
+    electronMock.app.isPackaged = false
+    if (originalPlatformDescriptor) {
+      Object.defineProperty(process, 'platform', originalPlatformDescriptor)
+    }
     delete process.env.AGENT_RELAY_WORKSPACE_KEY
+    if (originalAgentRelayBin === undefined) {
+      delete process.env.AGENT_RELAY_BIN
+    } else {
+      process.env.AGENT_RELAY_BIN = originalAgentRelayBin
+    }
     mock.state.spawnedClients.length = 0
     mock.state.constructedClients.length = 0
     mock.state.connectedClients.length = 0
@@ -484,6 +587,10 @@ describe('BrokerManager local + cloud coexistence', () => {
       delete process.env.AGENT_RELAY_WORKSPACE_KEY
     } else {
       process.env.AGENT_RELAY_WORKSPACE_KEY = inheritedWorkspaceKey
+    }
+    electronMock.app.isPackaged = false
+    if (originalPlatformDescriptor) {
+      Object.defineProperty(process, 'platform', originalPlatformDescriptor)
     }
   })
 
@@ -698,6 +805,18 @@ describe('BrokerManager local + cloud coexistence', () => {
       }
       await rm(tempDir, { recursive: true, force: true })
     }
+  })
+
+  it('uses the packaged Agent Relay broker binary instead of an adjacent local relay build by default', async () => {
+    const manager = new BrokerManager()
+
+    await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', undefined as never, [])
+
+    const spawnOptions = mock.HarnessDriverClient.spawn.mock.calls[0]?.[0] as { binaryPath?: string } | undefined
+    expect(spawnOptions?.binaryPath).toContain(join('node_modules', '@agent-relay', `broker-${process.platform}-${process.arch}`, 'bin'))
+    expect(spawnOptions?.binaryPath).not.toContain(join('relay', 'target', 'debug'))
+
+    await manager.shutdown()
   })
 
   it('reports the matching connection file when a stale current file and matching legacy file coexist', async () => {
@@ -1146,6 +1265,35 @@ describe('BrokerManager local + cloud coexistence', () => {
     expect(local.setInboundDeliveryMode).not.toHaveBeenCalled()
 
     await manager.shutdown()
+  })
+
+  it('treats terminal attach for a missing worker as a stale terminal', async () => {
+    const previousTimeout = process.env.PEAR_ATTACH_REGISTRATION_TIMEOUT_MS
+    process.env.PEAR_ATTACH_REGISTRATION_TIMEOUT_MS = '1'
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, [])
+
+    try {
+      await expect(manager.attachTerminal(PROJECT_ID, {
+        name: 'codex-1',
+        mode: 'passthrough'
+      })).resolves.toEqual({
+        name: 'codex-1',
+        mode: 'auto_inject',
+        pending: 0
+      })
+
+      expect(local.getInboundDeliveryMode).not.toHaveBeenCalled()
+      expect(local.setInboundDeliveryMode).not.toHaveBeenCalled()
+      expect(local.snapshot).not.toHaveBeenCalled()
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env.PEAR_ATTACH_REGISTRATION_TIMEOUT_MS
+      } else {
+        process.env.PEAR_ATTACH_REGISTRATION_TIMEOUT_MS = previousTimeout
+      }
+      await manager.shutdown()
+    }
   })
 
   it('detachCloudSandbox drops only the cloud session', async () => {

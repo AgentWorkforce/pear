@@ -271,36 +271,55 @@ function findWorkforcePersona(
   }
 }
 
+function resolveBrokerBinaryOverride(): string | null {
+  const configured = process.env.AGENT_RELAY_BIN?.trim()
+  if (!configured) return null
+  if (canExecute(configured)) return configured
+  console.warn('[broker] Ignoring AGENT_RELAY_BIN because it is not executable:', configured)
+  return null
+}
+
 // Resolve the broker binary bundled with the v8 harness-driver runtime.
 // The runtime normally resolves this via import.meta.url, but that breaks when
 // electron-vite bundles the driver into the main process (import.meta.url points
 // to out/main/ instead of node_modules/).
-function resolveBundledBrokerBinary(): string {
-  // Use local relay build if available (for development)
-  const localBinary = join(__dirname, '..', '..', '..', 'relay', 'target', 'debug', 'agent-relay-broker')
-  try {
-    require('fs').accessSync(localBinary, require('fs').constants.X_OK)
-    console.log('[broker] Using local relay binary:', localBinary)
-    return localBinary
-  } catch {
-    // Fall back to SDK-bundled binary
+function brokerBinaryNameForPlatform(platform: NodeJS.Platform): string {
+  return platform === 'win32' ? 'agent-relay-broker.exe' : 'agent-relay-broker'
+}
+
+export function resolveBundledBrokerBinary(baseDir = __dirname, isPackaged = app.isPackaged): string {
+  const configuredBinary = resolveBrokerBinaryOverride()
+  if (configuredBinary) {
+    console.log('[broker] Using configured Agent Relay broker binary:', configuredBinary)
+    return configuredBinary
   }
 
   const suffix = `${process.platform}-${process.arch}`
   const unpackIfPackaged = (binary: string): string =>
-    app.isPackaged ? binary.replace('app.asar', 'app.asar.unpacked') : binary
+    isPackaged ? binary.replace('app.asar', 'app.asar.unpacked') : binary
 
   // v8 ships the broker as a per-platform optional package (@agent-relay/broker-*).
+  const brokerBinaryName = brokerBinaryNameForPlatform(process.platform)
   const optionalPackageBinary = join(
-    __dirname, '..', '..', 'node_modules', '@agent-relay', `broker-${suffix}`, 'bin',
-    process.platform === 'win32' ? 'agent-relay-broker.exe' : 'agent-relay-broker'
+    baseDir, '..', '..', 'node_modules', '@agent-relay', `broker-${suffix}`, 'bin',
+    brokerBinaryName
   )
-  if (canExecute(optionalPackageBinary)) return unpackIfPackaged(optionalPackageBinary)
+  const unpackedOptionalPackageBinary = unpackIfPackaged(optionalPackageBinary)
+  if (canExecute(unpackedOptionalPackageBinary)) return unpackedOptionalPackageBinary
+  if (unpackedOptionalPackageBinary !== optionalPackageBinary && canExecute(optionalPackageBinary)) {
+    return optionalPackageBinary
+  }
+
+  const localBinary = join(baseDir, '..', '..', '..', 'relay', 'target', 'debug', brokerBinaryName)
+  if (canExecute(localBinary)) {
+    console.warn('[broker] Bundled Agent Relay broker binary was not found; falling back to local relay build:', localBinary)
+    return localBinary
+  }
 
   // Backward-compatible fallback for SDK packages that still carry per-platform
   // broker binaries directly.
   const brokerBinary = join(
-    __dirname, '..', '..', 'node_modules', '@agent-relay', 'sdk', 'bin',
+    baseDir, '..', '..', 'node_modules', '@agent-relay', 'sdk', 'bin',
     `agent-relay-broker-${suffix}${process.platform === 'win32' ? '.exe' : ''}`
   )
   return unpackIfPackaged(brokerBinary)
@@ -2916,15 +2935,14 @@ export class BrokerManager {
   // top of attachTerminal so a freshly-spawned agent doesn't 404 on the
   // first setInboundDeliveryMode/getInboundDeliveryMode call. No-op if the
   // agent is already registered (the first listAgents() call returns it).
-  // Returns true when the agent appeared, false on timeout — the caller
-  // logs the timeout for debugging and falls through to the downstream
-  // calls (with their own retry wrapper) so a registration that completes
-  // just after the deadline still works.
+  // Returns true when the agent appeared, false on timeout. A false result
+  // means the renderer likely tried to revive a stale replayed terminal, so
+  // attach should stop before touching delivery-mode or snapshot endpoints.
   private async waitForAgentRegistration(session: BrokerSession, name: string): Promise<boolean> {
     // Bumped from PERSONA_REGISTRATION_TIMEOUT_MS (5s) — `claude --resume`
     // reads session history before connecting to the broker; a long
     // conversation can push first-registration past 5s.
-    const deadlineMs = 15_000
+    const deadlineMs = parsePositiveIntegerEnv('PEAR_ATTACH_REGISTRATION_TIMEOUT_MS', 15_000)
     const deadline = Date.now() + deadlineMs
     while (Date.now() < deadline) {
       try {
@@ -2957,7 +2975,7 @@ export class BrokerManager {
       return { session: fallback, registered: await this.waitForAgentRegistration(fallback, name) }
     }
 
-    const deadline = Date.now() + 15_000
+    const deadline = Date.now() + parsePositiveIntegerEnv('PEAR_ATTACH_REGISTRATION_TIMEOUT_MS', 15_000)
     while (Date.now() < deadline) {
       for (const candidate of candidates) {
         const agents = await candidate.client.listAgents().catch(() => null)
@@ -3279,15 +3297,21 @@ export class BrokerManager {
     // terminal → attach → broker 404. claude --resume in particular reads
     // session history first and can take 10+ seconds to register.
     const { session, registered } = await this.locateSessionForAgent(name, projectId)
+    const mode = toInboundDeliveryMode(input.mode)
+    if (!registered) {
+      console.warn(`[broker] attachTerminal: ${name} did not appear in listAgents within wait window; treating as a stale terminal`)
+      return {
+        name,
+        mode,
+        pending: 0
+      }
+    }
+
     const client = session.client
     // A re-attach (window reload, restart, tab re-open) is a fresh start for
     // this terminal — clear any stale HTTP-only fallback so the WS fast path
     // gets retried instead of being stuck on HTTP for the agent's lifetime.
     this.resetInputStreamFallback(this.getInputStreamKey(sessionKeyFor(session), name))
-    if (!registered) {
-      console.warn(`[broker] attachTerminal: ${name} did not appear in listAgents within wait window; falling through to per-call retry`)
-    }
-    const mode = toInboundDeliveryMode(input.mode)
     let previousMode: InboundDeliveryMode | undefined
 
     try {

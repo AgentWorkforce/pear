@@ -174,9 +174,9 @@ function BrokerErrorRows({
       {entries.map((entry, index) => (
         <div
           key={entry.id}
-          className="rounded-lg border border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 px-3 py-2.5"
+          className="min-w-0 overflow-hidden rounded-lg border border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 px-3 py-2.5"
         >
-          <div className="flex items-center justify-between gap-3 text-[11px] text-[var(--pear-red)]">
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 text-[11px] text-[var(--pear-red)]">
             <span className="font-medium uppercase tracking-[0.12em]">
               {getIssueLabel(entry, index, currentErrorId)}
             </span>
@@ -184,7 +184,7 @@ function BrokerErrorRows({
               {formatErrorTimestamp(entry.timestamp)}
             </span>
           </div>
-          <p className="mt-1 whitespace-pre-wrap text-sm text-[var(--pear-text)]">
+          <p className="mt-1 whitespace-pre-wrap text-sm leading-relaxed text-[var(--pear-text)] [overflow-wrap:anywhere]">
             {entry.message}
           </p>
         </div>
@@ -978,8 +978,9 @@ export function BrokerDetailsPage(): React.ReactNode {
 
   const pageProjectId = activeBrokerTabProjectId || activeProjectId || undefined
   const pageProjectName = pageProjectId ? getProjectName(projects, pageProjectId) : 'All projects'
-  const currentErrorId = brokerStatus === 'error' && brokerError && brokerErrors[0]?.message === brokerError
-    ? brokerErrors[0].id
+  const visibleBrokerErrors = brokerErrors
+  const currentErrorId = brokerStatus === 'error' && brokerError && visibleBrokerErrors[0]?.message === brokerError
+    ? visibleBrokerErrors[0].id
     : undefined
   const scopedBrokerDetails = useMemo(
     () => pageProjectId
@@ -989,7 +990,7 @@ export function BrokerDetailsPage(): React.ReactNode {
   )
   const brokerErrorsByProject = useMemo(() => {
     const grouped = new Map<string, BrokerErrorEntry[]>()
-    for (const entry of brokerErrors) {
+    for (const entry of visibleBrokerErrors) {
       if (!entry.projectId) continue
       if (pageProjectId && entry.projectId !== pageProjectId) continue
       const entries = grouped.get(entry.projectId) || []
@@ -997,14 +998,14 @@ export function BrokerDetailsPage(): React.ReactNode {
       grouped.set(entry.projectId, entries)
     }
     return grouped
-  }, [brokerErrors, pageProjectId])
+  }, [pageProjectId, visibleBrokerErrors])
   const unmatchedProjectErrorGroups = useMemo(() => {
     const brokerProjectIds = new Set(scopedBrokerDetails.map((broker) => broker.projectId))
     return Array.from(brokerErrorsByProject.entries()).filter(([projectId]) => !brokerProjectIds.has(projectId))
   }, [brokerErrorsByProject, scopedBrokerDetails])
   const unattributedBrokerErrors = useMemo(
-    () => pageProjectId ? [] : brokerErrors.filter((entry) => !entry.projectId),
-    [brokerErrors, pageProjectId]
+    () => pageProjectId ? [] : visibleBrokerErrors.filter((entry) => !entry.projectId),
+    [pageProjectId, visibleBrokerErrors]
   )
   const sortedBrokerEvents = useMemo(
     () => [...brokerEvents].sort((left, right) => left.timestamp - right.timestamp),

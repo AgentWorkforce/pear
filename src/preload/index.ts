@@ -170,7 +170,6 @@ export type {
   ProjectRootConflict,
   ProjectRootRecord,
   TerminalAttachMode,
-  ViewMode,
   WorkforcePersona
 } from '../shared/types/ipc'
 

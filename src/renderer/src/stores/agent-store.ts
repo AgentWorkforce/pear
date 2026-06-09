@@ -14,6 +14,7 @@ import {
   compactBrokerEvent as compactBrokerEventPayload,
   normalizeEventTimestamp
 } from '@shared/lib/broker-events'
+import { getBrokerErrorKey } from '@shared/lib/broker-errors'
 import { useTypingStore } from '@/stores/typing-store'
 import { clearPtyBuffer, getPtyChunks } from '@/stores/pty-buffer-store'
 
@@ -83,10 +84,19 @@ export interface BrokerErrorEntry {
   projectId?: string
 }
 
-const MAX_BROKER_ERRORS = 12
+export const MAX_BROKER_ERRORS = 12
+
+export function prependBrokerError(entries: BrokerErrorEntry[], entry: BrokerErrorEntry): BrokerErrorEntry[] {
+  const key = getBrokerErrorKey(entry)
+  return [
+    entry,
+    ...entries.filter((candidate) => getBrokerErrorKey(candidate) !== key)
+  ].slice(0, MAX_BROKER_ERRORS)
+}
+
 const MAX_BROKER_EVENTS = 3_000
 const BROKER_EVENT_RETENTION_MS = 12 * 60 * 60 * 1_000
-// Chat + relay history are display/graph buffers, not a source of truth, so cap
+// Chat + relay history are display buffers, not a source of truth, so cap
 // them the same way broker events are capped. Without this they grow for the
 // life of the session (one entry per relay_inbound), which is the dominant
 // renderer memory leak behind long-session crashes.
@@ -723,7 +733,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
       }
       const needNewActive = state.activeAgentKey ? staleKeys.includes(state.activeAgentKey) : false
       const nextActiveAgent = needNewActive
-        ? nextAgents.find((agent) => agent.status === 'running') || nextAgents[0]
+        ? nextAgents.find((agent) => agent.status === 'running')
         : undefined
 
       return {
@@ -1095,15 +1105,15 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
         brokerStatus: nextStatus,
         brokerError: nextError,
         brokerErrors: shouldRecord
-          ? [
+          ? prependBrokerError(
+              state.brokerErrors,
               {
                 id: crypto.randomUUID(),
                 message: nextError,
                 timestamp: Date.now(),
                 projectId: status.projectId
-              },
-              ...state.brokerErrors
-            ].slice(0, MAX_BROKER_ERRORS)
+              }
+            )
           : state.brokerErrors
       }
     })

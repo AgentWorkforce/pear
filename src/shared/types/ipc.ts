@@ -7,7 +7,6 @@
 export type ViewMode =
   | 'terminal'
   | 'chat'
-  | 'graph'
   | 'project-settings'
   | 'account-settings'
   | 'broker-details'
