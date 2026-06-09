@@ -10,6 +10,7 @@ import { BurnSessionPage } from '@/components/burn/BurnSessionPage'
 import { BurnProjectPage } from '@/components/burn/BurnProjectPage'
 import { BurnSessionDetailPage } from '@/components/burn/BurnSessionDetailPage'
 import { DiffPane } from '@/components/diff/DiffPane'
+import { AttentionInbox } from '@/components/issues/AttentionInbox'
 import ConversationsPanel from '@/components/ai-hist/ConversationsPanel'
 import { AppTopBar } from '@/components/common/AppTopBar'
 import { CommandMenu } from '@/components/common/CommandMenu'
@@ -104,6 +105,8 @@ export default function App(): React.ReactNode {
       ? <BrokerDetailsPage />
     : activeTab?.kind === 'source-control'
       ? <DiffPane />
+    : activeTab?.kind === 'issues'
+      ? <AttentionInbox />
     : activeTab?.kind === 'ai-hist'
       ? <ConversationsPanel />
     : activeTab?.kind === 'burn-session'

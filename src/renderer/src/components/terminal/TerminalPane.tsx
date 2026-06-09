@@ -1,6 +1,6 @@
 import type React from 'react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, ChevronLeft, ChevronRight, Columns2, Loader2, Network, PanelTop, X } from 'lucide-react'
+import { AlertTriangle, ChevronLeft, ChevronRight, Columns2, CornerUpLeft, Loader2, Network, PanelTop, X } from 'lucide-react'
 import { AgentHarnessIcon, ClaudeIcon, CodexIcon } from '@/components/common/AgentIcons'
 import { GraphView } from '@/components/graph/GraphView'
 import { ChatComposerInput } from '@/components/chat/ChatComposerInput'
@@ -12,6 +12,7 @@ import { useCloudAgentStore, type CloudAgentAttachProgress } from '@/stores/clou
 import { useIsAgentTyping } from '@/stores/typing-store'
 import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
+import { issueForAgent, useIssuesStore } from '@/stores/issues-store'
 import { PendingMessagesMenu, type QueueDeliveryMode } from './PendingMessagesPane'
 import { TerminalInstance } from './TerminalInstance'
 
@@ -377,6 +378,52 @@ function SplitTerminalPage({
         )
       })}
     </div>
+  )
+}
+
+// Reverse leg of the Control Center ⟷ Project round-trip. When the active agent
+// maps to an issue (via issues-store `issueForAgent`), the agent header shows
+// `▸ implementing PEAR-X`; immediately after a forward L3 jump it instead shows
+// the `↩ PEAR-X` breadcrumb (ui-store `agentJumpIssueId`). Either click returns
+// to the issues tab focused on that card — without closing the inbox.
+function ActiveAgentIssueChip({ agent }: { agent: Agent | undefined }): React.ReactNode {
+  const issues = useIssuesStore((s) => s.issues)
+  const agentJumpIssueId = useUIStore((s) => s.agentJumpIssueId)
+  const openTab = useUIStore((s) => s.openTab)
+  const setSelectedIssueId = useUIStore((s) => s.setSelectedIssueId)
+
+  const jumpIssue = useMemo(
+    () => (agentJumpIssueId ? issues.find((issue) => issue.id === agentJumpIssueId) : undefined),
+    [agentJumpIssueId, issues]
+  )
+  const mappedIssue = useMemo(
+    () => (agent ? issueForAgent(agent.name) : undefined),
+    [agent, issues]
+  )
+  const issue = jumpIssue || mappedIssue
+  if (!issue) return null
+
+  const isBreadcrumb = Boolean(jumpIssue)
+  const issueId = issue.id
+
+  function openIssueCard(): void {
+    setSelectedIssueId(issueId)
+    openTab({ kind: 'issues' })
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={openIssueCard}
+      className="mx-1 flex shrink-0 items-center gap-1.5 rounded-full border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-2.5 py-1 text-[11px] font-medium text-[var(--pear-text-dim)] transition-colors hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]"
+      title={isBreadcrumb ? `Back to ${issue.identifier} in the inbox` : `${issue.identifier}: ${issue.title}`}
+      aria-label={isBreadcrumb ? `Back to ${issue.identifier}` : `Open ${issue.identifier} in the inbox`}
+    >
+      {isBreadcrumb ? <CornerUpLeft size={12} className="shrink-0" /> : <ChevronRight size={12} className="shrink-0" />}
+      <span className="max-w-[170px] truncate">
+        {isBreadcrumb ? issue.identifier : `implementing ${issue.identifier}`}
+      </span>
+    </button>
   )
 }
 
@@ -831,6 +878,7 @@ export function TerminalPane(): React.ReactNode {
             onDeliveryModeChange={(mode) => void handleDeliveryModeChange(activeAgent, mode)}
           />
         )}
+        <ActiveAgentIssueChip agent={activeAgent} />
         <button
           type="button"
           onClick={() => setTerminalLayout(splitEnabled ? 'tabs' : 'horizontal-split')}

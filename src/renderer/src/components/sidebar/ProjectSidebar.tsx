@@ -6,6 +6,7 @@ import {
   AlertTriangle,
   FolderKanban,
   Hash,
+  Inbox,
   LayoutGrid,
   LogIn,
   LogOut,
@@ -27,6 +28,7 @@ import {
 import { getAgentKeyForAgent, useAgentStore, type Agent } from '@/stores/agent-store'
 import { useIsAgentTyping } from '@/stores/typing-store'
 import { useProjectStore, type Project } from '@/stores/project-store'
+import { useIssuesStore } from '@/stores/issues-store'
 import { useUIStore, type AppTab, type AppTabInput } from '@/stores/ui-store'
 import { pear, type AuthUser, type IntegrationAuthRecoveryState } from '@/lib/ipc'
 
@@ -763,6 +765,61 @@ function ProjectSwitcher({ collapsed = false }: { collapsed?: boolean }): React.
   )
 }
 
+// The Attention Inbox is a global, cross-project surface, so its entry lives
+// above the project-scoped navigation and stays reachable even with no active
+// project selected (e.g. the browser demo build).
+function IssuesNavEntry({ collapsed = false }: { collapsed?: boolean }): React.ReactNode {
+  const openTab = useUIStore((s) => s.openTab)
+  const activeTab = useUIStore((s) => s.tabs.find((tab) => tab.id === s.activeTabId))
+  const active = activeTab?.kind === 'issues'
+  const needsYouCount = useIssuesStore((s) => s.issues.reduce((count, issue) => issue.band === 'needs-you' ? count + 1 : count, 0))
+
+  function openIssues(): void {
+    openTab({ kind: 'issues' })
+  }
+
+  if (collapsed) {
+    return (
+      <button
+        type="button"
+        onClick={openIssues}
+        className={collapsedButtonClass(active)}
+        title={needsYouCount > 0 ? `Issues — ${needsYouCount} need you` : 'Issues'}
+        aria-label="Issues"
+      >
+        <Inbox size={18} className={active ? '' : 'text-[var(--pear-text-dim)]'} />
+        {needsYouCount > 0 && (
+          <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--pear-red)] px-1 text-[9px] font-bold leading-none text-white">
+            {needsYouCount}
+          </span>
+        )}
+      </button>
+    )
+  }
+
+  return (
+    <div className="px-3 pb-2 pt-1">
+      <button
+        type="button"
+        onClick={openIssues}
+        className={`flex h-9 w-full min-w-0 items-center gap-2.5 rounded-md border px-2.5 text-left text-[13px] font-semibold transition-colors ${
+          active
+            ? 'border-[var(--pear-accent-dim)] bg-[var(--pear-bg-overlay)] text-[var(--pear-text)]'
+            : 'border-[var(--pear-border-subtle)] bg-[var(--pear-bg-surface)]/70 text-[var(--pear-text)] hover:border-[var(--pear-border)] hover:bg-[var(--pear-bg-surface-hover)]'
+        }`}
+      >
+        <Inbox size={15} className="shrink-0 text-[var(--pear-text-dim)]" />
+        <span className="min-w-0 flex-1 truncate">Issues</span>
+        {needsYouCount > 0 && (
+          <span className="shrink-0 rounded-full bg-[var(--pear-red)] px-1.5 py-0.5 text-[10px] font-bold leading-none text-white">
+            {needsYouCount}
+          </span>
+        )}
+      </button>
+    </div>
+  )
+}
+
 function ProjectNavigation({ collapsed = false }: { collapsed?: boolean }): React.ReactNode {
   const activeProjectId = useProjectStore((s) => s.activeProjectId)
   const activeChannelName = useProjectStore((s) => s.activeChannelName)
@@ -1082,6 +1139,10 @@ export function ProjectSidebar(): React.ReactNode {
           <ProjectSwitcher collapsed />
         </div>
 
+        <div className="mb-2">
+          <IssuesNavEntry collapsed />
+        </div>
+
         <ProjectNavigation collapsed />
 
         <div className="shrink-0 border-t border-[var(--pear-border-subtle)] px-2 pt-2">
@@ -1102,6 +1163,10 @@ export function ProjectSidebar(): React.ReactNode {
 
       <div className="titlebar-nodrag shrink-0 pb-2">
         <ProjectSwitcher />
+      </div>
+
+      <div className="shrink-0">
+        <IssuesNavEntry />
       </div>
 
       <ProjectNavigation />
