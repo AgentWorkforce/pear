@@ -336,6 +336,7 @@ describe('IntegrationsManager', () => {
       })
     ])
 
+    await manager.hydrateProjectCloudIntegrations('project-1')
     expect(mock.fetchCalls.some((call) => call.url.includes('/api/v1/workspaces/'))).toBe(false)
     expect(manager.getAuthRecoveryState()).toMatchObject({
       reason: 'account-workspace-required',
@@ -343,11 +344,61 @@ describe('IntegrationsManager', () => {
     })
   })
 
-  it('throws cloud-auth-required for settings integrations so the renderer can prompt sign-in', async () => {
+  it('raises the cloud-auth sign-in banner via background hydration without blocking first paint', async () => {
     mock.getAccountWorkspaceId.mockRejectedValueOnce(new Error('cloud-auth-required'))
     const manager = new IntegrationsManager()
+    const events: unknown[] = []
+    manager.onEvent((event) => events.push(event))
 
-    await expect(manager.listConnectedForSettings('project-1')).rejects.toThrow('cloud-auth-required')
+    // First paint returns the local list immediately and never throws on a cloud
+    // auth failure — the renderer prompt is driven by the auth-required event.
+    await expect(manager.listConnectedForSettings('project-1')).resolves.toEqual([
+      expect.objectContaining({ provider: 'slack', integrationId: 'slack-integration-1' })
+    ])
+
+    await manager.hydrateProjectCloudIntegrations('project-1')
+    expect(manager.getAuthRecoveryState()).toMatchObject({ reason: 'cloud-auth-required' })
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: 'integration-auth-required', reason: 'cloud-auth-required' })
+    )
+  })
+
+  it('returns the local list first while cloud hydration is still pending', async () => {
+    // Gate cloud resolution so we can prove first paint does NOT wait on it.
+    let releaseCloud!: () => void
+    const cloudGate = new Promise<void>((resolve) => {
+      releaseCloud = resolve
+    })
+    mock.getAccountWorkspaceId.mockImplementationOnce(async () => {
+      await cloudGate
+      return 'account-workspace-id'
+    })
+    const manager = new IntegrationsManager()
+
+    // Resolves to the local list even though the cloud call is still blocked.
+    await expect(manager.listConnectedForSettings('project-1')).resolves.toEqual([
+      expect.objectContaining({ provider: 'slack', integrationId: 'slack-integration-1' })
+    ])
+    expect(mock.fetchCalls.some((call) => call.url.includes('/api/v1/workspaces/account-workspace-id/integrations'))).toBe(false)
+
+    // Releasing the cloud call lets the background hydration issue its fetch.
+    releaseCloud()
+    await manager.hydrateProjectCloudIntegrations('project-1')
+    expect(manager.getAuthRecoveryState()).toBeNull()
+    expect(mock.fetchCalls.some((call) => call.url.includes('/api/v1/workspaces/account-workspace-id/integrations'))).toBe(true)
+  })
+
+  it('does not throw or raise a banner when background cloud hydration hits a transient failure', async () => {
+    mock.getAccountWorkspaceId.mockRejectedValueOnce(new Error('network unreachable'))
+    const manager = new IntegrationsManager()
+
+    await expect(manager.listConnectedForSettings('project-1')).resolves.toEqual([
+      expect.objectContaining({ provider: 'slack', integrationId: 'slack-integration-1' })
+    ])
+
+    await manager.hydrateProjectCloudIntegrations('project-1')
+    // A generic (non-auth) failure is swallowed: first paint already showed local.
+    expect(manager.getAuthRecoveryState()).toBeNull()
   })
 
   it('emits auth recovery and returns local integrations when local mount startup cannot resolve an account workspace', async () => {
@@ -461,8 +512,12 @@ describe('IntegrationsManager', () => {
     }))
     const manager = new IntegrationsManager()
 
-    await expect(manager.listConnectedForSettings('project-1'))
-      .rejects.toThrow('cloud-auth-required:workspace-access-revoked')
+    // Local-first: first paint returns local; the 403 is classified into the
+    // sign-in banner by the background hydration rather than thrown.
+    await expect(manager.listConnectedForSettings('project-1')).resolves.toEqual([
+      expect.objectContaining({ provider: 'slack', integrationId: 'slack-integration-1' })
+    ])
+    await manager.hydrateProjectCloudIntegrations('project-1')
 
     expect(manager.getAuthRecoveryState()).toMatchObject({
       reason: 'cloud-auth-required',
@@ -484,8 +539,10 @@ describe('IntegrationsManager', () => {
       statusText: 'Forbidden',
       json: async () => ({ error: 'Forbidden' })
     }))
-    await expect(manager.listConnectedForSettings('project-1'))
-      .rejects.toThrow('cloud-auth-required:workspace-access-revoked')
+    await expect(manager.listConnectedForSettings('project-1')).resolves.toEqual([
+      expect.objectContaining({ provider: 'slack', integrationId: 'slack-integration-1' })
+    ])
+    await manager.hydrateProjectCloudIntegrations('project-1')
     expect(manager.getAuthRecoveryState()).toMatchObject({ reason: 'cloud-auth-required' })
 
     // Fresh login fires retryAuthRecovery; the cloud re-check now succeeds, so
