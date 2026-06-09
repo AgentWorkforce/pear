@@ -172,6 +172,40 @@ describe('useTerminal — ref stability', () => {
     expect(createdTerminals.length).toBeGreaterThanOrEqual(2)
   })
 
+  it('focuses xterm exactly once on first mount of a new runtime', async () => {
+    // Regression: the initial-mount focus ladder fired focusTerminal at
+    // 0/50/150/300ms (five calls). Each does container.focus() then
+    // textarea.focus(), bouncing focus and re-emitting a focus-in (\e[I) to
+    // a DECSET ?1004 TUI — Claude Code's Ink UI stacked one duplicate
+    // tool-card per emission ("~5 cards on first agent spawn"). First mount
+    // must focus exactly once.
+    vi.useFakeTimers()
+    const rafSpy = vi
+      .spyOn(globalThis, 'requestAnimationFrame')
+      .mockImplementation((cb) => setTimeout(() => cb(performance.now()), 0))
+    const focusSpy = vi.spyOn(MockTerminal.prototype, 'focus')
+
+    try {
+      seedAgents([{ projectId: 'p', name: 'alpha' }])
+      const probe = renderProbe('alpha', 'p')
+      await probe.settle()
+      // Drain the rAF→timer chain plus anything the old ladder would have
+      // scheduled at 0/50/150/300ms, so a regression can't hide in a later
+      // timer that this assertion ran before.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500)
+      })
+
+      expect(createdTerminals).toHaveLength(1)
+      expect(focusSpy).toHaveBeenCalledTimes(1)
+
+      probe.unmount()
+    } finally {
+      focusSpy.mockRestore()
+      rafSpy.mockRestore()
+    }
+  })
+
   it('does not programmatically focus xterm when remounting an existing runtime', async () => {
     vi.useFakeTimers()
     const rafSpy = vi
