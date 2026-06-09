@@ -25,21 +25,47 @@ function archSuffix(): string {
   return `${process.platform}-${process.arch}`
 }
 
+// Locate the relayfile-mount binary shipped as the per-platform optional
+// package (@relayfile/mount-<platform>-<arch>), installed transitively via
+// @relayfile/sdk's optionalDependencies — the same distribution model as the
+// agent-relay broker (see resolveBundledBrokerBinary in broker.ts). The SDK
+// itself resolves this via import.meta.url, but that points at out/main/ once
+// electron-vite bundles the main process, so we resolve from __dirname instead.
+function optionalPackageMountBinaries(): string[] {
+  const pkgArch = `${process.platform}-${process.arch}`
+  const binName = process.platform === 'win32' ? 'relayfile-mount.exe' : 'relayfile-mount'
+  const unpackIfPackaged = (binary: string): string =>
+    app.isPackaged ? binary.replace('app.asar', 'app.asar.unpacked') : binary
+  // __dirname is out/main; ../../ reaches the app root that holds node_modules.
+  const nodeModules = join(__dirname, '..', '..', 'node_modules')
+  return [
+    // Hoisted to the app's top-level node_modules (the common case).
+    join(nodeModules, '@relayfile', `mount-${pkgArch}`, 'bin', binName),
+    // Nested under @relayfile/sdk when npm can't hoist it.
+    join(nodeModules, '@relayfile', 'sdk', 'node_modules', '@relayfile', `mount-${pkgArch}`, 'bin', binName)
+  ].map(unpackIfPackaged)
+}
+
 export function resolveRelayfileMountBinary(): string | null {
   if (canExecute(process.env.RELAYFILE_MOUNT_BIN)) return resolve(process.env.RELAYFILE_MOUNT_BIN)
 
   const appPath = app.getAppPath()
-  const candidates = app.isPackaged
-    ? [
-        join(process.resourcesPath, 'bin', 'relayfile-mount'),
-        join(appPath.replace('app.asar', 'app.asar.unpacked'), 'bin', 'relayfile-mount')
-      ]
-    : [
-        join(appPath, 'bin', 'relayfile-mount'),
-        join(process.cwd(), 'bin', 'relayfile-mount'),
-        join(appPath, '..', 'relayfile', 'dist', `relayfile-mount-${archSuffix()}`),
-        join(process.cwd(), '..', 'relayfile', 'dist', `relayfile-mount-${archSuffix()}`)
-      ]
+  const candidates = [
+    // Primary production path: the per-platform optional-dependency package.
+    ...optionalPackageMountBinaries(),
+    // Development / source-checkout fallbacks.
+    ...(app.isPackaged
+      ? [
+          join(process.resourcesPath, 'bin', 'relayfile-mount'),
+          join(appPath.replace('app.asar', 'app.asar.unpacked'), 'bin', 'relayfile-mount')
+        ]
+      : [
+          join(appPath, 'bin', 'relayfile-mount'),
+          join(process.cwd(), 'bin', 'relayfile-mount'),
+          join(appPath, '..', 'relayfile', 'dist', `relayfile-mount-${archSuffix()}`),
+          join(process.cwd(), '..', 'relayfile', 'dist', `relayfile-mount-${archSuffix()}`)
+        ])
+  ]
 
   for (const candidate of candidates) {
     if (canExecute(candidate)) return resolve(candidate)
