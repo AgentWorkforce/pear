@@ -223,7 +223,12 @@ vi.mock('./integration-mounts', () => ({
 
 vi.mock('./integration-event-bridge', () => ({
   integrationEventBridge: mock.integrationEventBridge,
-  integrationSubscriptionSummaries: vi.fn(() => [])
+  integrationSubscriptionSummaries: vi.fn(() => []),
+  slackListenDms: (integration: { provider?: string; scope?: Record<string, unknown> }) => {
+    if (integration.provider !== 'slack') return false
+    const scope = integration.scope ?? {}
+    return ['listenDms', 'listenDirectMessages', 'directMessages'].some((key) => scope[key] === true)
+  }
 }))
 
 vi.mock('./cloud-agent', () => ({
@@ -882,6 +887,36 @@ describe('IntegrationsManager', () => {
 
     await expect(
       manager.readRemoteFile('project-1', '/github/repos/acme/app/issues/1.json')
+    ).rejects.toThrow('outside this project integration scope')
+
+    expect(mock.readFileCalls).toEqual([])
+  })
+
+  it('reads Slack DM/user message records when DM listening is enabled, even outside channel mounts', async () => {
+    mock.store.projects[0].integrations[0].scope = { listenDms: true }
+    const manager = new IntegrationsManager()
+
+    const preview = await manager.readRemoteFile(
+      'project-1',
+      '/slack/users/U0ADJH4P83T/messages/1781020047_821749/meta.json'
+    )
+
+    expect(preview).toMatchObject({ kind: 'text' })
+    expect(mock.readFileCalls).toEqual([
+      {
+        workspaceId: 'account-workspace-id',
+        path: '/slack/users/U0ADJH4P83T/messages/1781020047_821749/meta.json'
+      }
+    ])
+  })
+
+  it('still rejects Slack DM/user message reads when DM listening is disabled', async () => {
+    // Default scope has DM listening off, and /slack/users is outside the
+    // channel mount paths, so the scope guard must still reject it.
+    const manager = new IntegrationsManager()
+
+    await expect(
+      manager.readRemoteFile('project-1', '/slack/users/U0ADJH4P83T/messages/1781020047_821749/meta.json')
     ).rejects.toThrow('outside this project integration scope')
 
     expect(mock.readFileCalls).toEqual([])

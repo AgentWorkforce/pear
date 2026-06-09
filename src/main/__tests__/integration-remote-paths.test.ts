@@ -4,6 +4,7 @@ import { test } from 'node:test'
 import {
   canShowRemoteDirectoryEntryForMountPaths,
   canListRemoteDirectoryForMountPaths,
+  isSlackDmListablePath,
   normalizeRemoteDirectoryPath,
   remotePathName
 } from '../integration-remote-paths.ts'
@@ -61,4 +62,21 @@ test('remote directory entries are filtered to configured mount roots', () => {
   assert.equal(canShowRemoteDirectoryEntryForMountPaths('/discovery/github', [
     '/discovery/slack'
   ]), false)
+})
+
+test('Slack DM and per-user message paths are recognized as DM-listable', () => {
+  // Per-user message paths (/slack/users/*/messages/**)
+  assert.equal(isSlackDmListablePath('/slack/users'), true)
+  assert.equal(isSlackDmListablePath('/slack/users/U0ADJH4P83T/messages/1781020047_821749/meta.json'), true)
+  // DM channels use Slack's "D" channel-id convention (/slack/channels/D*/**)
+  assert.equal(isSlackDmListablePath('/slack/channels/D123/messages/1.json'), true)
+  assert.equal(isSlackDmListablePath('/slack/channels/D123'), true)
+})
+
+test('non-DM Slack paths are not treated as DM-listable', () => {
+  assert.equal(isSlackDmListablePath('/slack/channels/C123/messages/1.json'), false)
+  assert.equal(isSlackDmListablePath('/slack/channels'), false)
+  assert.equal(isSlackDmListablePath('/slack'), false)
+  assert.equal(isSlackDmListablePath('/github/repos/acme/app'), false)
+  assert.equal(isSlackDmListablePath('/discovery/slack'), false)
 })

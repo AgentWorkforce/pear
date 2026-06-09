@@ -452,7 +452,7 @@ function scopeBooleanDefault(scope: Record<string, unknown>, keys: string[], def
   return defaultValue
 }
 
-function slackListenDms(integration: ConnectedIntegration): boolean {
+export function slackListenDms(integration: ConnectedIntegration): boolean {
   if (!isSlackProvider(integration.provider)) return false
   return scopeBooleanDefault(integration.scope, ['listenDms', 'listenDirectMessages', 'directMessages'], false)
 }
