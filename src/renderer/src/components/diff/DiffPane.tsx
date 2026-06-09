@@ -2513,7 +2513,7 @@ export function DiffPane(): React.ReactNode {
   async function handleGenerate(): Promise<void> {
     setMessage(null)
     try {
-      await generateCommitMessage(root.path, {
+      await generateCommitMessage(activeProjectId || '', root.path, {
         wholeFiles: selectedFileList,
         patch: selectedPatchInput()
       })

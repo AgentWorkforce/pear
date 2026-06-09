@@ -523,13 +523,17 @@ export function registerIpcHandlers(): void {
     return git.commitSelection(path, input)
   })
 
-  ipcMain.handle('git:generate-commit-message', async (_, path: string, input: { wholeFiles: string[]; patch?: string }) => {
+  ipcMain.handle('git:generate-commit-message', async (_, projectId: string, path: string, input: { wholeFiles: string[]; patch?: string }) => {
     assertPathWithinProjects(path)
     if (!isDirectory(path)) throw new Error('Git working directory is unavailable')
-    const projectId = getProjectIdForPath(path)
-    if (!projectId) throw new Error('No project is configured for this Git working directory')
+    const normalizedProjectId = projectId.trim()
+    const { projects } = loadStore()
+    const project = projects.find((entry) => entry.id === normalizedProjectId)
+    if (!project || !projectContainsPath(project, path)) {
+      throw new Error(`Path is outside project roots for project ${projectId}: ${resolve(path)}`)
+    }
     const diff = await git.getSelectedDiff(path, input)
-    return brokerManager.generateCommitDraft(projectId, diff)
+    return brokerManager.generateCommitDraft(normalizedProjectId, diff)
   })
 
   // --- Files ---

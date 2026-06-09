@@ -59,6 +59,7 @@ interface GitState {
   selectCommitFile: (rootPath: string, file: string | null) => Promise<void>
   commitSelection: (rootPath: string, input: GitCommitSelectionInput) => Promise<{ hash: string }>
   generateCommitMessage: (
+    projectId: string,
     rootPath: string,
     input: { wholeFiles: string[]; patch?: string }
   ) => Promise<GitCommitDraft>
@@ -306,14 +307,14 @@ export const useGitStore = create<GitState>((set, get) => ({
     }
   },
 
-  generateCommitMessage: async (rootPath, input) => {
+  generateCommitMessage: async (projectId, rootPath, input) => {
     set((state) => ({
       actionLoading: true,
       commitDraftStatusByRoot: { ...state.commitDraftStatusByRoot, [rootPath]: 'generating' },
       commitDraftErrorByRoot: { ...state.commitDraftErrorByRoot, [rootPath]: undefined }
     }))
     try {
-      const result = await pear.git.generateCommitMessage(rootPath, input)
+      const result = await pear.git.generateCommitMessage(projectId, rootPath, input)
       set((state) => ({
         actionLoading: false,
         commitDraftByRoot: { ...state.commitDraftByRoot, [rootPath]: result },

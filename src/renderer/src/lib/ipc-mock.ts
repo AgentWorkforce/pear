@@ -556,7 +556,7 @@ export const pearMock: PearAPI = {
     discardFiles: async () => undefined,
     addGitignorePatterns: async () => undefined,
     commitSelection: async (_path: string, _input: GitCommitSelectionInput) => ({ hash: 'mock' }),
-    generateCommitMessage: async (_path: string, _input: GitGenerateCommitMessageInput): Promise<GitCommitDraft> => ({ title: 'Mock commit', body: '' })
+    generateCommitMessage: async (_projectId: string, _path: string, _input: GitGenerateCommitMessageInput): Promise<GitCommitDraft> => ({ title: 'Mock commit', body: '' })
   },
   fs: {
     listDir: async (): Promise<FsDirEntry[]> => [],
