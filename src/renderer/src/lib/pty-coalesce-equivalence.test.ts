@@ -1,8 +1,8 @@
 // Real-VT-parser justification for the PTY write-coalescing change
 // (perf(terminal): coalesce per-frame PTY chunks into one xterm write).
 //
-// The runtime's writeChunks() now concatenates the frame's chunks and issues
-// ONE term.write() instead of one write per chunk. That is only safe if
+// A runtime writeChunks() optimization may concatenate a frame's chunks and
+// issue ONE term.write() instead of one write per chunk. That is only safe if
 // xterm's parser is a true streaming state machine — i.e. write(a)+write(b)
 // produces a byte-for-byte identical screen to write(a+b), even when a chunk
 // boundary falls in the MIDDLE of an escape sequence.
@@ -77,7 +77,7 @@ describe('pty write coalescing — real xterm parser equivalence', () => {
   it('renders identically whether a redraw stream is written per-chunk or coalesced', async () => {
     const stream = buildRedrawStream(8)
 
-    // Baseline: one big coalesced write (what writeChunks now does).
+    // Baseline: one big coalesced write (the optimization under test).
     const coalesced = makeTerm()
     await writeSync(coalesced, stream)
     const expected = readScreen(coalesced)
