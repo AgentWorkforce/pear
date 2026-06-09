@@ -60,7 +60,8 @@ const mock = vi.hoisted(() => {
   }
   const workspaceHandle = {
     workspaceId: 'account-workspace-id',
-    client: vi.fn(() => relayClient)
+    client: vi.fn(() => relayClient),
+    refreshToken: vi.fn(async () => undefined)
   }
   const relayWorkspaceManager = {
     withHandle: vi.fn(async (fn: (handle: typeof workspaceHandle) => Promise<unknown>) => fn(workspaceHandle)),
@@ -180,6 +181,7 @@ const mock = vi.hoisted(() => {
     readFileCalls,
     relayClient,
     relayWorkspaceManager,
+    workspaceHandle,
     brokerManager: {
       listAgents: vi.fn(async () => []),
       sendMessage: vi.fn(async () => undefined),
@@ -195,6 +197,18 @@ const mock = vi.hoisted(() => {
     }
   }
 })
+
+// readRemoteFile/listRemoteDirectory now resolve a reader handle via
+// RelayfileSetup.joinWorkspace (integrations.ts getIntegrationRemoteReaderHandle).
+// Mock the SDK so that path returns the in-memory handle instead of doing a
+// real network join.
+vi.mock('@relayfile/sdk', () => ({
+  RelayfileSetup: class {
+    async joinWorkspace() {
+      return mock.workspaceHandle
+    }
+  }
+}))
 
 vi.mock('electron', () => ({
   BrowserWindow: mock.browserWindow,
