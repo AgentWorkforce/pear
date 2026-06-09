@@ -56,6 +56,9 @@ type StressResult = {
   finalMockAgentCount: number
   finalMockBrokerEventCount: number
   ptyChunkKeyCount: number
+  ptyChunkEntryCount: number
+  ptyChunkCharacterCount: number
+  maxPtyChunkCharactersForAgent: number
   terminalSampleAgent: string
 }
 
@@ -167,6 +170,9 @@ test.describe('renderer stress explorer', () => {
       finalMockAgentCount: 0,
       finalMockBrokerEventCount: 0,
       ptyChunkKeyCount: 0,
+      ptyChunkEntryCount: 0,
+      ptyChunkCharacterCount: 0,
+      maxPtyChunkCharactersForAgent: 0,
       terminalSampleAgent: 'agent-0001'
     }
 
@@ -350,6 +356,10 @@ test.describe('renderer stress explorer', () => {
 
           await new Promise((resolve) => setTimeout(resolve, 250))
           const state = mock.getState()
+          const ptyChunkValues = Object.values(state.ptyChunks)
+          const ptyChunkCharacterCounts = ptyChunkValues.map((chunks) =>
+            chunks.reduce((sum, chunk) => sum + chunk.length, 0)
+          )
           const totalFrameMs = frameDeltas.reduce((sum, delta) => sum + delta, 0)
           const longestFrameMs = frameDeltas.length > 0 ? Math.max(...frameDeltas) : 0
           const avgFrameMs = totalFrameMs / Math.max(1, frameDeltas.length)
@@ -397,6 +407,9 @@ test.describe('renderer stress explorer', () => {
             finalMockAgentCount: state.agents.length,
             finalMockBrokerEventCount: state.events.length,
             ptyChunkKeyCount: Object.keys(state.ptyChunks).length,
+            ptyChunkEntryCount: ptyChunkValues.reduce((sum, chunks) => sum + chunks.length, 0),
+            ptyChunkCharacterCount: ptyChunkCharacterCounts.reduce((sum, count) => sum + count, 0),
+            maxPtyChunkCharactersForAgent: ptyChunkCharacterCounts.length > 0 ? Math.max(...ptyChunkCharacterCounts) : 0,
             terminalSampleAgent: 'agent-0001'
           }
         },
