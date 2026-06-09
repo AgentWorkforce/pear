@@ -7,7 +7,6 @@ import assert from 'node:assert/strict'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const launcherPath = join(__dirname, '..', 'relayfile-mount-launcher.ts')
 const packageJsonPath = join(__dirname, '..', '..', '..', 'package.json')
-const installScriptPath = join(__dirname, '..', '..', '..', 'scripts', 'install-relayfile-mount.mjs')
 
 test('relayfile mount launcher imports the launcher from the SDK launcher entrypoint', async () => {
   const source = await readFile(launcherPath, 'utf8')
@@ -24,24 +23,44 @@ test('relayfile mount launcher imports the launcher from the SDK launcher entryp
   )
 })
 
-test('mac release scripts install relayfile-mount from release assets only', async () => {
+test('relayfile-mount ships as the @relayfile/mount-* optional package, not a postinstall download', async () => {
   const packageJson = JSON.parse(await readFile(packageJsonPath, 'utf8')) as {
     scripts: Record<string, string>
   }
-  const installScript = await readFile(installScriptPath, 'utf8')
+  const launcherSource = await readFile(launcherPath, 'utf8')
+  const electronBuilderPath = join(__dirname, '..', '..', '..', 'electron-builder.yml')
+  const electronBuilder = await readFile(electronBuilderPath, 'utf8')
 
+  // No automatic download on `npm i` — the binary now arrives via
+  // @relayfile/sdk's optionalDependencies (the broker distribution model).
   assert.equal(
-    packageJson.scripts['relayfile-mount:install:release'],
-    'node scripts/install-relayfile-mount.mjs --release'
+    packageJson.scripts.postinstall,
+    undefined,
+    'npm i must not download the relayfile-mount binary via a postinstall hook'
   )
-  for (const scriptName of ['dist:mac', 'release:mac']) {
+
+  // The mac release path bundles the optional-dep binary from node_modules; it
+  // must not shell out to the GitHub-release download anymore.
+  for (const scriptName of ['build', 'dist:mac', 'release:mac']) {
     const script = packageJson.scripts[scriptName]
-    assert.match(script, /relayfile-mount:install:release/)
-    assert.match(script, /RELAYFILE_MOUNT_INSTALL_SOURCE=release npm run build/)
+    assert.doesNotMatch(
+      script,
+      /relayfile-mount:install|install-relayfile-mount/,
+      `${scriptName} must not run the relayfile-mount download step`
+    )
   }
-  assert.match(installScript, /const releaseMode = /)
+
+  // The launcher resolves the per-platform optional package.
   assert.match(
-    installScript,
-    /if \(releaseMode\) \{[\s\S]*?await downloadRelease\(version\)[\s\S]*?process\.exit\(0\)/
+    launcherSource,
+    /@relayfile\/mount-/,
+    'the launcher must resolve the @relayfile/mount-<platform>-<arch> package'
+  )
+
+  // electron-builder unpacks the optional-dep binary so it is spawnable.
+  assert.match(
+    electronBuilder,
+    /node_modules\/@relayfile\/mount-\*\/bin\/\*\*/,
+    'electron-builder must asarUnpack the @relayfile/mount-* binary'
   )
 })

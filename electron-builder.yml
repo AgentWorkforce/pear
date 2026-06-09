@@ -21,6 +21,11 @@ asarUnpack:
   - node_modules/@agent-relay/sdk/bin/**
   - node_modules/@agent-relay/broker-*/bin/**
   - node_modules/agent-relay/node_modules/@agent-relay/broker-*/bin/**
+  # relayfile-mount ships as a per-platform optional package
+  # (@relayfile/mount-<platform>-<arch>), installed transitively via
+  # @relayfile/sdk's optionalDependencies — same model as the broker above.
+  - node_modules/@relayfile/mount-*/bin/**
+  - node_modules/@relayfile/sdk/node_modules/@relayfile/mount-*/bin/**
 
 mac:
   category: public.app-category.developer-tools
