@@ -431,9 +431,15 @@ export function TerminalPane(): React.ReactNode {
   const activeProjectId = useProjectStore((s) => s.activeProjectId)
   const activeProject = useProjectStore((s) => s.getActiveProject())
   const activeRoot = useProjectStore((s) => s.getActiveRoot())
-  const agents = activeProjectId
-    ? allAgents.filter((a) => a.projectId === activeProjectId)
-    : allAgents
+  const agents = useMemo(
+    () => {
+      const projectAgents = activeProjectId
+        ? allAgents.filter((agent) => agent.projectId === activeProjectId)
+        : allAgents
+      return projectAgents.filter((agent) => agent.status === 'running')
+    },
+    [activeProjectId, allAgents]
+  )
   const activeAgentKey = useAgentStore((s) => s.activeAgentKey)
   const setActiveAgentKey = useAgentStore((s) => s.setActiveAgentKey)
   const setAgentTerminalMode = useAgentStore((s) => s.setAgentTerminalMode)

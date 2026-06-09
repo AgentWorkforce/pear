@@ -1166,6 +1166,35 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('treats terminal attach for a missing worker as a stale terminal', async () => {
+    const previousTimeout = process.env.PEAR_ATTACH_REGISTRATION_TIMEOUT_MS
+    process.env.PEAR_ATTACH_REGISTRATION_TIMEOUT_MS = '1'
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, [])
+
+    try {
+      await expect(manager.attachTerminal(PROJECT_ID, {
+        name: 'codex-1',
+        mode: 'passthrough'
+      })).resolves.toEqual({
+        name: 'codex-1',
+        mode: 'auto_inject',
+        pending: 0
+      })
+
+      expect(local.getInboundDeliveryMode).not.toHaveBeenCalled()
+      expect(local.setInboundDeliveryMode).not.toHaveBeenCalled()
+      expect(local.snapshot).not.toHaveBeenCalled()
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env.PEAR_ATTACH_REGISTRATION_TIMEOUT_MS
+      } else {
+        process.env.PEAR_ATTACH_REGISTRATION_TIMEOUT_MS = previousTimeout
+      }
+      await manager.shutdown()
+    }
+  })
+
   it('detachCloudSandbox drops only the cloud session', async () => {
     const manager = new BrokerManager()
     const local = await startLocal(manager, ['local-agent'])

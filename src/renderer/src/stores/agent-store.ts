@@ -734,7 +734,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
       }
       const needNewActive = state.activeAgentKey ? staleKeys.includes(state.activeAgentKey) : false
       const nextActiveAgent = needNewActive
-        ? nextAgents.find((agent) => agent.status === 'running') || nextAgents[0]
+        ? nextAgents.find((agent) => agent.status === 'running')
         : undefined
 
       return {

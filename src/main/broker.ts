@@ -2926,15 +2926,14 @@ export class BrokerManager {
   // top of attachTerminal so a freshly-spawned agent doesn't 404 on the
   // first setInboundDeliveryMode/getInboundDeliveryMode call. No-op if the
   // agent is already registered (the first listAgents() call returns it).
-  // Returns true when the agent appeared, false on timeout — the caller
-  // logs the timeout for debugging and falls through to the downstream
-  // calls (with their own retry wrapper) so a registration that completes
-  // just after the deadline still works.
+  // Returns true when the agent appeared, false on timeout. A false result
+  // means the renderer likely tried to revive a stale replayed terminal, so
+  // attach should stop before touching delivery-mode or snapshot endpoints.
   private async waitForAgentRegistration(session: BrokerSession, name: string): Promise<boolean> {
     // Bumped from PERSONA_REGISTRATION_TIMEOUT_MS (5s) — `claude --resume`
     // reads session history before connecting to the broker; a long
     // conversation can push first-registration past 5s.
-    const deadlineMs = 15_000
+    const deadlineMs = parsePositiveIntegerEnv('PEAR_ATTACH_REGISTRATION_TIMEOUT_MS', 15_000)
     const deadline = Date.now() + deadlineMs
     while (Date.now() < deadline) {
       try {
@@ -2967,7 +2966,7 @@ export class BrokerManager {
       return { session: fallback, registered: await this.waitForAgentRegistration(fallback, name) }
     }
 
-    const deadline = Date.now() + 15_000
+    const deadline = Date.now() + parsePositiveIntegerEnv('PEAR_ATTACH_REGISTRATION_TIMEOUT_MS', 15_000)
     while (Date.now() < deadline) {
       for (const candidate of candidates) {
         const agents = await candidate.client.listAgents().catch(() => null)
@@ -3289,15 +3288,21 @@ export class BrokerManager {
     // terminal → attach → broker 404. claude --resume in particular reads
     // session history first and can take 10+ seconds to register.
     const { session, registered } = await this.locateSessionForAgent(name, projectId)
+    const mode = toInboundDeliveryMode(input.mode)
+    if (!registered) {
+      console.warn(`[broker] attachTerminal: ${name} did not appear in listAgents within wait window; treating as a stale terminal`)
+      return {
+        name,
+        mode,
+        pending: 0
+      }
+    }
+
     const client = session.client
     // A re-attach (window reload, restart, tab re-open) is a fresh start for
     // this terminal — clear any stale HTTP-only fallback so the WS fast path
     // gets retried instead of being stuck on HTTP for the agent's lifetime.
     this.resetInputStreamFallback(this.getInputStreamKey(sessionKeyFor(session), name))
-    if (!registered) {
-      console.warn(`[broker] attachTerminal: ${name} did not appear in listAgents within wait window; falling through to per-call retry`)
-    }
-    const mode = toInboundDeliveryMode(input.mode)
     let previousMode: InboundDeliveryMode | undefined
 
     try {
