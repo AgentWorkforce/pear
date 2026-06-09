@@ -392,7 +392,10 @@ describe('IntegrationMountManager', () => {
     )
   })
 
-  it('only reports actually started local paths while a reconcile is reused in flight', async () => {
+  it('applies an in-flight desired-mount change instead of dropping it', async () => {
+    // A channel-subscription change that arrives while a reconcile is still in
+    // flight must not be swallowed: it should be chained after the pending op so
+    // the new path ends up mounted and the superseded one is dropped.
     let finishMount!: () => void
     mock.mountDelay = new Promise((resolve) => {
       finishMount = () => resolve()
@@ -416,9 +419,18 @@ describe('IntegrationMountManager', () => {
     await first
     await second
 
+    // The in-flight change was applied: C002 was mounted after C001 settled.
+    expect(mock.mountInputs.map((input) => input.remotePath)).toContain('/slack/channels/C002')
     expect(manager.localPathsFor('account-workspace-id', {
       provider: 'slack',
       mountPaths: ['/slack/channels/C002']
+    })).toEqual([
+      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/slack/channels/C002'
+    ])
+    // The superseded path is no longer a live handle.
+    expect(manager.localPathsFor('account-workspace-id', {
+      provider: 'slack',
+      mountPaths: ['/slack/channels/C001']
     })).toEqual([])
   })
 
@@ -844,6 +856,130 @@ describe('IntegrationMountManager', () => {
       reason: 'account-workspace-required',
       message: 'account-workspace-required'
     })
+  })
+
+  it('liveness watchdog restarts a present handle whose reconcile loop has frozen at status:ready', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-06T14:10:00.000Z'))
+    const manager = new IntegrationMountManager()
+    const healthObserver = vi.fn()
+    manager.setHealthObserver(healthObserver)
+    // status:ready, no lastError, but lastSuccessfulReconcileAt is 10min stale —
+    // the auth/sync-wedge/stalled-revision checks all stay silent; only the
+    // liveness watchdog can catch this.
+    mock.readFile.mockResolvedValue(JSON.stringify({
+      status: 'ready',
+      stale: false,
+      pendingWriteback: 0,
+      files: {},
+      lastSuccessfulReconcileAt: '2026-06-06T14:00:00.000Z'
+    }))
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/channels/C123/messages']
+      }
+    ])
+
+    await vi.advanceTimersByTimeAsync(45_000)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(healthObserver).toHaveBeenCalledWith({
+      type: 'reconcile-stalled',
+      remotePath: '/slack/channels/C123/messages',
+      status: 'ready',
+      lastSuccessfulReconcileAt: '2026-06-06T14:00:00.000Z'
+    })
+    expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/messages')).toHaveLength(2)
+  })
+
+  it('liveness watchdog does not restart a present handle that reconciled recently', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-06T14:10:00.000Z'))
+    const manager = new IntegrationMountManager()
+    const healthObserver = vi.fn()
+    manager.setHealthObserver(healthObserver)
+    // Reconciled 30s ago — well within the stale window.
+    mock.readFile.mockResolvedValue(JSON.stringify({
+      status: 'ready',
+      files: {},
+      lastSuccessfulReconcileAt: '2026-06-06T14:09:30.000Z'
+    }))
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/channels/C123/messages']
+      }
+    ])
+
+    await vi.advanceTimersByTimeAsync(45_000)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(healthObserver).not.toHaveBeenCalled()
+    expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/messages')).toHaveLength(1)
+  })
+
+  it('supervisor rebuilds a desired mount that has no live handle and re-runs after auth recovery', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-06T14:00:00.000Z'))
+    // Simulate the mass-stopAll outage: the first mount fails because auth is
+    // momentarily unavailable, so no handle is ever created.
+    mock.currentAuth = null
+    const manager = new IntegrationMountManager()
+
+    await expect(manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/channels/C123/messages']
+      }
+    ])).rejects.toThrow('cloud-auth-required')
+
+    expect(mock.mountInputs).toHaveLength(0)
+
+    // Auth recovers. The supervisor — armed even though handles=0 — rebuilds the
+    // desired mount on its next tick without any further ensureMounted call.
+    mock.currentAuth = {
+      apiUrl: 'https://cloud.example',
+      accessToken: 'account-token'
+    }
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    await Promise.resolve()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/messages')).toHaveLength(1)
+    expect(manager.localPathsFor('account-workspace-id', {
+      provider: 'slack',
+      mountPaths: ['/slack/channels/C123/messages']
+    })).toEqual([
+      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/slack/channels/C123/messages'
+    ])
+  })
+
+  it('supervisor does not remount when every desired path already has a live handle', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-06T14:00:00.000Z'))
+    const manager = new IntegrationMountManager()
+    // Fresh mount, no lastSuccessfulReconcileAt yet — must not be treated as stale.
+    mock.readFile.mockResolvedValue('{}')
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/channels/C123/messages']
+      }
+    ])
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/messages')).toHaveLength(1)
   })
 })
 
