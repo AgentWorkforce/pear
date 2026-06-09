@@ -795,6 +795,63 @@ test('slack raw-id and slug alias paths with distinct revisions inject once per 
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'alice', 'alice'])
 })
 
+test('slack thread parent materialized under both messages and threads trees injects once', async () => {
+  const harness = makeHarness(['alice'], {
+    readFileResponse: (_workspaceId, path) => ({
+      path,
+      revision: 'rev-context',
+      contentType: 'application/json',
+      content: JSON.stringify({ provider: 'slack', text: 'thread parent message' }),
+      encoding: 'utf-8'
+    })
+  })
+
+  // Production mounts messages and threads as separate roots, so the dedupe
+  // path-tail is identical for both copies — only the logical fingerprint
+  // differentiates them.
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: [
+          '/slack/channels/C123ABC__proj-cloud/messages',
+          '/slack/channels/C123ABC__proj-cloud/threads'
+        ],
+        downloadHistoricalData: false,
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+  })
+
+  // A thread PARENT (thread_ts == parent ts) materializes as BOTH the flat
+  // messages/<ts> record and the threads/<ts> root, each a distinct file with a
+  // distinct revision. They are one logical message and must inject once.
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json',
+    'slack',
+    { digest: 'revision:messages-tree' }
+  ))
+  await waitForSent(harness, 1)
+
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC__proj-cloud/threads/1780668000_000000/meta.json',
+    'slack',
+    { digest: 'revision:threads-tree' }
+  ))
+  await waitForDropped('project-1', 1)
+  assert.equal(harness.sent.length, 1)
+
+  // A reply inside that thread is a distinct logical message and still injects.
+  await harness.emit(changeEvent(
+    '/slack/channels/C123ABC__proj-cloud/threads/1780668000_000000/replies/1780668060_000000.json',
+    'slack',
+    { digest: 'revision:reply-1' }
+  ))
+  await waitForSent(harness, 2)
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'alice'])
+})
+
 test('slack raw-id and slug alias duplicates suppress when one context read is sparse', async () => {
   const harness = makeHarness(['alice'], {
     readFileResponse: (_workspaceId, path) => {

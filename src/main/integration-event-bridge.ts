@@ -1400,8 +1400,13 @@ function slackLogicalChangeFingerprint(event: ChangeEvent): string | null {
       const suffix = segments.slice(replyIndex + 2).join('/')
       return `slack:${scopeKind}:${scopeValue}:thread:${thread}:reply:${segments[replyIndex + 1]}:${suffix}`
     }
+    // The thread ROOT (no reply segment) is the same logical Slack message as
+    // the channel's top-level `messages/<thread>/...` record (thread_ts ==
+    // parent ts). A thread parent therefore materializes under BOTH trees;
+    // collapse the root to the message identity so the dual materialization
+    // dedupes to a single injection instead of one per tree.
     const suffix = segments.slice(threadIndex + 2).join('/')
-    return `slack:${scopeKind}:${scopeValue}:thread:${thread}:${suffix}`
+    return `slack:${scopeKind}:${scopeValue}:message:${thread}:${suffix}`
   }
 
   return null
