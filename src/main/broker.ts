@@ -424,7 +424,10 @@ function ensureBrokerBinaryCompatShim(): string {
   return shimPath
 }
 
-async function resolveHarnessBrokerBinary(workspaceKey?: string): Promise<{ binaryPath: string; env: NodeJS.ProcessEnv }> {
+// `binaryPath` is what Pear launches (possibly the legacy compat shim);
+// `realBinaryPath` is always the actual broker binary, for callers that hand
+// the binary itself to other processes.
+async function resolveHarnessBrokerBinary(workspaceKey?: string): Promise<{ binaryPath: string; realBinaryPath: string; env: NodeJS.ProcessEnv }> {
   const binaryPath = resolveBundledBrokerBinary()
   const flags = await inspectBrokerInitCliFlags(binaryPath)
 
@@ -435,7 +438,7 @@ async function resolveHarnessBrokerBinary(workspaceKey?: string): Promise<{ bina
   }
 
   if (flags.supportsInstanceName) {
-    return { binaryPath, env: {} }
+    return { binaryPath, realBinaryPath: binaryPath, env: {} }
   }
 
   if (!flags.supportsName) {
@@ -446,6 +449,7 @@ async function resolveHarnessBrokerBinary(workspaceKey?: string): Promise<{ bina
   console.warn(`[broker] Broker binary uses legacy --name flag; launching through compatibility shim: ${binaryPath}`)
   return {
     binaryPath: shimPath,
+    realBinaryPath: binaryPath,
     env: {
       PEAR_AGENT_RELAY_BROKER_BINARY: binaryPath,
       PEAR_AGENT_RELAY_BROKER_SUPPORTS_INSTANCE_NAME: flags.supportsInstanceName ? '1' : '0',
@@ -1545,13 +1549,6 @@ export class BrokerManager {
       // Phase 1 of #125: the local broker stays the workspace creator, so the
       // key is only threaded when explicitly pinned via env.
       const brokerBinary = await resolveHarnessBrokerBinary(explicitWorkspaceKey)
-      // Spawned workers inherit the broker's env. AGENT_RELAY_BIN lets the
-      // workforce CLI's `mcp-args --register` relay-MCP injection find the
-      // same broker binary Pear runs — a PATH lookup fails in packaged
-      // installs and can hit a version-skewed global binary in dev. In the
-      // legacy-shim case binaryPath is the shim, so prefer the real binary.
-      const agentRelayBinForWorkers =
-        brokerBinary.env.PEAR_AGENT_RELAY_BROKER_BINARY ?? brokerBinary.binaryPath
       const opts: AgentRelaySpawnOptions = {
         cwd,
         brokerName: name,
@@ -1562,7 +1559,13 @@ export class BrokerManager {
         env: {
           PATH: augmentedPath(),
           ...brokerBinary.env,
-          AGENT_RELAY_BIN: agentRelayBinForWorkers,
+          // Spawned workers inherit the broker's env. AGENT_RELAY_BIN is the
+          // ecosystem-standard broker-binary override (harness-driver
+          // broker-path, workforce runtime relay-mcp); it lets the workforce
+          // CLI's `mcp-args --register` relay-MCP injection find the same
+          // broker binary Pear runs — a PATH lookup fails in packaged
+          // installs and can hit a version-skewed global binary in dev.
+          AGENT_RELAY_BIN: brokerBinary.realBinaryPath,
           ...(agentRelayMcpCommand ? { AGENT_RELAY_MCP_COMMAND: agentRelayMcpCommand } : {})
         },
         onStderr: (line: string) => {
