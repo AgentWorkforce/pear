@@ -1545,6 +1545,13 @@ export class BrokerManager {
       // Phase 1 of #125: the local broker stays the workspace creator, so the
       // key is only threaded when explicitly pinned via env.
       const brokerBinary = await resolveHarnessBrokerBinary(explicitWorkspaceKey)
+      // Spawned workers inherit the broker's env. AGENT_RELAY_BIN lets the
+      // workforce CLI's `mcp-args --register` relay-MCP injection find the
+      // same broker binary Pear runs — a PATH lookup fails in packaged
+      // installs and can hit a version-skewed global binary in dev. In the
+      // legacy-shim case binaryPath is the shim, so prefer the real binary.
+      const agentRelayBinForWorkers =
+        brokerBinary.env.PEAR_AGENT_RELAY_BROKER_BINARY ?? brokerBinary.binaryPath
       const opts: AgentRelaySpawnOptions = {
         cwd,
         brokerName: name,
@@ -1555,6 +1562,7 @@ export class BrokerManager {
         env: {
           PATH: augmentedPath(),
           ...brokerBinary.env,
+          AGENT_RELAY_BIN: agentRelayBinForWorkers,
           ...(agentRelayMcpCommand ? { AGENT_RELAY_MCP_COMMAND: agentRelayMcpCommand } : {})
         },
         onStderr: (line: string) => {
@@ -2858,13 +2866,18 @@ export class BrokerManager {
       (await session.client.listAgents()).map((agent) => agent.name)
     )
     const personaArgs = ['agent', input.personaId]
+    // No skipRelayPrompt here: the workforce CLI injects the agent-relay MCP
+    // into the inner harness, but it only does so when the broker stamps
+    // RELAY_AGENT_NAME (+ RELAY_AGENT_TOKEN) into the worker env — and the
+    // broker suppresses those stamps when skip_relay_prompt is set. Broker-side
+    // arg injection stays a no-op either way because `agentworkforce` is not a
+    // CLI the broker recognizes, so the wrapper command is unchanged.
     let nextInput: SpawnPtyInput = {
       name: getAvailableAgentName(input.baseName, existingNames),
       cli: input.command.cli,
       args: [...input.command.args, ...personaArgs],
       cwd: session.cwd,
-      channels: session.channels,
-      skipRelayPrompt: true
+      channels: session.channels
     }
 
     for (let attempt = 0; attempt < 20; attempt += 1) {
