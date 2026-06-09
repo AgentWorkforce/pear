@@ -24,21 +24,24 @@ export function parseOpenCommand(argv: readonly string[]): string | null {
 }
 
 /**
- * Find the first project that already contains `targetPath` — either as an exact
- * root or nested under one of its roots. Paths are resolved to absolute form so
+ * Whether a project already contains `targetPath` — either as an exact root or
+ * nested under one of its roots. Paths are resolved to absolute form so
  * relative inputs (`./my-directory`) match against stored absolute roots.
  */
-export function findProjectForPath(projects: readonly Project[], targetPath: string): Project | null {
+export function projectContainsPath(project: Project, targetPath: string): boolean {
   const resolved = resolve(targetPath)
-  return (
-    projects.find((project) =>
-      project.roots.some((root) => {
-        const rootPath = resolve(root.path)
-        const pathFromRoot = relative(rootPath, resolved)
-        return pathFromRoot === '' || (!pathFromRoot.startsWith('..') && !isAbsolute(pathFromRoot))
-      })
-    ) ?? null
-  )
+  return project.roots.some((root) => {
+    const rootPath = resolve(root.path)
+    const pathFromRoot = relative(rootPath, resolved)
+    return pathFromRoot === '' || (!pathFromRoot.startsWith('..') && !isAbsolute(pathFromRoot))
+  })
+}
+
+/**
+ * Find the first project that already contains `targetPath`.
+ */
+export function findProjectForPath(projects: readonly Project[], targetPath: string): Project | null {
+  return projects.find((project) => projectContainsPath(project, targetPath)) ?? null
 }
 
 export interface OpenPathResult {

@@ -334,8 +334,8 @@ const api = {
       invoke<void>('git:add-gitignore-patterns', path, patterns),
     commitSelection: (path: string, input: GitCommitSelectionInput) =>
       invoke<{ hash: string }>('git:commit-selection', path, input),
-    generateCommitMessage: (path: string, input: GitGenerateCommitMessageInput) =>
-      invoke<GitCommitDraft>('git:generate-commit-message', path, input)
+    generateCommitMessage: (projectId: string, path: string, input: GitGenerateCommitMessageInput) =>
+      invoke<GitCommitDraft>('git:generate-commit-message', projectId, path, input)
   },
   fs: {
     listDir: (dirPath: string) => invoke<FsDirEntry[]>('fs:list-dir', dirPath),

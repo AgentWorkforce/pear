@@ -924,6 +924,7 @@ export interface PearAPI {
     addGitignorePatterns: (path: string, patterns: string[]) => Promise<void>
     commitSelection: (path: string, input: GitCommitSelectionInput) => Promise<{ hash: string }>
     generateCommitMessage: (
+      projectId: string,
       path: string,
       input: GitGenerateCommitMessageInput
     ) => Promise<GitCommitDraft>

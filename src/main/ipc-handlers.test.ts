@@ -41,6 +41,7 @@ const mock = vi.hoisted(() => {
       reconcileMessages: vi.fn(),
       listAgents: vi.fn(),
       getAgentOutput: vi.fn(),
+      generateCommitDraft: vi.fn(),
       getStatus: vi.fn(),
       attachCloudSandbox: vi.fn(),
       detachCloudSandbox: vi.fn(),
@@ -107,7 +108,9 @@ vi.mock('./broker', () => ({
   brokerManager: mock.brokerManager
 }))
 
-vi.mock('./git', () => ({}))
+vi.mock('./git', () => ({
+  getSelectedDiff: vi.fn()
+}))
 vi.mock('./filesystem', () => ({}))
 vi.mock('./auth', () => ({}))
 vi.mock('./cloud-agent', () => ({
@@ -137,12 +140,15 @@ vi.mock('./path-utils', () => ({
   isDirectory: vi.fn(() => true)
 }))
 vi.mock('./cli', () => ({
-  findProjectForPath: vi.fn()
+  findProjectForPath: vi.fn(),
+  projectContainsPath: vi.fn()
 }))
 
 import { registerIpcHandlers } from './ipc-handlers'
-import { findProjectForPath } from './cli'
+import { findProjectForPath, projectContainsPath } from './cli'
 import { isDirectory } from './path-utils'
+import { loadStore } from './store'
+import * as git from './git'
 
 describe('registerIpcHandlers broker:start', () => {
   beforeEach(() => {
@@ -207,7 +213,9 @@ describe('registerIpcHandlers broker:list-personas', () => {
     mock.ipcMain.handle.mockClear()
     mock.ipcMain.on.mockClear()
     mock.brokerManager.listPersonas.mockReset()
-    vi.mocked(findProjectForPath).mockReset()
+    vi.mocked(loadStore).mockReset()
+    vi.mocked(loadStore).mockReturnValue({ projects: [], activeProjectId: null })
+    vi.mocked(projectContainsPath).mockReset()
     vi.mocked(isDirectory).mockReset()
     vi.mocked(isDirectory).mockReturnValue(true)
     registerIpcHandlers()
@@ -216,19 +224,44 @@ describe('registerIpcHandlers broker:list-personas', () => {
   it('lists personas for a cwd inside the requested project root', async () => {
     const handler = mock.handlers.get('broker:list-personas')
     expect(handler).toBeTypeOf('function')
-    vi.mocked(findProjectForPath).mockReturnValue({ id: 'project-1' } as never)
+    const project = { id: 'project-1', roots: [{ id: 'root-1', name: 'Project 1', path: '/tmp/project-1' }] }
+    vi.mocked(loadStore).mockReturnValue({ projects: [project], activeProjectId: null } as never)
+    vi.mocked(projectContainsPath).mockReturnValue(true)
     mock.brokerManager.listPersonas.mockResolvedValueOnce([{ id: 'autonomous-actor' }])
 
     const result = await handler?.({}, 'project-1', '/tmp/project-1')
 
     expect(result).toEqual([{ id: 'autonomous-actor' }])
+    expect(projectContainsPath).toHaveBeenCalledWith(project, '/tmp/project-1')
     expect(mock.brokerManager.listPersonas).toHaveBeenCalledWith('project-1', '/tmp/project-1')
+  })
+
+  it('lists personas for the requested project when multiple projects share the cwd root', async () => {
+    const handler = mock.handlers.get('broker:list-personas')
+    expect(handler).toBeTypeOf('function')
+    const firstProject = { id: 'project-1', roots: [{ id: 'root-1', name: 'Shared', path: '/tmp/shared' }] }
+    const requestedProject = { id: 'project-2', roots: [{ id: 'root-2', name: 'Shared', path: '/tmp/shared' }] }
+    vi.mocked(loadStore).mockReturnValue({
+      projects: [firstProject, requestedProject],
+      activeProjectId: null
+    } as never)
+    vi.mocked(projectContainsPath).mockImplementation((project) => project.id === 'project-2')
+    mock.brokerManager.listPersonas.mockResolvedValueOnce([{ id: 'autonomous-actor' }])
+
+    const result = await handler?.({}, 'project-2', '/tmp/shared')
+
+    expect(result).toEqual([{ id: 'autonomous-actor' }])
+    expect(projectContainsPath).toHaveBeenCalledTimes(1)
+    expect(projectContainsPath).toHaveBeenCalledWith(requestedProject, '/tmp/shared')
+    expect(mock.brokerManager.listPersonas).toHaveBeenCalledWith('project-2', '/tmp/shared')
   })
 
   it('rejects persona cwd outside the requested project root', async () => {
     const handler = mock.handlers.get('broker:list-personas')
     expect(handler).toBeTypeOf('function')
-    vi.mocked(findProjectForPath).mockReturnValue({ id: 'project-2' } as never)
+    const project = { id: 'project-1', roots: [{ id: 'root-1', name: 'Project 1', path: '/tmp/project-1' }] }
+    vi.mocked(loadStore).mockReturnValue({ projects: [project], activeProjectId: null } as never)
+    vi.mocked(projectContainsPath).mockReturnValue(false)
 
     await expect(handler?.({}, 'project-1', '/tmp/project-2')).rejects.toThrow(
       /Path is outside project roots for project project-1/
@@ -258,5 +291,59 @@ describe('registerIpcHandlers broker:spawn-persona', () => {
     expect(mock.brokerManager.spawnPersona).toHaveBeenCalledWith('project-1', 'autonomous-actor')
     expect(mock.integrationEventBridge.invalidateProjectAgentCache).toHaveBeenCalledTimes(1)
     expect(mock.integrationEventBridge.invalidateProjectAgentCache).toHaveBeenCalledWith('project-1')
+  })
+})
+
+describe('registerIpcHandlers git:generate-commit-message', () => {
+  beforeEach(() => {
+    mock.handlers.clear()
+    mock.ipcMain.handle.mockClear()
+    mock.ipcMain.on.mockClear()
+    mock.brokerManager.generateCommitDraft.mockReset()
+    vi.mocked(loadStore).mockReset()
+    vi.mocked(loadStore).mockReturnValue({ projects: [], activeProjectId: null })
+    vi.mocked(findProjectForPath).mockReset()
+    vi.mocked(projectContainsPath).mockReset()
+    vi.mocked(isDirectory).mockReset()
+    vi.mocked(isDirectory).mockReturnValue(true)
+    vi.mocked(git.getSelectedDiff).mockReset()
+    registerIpcHandlers()
+  })
+
+  it('generates the commit draft for the passed project when multiple projects share the root', async () => {
+    const handler = mock.handlers.get('git:generate-commit-message')
+    expect(handler).toBeTypeOf('function')
+    const firstProject = { id: 'project-1', roots: [{ id: 'root-1', name: 'Shared', path: '/tmp/shared' }] }
+    const requestedProject = { id: 'project-2', roots: [{ id: 'root-2', name: 'Shared', path: '/tmp/shared' }] }
+    vi.mocked(loadStore).mockReturnValue({
+      projects: [firstProject, requestedProject],
+      activeProjectId: null
+    } as never)
+    vi.mocked(findProjectForPath).mockReturnValue(firstProject as never)
+    vi.mocked(projectContainsPath).mockImplementation((project) => project.id === 'project-2')
+    vi.mocked(git.getSelectedDiff).mockResolvedValueOnce('selected diff')
+    mock.brokerManager.generateCommitDraft.mockResolvedValueOnce({ title: 'Draft', body: '' })
+
+    const result = await handler?.({}, 'project-2', '/tmp/shared', { wholeFiles: ['README.md'] })
+
+    expect(result).toEqual({ title: 'Draft', body: '' })
+    expect(projectContainsPath).toHaveBeenCalledWith(requestedProject, '/tmp/shared')
+    expect(git.getSelectedDiff).toHaveBeenCalledWith('/tmp/shared', { wholeFiles: ['README.md'] })
+    expect(mock.brokerManager.generateCommitDraft).toHaveBeenCalledWith('project-2', 'selected diff')
+  })
+
+  it("rejects commit draft generation when the path is outside the passed project's roots", async () => {
+    const handler = mock.handlers.get('git:generate-commit-message')
+    expect(handler).toBeTypeOf('function')
+    const project = { id: 'project-1', roots: [{ id: 'root-1', name: 'Project 1', path: '/tmp/project-1' }] }
+    vi.mocked(loadStore).mockReturnValue({ projects: [project], activeProjectId: null } as never)
+    vi.mocked(findProjectForPath).mockReturnValue(project as never)
+    vi.mocked(projectContainsPath).mockReturnValue(false)
+
+    await expect(handler?.({}, 'project-1', '/tmp/project-2', { wholeFiles: ['README.md'] })).rejects.toThrow(
+      /Path is outside project roots for project project-1/
+    )
+    expect(git.getSelectedDiff).not.toHaveBeenCalled()
+    expect(mock.brokerManager.generateCommitDraft).not.toHaveBeenCalled()
   })
 })
