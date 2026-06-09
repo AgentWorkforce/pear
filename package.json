@@ -23,6 +23,7 @@
     "verify:mcp-spawn": "node scripts/verify-mcp-spawn.mjs",
     "release:mac": "npm run icons:macos && npm run relayfile-mount:install:release && RELAYFILE_MOUNT_INSTALL_SOURCE=release npm run build && electron-builder --mac --publish always",
     "test": "node --experimental-strip-types --no-warnings --test 'src/main/__tests__/*.test.ts'",
+    "test:fidelity": "npm run build:web && playwright test --config playwright.fidelity.config.ts",
     "test:stress": "npm run build:web && playwright test --config playwright.stress.config.ts",
     "test:redraw": "npm run build:web && playwright test --config playwright.redraw.config.ts",
     "personas:refresh": "npx --yes agentworkforce install @agentworkforce/persona-autonomous-actor --overwrite && npx --yes agentworkforce install @agentworkforce/persona-slack-comms --overwrite"

@@ -69,6 +69,7 @@ import type {
   UpdaterState,
   WorkforcePersona
 } from '@shared/types/ipc'
+import { getTerminalRuntime } from '@/lib/terminal-runtime-registry'
 
 type BrokerEventLike = Record<string, unknown> & {
   kind?: string
@@ -125,6 +126,7 @@ export interface PearMockHarness {
   spawnAgents: (count: number, options?: { projectId?: string; channel?: string; namePrefix?: string }) => void
   openChannel: (projectId: string, channelName: string) => void
   openAgents: (projectId?: string) => void
+  getTerminalBufferText: (projectId: string, name: string) => string | null
   getState: () => {
     activeId: string | null
     agents: BrokerListAgent[]
@@ -742,6 +744,17 @@ export const pearMockHarness: PearMockHarness = {
   openAgents: (projectId?: string) => {
     const listeners = state.menuListeners.get('mock:open-agents')
     for (const listener of listeners || []) listener(projectId)
+  },
+  getTerminalBufferText: (projectId: string, name: string) => {
+    const runtime = getTerminalRuntime(key(projectId, name))
+    if (!runtime) return null
+
+    const buffer = runtime.term.buffer.active
+    const lines: string[] = []
+    for (let index = 0; index < buffer.length; index += 1) {
+      lines.push(buffer.getLine(index)?.translateToString(true) ?? '')
+    }
+    return lines.join('\n')
   },
   getState: () => ({
     activeId: state.activeId,
