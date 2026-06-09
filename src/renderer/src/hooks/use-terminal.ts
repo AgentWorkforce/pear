@@ -165,7 +165,6 @@ export function useTerminal(
     let resizeObserver: ResizeObserver | null = null
     let resizeDebounceTimer: ReturnType<typeof setTimeout> | null = null
     let srttPoll: ReturnType<typeof setInterval> | null = null
-    let focusTimers: ReturnType<typeof setTimeout>[] = []
     let mountToken: symbol | null = null
     const containerEl = containerRef.current
 
@@ -191,11 +190,17 @@ export function useTerminal(
       // Do not programmatically focus an existing runtime on tab remount.
       // Some TUIs enable DECSET ?1004; xterm focus() then emits a focus-in
       // sequence that can make them redraw and stack duplicate content.
+      //
+      // On a fresh runtime, focus EXACTLY ONCE. The previous 0/50/150/300ms
+      // ladder fired focusTerminal five times; each call does
+      // container.focus() THEN textarea.focus(), bouncing focus off the
+      // xterm textarea and back, so each re-emitted a focus-in (\e[I) to a
+      // ?1004 TUI. On Claude Code's Ink UI that stacked one duplicate
+      // tool-card per emission — the "~5 cards on first agent spawn" symptom.
+      // mount() opens xterm synchronously when the container has layout (the
+      // active pane always does), so a single rAF-deferred focus lands.
       if (!isRuntimeRemount) {
         focusTerminal(true)
-        focusTimers = [0, 50, 150, 300].map((delay) =>
-          setTimeout(() => focusTerminal(true), delay)
-        )
       }
     }
 
@@ -244,7 +249,6 @@ export function useTerminal(
       // cross-tree React commit-order case the token-based detach
       // already protects the host against).
       runtime.clearOnDataIf(onDataHandler)
-      for (const timer of focusTimers) clearTimeout(timer)
       if (resizeDebounceTimer) clearTimeout(resizeDebounceTimer)
       resizeObserver?.disconnect()
       if (srttPoll) clearInterval(srttPoll)
