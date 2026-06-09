@@ -18,7 +18,6 @@ import { pear, type BrokerDetails, type BrokerEventRecord, type BrokerListAgent 
 import { type BrokerErrorEntry, useAgentStore } from '@/stores/agent-store'
 import { useProjectStore, type Project } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
-import { getBrokerErrorKey } from '@shared/lib/broker-errors'
 
 const errorTimeFormatter = new Intl.DateTimeFormat(undefined, {
   month: 'short',
@@ -86,16 +85,6 @@ function getAutoFixableBrokerError(
   options: { allowLivePidConflict?: boolean } = {}
 ): BrokerErrorEntry | undefined {
   return entries.find((entry) => isRecoverableBrokerRuntimeError(entry.message, options))
-}
-
-function dedupeBrokerErrorEntries(entries: BrokerErrorEntry[]): BrokerErrorEntry[] {
-  const seen = new Set<string>()
-  return entries.filter((entry) => {
-    const key = getBrokerErrorKey(entry)
-    if (seen.has(key)) return false
-    seen.add(key)
-    return true
-  })
 }
 
 function getConnectionStatusLabel(status: BrokerDetails['connectionFileStatus']): string {
@@ -989,7 +978,7 @@ export function BrokerDetailsPage(): React.ReactNode {
 
   const pageProjectId = activeBrokerTabProjectId || activeProjectId || undefined
   const pageProjectName = pageProjectId ? getProjectName(projects, pageProjectId) : 'All projects'
-  const visibleBrokerErrors = useMemo(() => dedupeBrokerErrorEntries(brokerErrors), [brokerErrors])
+  const visibleBrokerErrors = brokerErrors
   const currentErrorId = brokerStatus === 'error' && brokerError && visibleBrokerErrors[0]?.message === brokerError
     ? visibleBrokerErrors[0].id
     : undefined
