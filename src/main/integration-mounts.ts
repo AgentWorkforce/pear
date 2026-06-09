@@ -19,6 +19,22 @@ const MOUNT_AUTH_RESTART_THROTTLE_MS = 60_000
 // coalesce into one restart instead of racing it.
 const MOUNT_HEALTH_POLL_INTERVAL_MS = 45_000
 const MOUNT_SYNC_WEDGE_FAILURES = 3
+// A mount whose state.json still reports status:ready / no error but whose
+// lastSuccessfulReconcileAt has not advanced past this window has a wedged
+// reconcile loop the auth/sync-wedge/stalled-revision checks can't see (they all
+// require the mount to keep writing FRESH state). The mount self-reports a ~30s
+// poll interval, so 5min is ~10 missed cycles — comfortably past transient
+// network stalls (incl. the ~5min ws->poll fallback) yet far under the ~100min
+// full-pull self-heal. Wall-clock (not cycle-count) stays correct if the mount's
+// interval changes. A missing/never-written lastSuccessfulReconcileAt is treated
+// as NOT stale so a freshly-booted or never-reconciled mount is never killed.
+const RECONCILE_STALE_MS = 5 * 60_000
+// The supervisor reconciles desiredMountPaths -> live handles on its own cadence,
+// independent of whether any handles currently exist. This is the ONLY thing that
+// rebuilds mounts after a mass `stopAll()` (auth/workspace blip) drops every
+// handle and the follow-up remount fails — checkMountHealth only iterates present
+// handles, so it can never resurrect a missing one.
+const MOUNT_SUPERVISOR_INTERVAL_MS = 30_000
 // Defense-in-depth backstop for a silently-dropped incremental sync event (the
 // class of bug fixed server-side by cloud#2010 — an event whose path the mount's
 // literal-prefix filter rejected, so the mount cycles status:ready yet never
@@ -54,6 +70,11 @@ export type MountHealthAlert = {
   type: 'auth-required'
   reason: MountAuthRequiredReason
   message: string
+} | {
+  type: 'reconcile-stalled'
+  remotePath: string
+  status: string | null
+  lastSuccessfulReconcileAt: string | null
 }
 
 type MountAuthRequiredReason = 'cloud-auth-required' | 'account-workspace-required'
@@ -170,6 +191,9 @@ export class IntegrationMountManager {
   private pending: Promise<void> | null = null
   private desiredMountPaths: string[] = []
   private healthPollTimer: ReturnType<typeof setInterval> | null = null
+  private supervisorTimer: ReturnType<typeof setInterval> | null = null
+  private supervisorRunning = false
+  private lastSupervisedRemountAt = 0
   private healthObserver: ((alert: MountHealthAlert) => void) | null = null
   private handledHealthErrorKeys = new Map<string, string>()
   private lastAuthRequiredReason: MountAuthRequiredReason | null = null
@@ -187,15 +211,25 @@ export class IntegrationMountManager {
       return
     }
 
-    if (this.pending) return this.pending
-    const pending = this.mount(mountPaths, new Set(), new Set())
-      .catch((error) => {
-        if (isCloudAuthRequiredError(error) || isAccountWorkspaceRequiredError(error)) {
-          this.reportAuthRequired(error)
-          throw error
-        }
-        console.warn('[integration-mounts] Failed to reconcile Relayfile integration mounts:', toErrorMessage(error))
-      })
+    // Arm the supervisor before the first mount attempt so that even if this
+    // mount() throws (auth/workspace blip), there is a standing loop that keeps
+    // reconciling desiredMountPaths -> live handles until it recovers.
+    this.ensureSupervisor()
+
+    // A reconcile already in flight must not swallow a newer desired set (e.g. a
+    // channel-subscription change). Chain the latest desiredMountPaths after the
+    // pending op so the change is applied rather than dropped.
+    if (this.pending) {
+      const queued = this.pending
+        .catch(() => undefined)
+        .then(() => this.runMount(this.desiredMountPaths))
+        .finally(() => {
+          if (this.pending === queued) this.pending = null
+        })
+      this.pending = queued
+      return queued
+    }
+    const pending = this.runMount(mountPaths)
       .finally(() => {
         if (this.pending === pending) this.pending = null
       })
@@ -203,8 +237,27 @@ export class IntegrationMountManager {
     return this.pending
   }
 
+  // Shared mount wrapper used by ensureMounted and the supervisor: a no-op when
+  // there is nothing desired, surfaces auth-recovery, and otherwise swallows
+  // transient mount failures (the supervisor/health loops retry).
+  private async runMount(mountPaths: string[]): Promise<void> {
+    if (mountPaths.length === 0) return
+    try {
+      await this.mount(mountPaths, new Set(), new Set())
+    } catch (error) {
+      if (isCloudAuthRequiredError(error) || isAccountWorkspaceRequiredError(error)) {
+        this.reportAuthRequired(error)
+        throw error
+      }
+      console.warn('[integration-mounts] Failed to reconcile Relayfile integration mounts:', toErrorMessage(error))
+    }
+  }
+
   async stop(): Promise<void> {
     this.desiredMountPaths = []
+    // Tear the supervisor down only on an intentional full stop — a mass
+    // stopAll() from a workspace/auth blip leaves it running so it can rebuild.
+    this.stopSupervisor()
     const pending = this.pending
     if (pending) await pending.catch(() => undefined)
     await this.stopAll()
@@ -258,6 +311,58 @@ export class IntegrationMountManager {
     }
 
     return mountPaths.map((mountPath) => integrationLocalPathForRemote(workspaceId, mountPath))
+  }
+
+  // Supervisor: the only loop that can rebuild handles after a mass stopAll().
+  // Armed whenever desiredMountPaths is non-empty and kept running even while
+  // handles=0, so a token-refresh/workspace blip that tears every mount down (and
+  // whose follow-up remount fails) is recovered on the next tick. checkMountHealth
+  // only iterates PRESENT handles and therefore cannot resurrect a missing one.
+  private ensureSupervisor(): void {
+    if (this.supervisorTimer || this.desiredMountPaths.length === 0) return
+    const timer = setInterval(() => {
+      void this.superviseDesiredMounts()
+    }, MOUNT_SUPERVISOR_INTERVAL_MS)
+    timer.unref?.()
+    this.supervisorTimer = timer
+  }
+
+  private stopSupervisor(): void {
+    if (this.supervisorTimer) clearInterval(this.supervisorTimer)
+    this.supervisorTimer = null
+  }
+
+  // Reconcile desiredMountPaths -> live handles. Remounts the desired set when any
+  // desired path has no handle (the mass-stopAll/failed-remount case). Stale but
+  // PRESENT handles are handled by checkMountHealth's liveness watchdog, so this
+  // does no state I/O — it only compares the desired set against handle keys.
+  private async superviseDesiredMounts(): Promise<void> {
+    if (this.supervisorRunning) return
+    if (this.desiredMountPaths.length === 0) {
+      this.stopSupervisor()
+      return
+    }
+    // A reconcile is already running; it will converge handles. Re-check next tick.
+    if (this.pending) return
+    const missing = this.desiredMountPaths.filter((remotePath) => !this.handles.has(remotePath))
+    if (missing.length === 0) return
+
+    const now = Date.now()
+    if (now - this.lastSupervisedRemountAt < MOUNT_SUPERVISOR_INTERVAL_MS) return
+    this.lastSupervisedRemountAt = now
+    this.supervisorRunning = true
+    console.warn(
+      '[integration-mounts] Supervisor rebuilding missing relayfile mounts',
+      { missing, liveHandles: this.handles.size }
+    )
+    const pending = this.runMount(this.desiredMountPaths)
+      .catch(() => undefined)
+      .finally(() => {
+        this.supervisorRunning = false
+        if (this.pending === pending) this.pending = null
+      })
+    this.pending = pending
+    await pending
   }
 
   // The mount binary runs detached (background: true) and logs sync failures
@@ -371,6 +476,34 @@ export class IntegrationMountManager {
           }
         }
       }
+
+      // Liveness watchdog: a reconcile loop that wedges AFTER writing status:ready
+      // leaves state.json frozen with no lastError — the three checks above all
+      // require FRESH state, so none of them fire. Detect the freeze directly: a
+      // present handle whose lastSuccessfulReconcileAt has not advanced past the
+      // stale window is a wedged loop; restart it. A missing timestamp (booting /
+      // never reconciled) is intentionally NOT treated as stale.
+      if (state && mountReconcileIsStale(state)) {
+        const lastSuccess = typeof state.lastSuccessfulReconcileAt === 'string'
+          ? state.lastSuccessfulReconcileAt
+          : null
+        const healthErrorKey = ['reconcile-stalled', lastSuccess ?? 'missing'].join('|')
+        if (this.handledHealthErrorKeys.get(remotePath) === healthErrorKey) continue
+        const queued = this.queueForcedRestart(remotePath, 'reconcile loop stalled')
+        this.handledHealthErrorKeys.set(remotePath, healthErrorKey)
+        if (queued) {
+          console.warn(
+            `[integration-mounts] Mount reconcile loop stalled for ${remotePath}; restarting`,
+            { status: typeof state.status === 'string' ? state.status : null, lastSuccessfulReconcileAt: lastSuccess }
+          )
+          this.healthObserver?.({
+            type: 'reconcile-stalled',
+            remotePath,
+            status: typeof state.status === 'string' ? state.status : null,
+            lastSuccessfulReconcileAt: lastSuccess
+          })
+        }
+      }
     }
   }
 
@@ -465,7 +598,11 @@ export class IntegrationMountManager {
       const existing = this.handles.get(spec.remotePath)
       if (existing) {
         const status = await existing.status().catch(() => null)
-        if (status?.ready && !forceRemotePaths.has(spec.remotePath)) {
+        // status.ready alone is not enough: a wedged reconcile loop keeps
+        // reporting ready off its frozen state.json. Don't reuse a handle whose
+        // lastSuccessfulReconcileAt has gone stale — restart it instead.
+        const stale = mountReconcileIsStale(await readMountStateFile(existing.localDir))
+        if (status?.ready && !stale && !forceRemotePaths.has(spec.remotePath)) {
           this.scheduleRefresh(spec.remotePath, existing)
           continue
         }
@@ -619,6 +756,20 @@ function parseTimestamp(value: string | null | undefined): number | null {
   if (!value) return null
   const parsed = Date.parse(value)
   return Number.isFinite(parsed) ? parsed : null
+}
+
+// True when a mount's reconcile loop has demonstrably frozen: it has reconciled
+// at least once (so it's not merely booting) but lastSuccessfulReconcileAt has
+// not advanced past the stale window. A null state or a missing/never-written
+// timestamp is NOT stale — a freshly-mounted or never-reconciled mount must not
+// be killed.
+function mountReconcileIsStale(state: Record<string, unknown> | null): boolean {
+  if (!state) return false
+  const lastSuccessAt = parseTimestamp(
+    typeof state.lastSuccessfulReconcileAt === 'string' ? state.lastSuccessfulReconcileAt : null
+  )
+  if (lastSuccessAt === null) return false
+  return Date.now() - lastSuccessAt > RECONCILE_STALE_MS
 }
 
 function refreshTimeFor(handle: MountedWorkspaceHandle): number | null {
