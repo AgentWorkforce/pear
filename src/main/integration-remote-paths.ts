@@ -38,3 +38,19 @@ export function canShowRemoteDirectoryEntryForMountPaths(entryPath: string, moun
     isRelayfilePathWithinRoot(entryPath, mountPath)
   )
 }
+
+// Slack direct-message and per-user message paths are delivered as events when
+// DM listening is enabled (SLACK_DM_EVENT_GLOBS: /slack/users/*/messages/** and
+// /slack/channels/D*/**), but they are not part of the canonical channel mount
+// paths, so the mount-path scope checks above reject them. This predicate
+// recognizes exactly those event-subscribed DM roots so list/read can be
+// allowed when (and only when) DM listening is on, without widening scope to
+// non-DM channels. The "D" prefix on a channel segment is Slack's DM channel
+// convention, which a plain root path cannot express.
+export function isSlackDmListablePath(remotePath: string): boolean {
+  const segments = (remotePath || '').trim().replace(/\/+$/, '').split('/').filter(Boolean)
+  if (segments[0] !== 'slack') return false
+  if (segments[1] === 'users') return true
+  if (segments[1] === 'channels' && /^D/u.test(segments[2] ?? '')) return true
+  return false
+}

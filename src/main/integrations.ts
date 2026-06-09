@@ -6,7 +6,7 @@ import { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, getApiUrl, re
 import { brokerManager } from './broker'
 import { cloudAgentManager } from './cloud-agent'
 import * as filesystem from './filesystem'
-import { integrationEventBridge, integrationSubscriptionSummaries } from './integration-event-bridge'
+import { integrationEventBridge, integrationSubscriptionSummaries, slackListenDms } from './integration-event-bridge'
 import {
   integrationMountManager,
   integrationMountRootForWorkspace,
@@ -16,6 +16,7 @@ import {
   canListRemoteDirectoryForMountPaths,
   canShowRemoteDirectoryEntryForMountPaths,
   isRelayfilePathWithinRoot,
+  isSlackDmListablePath,
   normalizeRemoteDirectoryPath,
   remotePathName
 } from './integration-remote-paths'
@@ -1011,7 +1012,11 @@ export class IntegrationsManager {
     const path = normalizeRemoteDirectoryPath(remotePath)
     if (!path || path === '/') throw new Error('Integration remote file path is required')
     const mountPaths = this.listableRemoteMountPaths(projectId)
-    if (!mountPaths.some((mountPath) => isRelayfilePathWithinRoot(mountPath, path))) {
+    const allowSlackDms = this.slackDmListingEnabledForProject(projectId)
+    const withinScope =
+      mountPaths.some((mountPath) => isRelayfilePathWithinRoot(mountPath, path)) ||
+      (allowSlackDms && isSlackDmListablePath(path))
+    if (!withinScope) {
       throw new Error('Integration remote file is outside this project integration scope')
     }
 
@@ -1026,7 +1031,8 @@ export class IntegrationsManager {
     const path = normalizeRemoteDirectoryPath(remotePath)
     if (!path || path === '/') throw new Error('Integration remote directory path is required')
     const mountPaths = this.listableRemoteMountPaths(projectId)
-    if (!canListRemoteDirectoryForMountPaths(path, mountPaths)) {
+    const allowSlackDms = this.slackDmListingEnabledForProject(projectId)
+    if (!canListRemoteDirectoryForMountPaths(path, mountPaths) && !(allowSlackDms && isSlackDmListablePath(path))) {
       throw new Error('Integration remote directory is outside this project integration scope')
     }
 
@@ -1043,7 +1049,12 @@ export class IntegrationsManager {
 
         for (const entry of tree.entries) {
           if (entry.path === path) continue
-          if (!canShowRemoteDirectoryEntryForMountPaths(entry.path, mountPaths)) continue
+          if (
+            !canShowRemoteDirectoryEntryForMountPaths(entry.path, mountPaths) &&
+            !(allowSlackDms && isSlackDmListablePath(entry.path))
+          ) {
+            continue
+          }
           entries.push({
             name: remotePathName(entry.path),
             path: entry.path,
@@ -1977,6 +1988,14 @@ export class IntegrationsManager {
 
   private canonicalMountPathsForIntegration(integration: ConnectedIntegration): string[] {
     return canonicalMountPathsForConnectedIntegration(integration)
+  }
+
+  // True when any visible Slack integration for the project has DM listening
+  // enabled. DM/user message paths are event-subscribed but absent from the
+  // canonical channel mount paths, so list/read of those paths is permitted
+  // only under this flag (see isSlackDmListablePath).
+  private slackDmListingEnabledForProject(projectId: string): boolean {
+    return this.visibleIntegrationsForProject(projectId).some((integration) => slackListenDms(integration))
   }
 
   private async listSystemMessageAgents(
