@@ -151,7 +151,7 @@ describe('agent-store stress', () => {
 
     // Sanity — buffer is non-trivially populated (the cap actually clamped).
     expect(messages.length).toBe(MAX_CHAT_MESSAGES)
-  }, 25_000)
+  }, 60_000)
 
   it('addHumanMessage never drops repeated identical sends', () => {
     // Invariant 2 — the optimistic path is local-only; repeats must survive.

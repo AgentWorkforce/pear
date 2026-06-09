@@ -168,6 +168,53 @@ describe('terminal-runtime-registry — pty-buffer subscription lifecycle', () =
   })
 })
 
+describe('terminal-runtime-registry — pty drain coalescing', () => {
+  it('coalesces a multi-chunk frame into one ordered write', async () => {
+    const runtime = registry.acquireTerminalRuntime({
+      projectId: 'p',
+      agentName: 'a',
+      terminalMode: 'drive',
+      theme: 'dark',
+      getInputSrtt: () => null
+    })
+    const term = createdTerminals[0]
+    expect(term).toBeDefined()
+
+    runtime.mount(makeLayoutContainer())
+    await flushAsync()
+    await flushAsync()
+
+    const before = term.__writes.length
+    // Three chunks staged in one animation frame (no flush between), then
+    // drained together. The runtime must hand xterm ONE write — not three —
+    // so the VT parser (and the predictive-echo headless model) run once per
+    // frame instead of once per chunk. That per-chunk fan-out was the drain
+    // hot path under heavy TUI redraw streaming.
+    ptyBuffer.appendPtyChunk(runtime.key, 'aaa')
+    ptyBuffer.appendPtyChunk(runtime.key, 'bbb')
+    ptyBuffer.appendPtyChunk(runtime.key, 'ccc')
+    ptyBuffer.flushPtyChunksNow(runtime.key)
+
+    expect(term.__writes.length).toBe(before + 1)
+    expect(term.__writes[term.__writes.length - 1]).toBe('aaabbbccc')
+
+    const beforeDuplicates = term.__writes.length
+    ptyBuffer.appendPtyChunk(runtime.key, 'dup')
+    ptyBuffer.appendPtyChunk(runtime.key, 'dup')
+    ptyBuffer.appendPtyChunk(runtime.key, 'tail')
+    ptyBuffer.flushPtyChunksNow(runtime.key)
+
+    expect(term.__writes.length).toBe(beforeDuplicates + 1)
+    expect(term.__writes[term.__writes.length - 1]).toBe('dupduptail')
+
+    const afterDuplicates = term.__writes.length
+    ptyBuffer.flushPtyChunksNow(runtime.key)
+    expect(term.__writes.length).toBe(afterDuplicates)
+
+    registry.disposeTerminalRuntime(runtime.key)
+  })
+})
+
 describe('terminal-runtime-registry — clearOnDataIf identity check', () => {
   it('only clears the on-data handler when the caller still owns the slot', () => {
     const runtime = registry.acquireTerminalRuntime({
