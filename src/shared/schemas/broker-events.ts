@@ -377,6 +377,40 @@ export const BrokerEventSchema = z.discriminatedUnion('kind', [
 
 export type ValidatedBrokerEvent = z.infer<typeof BrokerEventSchema>
 
+/** Per-variant inferred types — use with `satisfies` to catch payload drift at compile time. */
+export type AgentSpawnedEvent = Extract<ValidatedBrokerEvent, { kind: 'agent_spawned' }>
+export type AgentReleasedEvent = Extract<ValidatedBrokerEvent, { kind: 'agent_released' }>
+export type AgentExitEvent = Extract<ValidatedBrokerEvent, { kind: 'agent_exit' }>
+export type AgentExitedEvent = Extract<ValidatedBrokerEvent, { kind: 'agent_exited' }>
+export type AgentContextLowEvent = Extract<ValidatedBrokerEvent, { kind: 'agent_context_low' }>
+export type RelayInboundEvent = Extract<ValidatedBrokerEvent, { kind: 'relay_inbound' }>
+export type WorkerStreamEvent = Extract<ValidatedBrokerEvent, { kind: 'worker_stream' }>
+export type DeliveryRetryEvent = Extract<ValidatedBrokerEvent, { kind: 'delivery_retry' }>
+export type DeliveryDroppedEvent = Extract<ValidatedBrokerEvent, { kind: 'delivery_dropped' }>
+export type DeliveryQueuedEvent = Extract<ValidatedBrokerEvent, { kind: 'delivery_queued' }>
+export type AgentPendingDrainedEvent = Extract<ValidatedBrokerEvent, { kind: 'agent_pending_drained' }>
+export type AgentInboundDeliveryModeChangedEvent = Extract<ValidatedBrokerEvent, { kind: 'agent_inbound_delivery_mode_changed' }>
+export type DeliveryInjectedEvent = Extract<ValidatedBrokerEvent, { kind: 'delivery_injected' }>
+export type DeliveryVerifiedEvent = Extract<ValidatedBrokerEvent, { kind: 'delivery_verified' }>
+export type DeliveryFailedEvent = Extract<ValidatedBrokerEvent, { kind: 'delivery_failed' }>
+export type MessageDeliveryConfirmedEvent = Extract<ValidatedBrokerEvent, { kind: 'message_delivery_confirmed' }>
+export type MessageDeliveryFailedEvent = Extract<ValidatedBrokerEvent, { kind: 'message_delivery_failed' }>
+export type DeliveryActiveEvent = Extract<ValidatedBrokerEvent, { kind: 'delivery_active' }>
+export type DeliveryAckEvent = Extract<ValidatedBrokerEvent, { kind: 'delivery_ack' }>
+export type ChannelSubscribedEvent = Extract<ValidatedBrokerEvent, { kind: 'channel_subscribed' }>
+export type ChannelUnsubscribedEvent = Extract<ValidatedBrokerEvent, { kind: 'channel_unsubscribed' }>
+export type WorkerReadyEvent = Extract<ValidatedBrokerEvent, { kind: 'worker_ready' }>
+export type WorkerErrorEvent = Extract<ValidatedBrokerEvent, { kind: 'worker_error' }>
+export type RelaycastPublishedEvent = Extract<ValidatedBrokerEvent, { kind: 'relaycast_published' }>
+export type RelaycastPublishFailedEvent = Extract<ValidatedBrokerEvent, { kind: 'relaycast_publish_failed' }>
+export type AclDeniedEvent = Extract<ValidatedBrokerEvent, { kind: 'acl_denied' }>
+export type AgentIdleEvent = Extract<ValidatedBrokerEvent, { kind: 'agent_idle' }>
+export type AgentResultEvent = Extract<ValidatedBrokerEvent, { kind: 'agent_result' }>
+export type AgentBlockedOnSendEvent = Extract<ValidatedBrokerEvent, { kind: 'agent_blocked_on_send' }>
+export type AgentRestartingEvent = Extract<ValidatedBrokerEvent, { kind: 'agent_restarting' }>
+export type AgentRestartedEvent = Extract<ValidatedBrokerEvent, { kind: 'agent_restarted' }>
+export type AgentPermanentlyDeadEvent = Extract<ValidatedBrokerEvent, { kind: 'agent_permanently_dead' }>
+
 /**
  * The shape every forwarded broker event satisfies: an object carrying a
  * string `kind`. Both validated and (kind-only-validated) unknown events are
