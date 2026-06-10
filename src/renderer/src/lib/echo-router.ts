@@ -132,8 +132,16 @@ export function createEchoRouter(deps: EchoRouterDeps): EchoRouter {
         clearTimeout(reseedTimeout)
         reseedTimeout = null
       }
-      if (disposed || deps.getEngine() !== engine) {
+      if (disposed) {
         heldChunks = []
+        return
+      }
+      if (deps.getEngine() !== engine) {
+        // The engine changed mid-transition (today only possible via
+        // dispose, but defend anyway): the terminal is still live, so the
+        // held bytes must render — release them directly and stay on the
+        // direct route rather than dropping live PTY output.
+        releaseHeldDirect()
         return
       }
       void engine.seed(deps.buildModelSeed())

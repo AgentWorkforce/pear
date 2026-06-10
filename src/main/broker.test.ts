@@ -1469,6 +1469,40 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('logs the identity-less PTY stream blind spot once per stream while delivering', async () => {
+    // AGENTS.md: low-noise telemetry for missing event identity. One line per
+    // stream, not per chunk — an identity-less stream hits the branch on
+    // every chunk and per-chunk logging would flood.
+    const infoSpy = vi.spyOn(console, 'info').mockImplementation(() => {})
+    try {
+      const manager = new BrokerManager()
+      const win = createMockWindow()
+      const local = await startLocalWithWindow(manager, win)
+      const listener = local.onEvent.mock.calls.at(-1)?.[0]
+      expect(listener).toBeTypeOf('function')
+
+      listener?.({ kind: 'worker_stream', name: 'claude-1', chunk: 'one\n' })
+      listener?.({ kind: 'worker_stream', name: 'claude-1', chunk: 'two\n' })
+      listener?.({ kind: 'worker_stream', name: 'codex-1', chunk: 'three\n' })
+
+      const blindSpotLogs = infoSpy.mock.calls.filter(([first]) =>
+        typeof first === 'string' && first.includes('no seq/event_id')
+      )
+      expect(blindSpotLogs).toHaveLength(2) // once for claude-1, once for codex-1
+      expect(blindSpotLogs[0][0]).toContain('claude-1')
+      expect(blindSpotLogs[1][0]).toContain('codex-1')
+
+      // Telemetry never suppresses delivery.
+      const ptyCalls = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+        .filter(([channel]) => channel === 'broker:pty-chunk')
+      expect(ptyCalls).toHaveLength(3)
+
+      await manager.shutdown()
+    } finally {
+      infoSpy.mockRestore()
+    }
+  })
+
   it('delivers chunks whose seq repeats with different bytes (daemon seq reset)', async () => {
     // A daemon restart resets its event seq counter. The replacement stream
     // reuses seq numbers we have already seen — but the bytes are new output

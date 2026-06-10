@@ -2499,6 +2499,7 @@ export class BrokerManager {
 
   private forgetAgentSession(name: string, sessionKey: string): void {
     this.ptyStreamDedupe.delete(`${sessionKey}:${name}`)
+    this.ptyStreamsMissingIdentity.delete(`${sessionKey}:${name}`)
     const sessionKeys = this.agentSessions.get(name)
     if (!sessionKeys) return
     sessionKeys.delete(sessionKey)

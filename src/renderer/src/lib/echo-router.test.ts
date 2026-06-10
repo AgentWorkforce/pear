@@ -359,6 +359,49 @@ describe('echo-router — reseed capture timeout', () => {
     router.dispose()
   })
 
+  it('releases held chunks directly when the engine changes during the capture', () => {
+    const written: string[] = []
+    let captureCallback: (() => void) | null = null
+    const makeEngine = (): PredictiveEchoWithStatus => ({
+      seed: vi.fn(() => Promise.resolve()),
+      onUserInput: vi.fn(),
+      onServerOutput: vi.fn(() => Promise.resolve()),
+      rollback: vi.fn(),
+      onResize: vi.fn(),
+      reset: vi.fn(),
+      hasPredictions: false
+    })
+    let engine = makeEngine()
+    const firstEngine = engine
+
+    const router = createEchoRouter({
+      write: (data, callback) => {
+        if (callback) captureCallback = callback
+        else if (data) written.push(data)
+      },
+      getEngine: () => engine,
+      buildModelSeed: () => '\x1bc',
+      getInputSrtt: () => 80,
+      isViewportPinned: () => false,
+      scrollToBottom: () => {}
+    })
+
+    router.onUserInput('a') // begins the transition
+    router.onServerOutput('held-1')
+    router.onServerOutput('held-2')
+
+    // The engine is swapped out before the capture completes; the held
+    // bytes are live PTY output and must still render.
+    engine = makeEngine()
+    captureCallback?.()
+
+    expect(written).toEqual(['held-1held-2'])
+    expect(router.route()).toBe('direct')
+    expect(firstEngine.seed).not.toHaveBeenCalled()
+    expect(engine.seed).not.toHaveBeenCalled()
+    router.dispose()
+  })
+
   it('dispose drops held chunks and cancels the capture timeout', () => {
     const written: string[] = []
     const router = createEchoRouter({
