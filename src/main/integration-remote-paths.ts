@@ -45,6 +45,7 @@ export type LinearIssueCommentCreatePayload = {
 }
 
 export function linearIssueCommentRemotePath(issueRemotePath: string, commentFileName: string): string | null {
+  if (typeof issueRemotePath !== 'string') return null
   const normalizedIssuePath = normalizeRemoteDirectoryPath(issueRemotePath)
   if (!normalizedIssuePath) return null
   const issueSegments = normalizedIssuePath.split('/').filter(Boolean)
@@ -52,7 +53,7 @@ export function linearIssueCommentRemotePath(issueRemotePath: string, commentFil
   const issueFileName = issueSegments[2]
   if (!LINEAR_ISSUE_FILE_NAME_PATTERN.test(issueFileName)) return null
 
-  const normalizedCommentFile = commentFileName.trim()
+  const normalizedCommentFile = typeof commentFileName === 'string' ? commentFileName.trim() : ''
   if (!normalizedCommentFile || normalizedCommentFile.includes('/') || normalizedCommentFile.includes('\\')) return null
   if (normalizedCommentFile === '.' || normalizedCommentFile === '..' || !normalizedCommentFile.endsWith('.json')) return null
 
@@ -63,8 +64,9 @@ export function linearIssueCommentCreatePayload(
   body: string,
   issue: LinearIssueCommentPayloadIssue
 ): LinearIssueCommentCreatePayload {
-  const issueId = issue.id.trim()
-  if (!body.trim()) throw new Error('Linear comment body is required')
+  const trimmedBody = typeof body === 'string' ? body.trim() : ''
+  const issueId = typeof issue?.id === 'string' ? issue.id.trim() : ''
+  if (!trimmedBody) throw new Error('Linear comment body is required')
   if (!issueId) throw new Error('Linear issue id is required')
 
   const issuePayload: LinearIssueCommentCreatePayload['issue'] = { id: issueId }
@@ -80,7 +82,7 @@ export function linearIssueCommentCreatePayload(
   }
 
   return {
-    body,
+    body: trimmedBody,
     botActor: '',
     isArtificialAgentSessionRoot: false,
     issue: issuePayload,
