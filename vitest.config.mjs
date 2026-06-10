@@ -14,6 +14,11 @@ export default {
         test: {
           name: 'node',
           environment: 'node',
+          // A few timing-sensitive tests (e.g. cloud-agent git-overlay setup) can
+          // exceed the 5s default when the suite runs as a full CI gate or back-to-back
+          // with the node:test suite under load. Give them headroom so the gate is stable.
+          testTimeout: 20_000,
+          hookTimeout: 20_000,
           include: [
             'src/main/**/*.test.ts',
             'src/renderer/src/**/*.test.ts',
@@ -33,6 +38,8 @@ export default {
         test: {
           name: 'dom',
           environment: 'happy-dom',
+          testTimeout: 20_000,
+          hookTimeout: 20_000,
           setupFiles: ['src/renderer/src/__test__/dom-setup.ts'],
           include: ['src/renderer/src/**/*.dom.test.ts'],
           exclude: ['**/node_modules/**', '**/dist/**', '**/out/**']

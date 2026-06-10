@@ -18,9 +18,55 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run verify:mcp-resources-drift
+      # Renderer typecheck (tsconfig.web.json) is clean today — BLOCKING so
+      # renderer type regressions can't land.
+      - run: npm run typecheck:web
+      # Main+preload typecheck (tsconfig.node.json) surfaces ~95 pre-existing
+      # type errors (see PR "CI: enforce typecheck and run the full test suite"
+      # for the full list). NON-BLOCKING until those are fixed; then delete the
+      # flag (and this comment) so it becomes a hard gate too.
+      - run: npm run typecheck:node
+        continue-on-error: true
       - run: npm test
-      - run: npx vitest run src/main/broker.test.ts
+      # Full vitest suite (node + dom projects). Previously CI only ran the single
+      # src/main/broker.test.ts file; this now gates the entire suite (19 files / 263 tests).
+      - run: npx vitest run
       - run: npm run build
+
+  playwright:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      # Both configs run `npm run build:web` themselves (via test:fidelity / test:redraw),
+      # but build once up front so a build break fails fast and is shared by both suites.
+      - run: npm run build:web
+      # fidelity is NON-BLOCKING for now. The spec boots the web-mock build and expects
+      # the Agents/terminal view, but the web-mock build now lands on the Attention Inbox
+      # tab by default (src/renderer/src/stores/ui-store.ts: initialTab is 'issues' when
+      # VITE_PEAR_MOCK_IPC === 'true'), so `terminal-instance` never mounts and all 6
+      # specs time out. The spec needs a step to open the Agents view before spawning
+      # agents (the redraw spec already navigates via the 'general' channel and passes).
+      # See the PR body. Remove continue-on-error once the spec is updated.
+      - run: npx playwright test --config playwright.fidelity.config.ts
+        continue-on-error: true
+      # redraw passes today and gates as a hard requirement.
+      - run: npx playwright test --config playwright.redraw.config.ts
+      - name: Upload Playwright traces
+        # always() so traces from the continue-on-error fidelity step are captured too
+        # (a continue-on-error failure does not trip failure()). No-op when nothing failed.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-traces
+          path: test-results/
+          retention-days: 7
+          if-no-files-found: ignore
 
   packaged-mcp-smoke:
     runs-on: macos-latest
