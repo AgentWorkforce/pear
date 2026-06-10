@@ -40,6 +40,9 @@ async function expectSplitTerminalVisible(page: Page, name: string): Promise<voi
   if (await waitForTerminalVisible(page, name)) return
 
   const pageTabs = page.getByRole('tab', { name: /Show terminal page \d+/ })
+  // Wait for tabs to attach before counting; an immediate count() can race the
+  // render and skip the page-switch loop entirely.
+  await pageTabs.first().waitFor({ state: 'attached', timeout: 2000 }).catch(() => {})
   const pageCount = await pageTabs.count()
   for (let index = 0; index < pageCount; index += 1) {
     await pageTabs.nth(index).click()
@@ -70,7 +73,9 @@ async function bootWithAgents(
 
   const firstAgent = agentName(prefix)
   await page.getByText('general').click()
-  await page.locator('button').filter({ hasText: firstAgent }).first().click()
+  // Role-scoped but not exact: the button's accessible name includes status
+  // text beyond the agent name (exact-match never resolves).
+  await page.getByRole('button', { name: firstAgent }).first().click()
   await expect(terminalFor(page, firstAgent)).toBeVisible()
   await expect.poll(
     () => page.evaluate(({ projectId, name }) =>
