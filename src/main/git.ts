@@ -26,6 +26,7 @@ export interface FileStatus {
   oldPath?: string
   status: 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked'
   staged: boolean
+  conflicted?: boolean
 }
 
 export interface GitSummary {
@@ -360,6 +361,15 @@ export async function getStatus(path: string): Promise<FileStatus[]> {
         oldPath,
         status: 'renamed',
         staged: xy[0] !== '.'
+      })
+    } else if (line.startsWith('u ')) {
+      const parts = line.split(' ')
+      const filePath = parts.slice(10).join(' ')
+      files.push({
+        path: filePath,
+        status: 'modified',
+        staged: false,
+        conflicted: true
       })
     } else if (line.startsWith('? ')) {
       files.push({ path: line.slice(2), status: 'untracked', staged: false })
@@ -1524,6 +1534,13 @@ export async function commitSelection(path: string, input: GitCommitSelectionInp
 
   if (wholeFiles.length === 0 && !patch) {
     throw new Error('Select at least one file or changed line to commit')
+  }
+
+  // Committing through the temp-index path ends with `git reset --mixed HEAD`,
+  // which would silently clear the unmerged state of conflicted files; refuse
+  // instead so conflicts stay visible until resolved.
+  if ((await getStatus(path)).some((file) => file.conflicted)) {
+    throw new Error('Resolve all merge conflicts before committing a selection')
   }
 
   if (await hasStagedChanges(path)) {
