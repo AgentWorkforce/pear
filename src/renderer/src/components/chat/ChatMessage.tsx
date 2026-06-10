@@ -295,6 +295,8 @@ function ChatMessageInner({
         <div
           className="mt-0.5 flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-[var(--pear-border-subtle)]"
           style={{ backgroundColor: `color-mix(in srgb, ${color} 20%, transparent)` }}
+          title={message.from}
+          aria-label={message.from}
         >
           <AgentHarnessIcon
             cli={agent?.cli}
