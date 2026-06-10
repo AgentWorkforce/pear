@@ -43,20 +43,14 @@ jobs:
       # Both configs run `npm run build:web` themselves (via test:fidelity / test:redraw),
       # but build once up front so a build break fails fast and is shared by both suites.
       - run: npm run build:web
-      # fidelity is NON-BLOCKING for now. The spec boots the web-mock build and expects
-      # the Agents/terminal view, but the web-mock build now lands on the Attention Inbox
-      # tab by default (src/renderer/src/stores/ui-store.ts: initialTab is 'issues' when
-      # VITE_PEAR_MOCK_IPC === 'true'), so `terminal-instance` never mounts and all 6
-      # specs time out. The spec needs a step to open the Agents view before spawning
-      # agents (the redraw spec already navigates via the 'general' channel and passes).
-      # See the PR body. Remove continue-on-error once the spec is updated.
+      # Fidelity now opens the terminal view explicitly, so duplicate-output
+      # regressions block CI instead of soft-failing.
       - run: npx playwright test --config playwright.fidelity.config.ts
-        continue-on-error: true
       # redraw passes today and gates as a hard requirement.
       - run: npx playwright test --config playwright.redraw.config.ts
       - name: Upload Playwright traces
-        # always() so traces from the continue-on-error fidelity step are captured too
-        # (a continue-on-error failure does not trip failure()). No-op when nothing failed.
+        # always() so traces from any failed Playwright gate are captured.
+        # No-op when nothing failed.
         if: always()
         uses: actions/upload-artifact@v4
         with:
