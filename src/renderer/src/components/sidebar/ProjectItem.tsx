@@ -256,6 +256,8 @@ export function ProjectItem({ project, isActive }: Props): React.ReactNode {
                     type="button"
                     onClick={() => handleSelectAgent(agent)}
                     className="flex w-full min-w-0 items-center gap-1.5 rounded-md px-2 py-1 text-left text-[11px] text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
+                    title={agent.name}
+                    aria-label={agent.name}
                   >
                     <AgentHarnessIcon
                       cli={agent.cli}

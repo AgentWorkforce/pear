@@ -1034,6 +1034,8 @@ function ProjectNavigation({ collapsed = false }: { collapsed?: boolean }): Reac
                     type="button"
                     onClick={() => selectAgent(agent)}
                     className={rowClass(active)}
+                    title={agent.name}
+                    aria-label={agent.name}
                   >
                     <AgentHarnessIcon cli={agent.cli} className="h-3.5 w-3.5 shrink-0 text-[var(--pear-text-faint)]" />
                     <span className="min-w-0 flex-1 truncate">{agent.name}</span>

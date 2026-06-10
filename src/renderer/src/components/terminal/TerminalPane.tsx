@@ -238,8 +238,8 @@ function SplitTerminalTile({
       >
         <span
           className="flex h-4 w-4 shrink-0 items-center justify-center"
-          title={agent.cli}
-          aria-label={agent.cli}
+          title={agent.name}
+          aria-label={agent.name}
         >
           <AgentHarnessIcon
             cli={agent.cli}
@@ -306,8 +306,8 @@ function AgentTab({ agent, burnSummary, active, onActivate, onOpenBurn }: AgentT
     >
       <span
         className="flex h-4 w-4 shrink-0 items-center justify-center"
-        title={agent.cli}
-        aria-label={agent.cli}
+        title={agent.name}
+        aria-label={agent.name}
       >
         <AgentHarnessIcon
           cli={agent.cli}
