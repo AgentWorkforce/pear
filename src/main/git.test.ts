@@ -175,7 +175,11 @@ describe('git status and summaries', () => {
     ]))
   })
 
-  it('currently drops conflicted porcelain entries', async () => {
+  // KNOWN BUG: getStatus() ignores porcelain-v2 `u` records, so unmerged
+  // (conflicted) files never reach the UI. This asserts the DESIRED behavior
+  // under `it.fails`; once the bug is fixed the test starts passing, vitest
+  // flags the stale `.fails` modifier, and it should be removed.
+  it.fails('surfaces conflicted porcelain entries in getStatus', async () => {
     const repo = await createRepo()
     await write(repo, 'conflict.txt', 'base\n')
     await commitAll(repo, 'Base')
@@ -191,10 +195,7 @@ describe('git status and summaries', () => {
     await expect(git(repo, ['merge', 'feature'])).rejects.toMatchObject({ code: 1 })
     await expect(git(repo, ['status', '--porcelain=v2'])).resolves.toContain('u UU')
 
-    // Current behavior: `u` records from porcelain v2 are ignored, so the UI
-    // receives no entry for an unmerged file. This pins the behavior without
-    // fixing it.
-    expect(await getStatus(repo)).not.toEqual(expect.arrayContaining([
+    expect(await getStatus(repo)).toEqual(expect.arrayContaining([
       expect.objectContaining({ path: 'conflict.txt' })
     ]))
   })
