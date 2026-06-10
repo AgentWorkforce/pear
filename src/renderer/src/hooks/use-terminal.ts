@@ -300,7 +300,9 @@ export function useTerminal(
       runtime.refreshOnShow()
       if (wasPinned) runtime.term.scrollToBottom()
     } catch {
-      // ignore
+      // Visibility-change repaint/fit is best-effort: xterm can throw if the
+      // term was disposed between the event firing and this handler running.
+      // A failed redraw self-corrects on the next fit, so silence is correct.
     }
     // Intentionally do NOT call term.focus() on visibility change.
     // When the PTY application has enabled DECSET ?1004 (focus events) —

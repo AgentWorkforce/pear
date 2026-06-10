@@ -426,6 +426,8 @@ function normalizeHttpsGitRemote(rawUrl: string): string | null {
     url.hash = ''
     return url.toString()
   } catch {
+    // Unparseable remote → null is the documented "not a usable git remote"
+    // sentinel the callers branch on; the parse error itself carries no extra info.
     return null
   }
 }
@@ -888,7 +890,11 @@ export class CloudAgentManager {
       await this.throwIfAttachCanceled(projectId, cloudAgentId, sandbox)
     } catch (error) {
       await this.stopMount(projectId)
-      await this.deleteBox(toBinding(projectId, cloudAgentId, sandbox)).catch(() => undefined)
+      await this.deleteBox(toBinding(projectId, cloudAgentId, sandbox)).catch((cleanupError) => {
+        // Best-effort cleanup: the mount/connect error below is what we throw,
+        // but a failed box delete leaks a cloud sandbox, so surface it.
+        console.warn(`[cloud-agent] Failed to delete sandbox box after attach failure for project ${projectId} (cloud agent ${cloudAgentId}):`, toErrorMessage(cleanupError))
+      })
       throw error
     }
 
@@ -919,7 +925,11 @@ export class CloudAgentManager {
   ): Promise<void> {
     if (!this.canceledAttaches.has(projectId)) return
     this.canceledAttaches.delete(projectId)
-    await this.deleteBox(toBinding(projectId, cloudAgentId, sandbox)).catch(() => undefined)
+    await this.deleteBox(toBinding(projectId, cloudAgentId, sandbox)).catch((cleanupError) => {
+      // Cancel path: a failed box delete leaks a cloud sandbox; log it but
+      // still throw the cancellation so the original control flow is unchanged.
+      console.warn(`[cloud-agent] Failed to delete sandbox box after attach cancel for project ${projectId} (cloud agent ${cloudAgentId}):`, toErrorMessage(cleanupError))
+    })
     throw new Error('Cloud agent attach canceled')
   }
 
@@ -1102,7 +1112,10 @@ export class CloudAgentManager {
     let sandbox = await this.fetchBox(url, auth.accessToken, 'POST', mountPaths, workspaceSource, relayBroker)
     options.onSandbox?.(sandbox)
     if (options.isCancelled?.()) {
-      await this.deleteBox(toBinding(projectId, cloudAgentId, sandbox)).catch(() => undefined)
+      await this.deleteBox(toBinding(projectId, cloudAgentId, sandbox)).catch((cleanupError) => {
+        // Warm-cancel cleanup: log a leaked sandbox without changing the throw.
+        console.warn(`[cloud-agent] Failed to delete sandbox box after warm cancel for project ${projectId} (cloud agent ${cloudAgentId}):`, toErrorMessage(cleanupError))
+      })
       throw new Error('Cloud agent sandbox warm canceled')
     }
     console.log(`[cloud-agent] warming sandbox ${sandbox.sandboxId} for project ${projectId}: initial status=${sandbox.status}`)
@@ -1129,7 +1142,10 @@ export class CloudAgentManager {
       sandbox = await this.fetchBox(url, fetchAccessToken, 'GET')
       options.onSandbox?.(sandbox)
       if (options.isCancelled?.()) {
-        await this.deleteBox(toBinding(projectId, cloudAgentId, sandbox)).catch(() => undefined)
+        await this.deleteBox(toBinding(projectId, cloudAgentId, sandbox)).catch((cleanupError) => {
+          // Warm-cancel cleanup: log a leaked sandbox without changing the throw.
+          console.warn(`[cloud-agent] Failed to delete sandbox box after warm cancel for project ${projectId} (cloud agent ${cloudAgentId}):`, toErrorMessage(cleanupError))
+        })
         throw new Error('Cloud agent sandbox warm canceled')
       }
       this.emitSandboxStatus(projectId, sandbox)
@@ -1270,6 +1286,9 @@ export class CloudAgentManager {
           onEvent: (event) => {
             input.onEvent?.(event)
             if (event.type === 'reconcile' || event.type === 'status') {
+              // Fire-and-forget is safe: emitMountStatus swallows mount.status()
+              // failures internally (-> null) and emit() is synchronous, so it
+              // never rejects. This fires per mount event, so a log here would flood.
               void this.emitMountStatus(projectId)
             }
           }
@@ -1409,6 +1428,9 @@ export class CloudAgentManager {
   private schedulePullAfterRun(projectId: string): void {
     this.clearPullTimer(projectId)
     const timer = setTimeout(() => {
+      // Fire-and-forget is safe: maybePullAfterRun wraps its git work in a
+      // try/catch that surfaces failures via emit({ type: 'error' }), so the
+      // promise never rejects unhandled.
       void this.maybePullAfterRun(projectId)
     }, RUN_END_PULL_DELAY_MS)
     this.pullTimers.set(projectId, timer)

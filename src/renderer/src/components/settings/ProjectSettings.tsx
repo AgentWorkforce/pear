@@ -624,6 +624,9 @@ function IntegrationVisibilitySection({
           if (optionChannels.length > 0) return optionChannels
         } catch (err) {
           console.warn('[integrations] Failed to list Slack channel options:', err)
+          // The primary failure (err) was just logged and is rethrown below if
+          // this fallback is empty; a failed mounted-channel read here is a
+          // secondary fallback, so [] without its own log is correct.
           const mountedChannels = await listMountedSlackChannels().catch(() => [])
           if (mountedChannels.length > 0) return mountedChannels
           const message = err instanceof Error ? err.message : String(err)
@@ -637,6 +640,8 @@ function IntegrationVisibilitySection({
       })
       if (remoteChannels.length > 0) return remoteChannels
 
+      // Last-resort fallback: an empty channel list is the correct "nothing to
+      // show" UI state, and the remote-list failure above is already logged.
       return listMountedSlackChannels().catch(() => [])
     })
   }, [cachedResources, projectId])

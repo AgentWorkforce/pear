@@ -271,6 +271,9 @@ export default function CloudAgentPicker({
     const previous = prewarmTargetRef.current
     if (previous === agentId) return
     if (previous) {
+      // Fire-and-forget cancel of the superseded prewarm target. A failed
+      // cancel is harmless here — the box self-expires — and the main process
+      // logs real deletion failures; surfacing it in the picker would be noise.
       void pear.cloudAgent.cancelPrewarm(projectId, previous).catch(() => undefined)
     }
     prewarmTargetRef.current = agentId
