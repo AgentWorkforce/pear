@@ -1,0 +1,30 @@
+name: Nightly Stress
+
+on:
+  schedule:
+    # 07:00 UTC daily (off-peak). Adjust if it collides with other scheduled jobs.
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+jobs:
+  stress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      # test:stress runs `npm run build:web` itself, then the stress Playwright config
+      # (stress-1000-agents + stress-explorer specs).
+      - run: npm run test:stress
+      - name: Upload Playwright traces
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: stress-playwright-traces
+          path: test-results/
+          retention-days: 7
+          if-no-files-found: ignore
