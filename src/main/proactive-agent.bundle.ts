@@ -27,6 +27,7 @@ export type ProactiveAgentDraft = {
   memory?: { enabled: boolean; scopes?: string[]; ttlDays?: number }
   harnessSettings?: { reasoning?: 'low' | 'medium' | 'high'; timeoutSeconds?: number }
   mount?: { enabled: boolean }
+  useSubscription?: boolean
   runMode?: 'cloud' | 'local'
 }
 
@@ -46,6 +47,7 @@ export type PersonaSpecJson = {
   memory?: ProactiveAgentDraft['memory']
   harnessSettings?: ProactiveAgentDraft['harnessSettings']
   mount: { enabled: boolean }
+  useSubscription?: boolean
   schedules?: unknown
 }
 
@@ -120,6 +122,7 @@ export function buildPersonaSpec(
   if (draft.inputs) persona.inputs = draft.inputs
   if (draft.memory) persona.memory = draft.memory
   if (draft.harnessSettings) persona.harnessSettings = draft.harnessSettings
+  if (draft.useSubscription) persona.useSubscription = true
 
   // TODO(v2): cron triggers are UI-only until the cloud trigger router supports them.
   if (schedules !== undefined) persona.schedules = schedules

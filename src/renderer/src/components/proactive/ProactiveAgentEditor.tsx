@@ -133,6 +133,7 @@ function createDefaultDraft(): ProactiveAgentDraft {
     inputs: {},
     memory: { enabled: false, scopes: [], ttlDays: 30 },
     harnessSettings: { reasoning: 'medium', timeoutSeconds: 300 },
+    useSubscription: false,
     runMode: 'cloud'
   }
 }
@@ -192,6 +193,7 @@ function normalizeDraft(draft: ProactiveAgentDraft): ProactiveAgentDraft {
         }
       : { enabled: false },
     harnessSettings: draft.harnessSettings,
+    useSubscription: draft.useSubscription === true,
     runMode: 'cloud'
   }
 }
@@ -219,6 +221,32 @@ function validateDraft(draft: ProactiveAgentDraft): ValidationErrors {
 
 function hasErrors(errors: ValidationErrors): boolean {
   return Object.values(errors).some(Boolean)
+}
+
+function subscriptionProviderForDraft(draft: ProactiveAgentDraft): string {
+  const model = draft.model.trim().toLowerCase()
+  if (/(anthropic|claude)/.test(model)) return 'anthropic'
+  if (/(openai|codex|gpt)/.test(model)) return 'openai'
+  if (/(google|gemini)/.test(model)) return 'google'
+  if (/(openrouter|opencode)/.test(model)) return 'openrouter'
+
+  if (draft.harness === 'claude') return 'anthropic'
+  if (draft.harness === 'codex') return 'openai'
+  if (draft.harness === 'opencode') return 'openrouter'
+  return draft.harness
+}
+
+function cloudCredentialConnectCommand(draft: ProactiveAgentDraft): string {
+  return `agent-relay cloud connect ${subscriptionProviderForDraft(draft)}`
+}
+
+function subscriptionCredentialBlockMessage(draft: ProactiveAgentDraft, cloudAgents: readonly CloudAgentRecord[]): string | null {
+  if (draft.useSubscription !== true) return null
+
+  const selectedAgent = cloudAgents.find((agent) => agent.id === draft.cloudAgentId)
+  if (selectedAgent?.lastAuthenticatedAt) return null
+
+  return `Subscription deploys require connected LLM provider credentials for the selected cloud agent. Run \`${cloudCredentialConnectCommand(draft)}\` in a terminal, then refresh cloud agents and deploy again.`
 }
 
 function phaseElapsed(phase: DeployPhase): string {
@@ -612,6 +640,12 @@ export function ProactiveAgentEditor({
     () => normalizeDraft({ ...draft, inputs: keyValueRowsToRecord(inputs) }),
     [draft, inputs]
   )
+  const selectedCloudAgent = useMemo(
+    () => cloudAgents.find((agent) => agent.id === selectedDraft.cloudAgentId) || null,
+    [cloudAgents, selectedDraft.cloudAgentId]
+  )
+  const subscriptionConnectCommand = cloudCredentialConnectCommand(selectedDraft)
+  const subscriptionCredentialMessage = subscriptionCredentialBlockMessage(selectedDraft, cloudAgents)
 
   const availableIntegrations = useMemo(() => {
     if (connectedIntegrations.length > 0) return connectedIntegrations
@@ -736,6 +770,13 @@ export function ProactiveAgentEditor({
         return
       }
       markPhase('validate', 'done')
+
+      const subscriptionBlock = subscriptionCredentialBlockMessage(selectedDraft, cloudAgents)
+      if (subscriptionBlock) {
+        setErrors({ deploy: subscriptionBlock })
+        markPhase('bundle', 'error')
+        return
+      }
 
       markPhase('bundle', 'active')
       const saved = await saveDraft()
@@ -943,6 +984,39 @@ export function ProactiveAgentEditor({
                     </select>
                     <FieldError message={errors.model} />
                   </label>
+                </div>
+
+                <div className="mt-4 rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] p-3">
+                  <label className="flex items-start gap-3">
+                    <input
+                      type="checkbox"
+                      checked={draft.useSubscription === true}
+                      onChange={(event) => patchDraft({ useSubscription: event.target.checked })}
+                      className="mt-1"
+                    />
+                    <span className="min-w-0">
+                      <span className="block text-sm font-medium text-[var(--pear-text)]">Use my subscription</span>
+                      <span className="mt-1 block text-xs leading-5 text-[var(--pear-text-faint)]">
+                        Run inference with your connected LLM provider credentials instead of workforce-billed inference.
+                      </span>
+                    </span>
+                  </label>
+                  {draft.useSubscription === true && selectedCloudAgent && !selectedCloudAgent.lastAuthenticatedAt && (
+                    <div className="mt-3 flex items-start gap-2 rounded-md border border-[var(--pear-yellow)]/20 bg-[var(--pear-yellow)]/10 px-3 py-2 text-xs leading-5 text-[var(--pear-yellow)]">
+                      <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                      <span>
+                        Connect credentials before deploying: <code className="rounded bg-[var(--pear-bg)]/60 px-1 font-mono">{subscriptionConnectCommand}</code>
+                      </span>
+                    </div>
+                  )}
+                  {subscriptionCredentialMessage && !selectedCloudAgent && (
+                    <div className="mt-3 flex items-start gap-2 rounded-md border border-[var(--pear-yellow)]/20 bg-[var(--pear-yellow)]/10 px-3 py-2 text-xs leading-5 text-[var(--pear-yellow)]">
+                      <AlertTriangle size={14} className="mt-0.5 shrink-0" />
+                      <span>
+                        Choose a cloud agent with connected credentials before deploying. You can connect them with <code className="rounded bg-[var(--pear-bg)]/60 px-1 font-mono">{subscriptionConnectCommand}</code>
+                      </span>
+                    </div>
+                  )}
                 </div>
 
                 <label className="mt-4 block">

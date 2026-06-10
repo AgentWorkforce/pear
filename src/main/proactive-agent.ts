@@ -381,6 +381,7 @@ export class ProactiveAgentManager {
       integrations: isRecord(draft.integrations) ? draft.integrations : {},
       watch: Array.isArray(draft.watch) ? draft.watch : [],
       mount: { enabled: draft.mount?.enabled ?? false },
+      useSubscription: draft.useSubscription === true,
       runMode: draft.runMode || 'cloud'
     }
   }

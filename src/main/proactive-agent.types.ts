@@ -42,6 +42,7 @@ export type ProactiveAgentDraft = {
   memory?: ProactiveAgentMemoryConfig
   harnessSettings?: ProactiveAgentHarnessSettings
   mount?: ProactiveAgentMountConfig
+  useSubscription?: boolean
   runMode?: ProactiveAgentRunMode
 }
 

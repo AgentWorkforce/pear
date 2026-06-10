@@ -579,6 +579,7 @@ export type ProactiveAgentDraft = {
   memory?: { enabled: boolean; scopes?: Array<'workspace' | 'project' | 'persona'>; ttlDays?: number }
   harnessSettings?: { reasoning?: 'low' | 'medium' | 'high'; timeoutSeconds?: number }
   mount?: { enabled: boolean }
+  useSubscription?: boolean
   runMode?: ProactiveAgentRunMode
 }
 
