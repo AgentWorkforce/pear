@@ -54,7 +54,8 @@ describe('createPearMountLauncher', () => {
       env: {
         RELAYFILE_TOKEN: 'relay_pa_test-token',
         RELAYFILE_LOCAL_DIR: localDir
-      }
+      },
+      readyTimeoutMs: 5_000
     })
 
     const credsPath = join(localDir, '.relay', 'creds.json')
@@ -78,12 +79,14 @@ describe('createPearMountLauncher', () => {
     await launcher.start({
       env: {
         RELAYFILE_LOCAL_DIR: join(tempDir, 'missing-token')
-      }
+      },
+      readyTimeoutMs: 5_000
     })
     await launcher.start({
       env: {
         RELAYFILE_TOKEN: 'relay_pa_test-token'
-      }
+      },
+      readyTimeoutMs: 5_000
     })
 
     expect(mock.start).toHaveBeenCalledTimes(2)

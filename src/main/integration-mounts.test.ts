@@ -64,7 +64,7 @@ const mock = vi.hoisted(() => {
     startMount,
     mkdir: vi.fn(async () => undefined),
     chmod: vi.fn(async () => undefined),
-    readFile: vi.fn(async () => '{}'),
+    readFile: vi.fn(async (_path: string) => '{}'),
     rm: vi.fn(async () => undefined),
     RelayfileSetup,
     get currentAuth() {

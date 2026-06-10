@@ -822,6 +822,12 @@ export class IntegrationsManager {
         this.setAuthRecoveryState(alert.reason, undefined, alert.message)
         return
       }
+      // Only auth-stall alerts carry pendingWriteback/message and map to a
+      // mount-auth-stall event. reconcile-stalled alerts have neither field, so
+      // emitting one here previously produced a malformed event with undefined
+      // pendingWriteback/message; ignore them rather than mislabel a reconcile
+      // stall as an auth stall.
+      if (alert.type !== 'auth-stall') return
       this.emit({
         type: 'mount-auth-stall',
         remotePath: alert.remotePath,

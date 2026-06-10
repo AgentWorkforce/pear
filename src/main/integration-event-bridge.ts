@@ -7,12 +7,29 @@ import {
   RelayFileClient,
   RelayFileSync,
   RelayfileSetup,
-  type ChangeEvent,
+  type ChangeEvent as SdkChangeEvent,
+  type Expansion,
+  type ExpansionLevel,
   type FileReadResponse,
   type FilesystemEvent,
+  type FilesystemEventType,
   type RelayFileSyncOptions,
   type Subscription
 } from '@relayfile/sdk'
+
+// Module-internal view of a relayfile change event as it actually flows through
+// this bridge. The @relayfile SDK narrows `ChangeEvent['type']` to the single
+// literal 'relayfile.changed' and types `expand` as a generic method, but in
+// practice the live change stream delivers the underlying filesystem event type
+// (e.g. 'writeback.succeeded', 'file.deleted') and this bridge additionally
+// synthesizes 'relayfile.changed.summary' rollup events (see
+// dispatchSummaryEvent). Widening `type` and relaxing `expand` here keeps every
+// synthesized event and runtime discriminant check honest without per-site
+// casts. SDK-delivered events (the narrow type) remain assignable to this.
+type ChangeEvent = Omit<SdkChangeEvent, 'type' | 'expand'> & {
+  type: SdkChangeEvent['type'] | FilesystemEventType | 'relayfile.changed.summary'
+  expand: (level?: ExpansionLevel) => Promise<Expansion>
+}
 import type { ConnectedIntegration } from './integrations'
 // @ts-expect-error Node's strip-types test runner requires the explicit .ts extension.
 import { isSlackWritebackCommandRoot, slackWritebackCommandMountPathFor } from './slack-writeback-command-roots.ts'
@@ -407,6 +424,13 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+// View any value as a string-keyed record for dynamic field access. Non-record
+// inputs collapse to an empty record so callers can read optional keys off
+// ChangeEvent/resource/summary without tripping over the SDK's narrow types.
+function asRecord(value: unknown): Record<string, unknown> {
+  return isRecord(value) ? value : {}
 }
 
 function stringList(value: unknown): string[] {
@@ -1398,9 +1422,9 @@ function injectionDeduplicationKey(projectId: string, event: ChangeEvent, matche
 }
 
 function eventRecordValue(event: ChangeEvent, key: string): unknown {
-  const resource = isRecord(event.resource) ? event.resource : {}
-  const summary = isRecord(event.summary) ? event.summary : {}
-  return (event as Record<string, unknown>)[key] ?? resource[key] ?? summary[key]
+  const resource = asRecord(event.resource)
+  const summary = asRecord(event.summary)
+  return asRecord(event)[key] ?? resource[key] ?? summary[key]
 }
 
 function eventOrigin(event: ChangeEvent): string | null {
@@ -1733,8 +1757,8 @@ function eventSummaryValue(value: unknown): string | undefined {
 }
 
 function integrationEventMetadata(event: ChangeEvent): Record<string, unknown> {
-  const summary = isRecord(event.summary) ? event.summary : {}
-  const resource = isRecord(event.resource) ? event.resource : {}
+  const summary = asRecord(event.summary)
+  const resource = asRecord(event.resource)
   const actor = isRecord(summary.actor)
     ? eventSummaryValue(summary.actor.displayName) || eventSummaryValue(summary.actor.id)
     : undefined
@@ -2080,7 +2104,7 @@ function formatSlackIntegrationEventMessage(
   contextPreview?: EventContextPreview,
   resolvedPath?: string
 ): string | null {
-  const resource = isRecord(event.resource) ? event.resource : {}
+  const resource = asRecord(event.resource)
   const provider = eventSummaryValue(resource.provider) || eventProvider(event)
   const relayfilePath = eventSummaryValue(resource.path)
   if (provider !== 'slack' || !relayfilePath || !slackEventContextPath(relayfilePath)) return null
@@ -2119,8 +2143,8 @@ function formatIntegrationEventMessage(
   const slackMessage = formatSlackIntegrationEventMessage(event, contextPreview, resolvedPath)
   if (slackMessage) return slackMessage
 
-  const summary = isRecord(event.summary) ? event.summary : {}
-  const resource = isRecord(event.resource) ? event.resource : {}
+  const summary = asRecord(event.summary)
+  const resource = asRecord(event.resource)
   const provider = eventSummaryValue(resource.provider) || 'integration'
   const relayfilePath = eventSummaryValue(resource.path)
   const displayPath = resolvedPath || relayfilePath
@@ -2714,7 +2738,7 @@ export class IntegrationEventBridge {
 
     try {
       const expanded = await event.expand('full')
-      const expandedRecord = isRecord(expanded) ? expanded : {}
+      const expandedRecord = asRecord(expanded)
       return eventContextPreviewFromData(
         typeof expandedRecord.path === 'string' ? expandedRecord.path : path,
         expandedRecord.data
@@ -3390,12 +3414,17 @@ export class IntegrationEventBridge {
 
   private async getWorkspaceHandle(): Promise<RelayfileWorkspaceHandle> {
     if (this.deps.getWorkspaceHandle) return this.deps.getWorkspaceHandle()
+    // @ts-expect-error Node's strip-types test runner requires the explicit .ts extension.
     const { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, refreshCloudAuth, resolveCloudAuth } = await import('./auth.ts')
-    let auth = await resolveCloudAuth()
-    if (!auth) {
+    const initialAuth = await resolveCloudAuth()
+    if (!initialAuth) {
       accountIntegrationEventHandle = null
       throw new Error('cloud-auth-required')
     }
+    // Non-null from here on: reassigned only to a refreshed CloudAuth below.
+    // Initializing from the narrowed `initialAuth` keeps the type non-null
+    // inside the joinWorkspace closure (a plain `let` would widen back to null).
+    let auth = initialAuth
 
     const accountWorkspaceId = await getAccountWorkspaceId(accountWorkspaceReadyRetryOptions())
     if (
@@ -3408,9 +3437,9 @@ export class IntegrationEventBridge {
     }
 
     const joinWorkspace = async () => {
-      const tokenProvider = async (): Promise<string | undefined> => {
+      const tokenProvider = async (): Promise<string> => {
         const fresh = await resolveCloudAuth()
-        return fresh?.accessToken ?? auth?.accessToken
+        return fresh?.accessToken ?? auth.accessToken
       }
       const setup = new RelayfileSetup({
         cloudApiUrl: auth.apiUrl,

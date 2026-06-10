@@ -66,7 +66,7 @@ const mock = vi.hoisted(() => {
       onBrokerEvent: vi.fn(),
       attachCloudSandbox: vi.fn(async () => undefined),
       detachCloudSandbox: vi.fn(async () => undefined),
-      workspaceKeyForProject: vi.fn(async () => undefined)
+      workspaceKeyForProject: vi.fn(async (): Promise<string | undefined> => undefined)
     },
     fetch: vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const normalizedUrl = String(url)

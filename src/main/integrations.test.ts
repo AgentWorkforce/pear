@@ -62,7 +62,7 @@ const mock = vi.hoisted(() => {
   const workspaceHandle = {
     workspaceId: 'account-workspace-id',
     client: vi.fn(() => relayClient),
-    requestJson: vi.fn(async (_request: { path: string }) => {
+    requestJson: vi.fn(async (_request: { path: string }): Promise<unknown> => {
       throw new Error('unexpected workspace request')
     }),
     refreshToken: vi.fn(async () => undefined)
@@ -177,8 +177,8 @@ const mock = vi.hoisted(() => {
     saveStore: vi.fn(() => undefined),
     integrationMountManager: {
       ensureMounted: vi.fn(() => mountReconcilePromise),
-      currentWorkspaceId: vi.fn(() => null),
-      localPathsFor: vi.fn(() => []),
+      currentWorkspaceId: vi.fn((): string | null => null),
+      localPathsFor: vi.fn((): string[] => []),
       setHealthObserver: vi.fn(),
       stop: vi.fn(async () => undefined)
     },
@@ -195,8 +195,8 @@ const mock = vi.hoisted(() => {
     relayWorkspaceManager,
     workspaceHandle,
     brokerManager: {
-      listAgents: vi.fn(async () => []),
-      sendMessage: vi.fn(async () => undefined),
+      listAgents: vi.fn(async (): Promise<Array<{ name: string; projectId: string }>> => []),
+      sendMessage: vi.fn(async (_projectId: string | undefined, _input: unknown) => undefined),
       sendMessageAndWaitForDelivery: vi.fn(async () => undefined)
     },
     ensureProjectIntegrationsLink: vi.fn(async () => undefined),

@@ -314,7 +314,7 @@ if (!gotSingleInstanceLock) {
     })
 
     if (process.platform === 'darwin' && appIcon) {
-      app.dock.setIcon(appIcon)
+      app.dock?.setIcon(appIcon)
     }
 
     registerAvatarCacheProtocol()
