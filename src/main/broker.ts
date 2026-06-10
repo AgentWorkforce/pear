@@ -412,6 +412,8 @@ child.on('exit', (code, signal) => {
     try {
       process.kill(process.pid, signal)
     } catch {
+      // Re-raising the child's signal failed; exit non-zero so the failure still
+      // propagates to the parent. Nothing to log from inside this shim process.
       process.exit(1)
     }
     return
@@ -1011,6 +1013,7 @@ function parsePortFromUrl(url: string | undefined): number | undefined {
     }
     return parsed.protocol === 'https:' ? 443 : parsed.protocol === 'http:' ? 80 : undefined
   } catch {
+    // Unparseable URL -> undefined port; the parse error carries no extra signal.
     return undefined
   }
 }
@@ -1073,6 +1076,8 @@ function readBrokerConnectionFileInfo(
       apiKey: parsed.data.apiKey
     }
   } catch {
+    // Read/JSON error -> treat as an invalid connection file; the 'invalid'
+    // status propagates to callers, so the underlying error adds nothing.
     return { path: connectionPath, status: 'invalid', hasApiKey: false }
   }
 }
@@ -1768,6 +1773,8 @@ export class BrokerManager {
     const normalizedProjectId = projectId.trim()
     if (!normalizedProjectId) return undefined
     const startPromise = this.startPromises.get(normalizedProjectId)
+    // Only awaiting the in-flight start as a gate; its own owner surfaces start
+    // failures. Here we just fall through to read whatever session exists.
     if (startPromise) await startPromise.catch(() => undefined)
     const session = this.sessions.get(normalizedProjectId)
     if (!session) return undefined
@@ -1810,6 +1817,8 @@ export class BrokerManager {
     // lets getOrAwaitSessionsForProject await an in-flight attach.
     const sessionKey = cloudSessionKey(normalizedProjectId)
     const inFlightAttach = this.startPromises.get(sessionKey)
+    // Gate only: serialize behind an in-flight attach. That attach's own caller
+    // surfaces its failure; we ignore the outcome and proceed to re-attach.
     if (inFlightAttach) await inFlightAttach.catch(() => undefined)
     let releaseAttachGate!: () => void
     const attachGate = new Promise<void>((resolve) => {
@@ -1824,8 +1833,10 @@ export class BrokerManager {
       if (previous) {
         try {
           await previous.client.shutdown()
-        } catch {
-          // Ignore shutdown errors.
+        } catch (err) {
+          // Non-fatal: we replace the session regardless, but a failed shutdown
+          // can leak the previous cloud sandbox, so make it visible.
+          console.warn(`[broker] Failed to shut down previous cloud session for project ${normalizedProjectId}:`, err)
         }
         this.dropSession(sessionKey, { disconnectOnly: false })
       }
@@ -1990,6 +2001,10 @@ export class BrokerManager {
 
   private async getOrAwaitSessionsForProject(projectId: string): Promise<BrokerSession[]> {
     const normalizedProjectId = projectId.trim()
+    // These three awaits are gates: we wait for any in-flight revive/start/attach
+    // to settle so the session map is populated, then read it below. Each
+    // operation's own owner surfaces its failure; ignoring it here is correct,
+    // and the `if (!sessions.length)` check turns a real failure into a throw.
     const revivePromise = this.revivePromises.get(normalizedProjectId)
     if (revivePromise) {
       await revivePromise.catch(() => undefined)
@@ -2388,7 +2403,11 @@ export class BrokerManager {
       if (event.kind === 'agent_spawned' && event.name) {
         this.rememberAgentSession(event.name, sessionKey)
         if (event.parent) {
-          void this.handleSpawnedChildLineage(sessionKey, event)
+          void this.handleSpawnedChildLineage(sessionKey, event).catch((err) => {
+            // Lineage recording is best-effort (burn enrichment), but a silent
+            // rejection here loses parent/child attribution — log it.
+            console.warn(`[broker] Failed to record spawned-child lineage for ${event.name}:`, err)
+          })
         }
       } else if (event.kind === 'agent_exit' && event.name) {
         this.closeInputStream(this.getInputStreamKey(sessionKey, event.name), 1000, 'agent closed')
@@ -2719,7 +2738,12 @@ export class BrokerManager {
     )
     for (const sibling of this.sessionsForProject(session.projectId)) {
       if (sibling === session) continue
-      const siblingAgents = await sibling.client.listAgents().catch(() => [])
+      const siblingAgents = await sibling.client.listAgents().catch((err) => {
+        // Best-effort: missing a sibling's names risks a relay-side collision,
+        // so log, but keep spawning rather than blocking on the sibling broker.
+        console.warn(`[broker] Failed to list sibling agents for project ${session.projectId} during spawn dedupe:`, err)
+        return []
+      })
       for (const agent of siblingAgents) existingNames.add(agent.name)
     }
     let nextInput = {
@@ -2978,6 +3002,10 @@ export class BrokerManager {
     const deadline = Date.now() + parsePositiveIntegerEnv('PEAR_ATTACH_REGISTRATION_TIMEOUT_MS', 15_000)
     while (Date.now() < deadline) {
       for (const candidate of candidates) {
+        // Silent by design: this probes both brokers every 250ms until the
+        // deadline, and a not-yet-registered agent throws transiently here.
+        // Logging would flood; the `registered: false` return surfaces the
+        // real outcome to the caller.
         const agents = await candidate.client.listAgents().catch(() => null)
         if (agents?.some((agent) => agent.name === name)) {
           this.rememberAgentSession(name, sessionKeyFor(candidate))
@@ -3245,6 +3273,8 @@ export class BrokerManager {
     let idleSince: number | null = null
 
     while (Date.now() - startedAt < timeoutMs) {
+      // Silent by design: tight idle-poll loop; a transient getStatus failure
+      // is treated as "agent gone" (return) and logging each miss would flood.
       const agent = await session.client.getStatus()
         .then((status) => status.agents.find((entry) => entry.name === name))
         .catch(() => undefined)
@@ -3334,6 +3364,8 @@ export class BrokerManager {
       }
     }
 
+    // Pending count is a non-critical UI hint; 0 on failure is a safe default
+    // and the snapshot call right below surfaces any real attach failure.
     const pending = mode === 'manual_flush'
       ? await this.withAgentMissingRetry('getPending', name, () => client.getPending(name)).then((messages) => messages.length).catch(() => 0)
       : 0
@@ -3479,6 +3511,8 @@ export class BrokerManager {
       }
       throw err
     }
+    // Pending count is a non-critical UI hint; 0 on failure is a safe default
+    // (the setInboundDeliveryMode above already succeeded for this to run).
     const pending = result.mode === 'manual_flush'
       ? await session.client.getPending(trimmedName).then((messages) => messages.length).catch(() => 0)
       : 0
@@ -3933,6 +3967,8 @@ export class BrokerManager {
     const brokerKind = session.cloudSandboxId ? ('cloud' as const) : ('local' as const)
     return Promise.all(
       agents.map(async (agent) => {
+        // Best-effort enrichment on every listAgents poll: undefined just omits
+        // the delivery-mode badge. Logging per-agent per-poll would flood.
         const inboundDeliveryMode = await session.client.getInboundDeliveryMode(agent.name).catch(() => undefined)
         return { ...agent, projectId: session.projectId, inboundDeliveryMode, brokerKind }
       })
@@ -4070,8 +4106,10 @@ export class BrokerManager {
       for (const session of sessions) {
         try {
           await session.client.shutdown()
-        } catch {
-          // Ignore shutdown errors.
+        } catch (err) {
+          // Non-fatal during teardown, but a failed cloud-session shutdown can
+          // leak a sandbox — log so it is not invisible.
+          console.warn(`[broker] Failed to shut down session for project ${targetProjectId}:`, err)
         }
         this.dropSession(sessionKeyFor(session), { disconnectOnly: false })
       }
@@ -4122,8 +4160,10 @@ export class BrokerManager {
     if (!session) return
     try {
       await session.client.shutdown()
-    } catch {
-      // Ignore shutdown errors.
+    } catch (err) {
+      // Non-fatal: we drop the session anyway, but a failed shutdown can leak
+      // the detached cloud sandbox, so surface it.
+      console.warn(`[broker] Failed to shut down cloud session on detach for project ${normalizedProjectId}:`, err)
     }
     this.dropSession(sessionKey, { disconnectOnly: false })
     // Only report the project as disconnected when nothing is left serving

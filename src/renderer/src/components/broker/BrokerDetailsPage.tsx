@@ -1024,6 +1024,9 @@ export function BrokerDetailsPage(): React.ReactNode {
     setDetailsError(null)
     try {
       if (typeof pear.broker.listEvents === 'function') {
+        // Best-effort backfill of historical events alongside the live stream;
+        // on failure the page still renders from listDetails below, and the
+        // main process logs the underlying broker error.
         pear.broker.listEvents()
           .then(hydrateBrokerEvents)
           .catch(() => undefined)

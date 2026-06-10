@@ -189,6 +189,9 @@ async function readGithubLink(projectId: string, sync: Record<string, unknown>):
   const path = githubPathForSyncedRecord(sync)
   if (!path) return { owner, repo, number, type: fallbackType }
 
+  // Best-effort enrichment: if the remote file can't be read we fall back to
+  // the derived type below. null is also the "not text" path, so a read error
+  // needs no separate handling here.
   const preview = await pear.integrations.readRemoteFile(projectId, path).catch(() => null)
   if (!preview || preview.kind !== 'text') return { owner, repo, number, type: fallbackType }
   const parsed = parseJsonPreview(preview.content, path)

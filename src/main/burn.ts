@@ -223,6 +223,10 @@ const MAX_SESSIONS_FOR_DETAILS = 12
 const MAX_ROWS = 12
 
 let warnedUnavailable = false
+// getFingerprint is polled (~every 15s) by burn views, so throttle its failure
+// log to stay low-noise when the ledger is persistently unavailable.
+const FINGERPRINT_WARN_THROTTLE_MS = 60_000
+let lastFingerprintWarnAt = 0
 const requireForResolve = createRequire(import.meta.url)
 
 const BURN_INGEST_TOOL_RESULT_WARNING_START =
@@ -820,7 +824,12 @@ class BurnManager {
         ? await burn.fingerprint({ session: input.sessionId, ledgerHome })
         : await burn.fingerprint({ ledgerHome })
       return { fingerprint: res.fingerprint }
-    } catch {
+    } catch (err) {
+      const now = Date.now()
+      if (now - lastFingerprintWarnAt > FINGERPRINT_WARN_THROTTLE_MS) {
+        lastFingerprintWarnAt = now
+        console.warn(`[burn] Failed to compute ledger fingerprint${input.sessionId ? ` for session ${input.sessionId}` : ''}:`, toErrorMessage(err))
+      }
       return { fingerprint: '' }
     }
   }
@@ -953,7 +962,10 @@ class BurnManager {
           turnCount: totals.turnCount
         }
       })
-    } catch {
+    } catch (err) {
+      // Recoverable: fall back to per-agent summaries below. Log so a
+      // consistently failing batch summary (the fast path) stays visible.
+      console.warn(`[burn] Batch agent summary failed for project ${projectId}; falling back to per-agent summaries:`, toErrorMessage(err))
       return Promise.all(agents.map((agent) => this.getAgentSummary(agent)))
     }
   }
@@ -1096,6 +1108,8 @@ class BurnManager {
    * view queries a warm, recently-ingested ledger instead of stalling on it.
    */
   warmUp(): void {
+    // Fire-and-forget is safe: ingestRecent() catches its own errors and logs
+    // them once via the warnedUnavailable guard, so it never rejects unhandled.
     void this.ingestRecent()
   }
 
@@ -1110,6 +1124,8 @@ class BurnManager {
     if (force) {
       await this.ingestRecent(true)
     } else {
+      // Fire-and-forget is safe: ingestRecent() self-handles and once-logs its
+      // own errors (warnedUnavailable guard), so it never rejects unhandled.
       void this.ingestRecent()
     }
   }

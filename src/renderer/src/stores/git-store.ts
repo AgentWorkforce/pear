@@ -184,6 +184,9 @@ export const useGitStore = create<GitState>((set, get) => ({
     projectStatusRequests.add(rootPathKey)
     try {
       const entries = await Promise.all(rootPaths.map(async (rootPath) => {
+        // Per-root git reads degrade independently: a non-repo or transiently
+        // locked root falls back to empty/null so one bad root can't blank the
+        // whole multi-root status sweep. The main process logs the real git error.
         const [files, summary] = await Promise.all([
           pear.git.status(rootPath).catch(() => [] as FileStatus[]),
           pear.git.summary(rootPath).catch(() => null)

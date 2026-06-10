@@ -187,6 +187,9 @@ function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNod
 
   useEffect(() => {
     pear.auth.status().then(setAuth)
+    // Initial recovery-state probe is best-effort: on failure we leave the
+    // banner hidden, and the integration-auth event listener below will set it
+    // if recovery is actually needed.
     pear.integrations.authRecoveryState().then(setAuthRecovery).catch(() => undefined)
   }, [])
 
@@ -212,6 +215,8 @@ function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNod
     try {
       const result = await pear.auth.login()
       setAuth(result.loggedIn ? await pear.auth.status() : result)
+      // Post-login recovery probe is best-effort: null just clears the banner,
+      // which is the correct post-login default if the probe itself fails.
       setAuthRecovery(await pear.integrations.authRecoveryState().catch(() => null))
     } finally {
       setLoading(false)

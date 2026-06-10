@@ -355,7 +355,8 @@ function createRuntime(
           try {
             addon.dispose()
           } catch {
-            // ignore
+            // Disposing an addon whose WebGL context is already lost can throw;
+            // we are tearing it down anyway, so there is nothing to recover or report.
           }
           if (webglAddon === addon) webglAddon = null
         })
@@ -547,7 +548,8 @@ function createRuntime(
       try {
         term.refresh(0, term.rows - 1)
       } catch {
-        // ignore
+        // A repaint can throw if the term was disposed between scheduling and
+        // running this fit; benign for a redraw, nothing to recover.
       }
       // Post-settle metrics may differ from the pre-settle ones the
       // predictor was constructed with. Sync it so column wraps and row
@@ -615,13 +617,15 @@ function createRuntime(
       try {
         webglAddon?.dispose()
       } catch {
-        // ignore
+        // Teardown: an already-disposed or context-lost WebGL addon can throw
+        // on dispose; we null it out next regardless, so silence is correct.
       }
       webglAddon = null
       try {
         term?.dispose()
       } catch {
-        // ignore
+        // Teardown: disposing an xterm instance twice (or after its host was
+        // detached) can throw; we null it out next regardless, so silence is correct.
       }
       term = null
       if (host.parentElement) {
@@ -667,7 +671,8 @@ function createRuntime(
       try {
         term.refresh(0, term.rows - 1)
       } catch {
-        // ignore
+        // A forced repaint can throw if the term was disposed; benign for a
+        // redraw request, nothing to recover.
       }
     },
     setInputSrttGetter(getter: () => number | null): void {
