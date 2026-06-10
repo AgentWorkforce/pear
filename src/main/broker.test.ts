@@ -1052,10 +1052,8 @@ describe('BrokerManager local + cloud coexistence', () => {
 
     const first = manager.spawnPersona(PROJECT_ID, 'autonomous-actor')
     const second = manager.spawnPersona(PROJECT_ID, 'autonomous-actor')
-    await Promise.resolve()
-    await Promise.resolve()
 
-    expect(local.spawnPty).toHaveBeenCalledTimes(1)
+    await vi.waitFor(() => expect(local.spawnPty).toHaveBeenCalledTimes(1))
     releaseSpawn()
     const results = await Promise.all([first, second])
 
@@ -1123,8 +1121,7 @@ describe('BrokerManager local + cloud coexistence', () => {
     })
 
     const spawned = manager.spawnPersona(PROJECT_ID, 'autonomous-actor')
-    await Promise.resolve()
-    await Promise.resolve()
+    await vi.waitFor(() => expect(local.spawnPty).toHaveBeenCalledTimes(1))
 
     await expect(manager.listAgents(PROJECT_ID)).resolves.toEqual([])
     releaseSpawn()
@@ -1161,8 +1158,7 @@ describe('BrokerManager local + cloud coexistence', () => {
     })
 
     const spawned = manager.spawnPersona(PROJECT_ID, 'autonomous-actor')
-    await Promise.resolve()
-    await Promise.resolve()
+    await vi.waitFor(() => expect(local.spawnPty).toHaveBeenCalledTimes(1))
 
     const [pendingDetails] = await manager.listBrokerDetails()
     expect(pendingDetails.agentCount).toBe(0)

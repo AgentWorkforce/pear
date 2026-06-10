@@ -219,6 +219,7 @@ type BurnExportStamp = {
 const DEFAULT_LEDGER_HOME = join(homedir(), '.agentworkforce', 'burn')
 const INGEST_INTERVAL_MS = 15_000
 const SESSION_LOOKUP_CACHE_MS = 60_000
+const SESSION_LOOKUP_CACHE_MAX_ENTRIES = 500
 const MAX_SESSIONS_FOR_DETAILS = 12
 const MAX_ROWS = 12
 
@@ -541,6 +542,33 @@ class BurnManager {
   private lastIngestAt = 0
   private sessionLookupCache = new Map<string, { lookup: BurnSessionLookup; updatedAt: number }>()
 
+  private getCachedSessionLookup(sessionId: string, now: number): BurnSessionLookup | null {
+    const cached = this.sessionLookupCache.get(sessionId)
+    if (!cached) return null
+
+    if (now - cached.updatedAt >= SESSION_LOOKUP_CACHE_MS) {
+      this.sessionLookupCache.delete(sessionId)
+      return null
+    }
+
+    this.sessionLookupCache.delete(sessionId)
+    this.sessionLookupCache.set(sessionId, cached)
+    return cached.lookup
+  }
+
+  private rememberSessionLookup(sessionId: string, lookup: BurnSessionLookup): void {
+    if (this.sessionLookupCache.has(sessionId)) {
+      this.sessionLookupCache.delete(sessionId)
+    }
+    this.sessionLookupCache.set(sessionId, { lookup, updatedAt: Date.now() })
+
+    while (this.sessionLookupCache.size > SESSION_LOOKUP_CACHE_MAX_ENTRIES) {
+      const oldestKey = this.sessionLookupCache.keys().next().value
+      if (typeof oldestKey !== 'string') break
+      this.sessionLookupCache.delete(oldestKey)
+    }
+  }
+
   async listAgentSummaries(agents: BurnAgentInput[]): Promise<BurnAgentSummary[]> {
     await this.refreshLedger(false)
     if (agents.length <= 1) return Promise.all(agents.map((agent) => this.getAgentSummary(agent)))
@@ -582,9 +610,9 @@ class BurnManager {
     const now = Date.now()
     const uncached: string[] = []
     for (const sessionId of deduped) {
-      const cached = this.sessionLookupCache.get(sessionId)
-      if (cached && now - cached.updatedAt < SESSION_LOOKUP_CACHE_MS) {
-        result[sessionId] = cached.lookup
+      const cached = this.getCachedSessionLookup(sessionId, now)
+      if (cached) {
+        result[sessionId] = cached
       } else {
         uncached.push(sessionId)
       }
@@ -611,7 +639,7 @@ class BurnManager {
           if (tokens === 0 && totalCost === 0 && cost.turnCount === 0 && !agentBySession.has(sessionId)) {
             return
           }
-          result[sessionId] = {
+          const lookup: BurnSessionLookup = {
             sessionId,
             totalTokens: tokens,
             totalCost,
@@ -619,9 +647,10 @@ class BurnManager {
             agent: agentBySession.get(sessionId),
             status: 'ok'
           }
-          this.sessionLookupCache.set(sessionId, { lookup: result[sessionId], updatedAt: Date.now() })
+          result[sessionId] = lookup
+          this.rememberSessionLookup(sessionId, lookup)
         } catch (error) {
-          result[sessionId] = {
+          const lookup: BurnSessionLookup = {
             sessionId,
             totalTokens: 0,
             totalCost: 0,
@@ -630,13 +659,14 @@ class BurnManager {
             status: 'unavailable',
             error: toErrorMessage(error)
           }
-          this.sessionLookupCache.set(sessionId, { lookup: result[sessionId], updatedAt: Date.now() })
+          result[sessionId] = lookup
+          this.rememberSessionLookup(sessionId, lookup)
         }
       }))
     } catch (error) {
       const message = toErrorMessage(error)
       for (const sessionId of uncached) {
-        result[sessionId] = {
+        const lookup: BurnSessionLookup = {
           sessionId,
           totalTokens: 0,
           totalCost: 0,
@@ -644,7 +674,8 @@ class BurnManager {
           status: 'unavailable',
           error: message
         }
-        this.sessionLookupCache.set(sessionId, { lookup: result[sessionId], updatedAt: Date.now() })
+        result[sessionId] = lookup
+        this.rememberSessionLookup(sessionId, lookup)
       }
     }
 
