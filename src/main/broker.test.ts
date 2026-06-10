@@ -2069,6 +2069,40 @@ describe('classifyBrokerEvent', () => {
     }).status).toBe('valid')
   })
 
+  it('accepts null for absent optional fields (broker serializes None as null)', () => {
+    // Regression: the live broker emits `null` for unset optional fields, not
+    // omitted keys. `.optional()` rejected null, so real agent_spawned /
+    // worker_ready / relay_inbound events were dropped at ingress (observed in
+    // production logs 2026-06-11). Payloads below are the exact dropped shapes.
+    expect(classifyBrokerEvent({
+      kind: 'agent_spawned',
+      name: 'codex-1',
+      runtime: 'pty',
+      provider: null,
+      model: null,
+      pid: null
+    }).status).toBe('valid')
+    expect(classifyBrokerEvent({
+      kind: 'worker_ready',
+      name: 'codex-1',
+      runtime: 'pty',
+      provider: null,
+      model: null
+    }).status).toBe('valid')
+    expect(classifyBrokerEvent({
+      kind: 'relay_inbound',
+      event_id: 'evt-null-1',
+      from: 'will',
+      target: 'codex-1',
+      body: 'hello',
+      thread_id: null
+    }).status).toBe('valid')
+    // Wrong non-null types must still be rejected.
+    expect(classifyBrokerEvent({
+      kind: 'agent_spawned', name: 'codex-1', runtime: 'pty', pid: 'not-a-number'
+    }).status).toBe('malformed')
+  })
+
   it('treats an unknown kind as forwardable, not malformed', () => {
     const result = classifyBrokerEvent({ kind: 'brand_new_kind', name: 'x' })
     expect(result.status).toBe('unknown')
