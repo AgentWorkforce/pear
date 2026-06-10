@@ -409,6 +409,51 @@ describe('IntegrationsManager', () => {
     expect(mock.fetchCalls.some((call) => call.url.includes('/api/v1/workspaces/account-workspace-id/integrations'))).toBe(true)
   })
 
+  it('returns settings integrations before local mount reconciliation finishes', async () => {
+    let finishMountReconcile!: () => void
+    mock.setMountReconcilePromise(new Promise((resolve) => {
+      finishMountReconcile = resolve
+    }))
+    const manager = new IntegrationsManager()
+    let resolved = false
+
+    const loadPromise = manager.listConnectedForSettings('project-1')
+      .then((integrations) => {
+        resolved = true
+        return integrations
+      })
+
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(resolved).toBe(true)
+    expect(await loadPromise).toEqual([
+      expect.objectContaining({ provider: 'slack', integrationId: 'slack-integration-1' })
+    ])
+    expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalledTimes(1)
+
+    finishMountReconcile()
+    await Promise.resolve()
+  })
+
+  it('coalesces repeated settings mount syncs while reconciliation is pending', async () => {
+    let finishMountReconcile!: () => void
+    mock.setMountReconcilePromise(new Promise((resolve) => {
+      finishMountReconcile = resolve
+    }))
+    const manager = new IntegrationsManager()
+
+    await Promise.all([
+      manager.listConnectedForSettings('project-1'),
+      manager.listConnectedForSettings('project-1')
+    ])
+
+    expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalledTimes(1)
+
+    finishMountReconcile()
+    await Promise.resolve()
+  })
+
   it('does not throw or raise a banner when background cloud hydration hits a transient failure', async () => {
     mock.getAccountWorkspaceId.mockRejectedValueOnce(new Error('network unreachable'))
     const manager = new IntegrationsManager()
@@ -435,11 +480,11 @@ describe('IntegrationsManager', () => {
       })
     ])
 
-    expect(events).toContainEqual({
+    await vi.waitFor(() => expect(events).toContainEqual({
       type: 'integration-auth-required',
       reason: 'account-workspace-required',
       message: 'account-workspace-required'
-    })
+    }))
   })
 
   it('keeps boot-time auth recovery queryable after the event is missed by renderer listeners', () => {
@@ -475,12 +520,12 @@ describe('IntegrationsManager', () => {
         integrationId: 'slack-integration-1'
       })
     ])
+    await vi.waitFor(() => expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalledTimes(1))
     expect(manager.getAuthRecoveryState()).toMatchObject({
       reason: 'account-workspace-required',
       failureClass: 'whoami-http-500',
       message: 'account-workspace-required:whoami-http-500'
     })
-    expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalledTimes(1)
 
     await vi.advanceTimersByTimeAsync(30_000)
     await Promise.resolve()
@@ -503,6 +548,7 @@ describe('IntegrationsManager', () => {
         integrationId: 'slack-integration-1'
       })
     ])
+    await vi.waitFor(() => expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalledTimes(1))
     expect(manager.getAuthRecoveryState()).toMatchObject({
       reason: 'account-workspace-required',
       failureClass: 'whoami-http-500'

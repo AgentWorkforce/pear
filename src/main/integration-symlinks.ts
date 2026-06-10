@@ -5,6 +5,7 @@ import { promisify } from 'node:util'
 import { integrationMountRootForWorkspace } from './integration-mounts'
 
 const execFileAsync = promisify(execFile)
+const gitDirCache = new Map<string, Promise<string | null>>()
 
 // Project-relative entry point for the workspace's mirrored integration data.
 // A symlink (never a real directory) so agents in the project can read
@@ -25,17 +26,28 @@ function isFileAlreadyExistsError(error: unknown): boolean {
 }
 
 async function resolveGitDir(projectRoot: string): Promise<string | null> {
-  try {
-    const { stdout } = await execFileAsync(
-      'git',
-      ['rev-parse', '--absolute-git-dir'],
-      { cwd: projectRoot }
-    )
-    const gitDir = stdout.trim()
-    return gitDir && isAbsolute(gitDir) ? gitDir : null
-  } catch {
-    return null
-  }
+  const cacheKey = resolve(projectRoot)
+  const cached = gitDirCache.get(cacheKey)
+  if (cached) return cached
+
+  const pending = (async (): Promise<string | null> => {
+    try {
+      const { stdout } = await execFileAsync(
+        'git',
+        ['rev-parse', '--absolute-git-dir'],
+        { cwd: projectRoot }
+      )
+      const gitDir = stdout.trim()
+      return gitDir && isAbsolute(gitDir) ? gitDir : null
+    } catch {
+      return null
+    }
+  })()
+  gitDirCache.set(cacheKey, pending)
+
+  const gitDir = await pending
+  if (!gitDir) gitDirCache.delete(cacheKey)
+  return gitDir
 }
 
 /**

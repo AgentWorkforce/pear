@@ -399,17 +399,23 @@ function IntegrationVisibilitySection({
     setError(null)
     setLoading(true)
     try {
-      const auth = await pear.auth.status()
+      const [authResult, integrationsResult] = await Promise.allSettled([
+        pear.auth.status(),
+        pear.integrations.list(projectId)
+      ])
+      if (authResult.status === 'rejected') throw authResult.reason
+      const auth = authResult.value
       if (!auth.loggedIn) {
         setAuthRequired(true)
         setWorkspaceRequired(false)
         setIntegrations([])
         return
       }
+      if (integrationsResult.status === 'rejected') throw integrationsResult.reason
 
       setAuthRequired(false)
       setWorkspaceRequired(false)
-      setIntegrations(await pear.integrations.list(projectId))
+      setIntegrations(integrationsResult.value)
     } catch (err) {
       if (isIntegrationAuthRequired(err)) {
         setAuthRequired(true)
