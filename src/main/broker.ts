@@ -14,12 +14,13 @@ import {
   type BrokerStatus,
   type ListAgent,
   type InboundDeliveryMode,
-  type PendingRelayMessage,
-  type PtyInputStream
+  type PendingRelayMessage
 } from '@agent-relay/harness-driver'
 import { AgentRelay, type RelayMessage } from '@agent-relay/sdk'
 import { getAccessToken, getApiUrl } from './auth'
 import { assertDirectory } from './path-utils'
+import { PtyInputStreamManager } from './pty-input-stream'
+import { PtyChunkDeduper } from './pty-dedup'
 import { createPearBurnSpawnListener, stampPearBurnSpawnedAgent } from './burn-spawn-hook'
 import { getBurnLedgerHome, getPearBurnAgentKey } from './burn'
 import {
@@ -558,16 +559,9 @@ const DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS = 15_000
 const DEFAULT_RECONCILE_MESSAGE_LIMIT = 50
 const MAX_RECONCILE_MESSAGE_LIMIT = 100
 const EVENT_STREAM_REBIND_COOLDOWN_MS = 5_000
-const PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS = 60_000
-const PTY_CHUNK_CONTENT_DEDUPE_TTL_MS = 1_000
-const MAX_PTY_CHUNK_DEDUPE_ENTRIES = 2_000
 // Throttle malformed-event warnings per `kind` so a misbehaving broker stream
 // can't flood the terminal (AGENTS.md low-noise telemetry doctrine).
 const MALFORMED_BROKER_EVENT_WARN_THROTTLE_MS = 60_000
-// After this many consecutive failures to open a PTY input stream, give up on
-// the WS fast path for that agent briefly and send over HTTP while it cools down.
-const MAX_INPUT_STREAM_OPEN_FAILURES = 3
-const INPUT_STREAM_FALLBACK_RETRY_MS = 15_000
 // A single broker read timeout can be a one-off slow response; a run of them
 // means that endpoint is wedged (alive, accepting TCP, never answering).
 // After this many consecutive timeouts for one project/operation we respawn it
@@ -1476,16 +1470,10 @@ export class BrokerManager {
   // so agent names are project-unique in practice — the set tracks which
   // session actually owns the worker so agent-scoped calls route correctly.
   private agentSessions = new Map<string, Set<string>>()
-  private inputStreams = new Map<string, PtyInputStream>()
-  private inputStreamFallbacks = new Set<string>()
-  private inputStreamFallbackRetryAt = new Map<string, number>()
-  // Keys whose WS input stream has completed the broker's pty_input_ready
-  // handshake — only these are safe to send on without blocking. Everything
-  // else routes over HTTP until the stream is confirmed open.
-  private inputStreamReady = new Set<string>()
-  // Consecutive background open failures per key; after MAX we pause WS retries
-  // for this agent briefly and keep HTTP input flowing.
-  private inputStreamOpenFailures = new Map<string, number>()
+  // PTY input streaming (WS fast path + HTTP fallback) and all its per-agent
+  // state live here; this manager owns the stream maps, failure counting, and
+  // fallback cooldown.
+  private inputStreamManager = new PtyInputStreamManager()
   // Consecutive broker read timeouts per project/operation; after MAX we
   // respawn the wedged broker. Reset whenever that operation succeeds.
   private brokerTimeoutCounts = new Map<string, number>()
@@ -1493,7 +1481,7 @@ export class BrokerManager {
   private eventStreamGenerationCounter = 0
   private eventObservers = new Set<BrokerEventObserver>()
   private eventHistory: BrokerEventRecord[] = []
-  private recentPtyChunks = new Map<string, number>()
+  private ptyDeduper = new PtyChunkDeduper()
   private eventSerial = 0
   // Ingress-validation telemetry: last warn time per malformed `kind`
   // (throttled) and the set of unknown `kind`s already logged (once each).
@@ -2419,7 +2407,7 @@ export class BrokerManager {
         'name' in event && typeof event.name === 'string' &&
         'chunk' in event && typeof event.chunk === 'string'
       ) {
-        if (this.isDuplicatePtyChunk(sessionKey, event.name, event)) {
+        if (this.ptyDeduper.isDuplicatePtyChunk(sessionKey, event.name, event)) {
           return
         }
         const targetWindow = this.windowForSession(sessionKey, win)
@@ -2454,7 +2442,7 @@ export class BrokerManager {
           })
         }
       } else if (event.kind === 'agent_exit' && event.name) {
-        this.closeInputStream(this.getInputStreamKey(sessionKey, event.name), 1000, 'agent closed')
+        this.inputStreamManager.closeInputStream(this.inputStreamManager.getInputStreamKey(sessionKey, event.name), 1000, 'agent closed')
         this.forgetAgentSession(event.name, sessionKey)
         void client.release(event.name, 'agent exit').catch((err) => {
           if (!isMissingAgentError(err)) {
@@ -2462,7 +2450,7 @@ export class BrokerManager {
           }
         })
       } else if ((event.kind === 'agent_exited' || event.kind === 'agent_released') && event.name) {
-        this.closeInputStream(this.getInputStreamKey(sessionKey, event.name), 1000, 'agent closed')
+        this.inputStreamManager.closeInputStream(this.inputStreamManager.getInputStreamKey(sessionKey, event.name), 1000, 'agent closed')
         this.forgetAgentSession(event.name, sessionKey)
       } else if ('name' in event && typeof event.name === 'string') {
         this.rememberAgentSession(event.name, sessionKey)
@@ -2488,56 +2476,6 @@ export class BrokerManager {
   private nextEventStreamGeneration(): number {
     this.eventStreamGenerationCounter += 1
     return this.eventStreamGenerationCounter
-  }
-
-  private isDuplicatePtyChunk(sessionKey: string, name: string, event: BrokerEvent): boolean {
-    const now = Date.now()
-    for (const [key, seenAt] of this.recentPtyChunks) {
-      const ttl = key.startsWith('chunk:')
-        ? PTY_CHUNK_CONTENT_DEDUPE_TTL_MS
-        : PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS
-      if (
-        now - seenAt > ttl ||
-        this.recentPtyChunks.size > MAX_PTY_CHUNK_DEDUPE_ENTRIES
-      ) {
-        this.recentPtyChunks.delete(key)
-      }
-    }
-
-    const eventRecord = event as Record<string, unknown>
-    const seq = typeof eventRecord.seq === 'number' || typeof eventRecord.seq === 'string'
-      ? String(eventRecord.seq)
-      : ''
-    const eventId = typeof eventRecord.event_id === 'string'
-      ? eventRecord.event_id
-      : typeof eventRecord.id === 'string'
-        ? eventRecord.id
-        : ''
-    const identity = eventId || (seq ? `seq:${seq}` : '')
-    const chunk = typeof eventRecord.chunk === 'string' ? eventRecord.chunk : ''
-    if (!identity && !chunk) return false
-
-    const contentKeyPrefix = `chunk:${sessionKey}:${name}:`
-    const key = identity
-      ? `identity:${sessionKey}:${name}:${identity}`
-      : `${contentKeyPrefix}${chunk}`
-    const ttl = identity
-      ? PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS
-      : PTY_CHUNK_CONTENT_DEDUPE_TTL_MS
-    const previous = this.recentPtyChunks.get(key)
-    if (previous !== undefined && now - previous <= ttl) {
-      return true
-    }
-
-    if (!identity) {
-      for (const previousKey of this.recentPtyChunks.keys()) {
-        if (previousKey.startsWith(contentKeyPrefix)) {
-          this.recentPtyChunks.delete(previousKey)
-        }
-      }
-    }
-    this.recentPtyChunks.set(key, now)
-    return false
   }
 
   /**
@@ -2644,10 +2582,6 @@ export class BrokerManager {
     }
   }
 
-  private getInputStreamKey(sessionKey: string, name: string): string {
-    return `${sessionKey}:${name}`
-  }
-
   private personaReadinessKey(sessionKey: string, name: string): string {
     return `${sessionKey}:${name}`
   }
@@ -2662,111 +2596,6 @@ export class BrokerManager {
 
   private isPersonaReadinessPending(session: BrokerSession, name: string): boolean {
     return this.pendingPersonaReadiness.has(this.personaReadinessKey(sessionKeyFor(session), name))
-  }
-
-  // Returns the input stream for an agent plus whether it is *ready* to send on
-  // (the broker has acked pty_input_ready). The WS handshake runs in the
-  // background and is never awaited here, so a keystroke is never blocked on the
-  // up-to-10s open timeout — callers send over HTTP until `ready` flips true.
-  private ensureInputStream(
-    session: BrokerSession,
-    name: string
-  ): { stream: PtyInputStream; ready: boolean } {
-    const key = this.getInputStreamKey(sessionKeyFor(session), name)
-    const existing = this.inputStreams.get(key)
-    if (existing && !existing.closed) {
-      return { stream: existing, ready: this.inputStreamReady.has(key) }
-    }
-
-    const stream = session.client.openInputStream(name)
-    this.inputStreams.set(key, stream)
-    this.inputStreamReady.delete(key)
-    stream.waitUntilOpen().then(
-      () => {
-        if (this.inputStreams.get(key) === stream) {
-          this.inputStreamReady.add(key)
-          this.inputStreamFallbacks.delete(key)
-          this.inputStreamFallbackRetryAt.delete(key)
-          this.inputStreamOpenFailures.delete(key)
-        }
-      },
-      () => {
-        if (this.inputStreams.get(key) !== stream) return
-        this.inputStreams.delete(key)
-        this.inputStreamReady.delete(key)
-        const failures = (this.inputStreamOpenFailures.get(key) ?? 0) + 1
-        this.inputStreamOpenFailures.set(key, failures)
-        // A stream that never opens (e.g. broker never sends pty_input_ready)
-        // would otherwise be re-opened on every keystroke. Stop trying the WS
-        // after a few failures, ride HTTP briefly, then retry. Cloud terminals
-        // can stay mounted across focus changes, so attachTerminal is not the
-        // only reliable signal that the fast path should get another chance.
-        // This is the one case worth surfacing: transient not-ready is normal,
-        // but a *persistently* unopenable stream means the low-latency fast path
-        // is off for this agent — log it once rather than hiding it.
-        if (failures >= MAX_INPUT_STREAM_OPEN_FAILURES && !this.inputStreamFallbacks.has(key)) {
-          console.warn(
-            `[broker] PTY input stream for ${name} failed to open ${failures}x; ` +
-            `routing input over HTTP for this agent and retrying PTY stream shortly`
-          )
-        }
-        if (failures >= MAX_INPUT_STREAM_OPEN_FAILURES) {
-          this.inputStreamFallbacks.add(key)
-          this.inputStreamFallbackRetryAt.set(key, Date.now() + INPUT_STREAM_FALLBACK_RETRY_MS)
-        }
-      }
-    )
-    return { stream, ready: false }
-  }
-
-  private refreshExpiredInputStreamFallback(key: string): void {
-    const retryAt = this.inputStreamFallbackRetryAt.get(key)
-    if (retryAt === undefined || Date.now() < retryAt) return
-    this.inputStreamFallbacks.delete(key)
-    this.inputStreamFallbackRetryAt.delete(key)
-    this.inputStreamOpenFailures.delete(key)
-  }
-
-  private closeInputStream(key: string, code = 1000, reason = 'closed'): void {
-    const stream = this.inputStreams.get(key)
-    this.inputStreams.delete(key)
-    this.inputStreamReady.delete(key)
-    this.inputStreamFallbacks.delete(key)
-    this.inputStreamFallbackRetryAt.delete(key)
-    this.inputStreamOpenFailures.delete(key)
-    if (stream) {
-      stream.close(code, reason)
-    }
-  }
-
-  // Drop any cached HTTP-only fallback + failure count for an agent so a fresh
-  // terminal attach gets another chance at the low-latency WS stream. Does not
-  // disturb a healthy open stream.
-  private resetInputStreamFallback(key: string): void {
-    this.inputStreamFallbacks.delete(key)
-    this.inputStreamFallbackRetryAt.delete(key)
-    this.inputStreamOpenFailures.delete(key)
-  }
-
-  private closeInputStreamsForSession(sessionKey: string): void {
-    const prefix = `${sessionKey}:`
-    for (const key of Array.from(this.inputStreams.keys())) {
-      if (key.startsWith(prefix)) {
-        this.closeInputStream(key, 1000, 'project closed')
-      }
-    }
-    for (const key of Array.from(this.inputStreamFallbacks)) {
-      if (key.startsWith(prefix)) this.inputStreamFallbacks.delete(key)
-    }
-    for (const key of Array.from(this.inputStreamFallbackRetryAt.keys())) {
-      if (key.startsWith(prefix)) this.inputStreamFallbackRetryAt.delete(key)
-    }
-    for (const key of Array.from(this.inputStreamOpenFailures.keys())) {
-      if (key.startsWith(prefix)) this.inputStreamOpenFailures.delete(key)
-    }
-    for (const key of Array.from(this.inputStreamReady)) {
-      if (key.startsWith(prefix)) this.inputStreamReady.delete(key)
-    }
   }
 
   async spawnAgent(
@@ -3422,7 +3251,7 @@ export class BrokerManager {
     // A re-attach (window reload, restart, tab re-open) is a fresh start for
     // this terminal — clear any stale HTTP-only fallback so the WS fast path
     // gets retried instead of being stuck on HTTP for the agent's lifetime.
-    this.resetInputStreamFallback(this.getInputStreamKey(sessionKeyFor(session), name))
+    this.inputStreamManager.resetInputStreamFallback(this.inputStreamManager.getInputStreamKey(sessionKeyFor(session), name))
     let previousMode: InboundDeliveryMode | undefined
 
     try {
@@ -3493,23 +3322,23 @@ export class BrokerManager {
     }
 
     const session = this.getSessionForAgent(trimmedName, projectId)
-    const key = this.getInputStreamKey(sessionKeyFor(session), trimmedName)
-    this.refreshExpiredInputStreamFallback(key)
-    if (!this.inputStreamFallbacks.has(key)) {
+    const key = this.inputStreamManager.getInputStreamKey(sessionKeyFor(session), trimmedName)
+    this.inputStreamManager.refreshExpiredInputStreamFallback(key)
+    if (!this.inputStreamManager.hasFallback(key)) {
       // Kick off (or reuse) the WS stream, but only *send* on it once the broker
       // has acked the handshake. Before that, fall through to HTTP so a keystroke
       // never stalls on the open timeout — the symptom that made typing look dead
       // after a re-attach. Subsequent keystrokes take the fast path once ready.
-      const { stream, ready } = this.ensureInputStream(session, trimmedName)
+      const { stream, ready } = this.inputStreamManager.ensureInputStream(session.client, key, trimmedName)
       if (ready && !stream.closed) {
         try {
           return await stream.send(data)
         } catch (err) {
-          if (this.inputStreams.get(key) === stream) {
-            this.closeInputStream(key, 1011, 'stream send failed')
+          if (this.inputStreamManager.getStream(key) === stream) {
+            this.inputStreamManager.closeInputStream(key, 1011, 'stream send failed')
           }
           if (isUnsupportedInputStreamError(err)) {
-            this.inputStreamFallbacks.add(key)
+            this.inputStreamManager.addFallback(key)
           }
           // A deliberate close (project/agent shutdown, terminal re-attach) that
           // races an in-flight send rejects with `input_stream_closed`. That's
@@ -3556,8 +3385,8 @@ export class BrokerManager {
     if (!trimmedName) return null
     try {
       const session = this.getSessionForAgent(trimmedName, projectId)
-      const key = this.getInputStreamKey(sessionKeyFor(session), trimmedName)
-      return this.inputStreams.get(key)?.srttMs ?? null
+      const key = this.inputStreamManager.getInputStreamKey(sessionKeyFor(session), trimmedName)
+      return this.inputStreamManager.getStream(key)?.srttMs ?? null
     } catch {
       return null
     }
@@ -3924,7 +3753,7 @@ export class BrokerManager {
     }
     const session = this.getSessionForAgent(trimmedName, projectId)
     await session.client.release(trimmedName)
-    this.closeInputStream(this.getInputStreamKey(sessionKeyFor(session), trimmedName), 1000, 'agent released')
+    this.inputStreamManager.closeInputStream(this.inputStreamManager.getInputStreamKey(sessionKeyFor(session), trimmedName), 1000, 'agent released')
   }
 
   // Run a per-session broker operation with the same self-healing listAgents
@@ -4210,7 +4039,7 @@ export class BrokerManager {
   }
 
   private dropSession(sessionKey: string, options: { disconnectOnly: boolean }): void {
-    this.closeInputStreamsForSession(sessionKey)
+    this.inputStreamManager.closeInputStreamsForSession(sessionKey)
     this.clearBrokerTimeoutCountsForProject(projectIdFromSessionKey(sessionKey))
 
     const session = this.sessions.get(sessionKey)
