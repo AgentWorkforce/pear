@@ -148,7 +148,7 @@ const deliveryInjected = z
   .object({
     kind: z.literal('delivery_injected'),
     name: z.string(),
-    delivery_id: z.string(),
+    delivery_id: z.string().optional(),
     event_id: z.string(),
     timestamp: z.unknown().optional()
   })
@@ -158,7 +158,7 @@ const deliveryVerified = z
   .object({
     kind: z.literal('delivery_verified'),
     name: z.string(),
-    delivery_id: z.string(),
+    delivery_id: z.string().optional(),
     event_id: z.string()
   })
   .passthrough()
@@ -167,7 +167,7 @@ const deliveryFailed = z
   .object({
     kind: z.literal('delivery_failed'),
     name: z.string(),
-    delivery_id: z.string(),
+    delivery_id: z.string().optional(),
     event_id: z.string(),
     reason: z.string()
   })
@@ -177,7 +177,7 @@ const messageDeliveryConfirmed = z
   .object({
     kind: z.literal('message_delivery_confirmed'),
     name: z.string(),
-    delivery_id: z.string(),
+    delivery_id: z.string().optional(),
     event_id: z.string(),
     from: z.string(),
     to: z.string()
@@ -201,7 +201,7 @@ const deliveryActive = z
   .object({
     kind: z.literal('delivery_active'),
     name: z.string(),
-    delivery_id: z.string(),
+    delivery_id: z.string().optional(),
     event_id: z.string()
   })
   .passthrough()
@@ -210,7 +210,7 @@ const deliveryAck = z
   .object({
     kind: z.literal('delivery_ack'),
     name: z.string(),
-    delivery_id: z.string(),
+    delivery_id: z.string().optional(),
     event_id: z.string()
   })
   .passthrough()

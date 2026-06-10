@@ -2056,6 +2056,23 @@ describe('classifyBrokerEvent', () => {
     }
   })
 
+  it('accepts delivery events without delivery_id', () => {
+    // The app's delivery logic keys on event_id + name only
+    // (isDeliveryEventForMessage); requiring delivery_id would silently drop
+    // confirmations from brokers that omit it and leave pending-delivery UI
+    // state stuck.
+    for (const kind of ['delivery_injected', 'delivery_verified', 'delivery_ack', 'delivery_active']) {
+      const result = classifyBrokerEvent({ kind, name: 'claude-1', event_id: 'evt-9' })
+      expect(result.status).toBe('valid')
+    }
+    expect(classifyBrokerEvent({
+      kind: 'delivery_failed', name: 'claude-1', event_id: 'evt-9', reason: 'timeout'
+    }).status).toBe('valid')
+    expect(classifyBrokerEvent({
+      kind: 'message_delivery_confirmed', name: 'claude-1', event_id: 'evt-9', from: 'a', to: 'b'
+    }).status).toBe('valid')
+  })
+
   it('treats an unknown kind as forwardable, not malformed', () => {
     const result = classifyBrokerEvent({ kind: 'brand_new_kind', name: 'x' })
     expect(result.status).toBe('unknown')
