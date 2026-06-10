@@ -20,6 +20,7 @@ import { AgentRelay, type RelayMessage } from '@agent-relay/sdk'
 import { getAccessToken, getApiUrl } from './auth'
 import { assertDirectory } from './path-utils'
 import { PtyInputStreamManager } from './pty-input-stream'
+import { PtyChunkDeduper } from './pty-dedup'
 import { createPearBurnSpawnListener, stampPearBurnSpawnedAgent } from './burn-spawn-hook'
 import { getBurnLedgerHome, getPearBurnAgentKey } from './burn'
 import {
@@ -558,9 +559,6 @@ const DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS = 15_000
 const DEFAULT_RECONCILE_MESSAGE_LIMIT = 50
 const MAX_RECONCILE_MESSAGE_LIMIT = 100
 const EVENT_STREAM_REBIND_COOLDOWN_MS = 5_000
-const PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS = 60_000
-const PTY_CHUNK_CONTENT_DEDUPE_TTL_MS = 1_000
-const MAX_PTY_CHUNK_DEDUPE_ENTRIES = 2_000
 // Throttle malformed-event warnings per `kind` so a misbehaving broker stream
 // can't flood the terminal (AGENTS.md low-noise telemetry doctrine).
 const MALFORMED_BROKER_EVENT_WARN_THROTTLE_MS = 60_000
@@ -1483,7 +1481,7 @@ export class BrokerManager {
   private eventStreamGenerationCounter = 0
   private eventObservers = new Set<BrokerEventObserver>()
   private eventHistory: BrokerEventRecord[] = []
-  private recentPtyChunks = new Map<string, number>()
+  private ptyDeduper = new PtyChunkDeduper()
   private eventSerial = 0
   // Ingress-validation telemetry: last warn time per malformed `kind`
   // (throttled) and the set of unknown `kind`s already logged (once each).
@@ -2409,7 +2407,7 @@ export class BrokerManager {
         'name' in event && typeof event.name === 'string' &&
         'chunk' in event && typeof event.chunk === 'string'
       ) {
-        if (this.isDuplicatePtyChunk(sessionKey, event.name, event)) {
+        if (this.ptyDeduper.isDuplicatePtyChunk(sessionKey, event.name, event)) {
           return
         }
         const targetWindow = this.windowForSession(sessionKey, win)
@@ -2478,56 +2476,6 @@ export class BrokerManager {
   private nextEventStreamGeneration(): number {
     this.eventStreamGenerationCounter += 1
     return this.eventStreamGenerationCounter
-  }
-
-  private isDuplicatePtyChunk(sessionKey: string, name: string, event: BrokerEvent): boolean {
-    const now = Date.now()
-    for (const [key, seenAt] of this.recentPtyChunks) {
-      const ttl = key.startsWith('chunk:')
-        ? PTY_CHUNK_CONTENT_DEDUPE_TTL_MS
-        : PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS
-      if (
-        now - seenAt > ttl ||
-        this.recentPtyChunks.size > MAX_PTY_CHUNK_DEDUPE_ENTRIES
-      ) {
-        this.recentPtyChunks.delete(key)
-      }
-    }
-
-    const eventRecord = event as Record<string, unknown>
-    const seq = typeof eventRecord.seq === 'number' || typeof eventRecord.seq === 'string'
-      ? String(eventRecord.seq)
-      : ''
-    const eventId = typeof eventRecord.event_id === 'string'
-      ? eventRecord.event_id
-      : typeof eventRecord.id === 'string'
-        ? eventRecord.id
-        : ''
-    const identity = eventId || (seq ? `seq:${seq}` : '')
-    const chunk = typeof eventRecord.chunk === 'string' ? eventRecord.chunk : ''
-    if (!identity && !chunk) return false
-
-    const contentKeyPrefix = `chunk:${sessionKey}:${name}:`
-    const key = identity
-      ? `identity:${sessionKey}:${name}:${identity}`
-      : `${contentKeyPrefix}${chunk}`
-    const ttl = identity
-      ? PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS
-      : PTY_CHUNK_CONTENT_DEDUPE_TTL_MS
-    const previous = this.recentPtyChunks.get(key)
-    if (previous !== undefined && now - previous <= ttl) {
-      return true
-    }
-
-    if (!identity) {
-      for (const previousKey of this.recentPtyChunks.keys()) {
-        if (previousKey.startsWith(contentKeyPrefix)) {
-          this.recentPtyChunks.delete(previousKey)
-        }
-      }
-    }
-    this.recentPtyChunks.set(key, now)
-    return false
   }
 
   /**
