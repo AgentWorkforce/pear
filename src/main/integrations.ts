@@ -1289,7 +1289,11 @@ export class IntegrationsManager {
     this.emit({ type: 'session-update', sessionId: normalizedSession.sessionId, session: normalizedSession })
 
     if (payload.connectLink) {
-      await shell.openExternal(payload.connectLink)
+      await this.openConnectLink(payload.connectLink, {
+        projectId,
+        provider: normalizedProvider,
+        sessionId: normalizedSession.sessionId
+      })
     }
 
     if (!this.isTerminalSession(normalizedSession.status)) {
@@ -1569,6 +1573,34 @@ export class IntegrationsManager {
       path: `api/v1/workspaces/${handle.workspaceId}/integrations/connect-session`,
       body: { allowedIntegrations: [relayfileProvider] }
     }) as ConnectSessionPayload)
+  }
+
+  private async openConnectLink(
+    connectLink: string,
+    context: { projectId: string; provider: string; sessionId: string }
+  ): Promise<void> {
+    let parsed: URL
+    try {
+      parsed = new URL(connectLink)
+    } catch (error) {
+      console.warn('[integrations] Refusing to open integration connect link:', {
+        ...context,
+        reason: 'invalid-url',
+        error: toErrorMessage(error)
+      })
+      return
+    }
+
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      console.warn('[integrations] Refusing to open integration connect link:', {
+        ...context,
+        reason: 'unsupported-scheme',
+        scheme: parsed.protocol || '(none)'
+      })
+      return
+    }
+
+    await shell.openExternal(parsed.href)
   }
 
   private async getIntegrationStatus(relayfileProvider: string): Promise<IntegrationStatusPayload> {

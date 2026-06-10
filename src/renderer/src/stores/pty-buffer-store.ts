@@ -26,22 +26,35 @@ const listeners = new Map<string, Set<Listener>>()
 // Chunks staged for the next animation frame, keyed by agent key.
 const pending = new Map<string, string[]>()
 // Scheduled rAF handles per key so we can cancel on clear/dispose.
-const pendingFrames = new Map<string, number>()
+type FrameHandle =
+  | { kind: 'raf'; handle: number }
+  | { kind: 'timeout'; handle: ReturnType<typeof setTimeout> }
 
-const raf: (cb: FrameRequestCallback) => number =
-  typeof requestAnimationFrame === 'function'
-    ? requestAnimationFrame
-    : ((cb: FrameRequestCallback) => setTimeout(() => cb(performance.now()), 16) as unknown as number)
+const pendingFrames = new Map<string, FrameHandle>()
 
-const cancelRaf: (handle: number) => void =
-  typeof cancelAnimationFrame === 'function'
-    ? cancelAnimationFrame
-    : ((handle: number) => clearTimeout(handle as unknown as ReturnType<typeof setTimeout>))
+function scheduleFrame(cb: FrameRequestCallback): FrameHandle {
+  if (typeof requestAnimationFrame === 'function') {
+    return { kind: 'raf', handle: requestAnimationFrame(cb) }
+  }
+  return { kind: 'timeout', handle: setTimeout(() => cb(performance.now()), 16) }
+}
+
+function cancelFrame(frame: FrameHandle): void {
+  if (frame.kind === 'raf') {
+    if (typeof cancelAnimationFrame === 'function') {
+      cancelAnimationFrame(frame.handle)
+    } else {
+      clearTimeout(frame.handle)
+    }
+    return
+  }
+  clearTimeout(frame.handle)
+}
 
 function cancelPendingFlush(key: string): void {
   const handle = pendingFrames.get(key)
   if (handle !== undefined) {
-    cancelRaf(handle)
+    cancelFrame(handle)
     pendingFrames.delete(key)
   }
   pending.delete(key)
@@ -82,7 +95,7 @@ export function getPtyChunks(key: string): string[] {
 export function flushPtyChunksNow(key: string): void {
   const handle = pendingFrames.get(key)
   if (handle !== undefined) {
-    cancelRaf(handle)
+    cancelFrame(handle)
     pendingFrames.delete(key)
   }
   if (pending.has(key)) {
@@ -134,14 +147,15 @@ export function appendPtyChunk(key: string, chunk: string): void {
     if (pendingFrames.has(key)) {
       // A rAF was scheduled earlier (when a subscriber existed); cancel it
       // since we're about to flush synchronously instead.
-      cancelRaf(pendingFrames.get(key)!)
+      const pendingFrame = pendingFrames.get(key)
+      if (pendingFrame) cancelFrame(pendingFrame)
       pendingFrames.delete(key)
     }
     flushPending(key)
     return
   }
   if (pendingFrames.has(key)) return
-  const handle = raf(() => flushPending(key))
+  const handle = scheduleFrame(() => flushPending(key))
   pendingFrames.set(key, handle)
 }
 
