@@ -31,6 +31,11 @@ import {
   type BrokerSpawnResult,
   type PersonaBrokerSpawnResult
 } from './spawn-coordinator'
+import {
+  BrokerEventHistory,
+  type BrokerEventRecord,
+  type BrokerEventRecordPayload
+} from './broker-event-history'
 import { createPearBurnSpawnListener, stampPearBurnSpawnedAgent } from './burn-spawn-hook'
 import { getBurnLedgerHome, getPearBurnAgentKey } from './burn'
 import {
@@ -38,7 +43,6 @@ import {
   GeneratedCommitDraftSchema,
   type GeneratedCommitDraft
 } from './schemas'
-import { compactBrokerEvent, normalizeEventTimestamp } from '../shared/lib/broker-events'
 import { classifyBrokerEvent } from '../shared/schemas/broker-events'
 import type {
   BrokerEventStreamDiagnostic,
@@ -563,8 +567,6 @@ function isPositiveInteger(value: unknown): value is number {
 const BROKER_DETAILS_TIMEOUT_MS = 3_000
 const COMMIT_DRAFT_MAX_DIFF_CHARS = 80_000
 const COMMIT_DRAFT_TIMEOUT_MS = 180_000
-const MAX_BROKER_EVENT_HISTORY = 3_000
-const BROKER_EVENT_HISTORY_TTL_MS = 12 * 60 * 60 * 1_000
 const DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS = 15_000
 const DEFAULT_RECONCILE_MESSAGE_LIMIT = 50
 const MAX_RECONCILE_MESSAGE_LIMIT = 100
@@ -773,7 +775,6 @@ function toErrorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-type BrokerEventRecordPayload = Record<string, unknown> & { kind: string }
 
 function isBrokerDebugEnabled(): boolean {
   return process.env.PEAR_BROKER_DEBUG === '1' || process.env.PEAR_BROKER_DEBUG === 'true'
@@ -1345,12 +1346,6 @@ export interface BrokerDetails {
   error?: string
 }
 
-export interface BrokerEventRecord {
-  id: string
-  projectId: string
-  timestamp: number
-  event: BrokerEventRecordPayload
-}
 
 interface BrokerStateSnapshot {
   agents: ListAgent[]
@@ -1415,9 +1410,11 @@ export class BrokerManager {
   private brokerTimeoutCounts = new Map<string, number>()
   private eventStreamGenerationCounter = 0
   private eventObservers = new Set<BrokerEventObserver>()
-  private eventHistory: BrokerEventRecord[] = []
+  // In-memory broker event buffer (append-on-record, reactive 3000-event / 12h
+  // prune) plus the replay query the renderer rehydrates from. BrokerManager
+  // keeps event publishing / IPC fan-out inline and delegates storage here.
+  private brokerEventHistory = new BrokerEventHistory()
   private ptyDeduper = new PtyChunkDeduper()
-  private eventSerial = 0
   // Ingress-validation telemetry: last warn time per malformed `kind`
   // (throttled) and the set of unknown `kind`s already logged (once each).
   private malformedEventWarnedAt = new Map<string, number>()
@@ -2457,7 +2454,7 @@ export class BrokerManager {
     win: BrowserWindow | undefined,
     event: BrokerEventRecordPayload
   ): BrokerEventRecord {
-    const record = this.recordBrokerEvent(projectId, event)
+    const record = this.brokerEventHistory.record(projectId, event)
     const targetWindow = this.windowForSession(sessionKey, win)
     if (targetWindow && !targetWindow.isDestroyed()) {
       targetWindow.webContents.send('broker:event', {
@@ -2468,38 +2465,6 @@ export class BrokerManager {
       })
     }
     return record
-  }
-
-  private recordBrokerEvent(projectId: string, event: BrokerEventRecordPayload): BrokerEventRecord {
-    const eventRecord = event as Record<string, unknown>
-    const timestamp = normalizeEventTimestamp(eventRecord.timestamp) ?? Date.now()
-    const record: BrokerEventRecord = {
-      id: `${projectId}:${++this.eventSerial}`,
-      projectId,
-      timestamp,
-      event: compactBrokerEvent(event)
-    }
-
-    this.eventHistory.push(record)
-    this.pruneBrokerEventHistory()
-    return record
-  }
-
-  private pruneBrokerEventHistory(now = Date.now()): void {
-    const cutoff = now - BROKER_EVENT_HISTORY_TTL_MS
-    if (this.eventHistory.length <= MAX_BROKER_EVENT_HISTORY) {
-      const firstFreshIndex = this.eventHistory.findIndex((entry) => entry.timestamp >= cutoff)
-      if (firstFreshIndex > 0) {
-        this.eventHistory.splice(0, firstFreshIndex)
-      } else if (firstFreshIndex === -1 && this.eventHistory.length > 0) {
-        this.eventHistory = []
-      }
-      return
-    }
-
-    this.eventHistory = this.eventHistory
-      .filter((entry) => entry.timestamp >= cutoff)
-      .slice(-MAX_BROKER_EVENT_HISTORY)
   }
 
   private rememberAgentSession(name: string, sessionKey: string): void {
@@ -3886,11 +3851,7 @@ export class BrokerManager {
   }
 
   listBrokerEvents(): BrokerEventRecord[] {
-    this.pruneBrokerEventHistory()
-    return this.eventHistory.map((entry) => ({
-      ...entry,
-      event: { ...(entry.event as Record<string, unknown>) } as BrokerEventRecordPayload
-    }))
+    return this.brokerEventHistory.list()
   }
 
   private async getBrokerStateSnapshot(session: BrokerSession): Promise<BrokerStateSnapshot> {
