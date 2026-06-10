@@ -227,6 +227,10 @@ const POLL_INTERVAL_MS = 2_000
 const POLL_TIMEOUT_MS = 5 * 60_000
 const CATALOG_CACHE_MS = 5 * 60_000
 const SYSTEM_MESSAGE_DEBOUNCE_MS = 1_000
+// Minimum gap between integrations-update broadcasts to the same project.
+// Staged state convergence (channel-name discovery, subscription readiness)
+// otherwise re-broadcasts a slightly-different full update every few seconds.
+const SYSTEM_MESSAGE_REBROADCAST_COOLDOWN_MS = 60_000
 const SYSTEM_MESSAGE_AGENT_WAIT_TIMEOUT_MS = 8_000
 const SYSTEM_MESSAGE_AGENT_WAIT_INTERVAL_MS = 500
 const LOCAL_MOUNT_CLOUD_HYDRATION_THROTTLE_MS = 30_000
@@ -800,10 +804,24 @@ export class IntegrationsManager {
   private sessionMetadata = new Map<string, SessionMetadata>()
   private pollTimers = new Map<string, NodeJS.Timeout>()
   private systemMessageTimers = new Map<string, NodeJS.Timeout>()
-  // Last successfully broadcast system message per project. Content-keyed (not
-  // TTL-keyed): an unchanged integrations update is never re-broadcast, no
-  // matter how often reconcile runs; any content change re-sends immediately.
-  private lastBroadcastSystemMessages = new Map<string, string>()
+  // Last integrations-update text each agent has CONFIRMED-SENT, per project.
+  // Content-keyed and per-agent (not per-project): a project-level signature
+  // recorded only when every send succeeded meant one flaky agent send
+  // re-broadcast the identical update to EVERY agent on the next reconcile —
+  // the agents that already received it replied again (the duplicated
+  // "<integrations-update>…" / duplicated acknowledgment transcripts). With
+  // per-agent records, retries target only the agents that missed it, and a
+  // newly spawned agent receives the current update without re-sending it to
+  // everyone else.
+  private lastAgentSystemMessages = new Map<string, Map<string, string>>()
+  // When each project's last broadcast went out. Mount-path discovery and
+  // subscription readiness converge in stages (e.g. bare → suffixed Slack
+  // channel ids), each stage changing the rendered text slightly; without a
+  // cooldown every stage re-broadcast the full update mid-task.
+  private lastSystemMessageBroadcastAt = new Map<string, number>()
+  // Snippet most recently embedded into spawn instructions, per project, so
+  // the spawn path can record it as already-delivered for the new agent.
+  private lastSpawnInstructionSnippets = new Map<string, string>()
   private catalogCache: IntegrationAdapter[] | null = null
   private catalogFetchedAt = 0
   private localMountCloudHydrationStartedAt = 0
@@ -2138,10 +2156,31 @@ export class IntegrationsManager {
   initialSpawnInstructions(projectId: string): string | undefined {
     const integrations = this.visibleIntegrationsForProject(projectId)
     if (integrations.length === 0) return undefined
+    const snippet = this.buildSystemMessageSnippet(integrations, true)
+    // Remember what this spawn embedded so recordSpawnInstructionDelivery
+    // can mark the new agent as already-notified — without it, the next
+    // project broadcast re-delivered the same setup context to the agent
+    // that just received it in its spawn task ("Setup context received"
+    // acknowledged twice).
+    this.lastSpawnInstructionSnippets.set(projectId, snippet)
     return [
       'Initial project integration context. Treat this as setup context, not as the user task.',
-      this.buildSystemMessageSnippet(integrations, true)
+      snippet
     ].join('\n')
+  }
+
+  // Called after a spawn whose task embedded initialSpawnInstructions: the
+  // new agent already has the current integrations snippet, so per-agent
+  // delivery records treat it as up to date.
+  recordSpawnInstructionDelivery(projectId: string, agentName: string): void {
+    const snippet = this.lastSpawnInstructionSnippets.get(projectId)
+    if (!snippet) return
+    let delivered = this.lastAgentSystemMessages.get(projectId)
+    if (!delivered) {
+      delivered = new Map()
+      this.lastAgentSystemMessages.set(projectId, delivered)
+    }
+    delivered.set(agentName, snippet)
   }
 
   private mountPathsForAgentWorkspace(integration: ConnectedIntegration): string[] {
@@ -2198,34 +2237,55 @@ export class IntegrationsManager {
     options: IntegrationSystemMessageOptions = {}
   ): Promise<void> {
     try {
-      if (this.lastBroadcastSystemMessages.get(projectId) === message) return
-
       const bridge = brokerManager as unknown as IntegrationSystemMessageBridge
       const agents = await this.listSystemMessageAgents(bridge, projectId, options.waitForAgent === true)
       if (agents.length === 0) return
-      await Promise.all(
-        agents
-          .map((agent) => {
-            const input = {
-              to: agent.name,
-              from: 'system',
-              text: message,
-              priority: 0,
-              mode: 'steer',
-              data: {
-                kind: 'integrations-update',
-                system: true
-              }
-            } as const
-            // Delivery confirmations can hang behind inactive PTYs. Integration
-            // updates are setup context, so broker send acceptance is the
-            // reliable boundary for idempotent notification.
-            return bridge.sendMessage(projectId, input)
-          })
+
+      let delivered = this.lastAgentSystemMessages.get(projectId)
+      if (!delivered) {
+        delivered = new Map()
+        this.lastAgentSystemMessages.set(projectId, delivered)
+      }
+      // Only agents that have not already received THIS text. A retry after
+      // a partial failure reaches just the agents that missed it; agents
+      // that already acknowledged the update never see it twice.
+      const pending = agents.filter((agent) => delivered.get(agent.name) !== message)
+      if (pending.length === 0) return
+
+      const results = await Promise.allSettled(
+        pending.map((agent) => {
+          const input = {
+            to: agent.name,
+            from: 'system',
+            text: message,
+            priority: 0,
+            mode: 'steer',
+            data: {
+              kind: 'integrations-update',
+              system: true
+            }
+          } as const
+          // Delivery confirmations can hang behind inactive PTYs. Integration
+          // updates are setup context, so broker send acceptance is the
+          // reliable boundary for idempotent notification.
+          return bridge.sendMessage(projectId, input)
+        })
       )
-      // Recorded only after every send was accepted: a failed broadcast leaves
-      // no signature, so the next reconcile retries the identical message.
-      this.lastBroadcastSystemMessages.set(projectId, message)
+      let anyDelivered = false
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
+          delivered.set(pending[index].name, message)
+          anyDelivered = true
+        } else {
+          console.warn(
+            `[integrations] Failed to inject integration system message for ${pending[index].name}:`,
+            toErrorMessage(result.reason)
+          )
+        }
+      })
+      if (anyDelivered) {
+        this.lastSystemMessageBroadcastAt.set(projectId, Date.now())
+      }
     } catch (error) {
       console.warn('[integrations] Failed to inject integration system message:', toErrorMessage(error))
     }
@@ -2239,10 +2299,22 @@ export class IntegrationsManager {
     const existing = this.systemMessageTimers.get(projectId)
     if (existing) clearTimeout(existing)
 
+    // Cooldown after a real broadcast: integration text converges in stages
+    // (channel-name discovery, subscription readiness), and each stage used
+    // to re-broadcast the whole update to every agent mid-task. Later
+    // schedules within the cooldown replace the timer, so the trailing
+    // broadcast carries the latest text. Per-agent delivery records make
+    // the eventual send a no-op for agents already up to date.
+    const lastBroadcastAt = this.lastSystemMessageBroadcastAt.get(projectId)
+    const cooldownRemaining = lastBroadcastAt === undefined
+      ? 0
+      : Math.max(0, lastBroadcastAt + SYSTEM_MESSAGE_REBROADCAST_COOLDOWN_MS - Date.now())
+    const delay = Math.max(SYSTEM_MESSAGE_DEBOUNCE_MS, cooldownRemaining)
+
     const timer = setTimeout(() => {
       this.systemMessageTimers.delete(projectId)
       void this.safeInjectSystemMessage(projectId, message, options)
-    }, SYSTEM_MESSAGE_DEBOUNCE_MS)
+    }, delay)
     this.systemMessageTimers.set(projectId, timer)
   }
 
