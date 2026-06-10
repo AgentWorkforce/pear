@@ -21,6 +21,16 @@ import { getAccessToken, getApiUrl } from './auth'
 import { assertDirectory } from './path-utils'
 import { PtyInputStreamManager } from './pty-input-stream'
 import { PtyChunkDeduper } from './pty-dedup'
+import {
+  SpawnCoordinator,
+  spawnRequestKey,
+  personaSpawnRequestKey,
+  normalizeSpawnPtyResult,
+  getAvailableAgentName,
+  isAgentNameConflict,
+  type BrokerSpawnResult,
+  type PersonaBrokerSpawnResult
+} from './spawn-coordinator'
 import { createPearBurnSpawnListener, stampPearBurnSpawnedAgent } from './burn-spawn-hook'
 import { getBurnLedgerHome, getPearBurnAgentKey } from './burn'
 import {
@@ -579,62 +589,8 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-function spawnRequestKey(
-  projectId: string,
-  input: SpawnPtyInput & { broker?: 'local' | 'cloud' },
-  options: { parentAgentName?: string }
-): string {
-  return JSON.stringify({
-    projectId,
-    broker: input.broker || 'auto',
-    name: input.name,
-    cli: input.cli,
-    cwd: input.cwd || '',
-    args: input.args || [],
-    task: input.task || '',
-    model: input.model || '',
-    parentAgentName: options.parentAgentName || ''
-  })
-}
-
-function personaSpawnRequestKey(projectId: string, personaId: string): string {
-  return JSON.stringify({
-    projectId,
-    personaId
-  })
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
-}
-
-type BrokerSpawnResult = {
-  name: string
-  runtime: string
-  cli?: string
-}
-
-type PersonaBrokerSpawnResult = BrokerSpawnResult & {
-  workerStreamBaselineSeq?: number
-  workerStreamBaselineCount: number
-}
-
-function normalizeSpawnPtyResult(value: unknown, fallbackName: string, cli?: string): BrokerSpawnResult {
-  const record = isRecord(value) ? value : {}
-  const name = typeof record.name === 'string' && record.name.trim()
-    ? record.name.trim()
-    : fallbackName
-  const runtime = typeof record.runtime === 'string' && record.runtime.trim()
-    ? record.runtime.trim()
-    : 'pty'
-  const result: BrokerSpawnResult = { name, runtime }
-  const resolvedCli = typeof cli === 'string' && cli.trim()
-    ? cli.trim()
-    : typeof record.cli === 'string' && record.cli.trim()
-      ? record.cli.trim()
-      : undefined
-  if (resolvedCli) result.cli = resolvedCli
-  return result
 }
 
 function brokerEventString(event: BrokerEvent, key: string): string | undefined {
@@ -1261,28 +1217,6 @@ async function clearBrokerRuntimeFiles(cwd: string, brokerName: string): Promise
   return removed
 }
 
-function getAvailableAgentName(requestedName: string, existingNames: Set<string>): string {
-  const trimmedName = requestedName.trim()
-  if (!existingNames.has(trimmedName)) {
-    return trimmedName
-  }
-
-  const match = trimmedName.match(/^(.*?)-(\d+)$/)
-  const baseName = match ? match[1] : trimmedName
-  let index = match ? Number(match[2]) + 1 : 2
-
-  while (existingNames.has(`${baseName}-${index}`)) {
-    index += 1
-  }
-
-  return `${baseName}-${index}`
-}
-
-function isAgentNameConflict(err: unknown): boolean {
-  const message = err instanceof Error ? err.message : String(err)
-  return /agent ['"].+['"] already exists/i.test(message) || message.includes('already exists')
-}
-
 function brokerErrorData(err: unknown): Record<string, unknown> | undefined {
   if (typeof err !== 'object' || err === null || !('data' in err)) return undefined
   const data = (err as { data?: unknown }).data
@@ -1463,8 +1397,10 @@ export class BrokerManager {
   private sessions = new Map<string, BrokerSession>()
   private startPromises = new Map<string, Promise<boolean | void>>()
   private revivePromises = new Map<string, Promise<boolean>>()
-  private inFlightSpawnRequests = new Map<string, Promise<{ name: string; runtime: string }>>()
-  private inFlightPersonaSpawnRequests = new Map<string, Promise<BrokerSpawnResult>>()
+  // Keyed in-flight-promise dedup for direct + persona spawns and the
+  // pending-persona readiness set. BrokerManager delegates the coalescing here
+  // and keeps the actual spawn work inline.
+  private spawnCoordinator = new SpawnCoordinator()
   // Which broker sessions (by session key) an agent name is registered on.
   // Both a project's local and cloud brokers join the same relay workspace,
   // so agent names are project-unique in practice — the set tracks which
@@ -1477,7 +1413,6 @@ export class BrokerManager {
   // Consecutive broker read timeouts per project/operation; after MAX we
   // respawn the wedged broker. Reset whenever that operation succeeds.
   private brokerTimeoutCounts = new Map<string, number>()
-  private pendingPersonaReadiness = new Set<string>()
   private eventStreamGenerationCounter = 0
   private eventObservers = new Set<BrokerEventObserver>()
   private eventHistory: BrokerEventRecord[] = []
@@ -2582,20 +2517,16 @@ export class BrokerManager {
     }
   }
 
-  private personaReadinessKey(sessionKey: string, name: string): string {
-    return `${sessionKey}:${name}`
-  }
-
   private markPersonaReadinessPending(session: BrokerSession, name: string): void {
-    this.pendingPersonaReadiness.add(this.personaReadinessKey(sessionKeyFor(session), name))
+    this.spawnCoordinator.markPersonaReadinessPending(sessionKeyFor(session), name)
   }
 
   private clearPersonaReadinessPending(session: BrokerSession, name: string): void {
-    this.pendingPersonaReadiness.delete(this.personaReadinessKey(sessionKeyFor(session), name))
+    this.spawnCoordinator.clearPersonaReadinessPending(sessionKeyFor(session), name)
   }
 
   private isPersonaReadinessPending(session: BrokerSession, name: string): boolean {
-    return this.pendingPersonaReadiness.has(this.personaReadinessKey(sessionKeyFor(session), name))
+    return this.spawnCoordinator.isPersonaReadinessPending(sessionKeyFor(session), name)
   }
 
   async spawnAgent(
@@ -2604,17 +2535,9 @@ export class BrokerManager {
     options: { parentAgentName?: string } = {}
   ): Promise<{ name: string; runtime: string }> {
     const requestKey = spawnRequestKey(projectId, spawnInput, options)
-    const inFlight = this.inFlightSpawnRequests.get(requestKey)
-    if (inFlight) return inFlight
-
-    let promise!: Promise<{ name: string; runtime: string }>
-    promise = this.spawnAgentOnce(projectId, spawnInput, options).finally(() => {
-      if (this.inFlightSpawnRequests.get(requestKey) === promise) {
-        this.inFlightSpawnRequests.delete(requestKey)
-      }
-    })
-    this.inFlightSpawnRequests.set(requestKey, promise)
-    return promise
+    return this.spawnCoordinator.coalesceSpawn(requestKey, () =>
+      this.spawnAgentOnce(projectId, spawnInput, options)
+    )
   }
 
   private async spawnAgentOnce(
@@ -2744,16 +2667,9 @@ export class BrokerManager {
     }
 
     const requestKey = personaSpawnRequestKey(projectId, trimmedPersonaId)
-    const inFlight = this.inFlightPersonaSpawnRequests.get(requestKey)
-    if (inFlight) return inFlight
-
-    const promise = this.spawnPersonaOnce(projectId, trimmedPersonaId).finally(() => {
-      if (this.inFlightPersonaSpawnRequests.get(requestKey) === promise) {
-        this.inFlightPersonaSpawnRequests.delete(requestKey)
-      }
-    })
-    this.inFlightPersonaSpawnRequests.set(requestKey, promise)
-    return promise
+    return this.spawnCoordinator.coalescePersonaSpawn(requestKey, () =>
+      this.spawnPersonaOnce(projectId, trimmedPersonaId)
+    )
   }
 
   private async spawnPersonaOnce(projectId: string, trimmedPersonaId: string): Promise<BrokerSpawnResult> {
