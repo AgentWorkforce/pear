@@ -10,7 +10,7 @@ const VARIANT_TOTAL = 700
 // failing on natural xterm write drain.
 const FINAL_DRAIN_DEADLINE_MS = 30_000
 
-type TerminalLayout = 'tabs' | 'horizontal-split' | 'graph'
+type TerminalLayout = 'tabs' | 'horizontal-split'
 
 type StreamSpec = {
   name: string
@@ -23,6 +23,31 @@ const agentName = (prefix: string, index = 1): string =>
 
 const marker = (prefix: string, index: number): string =>
   `[${prefix}-${String(index).padStart(4, '0')}]`
+
+const terminalFor = (page: Page, name: string) =>
+  page.locator(`[data-testid="terminal-instance"][data-agent-name="${name}"]`)
+
+async function waitForTerminalVisible(page: Page, name: string, timeout = 1_000): Promise<boolean> {
+  try {
+    await terminalFor(page, name).waitFor({ state: 'visible', timeout })
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function expectSplitTerminalVisible(page: Page, name: string): Promise<void> {
+  if (await waitForTerminalVisible(page, name)) return
+
+  const pageTabs = page.getByRole('tab', { name: /Show terminal page \d+/ })
+  const pageCount = await pageTabs.count()
+  for (let index = 0; index < pageCount; index += 1) {
+    await pageTabs.nth(index).click()
+    if (await waitForTerminalVisible(page, name)) return
+  }
+
+  await expect(terminalFor(page, name)).toBeVisible()
+}
 
 async function bootWithAgents(
   page: Page,
@@ -40,11 +65,13 @@ async function bootWithAgents(
   await page.evaluate(({ agentCount, namePrefix }) => {
     const mock = window.__pearMock
     if (!mock) throw new Error('window.__pearMock is not available')
-    mock.spawnAgents(agentCount, { projectId: 'mock-project', namePrefix })
+    mock.spawnAgents(agentCount, { projectId: 'mock-project', namePrefix, channel: 'general' })
   }, { agentCount: count, namePrefix: prefix })
 
   const firstAgent = agentName(prefix)
-  await expect(page.locator(`[data-testid="terminal-instance"][data-agent-name="${firstAgent}"]`)).toBeVisible()
+  await page.getByText('general').click()
+  await page.locator('button').filter({ hasText: firstAgent }).first().click()
+  await expect(terminalFor(page, firstAgent)).toBeVisible()
   await expect.poll(
     () => page.evaluate(({ projectId, name }) =>
       window.__pearMock?.getTerminalBufferText(projectId, name) ?? null,
@@ -244,8 +271,8 @@ test.describe('terminal output fidelity under high-rate PTY streaming', () => {
 
     await page.waitForTimeout(150)
     await page.getByRole('button', { name: 'Show split terminal pages' }).click()
-    await expect(page.locator(`[data-testid="terminal-instance"][data-agent-name="${first}"]`)).toBeVisible()
-    await expect(page.locator(`[data-testid="terminal-instance"][data-agent-name="${second}"]`)).toBeVisible()
+    await expectSplitTerminalVisible(page, first)
+    await expectSplitTerminalVisible(page, second)
     await waitForStream(page)
 
     await expectFidelity(page, 'split-pane transition during stream', first, 'split-a', VARIANT_TOTAL)
@@ -298,10 +325,11 @@ test.describe('terminal output fidelity under high-rate PTY streaming', () => {
     await startStream(page, [{ name, markerPrefix: 'remount-a', total: VARIANT_TOTAL }])
 
     await page.waitForTimeout(120)
-    await page.getByRole('button', { name: 'Show agent graph' }).click()
+    await page.getByRole('button', { name: 'Show split terminal pages' }).click()
+    await expectSplitTerminalVisible(page, name)
     await page.waitForTimeout(120)
-    await page.getByRole('button', { name: 'Show terminal tabs' }).click()
-    await expect(page.locator(`[data-testid="terminal-instance"][data-agent-name="${name}"]`)).toBeVisible()
+    await page.getByRole('button', { name: 'Move terminals back to tabs' }).click()
+    await expect(terminalFor(page, name)).toBeVisible()
     await waitForStream(page)
 
     await expectFidelity(page, 'runtime remount mid-stream', name, 'remount-a', VARIANT_TOTAL)
