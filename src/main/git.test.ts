@@ -196,6 +196,30 @@ describe('git status and summaries', () => {
     ])
   })
 
+  it('refuses commitSelection while merge conflicts are unresolved', async () => {
+    const repo = await createRepo()
+    await write(repo, 'conflict.txt', 'base\n')
+    await commitAll(repo, 'Base')
+
+    await git(repo, ['switch', '-c', 'feature'])
+    await write(repo, 'conflict.txt', 'feature\n')
+    await commitAll(repo, 'Feature change')
+
+    await git(repo, ['switch', 'main'])
+    await write(repo, 'conflict.txt', 'main\n')
+    await commitAll(repo, 'Main change')
+
+    await expect(git(repo, ['merge', 'feature'])).rejects.toMatchObject({ code: 1 })
+
+    await expect(commitSelection(repo, {
+      title: 'Commit during conflict',
+      wholeFiles: ['conflict.txt']
+    })).rejects.toThrow(/Resolve all merge conflicts/)
+
+    // The unmerged index state must survive the refused commit.
+    await expect(git(repo, ['status', '--porcelain=v2'])).resolves.toContain('u UU')
+  })
+
   it('summarizes tracked numstat and untracked file lines on the current branch', async () => {
     const repo = await createRepo()
     await write(repo, 'tracked.txt', 'one\nold\n')

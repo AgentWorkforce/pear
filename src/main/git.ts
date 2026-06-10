@@ -1536,6 +1536,13 @@ export async function commitSelection(path: string, input: GitCommitSelectionInp
     throw new Error('Select at least one file or changed line to commit')
   }
 
+  // Committing through the temp-index path ends with `git reset --mixed HEAD`,
+  // which would silently clear the unmerged state of conflicted files; refuse
+  // instead so conflicts stay visible until resolved.
+  if ((await getStatus(path)).some((file) => file.conflicted)) {
+    throw new Error('Resolve all merge conflicts before committing a selection')
+  }
+
   if (await hasStagedChanges(path)) {
     throw new Error('Unstage existing changes before committing a line selection')
   }

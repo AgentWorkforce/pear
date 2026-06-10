@@ -79,7 +79,7 @@ function sameFileStatuses(left: FileStatus[], right: FileStatus[]): boolean {
       file.oldPath === other.oldPath &&
       file.status === other.status &&
       file.staged === other.staged &&
-      file.conflicted === other.conflicted
+      !!file.conflicted === !!other.conflicted
   })
 }
 
@@ -93,7 +93,7 @@ function sameProjectFileStatuses(left: ProjectFileStatus[], right: ProjectFileSt
       file.oldPath === other.oldPath &&
       file.status === other.status &&
       file.staged === other.staged &&
-      file.conflicted === other.conflicted
+      !!file.conflicted === !!other.conflicted
   })
 }
 
