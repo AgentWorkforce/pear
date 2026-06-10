@@ -20,6 +20,7 @@ import {
   buildModelSeedFromTerminal,
   createEchoRouter,
   ENGINE_FLOOD_BYPASS_BYTES,
+  PREDICTION_QUIET_MS,
   RESEED_CAPTURE_TIMEOUT_MS,
   type EchoRouter,
   type SeedSource
@@ -31,13 +32,19 @@ const COLS = 80
 
 class HeadlessModel implements ScreenModel {
   private readonly term: Terminal
+  // Test hook: when set, model writes resolve only after this many ms —
+  // simulates a busy renderer where the engine's async tail backs up.
+  writeDelayMs = 0
 
   constructor(cols: number, rows: number) {
     this.term = new Terminal({ cols, rows, allowProposedApi: true, scrollback: 0 })
   }
 
   write(data: string): Promise<void> {
-    return new Promise((resolve) => this.term.write(data, resolve))
+    const written = new Promise<void>((resolve) => this.term.write(data, resolve))
+    if (this.writeDelayMs <= 0) return written
+    const delay = new Promise<void>((resolve) => setTimeout(resolve, this.writeDelayMs))
+    return Promise.all([written, delay]).then(() => {})
   }
 
   cursor(): { row: number; col: number } {
@@ -96,6 +103,7 @@ interface Harness {
   router: EchoRouter
   live: Terminal
   engine: PredictiveEchoEngine
+  model: HeadlessModel
   setSrtt(value: number | null): void
   dispose(): void
 }
@@ -124,6 +132,7 @@ function makeHarness(): Harness {
     router,
     live,
     engine,
+    model,
     setSrtt: (value) => {
       srtt = value
     },
@@ -150,6 +159,12 @@ async function reference(stream: string): Promise<string> {
   const screen = readScreen(term)
   term.dispose()
   return screen
+}
+
+// Predictions require the stream to have been quiet; streaming-sized chunks
+// arm a real-time window (Date.now-based).
+function waitForQuietWindow(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, PREDICTION_QUIET_MS + 50))
 }
 
 describe('echo-router — real engine + real parser equivalence', () => {
@@ -192,7 +207,8 @@ describe('echo-router — real engine + real parser equivalence', () => {
 
     // Latency spike → keystroke triggers the transition. Chunks that arrive
     // while the quiescent-point capture is in flight are held and must land
-    // exactly once.
+    // exactly once. (Transition requires a quiet stream.)
+    await waitForQuietWindow()
     harness.setSrtt(80)
     harness.router.onUserInput('x')
     const during = [3, 4].map(buildRedrawFrame)
@@ -253,7 +269,7 @@ describe('echo-router — real engine + real parser equivalence', () => {
     expect(readScreen(harness.live)).toBe(await reference(flood))
   })
 
-  it('keeps routing floods through the engine while predictions are on screen', async () => {
+  it('rolls back on-screen predictions when streaming starts and stays byte-faithful', async () => {
     harness.router.onServerOutput('\x1b[2J\x1b[H$ ')
     harness.setSrtt(80)
     harness.router.onUserInput('q')
@@ -272,13 +288,53 @@ describe('echo-router — real engine + real parser equivalence', () => {
     harness.router.onServerOutput(flood)
     await settle(harness)
 
-    // Reconciliation (not a blind bypass) handled the flood — the engine
-    // erased/reconciled its glyphs, so the screen equals pure pass-through
-    // of the confirmed bytes.
-    expect(harness.router.route()).toBe('engine')
+    // Streaming started with a glyph on screen: the router rolled it back
+    // at still-valid positions instead of letting the engine erase/repaint
+    // it around every frame. The screen equals pure pass-through of the
+    // confirmed bytes, and no prediction survives the storm.
+    expect((harness.engine as PredictiveEchoEngine).hasPredictions).toBe(false)
     expect(readScreen(harness.live)).toBe(
       await reference('\x1b[2J\x1b[H$ ' + flood)
     )
+
+    // New keystrokes during the active stream stay prediction-free.
+    harness.router.onUserInput('b')
+    await settle(harness)
+    expect((harness.engine as PredictiveEchoEngine).hasPredictions).toBe(false)
+    expect(readScreen(harness.live)).toBe(
+      await reference('\x1b[2J\x1b[H$ ' + flood)
+    )
+  })
+
+  it('preserves byte order when a flood bypass races chunks still queued in the engine tail', async () => {
+    // The interleaved-rows corruption class: chunk B is queued inside the
+    // engine's async tail (model write of A still in flight) when flood
+    // chunk C trips the bypass. A direct write of C MUST NOT overtake B —
+    // out-of-order bytes shear escape sequences and overlay row text.
+    harness.setSrtt(80)
+    harness.router.onUserInput('x')
+    await drain(harness.live)
+    await settle(harness)
+    expect(harness.router.route()).toBe('engine')
+
+    harness.model.writeDelayMs = 30 // back up the engine tail
+    const a = buildRedrawFrame(1)
+    const b = buildRedrawFrame(2)
+    let flood = ''
+    let i = 0
+    while (flood.length <= ENGINE_FLOOD_BYPASS_BYTES) {
+      flood += buildRedrawFrame(100 + (i % 100))
+      i += 1
+    }
+    harness.router.onServerOutput(a)
+    harness.router.onServerOutput(b) // queued behind A's slow model write
+    harness.router.onServerOutput(flood) // bypass: must still land after B
+
+    await new Promise((resolve) => setTimeout(resolve, 250))
+    harness.model.writeDelayMs = 0
+    await settle(harness)
+
+    expect(readScreen(harness.live)).toBe(await reference(a + b + flood))
   })
 
   it('re-engages predictions after a flood bypass via a fresh reseed', async () => {
@@ -297,8 +353,10 @@ describe('echo-router — real engine + real parser equivalence', () => {
     await settle(harness)
     expect(harness.router.route()).toBe('direct')
 
-    // Paint a fresh prompt directly (model is stale now), then type.
+    // Paint a fresh prompt directly (model is stale now), wait out the
+    // streaming quiet window, then type.
     harness.router.onServerOutput('\x1b[2J\x1b[H$ ')
+    await waitForQuietWindow()
     harness.router.onUserInput('q') // reseeds from the live screen
     await drain(harness.live)
     await settle(harness)

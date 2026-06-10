@@ -766,8 +766,22 @@ export function readRuntimeViewportText(projectId: string | undefined, name: str
   return lines.join('\n')
 }
 
+export function readRuntimeViewportDims(
+  projectId: string | undefined,
+  name: string
+): { rows: number; cols: number } | null {
+  const record = runtimes.get(getAgentKey(projectId, name))
+  if (!record) return null
+  const term = record.runtime.term
+  return { rows: term.rows, cols: term.cols }
+}
+
 if (import.meta.env.VITE_PEAR_MOCK_IPC === 'true' && typeof window !== 'undefined') {
   ;(window as unknown as {
     __pearReadTerminalViewport?: (projectId: string | undefined, name: string) => string | null
+    __pearReadTerminalDims?: (projectId: string | undefined, name: string) => { rows: number; cols: number } | null
   }).__pearReadTerminalViewport = readRuntimeViewportText
+  ;(window as unknown as {
+    __pearReadTerminalDims?: (projectId: string | undefined, name: string) => { rows: number; cols: number } | null
+  }).__pearReadTerminalDims = readRuntimeViewportDims
 }

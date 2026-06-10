@@ -24,6 +24,17 @@ import type { PredictiveEchoWithStatus } from '@/lib/predictive-echo'
 
 // Mirrors the engine's DEFAULT_PREDICTION_CONFIG.engageThresholdMs.
 export const PREDICTION_ENGAGE_THRESHOLD_MS = 30
+// Predictions are a quiet-prompt tool (mosh's regime: you type, the line
+// echoes back). While a TUI is actively streaming repaint frames, the engine
+// would erase/re-render its optimistic glyphs around EVERY frame — any
+// model/live divergence then erases real rows and strands glyphs inside
+// repainted panels (the interleaved-rows corruption class). So: a server
+// chunk bigger than PREDICTION_SAFE_CHUNK_BYTES marks the stream "active",
+// outstanding predictions are rolled back at that moment, and no new
+// predictions render until the stream has been quiet for
+// PREDICTION_QUIET_MS. Keystroke echo (tiny chunks) never trips this.
+export const PREDICTION_SAFE_CHUNK_BYTES = 1_024
+export const PREDICTION_QUIET_MS = 300
 // On the engine route, one coalesced frame bigger than this with no
 // outstanding predictions drops back to direct: during output floods the
 // model double-parse only adds drain time, and there is nothing on screen
@@ -96,17 +107,66 @@ export function createEchoRouter(deps: EchoRouterDeps): EchoRouter {
   let reseedTimeout: ReturnType<typeof setTimeout> | null = null
   let disposed = false
 
+  // Single ordering domain for everything that reaches the live terminal.
+  // Engine writes happen inside the engine's ASYNC tail (its model parse
+  // awaits between chunks), so a direct write issued while engine work is
+  // still queued — e.g. a flood-bypass route flip — would overtake bytes
+  // that arrived earlier. Out-of-order bytes shear escape sequences and
+  // overlay row text (character-interleaved lines). Any operation enqueued
+  // while the chain is non-empty chains behind it; the chain collapses back
+  // to synchronous direct writes once it drains.
+  let queuedOps = 0
+  let opChain: Promise<void> = Promise.resolve()
+
+  const enqueueOp = (op: () => Promise<void> | void): void => {
+    queuedOps += 1
+    opChain = opChain
+      .then(() => (disposed ? undefined : op()))
+      .catch(() => {})
+      .then(() => {
+        queuedOps -= 1
+      })
+  }
+
   const writePinnedAware = (data: string, sink: (data: string) => void): void => {
     const wasPinned = deps.isViewportPinned()
     sink(data)
     if (wasPinned) deps.scrollToBottom()
   }
 
+  // Engine route: always enqueued (the engine's tail is asynchronous).
+  const writeViaEngine = (engine: PredictiveEchoWithStatus, data: string): void => {
+    enqueueOp(() => {
+      if (deps.getEngine() !== engine) {
+        // Engine torn down while queued; the bytes still must render.
+        writePinnedAware(data, (chunk) => deps.write(chunk))
+        return
+      }
+      let done: Promise<void> = Promise.resolve()
+      writePinnedAware(data, (chunk) => {
+        done = engine.onServerOutput(chunk)
+      })
+      return done
+    })
+  }
+
+  // Direct route: synchronous while the chain is empty (the common case —
+  // zero overhead on local sessions), ordered behind it otherwise.
+  const writeDirectOrdered = (data: string, callback?: () => void): void => {
+    if (queuedOps === 0) {
+      writePinnedAware(data, (chunk) => deps.write(chunk, callback))
+      return
+    }
+    enqueueOp(() => {
+      writePinnedAware(data, (chunk) => deps.write(chunk, callback))
+    })
+  }
+
   const releaseHeldDirect = (): void => {
     const held = heldChunks
     heldChunks = []
     if (held.length === 0 || disposed) return
-    writePinnedAware(held.join(''), (data) => deps.write(data))
+    writeDirectOrdered(held.join(''))
   }
 
   const beginEngineTransition = (): void => {
@@ -124,8 +184,9 @@ export function createEchoRouter(deps: EchoRouterDeps): EchoRouter {
     }, RESEED_CAPTURE_TIMEOUT_MS)
     // Quiescent-point capture: the callback fires after everything already
     // queued to the live terminal has parsed, so the visible grid equals
-    // the byte stream consumed so far.
-    deps.write('', () => {
+    // the byte stream consumed so far. Ordered, so it also lands after any
+    // writes still chained from a recent flood bypass.
+    writeDirectOrdered('', () => {
       if (!reseedPending) return // timed out and aborted
       reseedPending = false
       if (reseedTimeout) {
@@ -149,10 +210,15 @@ export function createEchoRouter(deps: EchoRouterDeps): EchoRouter {
       const held = heldChunks
       heldChunks = []
       if (held.length > 0) {
-        writePinnedAware(held.join(''), (data) => void engine.onServerOutput(data))
+        writeViaEngine(engine, held.join(''))
       }
     })
   }
+
+  // Timestamp of the last streaming-sized server chunk. 0 = never.
+  let lastStreamOutputAt = 0
+  const streamIsActive = (): boolean =>
+    lastStreamOutputAt !== 0 && Date.now() - lastStreamOutputAt < PREDICTION_QUIET_MS
 
   return {
     onServerOutput(combined: string): void {
@@ -161,19 +227,33 @@ export function createEchoRouter(deps: EchoRouterDeps): EchoRouter {
         heldChunks.push(combined)
         return
       }
+      const streamingChunk = combined.length > PREDICTION_SAFE_CHUNK_BYTES
+      if (streamingChunk) lastStreamOutputAt = Date.now()
       const engine = route === 'engine' ? deps.getEngine() : null
       if (engine) {
+        if (streamingChunk && engine.hasPredictions) {
+          // The TUI started streaming with optimistic glyphs on screen.
+          // Erase them NOW, at positions that are still valid, instead of
+          // letting the engine erase/re-render them around every repaint
+          // frame — that cycle is what strands glyphs inside repainted
+          // panels and erases real rows when model and live drift.
+          enqueueOp(() => {
+            if (deps.getEngine() === engine) engine.rollback()
+          })
+        }
         if (combined.length > ENGINE_FLOOD_BYPASS_BYTES && !engine.hasPredictions) {
           // Output flood with nothing predicted on screen: the model
           // double-parse only delays the drain. Drop to direct; the next
           // engaged keystroke reseeds the model before predicting again.
+          // Ordered: this write chains behind chunks still queued in the
+          // engine's tail — overtaking them would interleave row bytes.
           route = 'direct'
-          writePinnedAware(combined, (data) => deps.write(data))
+          writeDirectOrdered(combined)
         } else {
-          writePinnedAware(combined, (data) => void engine.onServerOutput(data))
+          writeViaEngine(engine, combined)
         }
       } else {
-        writePinnedAware(combined, (data) => deps.write(data))
+        writeDirectOrdered(combined)
       }
     },
     onUserInput(data: string): void {
@@ -182,6 +262,10 @@ export function createEchoRouter(deps: EchoRouterDeps): EchoRouter {
       // engine's model isn't authoritative yet. Only the optimistic echo is
       // skipped; the keystroke still reaches the PTY via the send path.
       if (reseedPending) return
+      // Predictions stay off while the server is actively streaming — the
+      // user sees output flowing (their echo included); optimistic glyphs
+      // only add an erase/re-render cycle per repaint frame.
+      if (streamIsActive()) return
       const engine = deps.getEngine()
       if (!engine) return
       if (route === 'engine') {
