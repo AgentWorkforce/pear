@@ -953,6 +953,25 @@ describe('IntegrationsManager', () => {
     expect(mock.integrationMountManager.ensureMounted).not.toHaveBeenCalled()
   })
 
+  it('returns a missing preview when an in-scope remote read 404s instead of rejecting', async () => {
+    // Historical provider records (e.g. the GitHub issue JSON synthesized from
+    // Linear sync metadata) are not downloaded locally, so an in-scope read can
+    // legitimately 404. It must degrade to a missing preview rather than reject
+    // the IPC handler.
+    mock.relayClient.readFile.mockImplementationOnce(async (_workspaceId: string, path: string) => {
+      mock.readFileCalls.push({ workspaceId: _workspaceId, path })
+      throw Object.assign(new Error('not found'), { status: 404, code: 'not_found' })
+    })
+
+    const manager = new IntegrationsManager()
+    const preview = await manager.readRemoteFile(
+      'project-1',
+      '/slack/channels/C123/messages/1713220123_001100.json'
+    )
+
+    expect(preview).toMatchObject({ kind: 'missing', size: 0 })
+  })
+
   it('rejects targeted remote file reads outside the project integration scope', async () => {
     const manager = new IntegrationsManager()
 
