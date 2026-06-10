@@ -1,0 +1,48 @@
+name: Merge on Green
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review, labeled, unlabeled]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  check_run:
+    types: [completed, rerequested, requested_action]
+  status:
+  workflow_dispatch:
+    inputs:
+      pull_request:
+        description: Optional PR number to re-evaluate
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+  checks: read
+  statuses: read
+
+concurrency:
+  group: merge-on-green-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  evaluate:
+    if: >-
+      github.event_name != 'check_run' ||
+      github.event.check_run.app.slug != 'github-actions' ||
+      github.event.check_run.name != 'evaluate'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - name: Evaluate merge-on-green PRs
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MERGE_ON_GREEN_LABEL: merge-on-green
+          MERGE_ON_GREEN_ORG: AgentWorkforce
+          MERGE_ON_GREEN_METHOD: squash
+          MERGE_ON_GREEN_REQUIRED_BOTS: ${{ vars.MERGE_ON_GREEN_REQUIRED_BOTS }}
+          MERGE_ON_GREEN_IGNORED_CHECKS: ${{ vars.MERGE_ON_GREEN_IGNORED_CHECKS }}
+        run: node scripts/merge-on-green.mjs

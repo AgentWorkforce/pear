@@ -24,7 +24,7 @@
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
     "typecheck": "npm run typecheck:web && npm run typecheck:node",
-    "test": "node --experimental-strip-types --no-warnings --test 'src/main/__tests__/*.test.ts'",
+    "test": "node --experimental-strip-types --no-warnings --test 'src/main/__tests__/*.test.ts' 'scripts/*.test.mjs'",
     "test:all": "npm test && npx vitest run",
     "test:fidelity": "npm run build:web && playwright test --config playwright.fidelity.config.ts",
     "test:stress": "npm run build:web && playwright test --config playwright.stress.config.ts",
