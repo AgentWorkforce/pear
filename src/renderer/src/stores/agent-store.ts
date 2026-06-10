@@ -289,6 +289,172 @@ function isHumanMessage(message: Pick<ChatMessage, 'from' | 'isHuman'>): boolean
   return message.isHuman || isHumanSender(message.from)
 }
 
+type AgentEchoCandidate = Pick<ChatMessage, 'from' | 'body' | 'projectId' | 'timestamp' | 'to' | 'isHuman'>
+type TimestampCounts = Map<number, number>
+type AgentEchoBuckets = Map<number, TimestampCounts>
+
+function incrementCount<TKey>(counts: Map<TKey, number>, key: TKey): void {
+  counts.set(key, (counts.get(key) || 0) + 1)
+}
+
+function decrementCount<TKey>(counts: Map<TKey, number>, key: TKey): void {
+  const count = counts.get(key)
+  if (count === undefined) return
+  if (count <= 1) {
+    counts.delete(key)
+    return
+  }
+  counts.set(key, count - 1)
+}
+
+// Same shape as the old scan: non-human messages match by trimmed/lowercase
+// sender, exact body, exact projectId (undefined is not a wildcard), and a
+// target normalized only by trimming and removing a leading "#".
+function agentEchoIdentityKey(message: AgentEchoCandidate): string {
+  const projectScope = message.projectId === undefined
+    ? ['undefined']
+    : ['string', message.projectId]
+  return JSON.stringify([
+    message.from.trim().toLowerCase(),
+    projectScope,
+    normalizeMessageTarget(message.to),
+    message.body
+  ])
+}
+
+function agentEchoBucket(timestamp: number): number {
+  return Math.floor(timestamp / AGENT_MESSAGE_DEDUPE_WINDOW_MS)
+}
+
+// Indexes the renderer's final guardrail for broker replay / cross-stream
+// races where the same logical agent message arrives with different ids.
+// Bucket width equals the 2s dedupe window, so an exact match can only live
+// in the candidate bucket or an adjacent bucket.
+class ChatMessageDedupIndex {
+  private readonly ids = new Map<string, number>()
+  private readonly agentEchoBucketsByIdentity = new Map<string, AgentEchoBuckets>()
+
+  constructor(messages: Iterable<ChatMessage>) {
+    for (const message of messages) {
+      this.add(message)
+    }
+  }
+
+  hasId(id: string): boolean {
+    return (this.ids.get(id) || 0) > 0
+  }
+
+  hasAgentEcho(candidate: AgentEchoCandidate): boolean {
+    if (isHumanMessage(candidate)) return false
+    if (!Number.isFinite(candidate.timestamp)) return false
+
+    const buckets = this.agentEchoBucketsByIdentity.get(agentEchoIdentityKey(candidate))
+    if (!buckets) return false
+
+    const candidateBucket = agentEchoBucket(candidate.timestamp)
+    for (let bucket = candidateBucket - 1; bucket <= candidateBucket + 1; bucket += 1) {
+      const timestamps = buckets.get(bucket)
+      if (!timestamps) continue
+
+      for (const timestamp of timestamps.keys()) {
+        if (Math.abs(timestamp - candidate.timestamp) < AGENT_MESSAGE_DEDUPE_WINDOW_MS) {
+          return true
+        }
+      }
+    }
+
+    return false
+  }
+
+  add(message: ChatMessage): void {
+    incrementCount(this.ids, message.id)
+    if (isHumanMessage(message)) return
+    if (!Number.isFinite(message.timestamp)) return
+
+    const key = agentEchoIdentityKey(message)
+    const bucket = agentEchoBucket(message.timestamp)
+    let buckets = this.agentEchoBucketsByIdentity.get(key)
+    if (!buckets) {
+      buckets = new Map()
+      this.agentEchoBucketsByIdentity.set(key, buckets)
+    }
+
+    let timestamps = buckets.get(bucket)
+    if (!timestamps) {
+      timestamps = new Map()
+      buckets.set(bucket, timestamps)
+    }
+    incrementCount(timestamps, message.timestamp)
+  }
+
+  delete(message: ChatMessage): void {
+    decrementCount(this.ids, message.id)
+    if (isHumanMessage(message)) return
+    if (!Number.isFinite(message.timestamp)) return
+
+    const key = agentEchoIdentityKey(message)
+    const buckets = this.agentEchoBucketsByIdentity.get(key)
+    if (!buckets) return
+
+    const bucket = agentEchoBucket(message.timestamp)
+    const timestamps = buckets.get(bucket)
+    if (!timestamps) return
+
+    decrementCount(timestamps, message.timestamp)
+    if (timestamps.size === 0) buckets.delete(bucket)
+    if (buckets.size === 0) this.agentEchoBucketsByIdentity.delete(key)
+  }
+
+  replace(previous: ChatMessage, next: ChatMessage): void {
+    this.delete(previous)
+    this.add(next)
+  }
+}
+
+let chatMessageDedupIndexCache: {
+  source: ChatMessage[]
+  index: ChatMessageDedupIndex
+} | null = null
+
+function getChatMessageDedupIndex(messages: ChatMessage[]): ChatMessageDedupIndex {
+  if (chatMessageDedupIndexCache?.source === messages) {
+    return chatMessageDedupIndexCache.index
+  }
+
+  const index = new ChatMessageDedupIndex(messages)
+  chatMessageDedupIndexCache = { source: messages, index }
+  return index
+}
+
+function setChatMessageDedupIndexCache(messages: ChatMessage[], index: ChatMessageDedupIndex): void {
+  chatMessageDedupIndexCache = { source: messages, index }
+}
+
+function resetChatMessageDedupIndexCache(): void {
+  chatMessageDedupIndexCache = null
+}
+
+function appendChatMessageWithDedupIndex(messages: ChatMessage[], message: ChatMessage): ChatMessage[] {
+  const index = getChatMessageDedupIndex(messages)
+  const nextMessages = capByCount([...messages, message], MAX_CHAT_MESSAGES)
+  const droppedCount = messages.length + 1 - nextMessages.length
+
+  for (let indexToDrop = 0; indexToDrop < droppedCount; indexToDrop += 1) {
+    const dropped = messages[indexToDrop]
+    if (dropped) index.delete(dropped)
+  }
+  index.add(message)
+  setChatMessageDedupIndexCache(nextMessages, index)
+  return nextMessages
+}
+
+function isDuplicateAgentEcho(
+  index: ChatMessageDedupIndex,
+  candidate: AgentEchoCandidate
+): boolean {
+  return index.hasAgentEcho(candidate)
+}
+
 // Detects the canonical-of-optimistic case: an incoming broker record
 // that matches an existing optimistic local-UUID record by content +
 // time window. Scoped to local: true records so it doesn't collapse two
@@ -305,41 +471,6 @@ function isCanonicalEchoOfLocalHuman(
     normalizeMessageTarget(message.to) === normalizeMessageTarget(candidate.to) &&
     Math.abs(message.timestamp - candidate.timestamp) < HUMAN_MESSAGE_DEDUPE_WINDOW_MS
   )
-}
-
-// Same shape as the human echo guard but scoped to agent (non-human)
-// messages with a tighter 2s window. Catches the broker-replay /
-// cross-stream race where the same agent message arrives via
-// relay_inbound AND a reconcile snapshot with mismatched event_ids
-// — without this, both records survive id-based dedup and the user
-// sees the message twice. Per AGENTS.md the renderer should defend as
-// final guardrail even when the broker is supposed to provide stable ids.
-//
-// Accepts any iterable so the reconcile path can pass `byId.values()`
-// directly without an Array.from() copy per incoming message — under
-// heavy load (1000+ agents) the per-message copy was O(n) on the
-// existing message buffer.
-function isDuplicateAgentEcho(
-  messages: Iterable<ChatMessage>,
-  candidate: Pick<ChatMessage, 'from' | 'body' | 'projectId' | 'timestamp' | 'to' | 'isHuman'>
-): boolean {
-  if (isHumanMessage(candidate)) return false
-  const candidateFrom = candidate.from.trim().toLowerCase()
-  const candidateTarget = normalizeMessageTarget(candidate.to)
-  for (const message of messages) {
-    if (isHumanMessage(message)) continue
-    if (message.from.trim().toLowerCase() !== candidateFrom) continue
-    if (message.body !== candidate.body) continue
-    // Require exact project equality. Allowing `undefined` to wildcard
-    // would let an unscoped message from one project shadow a real
-    // distinct message in another project.
-    if (message.projectId !== candidate.projectId) continue
-    if (normalizeMessageTarget(message.to) !== candidateTarget) continue
-    if (Math.abs(message.timestamp - candidate.timestamp) < AGENT_MESSAGE_DEDUPE_WINDOW_MS) {
-      return true
-    }
-  }
-  return false
 }
 
 function createChannelJoinNotice(
@@ -382,7 +513,9 @@ function appendJoinNotices(messages: ChatMessage[], notices: ChatMessage[]): Cha
     nextMessages = [...nextMessages, notice]
   }
 
-  return capByCount(nextMessages, MAX_CHAT_MESSAGES)
+  const cappedMessages = capByCount(nextMessages, MAX_CHAT_MESSAGES)
+  setChatMessageDedupIndexCache(cappedMessages, new ChatMessageDedupIndex(cappedMessages))
+  return cappedMessages
 }
 
 function isBrokerDebugEnabled(): boolean {
@@ -468,6 +601,7 @@ function reconcileChatMessages(
   if (incomingMessages.length === 0) return existingMessages
 
   const byId = new Map(existingMessages.map((message) => [message.id, message]))
+  const dedupIndex = new ChatMessageDedupIndex(byId.values())
   let changed = false
 
   for (const incoming of incomingMessages) {
@@ -485,6 +619,7 @@ function reconcileChatMessages(
       }
       if (!chatMessagesEqual(previous, merged)) {
         byId.set(next.id, merged)
+        dedupIndex.replace(previous, merged)
         changed = true
       }
       continue
@@ -498,14 +633,17 @@ function reconcileChatMessages(
     // echo, rather than being seen as already-replaced.
     const optimistic = findOptimisticHumanMatch(byId, next)
     if (optimistic) {
+      dedupIndex.delete(optimistic)
       byId.delete(optimistic.id)
-      byId.set(next.id, {
+      const replacement: ChatMessage = {
         ...optimistic,
         ...next,
         threadReplies: next.threadReplies || optimistic.threadReplies,
         reactions: next.reactions || optimistic.reactions,
         local: false
-      })
+      }
+      byId.set(next.id, replacement)
+      dedupIndex.add(replacement)
       changed = true
       continue
     }
@@ -513,24 +651,31 @@ function reconcileChatMessages(
     // agent-duplicate guardrail: if a non-human message with the
     // same (from, body, project, target) arrived within the agent
     // dedupe window via another stream (relay_inbound), don't append
-    // a second copy under a different id. Pass byId.values() directly
-    // — copying to an array per message was O(n²) under heavy load.
+    // a second copy under a different id. The index is kept in lockstep with
+    // byId during this batch, so accepted earlier messages suppress later
+    // replays exactly like the old byId.values() scan did.
     if (
       !isHumanMessage(next) &&
-      isDuplicateAgentEcho(byId.values(), next)
+      isDuplicateAgentEcho(dedupIndex, next)
     ) {
       continue
     }
     byId.set(next.id, next)
+    dedupIndex.add(next)
     changed = true
   }
 
-  if (!changed) return existingMessages
+  if (!changed) {
+    setChatMessageDedupIndexCache(existingMessages, dedupIndex)
+    return existingMessages
+  }
 
-  return capByCount(
+  const nextMessages = capByCount(
     Array.from(byId.values()).sort((left, right) => left.timestamp - right.timestamp),
     MAX_CHAT_MESSAGES
   )
+  setChatMessageDedupIndexCache(nextMessages, new ChatMessageDedupIndex(nextMessages))
+  return nextMessages
 }
 
 interface AgentState {
@@ -1031,14 +1176,15 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
           timestamp,
           projectId
         }
+        const dedupIndex = getChatMessageDedupIndex(state.messages)
         const targetName = eventTarget.startsWith('#') ? null : normalizeMessageTarget(eventTarget)
-        const alreadySeenById = state.messages.some((m) => m.id === msg.id)
+        const alreadySeenById = dedupIndex.hasId(msg.id)
         const isDuplicate = alreadySeenById ||
           (isHuman && isCanonicalEchoOfLocalHuman(state.messages, msg)) ||
-          (!isHuman && isDuplicateAgentEcho(state.messages, msg))
+          (!isHuman && isDuplicateAgentEcho(dedupIndex, msg))
         const messages = isDuplicate
           ? state.messages
-          : capByCount([...state.messages, msg], MAX_CHAT_MESSAGES)
+          : appendChatMessageWithDedupIndex(state.messages, msg)
 
         if (messages !== state.messages && isBrokerDebugEnabled()) {
           console.info('[broker:renderer-receipt]', {
@@ -1141,7 +1287,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
     // message. Optimistic-vs-canonical dedup is now handled exclusively
     // via the `local` flag in the relay_inbound + reconcile paths.
     set((state) => ({
-      messages: capByCount([...state.messages, msg], MAX_CHAT_MESSAGES),
+      messages: appendChatMessageWithDedupIndex(state.messages, msg),
       lastHumanMessageSentAt: timestamp
     }))
   },
@@ -1278,7 +1424,8 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
     })
   },
 
-  clearAll: () =>
+  clearAll: () => {
+    resetChatMessageDedupIndexCache()
     set({
       agents: [],
       activeAgentKey: null,
@@ -1289,7 +1436,8 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
       brokerErrors: [],
       brokerEvents: [],
       lastHumanMessageSentAt: 0
-    }),
+    })
+  },
 
   getAgentBuffer: (projectId, name) => getPtyChunks(getAgentKey(projectId, name))
 })))
