@@ -53,7 +53,7 @@ export default function App(): React.ReactNode {
   useUpdateEvents()
 
   useEffect(() => {
-    load()
+    void load()
   }, [load])
 
   useEffect(() => {

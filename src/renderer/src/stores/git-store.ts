@@ -361,7 +361,7 @@ export const useGitStore = create<GitState>((set, get) => ({
   selectFile: (file, rootPath) => {
     set({ selectedFile: file, diff: '' })
     if (file) {
-      get().fetchDiff(rootPath, file)
+      void get().fetchDiff(rootPath, file)
     } else {
       set({ diff: '', loading: false })
     }
@@ -374,25 +374,25 @@ export const useGitStore = create<GitState>((set, get) => ({
     )
 
     if (rootPath) {
-      get().fetchStatus(rootPath)
-      get().fetchSummary(rootPath)
+      void get().fetchStatus(rootPath)
+      void get().fetchSummary(rootPath)
       const selectedFile = get().selectedFile
-      if (selectedFile) get().fetchDiff(rootPath, selectedFile)
+      if (selectedFile) void get().fetchDiff(rootPath, selectedFile)
     }
 
     if (normalizedProjectRootPaths.length > 0) {
-      get().fetchProjectStatus(normalizedProjectRootPaths)
+      void get().fetchProjectStatus(normalizedProjectRootPaths)
     } else {
-      get().fetchProjectStatus([])
+      void get().fetchProjectStatus([])
       return
     }
 
     const interval = setInterval(() => {
       if (rootPath) {
-        get().fetchStatus(rootPath)
-        get().fetchSummary(rootPath)
+        void get().fetchStatus(rootPath)
+        void get().fetchSummary(rootPath)
       }
-      get().fetchProjectStatus(normalizedProjectRootPaths)
+      void get().fetchProjectStatus(normalizedProjectRootPaths)
     }, 3000)
     set({ pollInterval: interval })
   },

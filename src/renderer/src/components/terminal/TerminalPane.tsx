@@ -325,7 +325,7 @@ function AgentTab({ agent, burnSummary, active, onActivate, onOpenBurn }: AgentT
         <button
           onClick={(e) => {
             e.stopPropagation()
-            pear.broker.releaseAgent(agent.projectId, agent.name)
+            void pear.broker.releaseAgent(agent.projectId, agent.name)
           }}
           className="ml-1 rounded-md p-1 opacity-0 hover:bg-[var(--pear-bg-overlay)] group-hover:opacity-100"
           title="Release agent"

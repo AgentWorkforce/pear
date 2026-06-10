@@ -138,7 +138,9 @@ function createWindow(): void {
   })
 
   mainWindow.webContents.setWindowOpenHandler((details) => {
-    shell.openExternal(details.url)
+    // Fire-and-forget: Electron opens the URL in the default browser;
+    // errors (e.g. no handler for the scheme) surface in the OS, not here.
+    void shell.openExternal(details.url)
     return { action: 'deny' }
   })
 
@@ -152,9 +154,10 @@ function createWindow(): void {
   })
 
   if (process.env.ELECTRON_RENDERER_URL) {
-    mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
+    // Load errors surface in devtools/crash-reporter; no app-level handler needed.
+    void mainWindow.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    void mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
   }
 }
 
@@ -338,6 +341,8 @@ if (!gotSingleInstanceLock) {
     app.on('activate', () => {
       if (BrowserWindow.getAllWindows().length === 0) createWindow()
     })
+  }).catch((err) => {
+    console.error('[main] app initialization failed:', err)
   })
 }
 
