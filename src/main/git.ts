@@ -26,6 +26,7 @@ export interface FileStatus {
   oldPath?: string
   status: 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked'
   staged: boolean
+  conflicted?: boolean
 }
 
 export interface GitSummary {
@@ -360,6 +361,15 @@ export async function getStatus(path: string): Promise<FileStatus[]> {
         oldPath,
         status: 'renamed',
         staged: xy[0] !== '.'
+      })
+    } else if (line.startsWith('u ')) {
+      const parts = line.split(' ')
+      const filePath = parts.slice(10).join(' ')
+      files.push({
+        path: filePath,
+        status: 'modified',
+        staged: false,
+        conflicted: true
       })
     } else if (line.startsWith('? ')) {
       files.push({ path: line.slice(2), status: 'untracked', staged: false })

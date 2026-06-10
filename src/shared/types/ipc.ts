@@ -402,6 +402,7 @@ export interface GitFileStatus {
   oldPath?: string
   status: GitFileStatusKind
   staged: boolean
+  conflicted?: boolean
 }
 
 export interface GitSummary {
