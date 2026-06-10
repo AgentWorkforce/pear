@@ -21,6 +21,7 @@ const WHOAMI_REQUEST_TIMEOUT_MS = 10_000
 const ACCOUNT_WORKSPACE_RETRY_ATTEMPTS = 8
 const ACCOUNT_WORKSPACE_RETRY_DELAY_MS = 500
 const warnedWhoamiWorkspaceFailures = new Set<string>()
+let storedTokensPresenceCache: { authPath: string; hasTokens: boolean } | null = null
 
 interface AuthStatus {
   loggedIn: boolean
@@ -58,9 +59,17 @@ const getAuthMetaPath = (): string => {
 }
 
 function hasStoredTokens(): boolean {
+  const authPath = getAuthPath()
+  if (storedTokensPresenceCache?.authPath === authPath) {
+    return storedTokensPresenceCache.hasTokens
+  }
+
   try {
-    return readFileSync(getAuthPath()).length > 0
+    const hasTokens = readFileSync(authPath).length > 0
+    storedTokensPresenceCache = { authPath, hasTokens }
+    return hasTokens
   } catch {
+    storedTokensPresenceCache = { authPath, hasTokens: false }
     return false
   }
 }
@@ -219,7 +228,9 @@ async function withCachedAvatar(user: UserInfo | undefined, waitForMissing: bool
 
 function saveTokens(tokens: StoredTokens): void {
   const encrypted = safeStorage.encryptString(JSON.stringify(tokens))
-  writeFileSync(getAuthPath(), encrypted)
+  const authPath = getAuthPath()
+  writeFileSync(authPath, encrypted)
+  storedTokensPresenceCache = { authPath, hasTokens: true }
   saveAuthMeta(tokens)
 }
 
@@ -259,8 +270,10 @@ export function readStoredAuth(): StoredTokens | null {
 
 function clearTokens(): void {
   try {
-    writeFileSync(getAuthPath(), '')
+    const authPath = getAuthPath()
+    writeFileSync(authPath, '')
     writeFileSync(getAuthMetaPath(), '')
+    storedTokensPresenceCache = { authPath, hasTokens: false }
   } catch {
     // ignore
   }

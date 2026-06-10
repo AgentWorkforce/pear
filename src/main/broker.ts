@@ -1,9 +1,9 @@
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
-import { rm } from 'fs/promises'
+import { existsSync, readFileSync } from 'fs'
+import { chmod, mkdir, readFile, rm, writeFile } from 'fs/promises'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { delimiter, basename, isAbsolute, join } from 'path'
-import { execFile, execFileSync } from 'child_process'
+import { execFile } from 'child_process'
 import { app, BrowserWindow } from 'electron'
 import {
   HarnessDriverClient as AgentRelayClient,
@@ -159,16 +159,24 @@ function parseAgentWorkforceJson<T>(output: string, label: string): T {
   }
 }
 
-function runAgentWorkforceJson<T>(
+async function runAgentWorkforceJson<T>(
   cwd: string,
   command: { cli: string; args: string[] },
   args: string[],
   label: string
-): T {
-  const output = execFileSync(command.cli, [...command.args, ...args], {
-    cwd,
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'pipe']
+): Promise<T> {
+  const output = await new Promise<string>((resolve, reject) => {
+    execFile(command.cli, [...command.args, ...args], {
+      cwd,
+      encoding: 'utf8',
+      windowsHide: true
+    }, (err, stdout) => {
+      if (err) {
+        reject(err)
+        return
+      }
+      resolve(stdout)
+    })
   })
   return parseAgentWorkforceJson<T>(output, label)
 }
@@ -239,9 +247,9 @@ function normalizeResolvedPersona(output: AgentWorkforceShowOutput, requestedId:
   }
 }
 
-function listWorkforcePersonas(cwd: string): WorkforcePersona[] {
+async function listWorkforcePersonas(cwd: string): Promise<WorkforcePersona[]> {
   const command = resolveAgentWorkforceCommand(cwd)
-  const output = runAgentWorkforceJson<AgentWorkforceListOutput>(
+  const output = await runAgentWorkforceJson<AgentWorkforceListOutput>(
     cwd,
     command,
     ['list', '--json'],
@@ -253,13 +261,13 @@ function listWorkforcePersonas(cwd: string): WorkforcePersona[] {
     .filter((persona): persona is WorkforcePersona => persona !== null)
 }
 
-function findWorkforcePersona(
+async function findWorkforcePersona(
   cwd: string,
   personaId: string,
   command = resolveAgentWorkforceCommand(cwd)
-): ResolvedWorkforcePersona {
+): Promise<ResolvedWorkforcePersona> {
   try {
-    const output = runAgentWorkforceJson<AgentWorkforceShowOutput>(
+    const output = await runAgentWorkforceJson<AgentWorkforceShowOutput>(
       cwd,
       command,
       ['show', personaId, '--json'],
@@ -423,23 +431,31 @@ child.on('exit', (code, signal) => {
 `
 }
 
-function ensureBrokerBinaryCompatShim(): string {
+async function textFileMatches(filePath: string, source: string): Promise<boolean> {
+  try {
+    return await readFile(filePath, 'utf8') === source
+  } catch {
+    return false
+  }
+}
+
+async function ensureBrokerBinaryCompatShim(): Promise<string> {
   const shimDir = join(app.getPath('userData'), 'broker-compat')
   const shimPath = join(shimDir, process.platform === 'win32' ? 'agent-relay-broker-compat.cmd' : 'agent-relay-broker-compat')
   const source = process.platform === 'win32'
     ? `@echo off\r\nnode "%~dp0agent-relay-broker-compat.js" %*\r\n`
     : brokerBinaryCompatShimSource()
 
-  mkdirSync(shimDir, { recursive: true })
-  if (!existsSync(shimPath) || readFileSync(shimPath, 'utf8') !== source) {
-    writeFileSync(shimPath, source)
-    chmodSync(shimPath, 0o755)
+  await mkdir(shimDir, { recursive: true })
+  if (!(await textFileMatches(shimPath, source))) {
+    await writeFile(shimPath, source)
+    await chmod(shimPath, 0o755)
   }
   if (process.platform === 'win32') {
     const jsPath = join(shimDir, 'agent-relay-broker-compat.js')
     const jsSource = brokerBinaryCompatShimSource()
-    if (!existsSync(jsPath) || readFileSync(jsPath, 'utf8') !== jsSource) {
-      writeFileSync(jsPath, jsSource)
+    if (!(await textFileMatches(jsPath, jsSource))) {
+      await writeFile(jsPath, jsSource)
     }
   }
   return shimPath
@@ -466,7 +482,7 @@ async function resolveHarnessBrokerBinary(workspaceKey?: string): Promise<{ bina
     throw new Error(`Broker binary supports neither --instance-name nor --name: ${binaryPath}`)
   }
 
-  const shimPath = ensureBrokerBinaryCompatShim()
+  const shimPath = await ensureBrokerBinaryCompatShim()
   console.warn(`[broker] Broker binary uses legacy --name flag; launching through compatibility shim: ${binaryPath}`)
   return {
     binaryPath: shimPath,
@@ -2813,7 +2829,7 @@ export class BrokerManager {
     const personaCwd = cwd?.trim()
     if (personaCwd) {
       try {
-        return listWorkforcePersonas(personaCwd)
+        return await listWorkforcePersonas(personaCwd)
       } catch (err) {
         console.warn(`[broker] Failed to list workforce personas for project ${projectId} at ${personaCwd}:`, err)
         return []
@@ -2829,7 +2845,7 @@ export class BrokerManager {
     }
 
     try {
-      return listWorkforcePersonas(session.cwd)
+      return await listWorkforcePersonas(session.cwd)
     } catch (err) {
       console.warn(`[broker] Failed to list workforce personas for project ${projectId}:`, err)
       return []
@@ -2846,8 +2862,7 @@ export class BrokerManager {
     const inFlight = this.inFlightPersonaSpawnRequests.get(requestKey)
     if (inFlight) return inFlight
 
-    let promise!: Promise<BrokerSpawnResult>
-    promise = this.spawnPersonaOnce(projectId, trimmedPersonaId).finally(() => {
+    const promise = this.spawnPersonaOnce(projectId, trimmedPersonaId).finally(() => {
       if (this.inFlightPersonaSpawnRequests.get(requestKey) === promise) {
         this.inFlightPersonaSpawnRequests.delete(requestKey)
       }
@@ -2860,7 +2875,7 @@ export class BrokerManager {
     const session = this.getSessionForProject(projectId)
 
     const command = resolveAgentWorkforceCommand(session.cwd)
-    const persona = findWorkforcePersona(session.cwd, trimmedPersonaId, command)
+    const persona = await findWorkforcePersona(session.cwd, trimmedPersonaId, command)
 
     // Resolve the harness from `agentworkforce show --json`. The actual spawn
     // is delegated to the workforce CLI (`agent <persona>`), which reads the
