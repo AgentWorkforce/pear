@@ -18,13 +18,14 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run verify:mcp-resources-drift
-      # Type-checks main+preload (tsconfig.node.json) and renderer (tsconfig.web.json).
-      # NON-BLOCKING for now: tsconfig.node.json surfaces ~95 pre-existing type errors
-      # (see PR "CI: enforce typecheck and run the full test suite" for the full list).
-      # The renderer (tsconfig.web.json) is already clean. Flip continue-on-error to
-      # false (or delete this comment + the flag) once the listed node errors are fixed
-      # so typecheck becomes a hard gate.
-      - run: npm run typecheck
+      # Renderer typecheck (tsconfig.web.json) is clean today — BLOCKING so
+      # renderer type regressions can't land.
+      - run: npm run typecheck:web
+      # Main+preload typecheck (tsconfig.node.json) surfaces ~95 pre-existing
+      # type errors (see PR "CI: enforce typecheck and run the full test suite"
+      # for the full list). NON-BLOCKING until those are fixed; then delete the
+      # flag (and this comment) so it becomes a hard gate too.
+      - run: npm run typecheck:node
         continue-on-error: true
       - run: npm test
       # Full vitest suite (node + dom projects). Previously CI only ran the single

@@ -23,7 +23,7 @@
     "release:mac": "npm run icons:macos && npm run build && electron-builder --mac --publish always",
     "typecheck:node": "tsc --noEmit -p tsconfig.node.json",
     "typecheck:web": "tsc --noEmit -p tsconfig.web.json",
-    "typecheck": "npm run typecheck:node && npm run typecheck:web",
+    "typecheck": "npm run typecheck:web && npm run typecheck:node",
     "test": "node --experimental-strip-types --no-warnings --test 'src/main/__tests__/*.test.ts'",
     "test:all": "npm test && npx vitest run",
     "test:fidelity": "npm run build:web && playwright test --config playwright.fidelity.config.ts",
