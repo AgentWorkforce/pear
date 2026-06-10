@@ -32,13 +32,13 @@ const agentSpawned = z
     kind: z.literal('agent_spawned'),
     name: z.string(),
     runtime: z.string(),
-    provider: z.string().optional(),
-    cli: z.string().optional(),
-    model: z.string().optional(),
-    sessionId: z.string().optional(),
-    parent: z.string().optional(),
-    pid: z.number().optional(),
-    source: z.string().optional()
+    provider: z.string().nullish(),
+    cli: z.string().nullish(),
+    model: z.string().nullish(),
+    sessionId: z.string().nullish(),
+    parent: z.string().nullish(),
+    pid: z.number().nullish(),
+    source: z.string().nullish()
   })
   .passthrough()
 
@@ -61,9 +61,9 @@ const agentExited = z
   .object({
     kind: z.literal('agent_exited'),
     name: z.string(),
-    code: z.number().optional(),
-    signal: z.string().optional(),
-    reason: z.string().optional()
+    code: z.number().nullish(),
+    signal: z.string().nullish(),
+    reason: z.string().nullish()
   })
   .passthrough()
 
@@ -82,9 +82,9 @@ const relayInbound = z
     from: z.string(),
     target: z.string(),
     body: z.string(),
-    thread_id: z.string().optional(),
-    mode: z.string().optional(),
-    injection_mode: z.string().optional()
+    thread_id: z.string().nullish(),
+    mode: z.string().nullish(),
+    injection_mode: z.string().nullish()
   })
   .passthrough()
 
@@ -131,7 +131,7 @@ const agentPendingDrained = z
     kind: z.literal('agent_pending_drained'),
     name: z.string(),
     count: z.number(),
-    reason: z.string().optional()
+    reason: z.string().nullish()
   })
   .passthrough()
 
@@ -148,7 +148,7 @@ const deliveryInjected = z
   .object({
     kind: z.literal('delivery_injected'),
     name: z.string(),
-    delivery_id: z.string().optional(),
+    delivery_id: z.string().nullish(),
     event_id: z.string(),
     timestamp: z.unknown().optional()
   })
@@ -158,7 +158,7 @@ const deliveryVerified = z
   .object({
     kind: z.literal('delivery_verified'),
     name: z.string(),
-    delivery_id: z.string().optional(),
+    delivery_id: z.string().nullish(),
     event_id: z.string()
   })
   .passthrough()
@@ -167,7 +167,7 @@ const deliveryFailed = z
   .object({
     kind: z.literal('delivery_failed'),
     name: z.string(),
-    delivery_id: z.string().optional(),
+    delivery_id: z.string().nullish(),
     event_id: z.string(),
     reason: z.string()
   })
@@ -177,7 +177,7 @@ const messageDeliveryConfirmed = z
   .object({
     kind: z.literal('message_delivery_confirmed'),
     name: z.string(),
-    delivery_id: z.string().optional(),
+    delivery_id: z.string().nullish(),
     event_id: z.string(),
     from: z.string(),
     to: z.string()
@@ -188,8 +188,8 @@ const messageDeliveryFailed = z
   .object({
     kind: z.literal('message_delivery_failed'),
     name: z.string(),
-    delivery_id: z.string().optional(),
-    event_id: z.string().optional(),
+    delivery_id: z.string().nullish(),
+    event_id: z.string().nullish(),
     from: z.string(),
     to: z.string(),
     attempts: z.number(),
@@ -201,7 +201,7 @@ const deliveryActive = z
   .object({
     kind: z.literal('delivery_active'),
     name: z.string(),
-    delivery_id: z.string().optional(),
+    delivery_id: z.string().nullish(),
     event_id: z.string()
   })
   .passthrough()
@@ -210,7 +210,7 @@ const deliveryAck = z
   .object({
     kind: z.literal('delivery_ack'),
     name: z.string(),
-    delivery_id: z.string().optional(),
+    delivery_id: z.string().nullish(),
     event_id: z.string()
   })
   .passthrough()
@@ -236,11 +236,11 @@ const workerReady = z
     kind: z.literal('worker_ready'),
     name: z.string(),
     runtime: z.string(),
-    provider: z.string().optional(),
-    cli: z.string().optional(),
-    model: z.string().optional(),
-    sessionId: z.string().optional(),
-    pid: z.number().optional()
+    provider: z.string().nullish(),
+    cli: z.string().nullish(),
+    model: z.string().nullish(),
+    sessionId: z.string().nullish(),
+    pid: z.number().nullish()
   })
   .passthrough()
 
@@ -285,7 +285,7 @@ const agentIdle = z
     kind: z.literal('agent_idle'),
     name: z.string(),
     idle_secs: z.number(),
-    since: z.string().optional()
+    since: z.string().nullish()
   })
   .passthrough()
 
@@ -313,8 +313,8 @@ const agentRestarting = z
   .object({
     kind: z.literal('agent_restarting'),
     name: z.string(),
-    code: z.number().optional(),
-    signal: z.string().optional(),
+    code: z.number().nullish(),
+    signal: z.string().nullish(),
     restart_count: z.number(),
     delay_ms: z.number()
   })
