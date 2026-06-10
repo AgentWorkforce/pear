@@ -58,9 +58,13 @@ const mock = vi.hoisted(() => {
       }
     })
   }
+  const shellOpenExternal = vi.fn(async () => undefined)
   const workspaceHandle = {
     workspaceId: 'account-workspace-id',
     client: vi.fn(() => relayClient),
+    requestJson: vi.fn(async (_request: { path: string }) => {
+      throw new Error('unexpected workspace request')
+    }),
     refreshToken: vi.fn(async () => undefined)
   }
   const relayWorkspaceManager = {
@@ -152,6 +156,7 @@ const mock = vi.hoisted(() => {
     fetchCalls,
     store,
     fetch,
+    shellOpenExternal,
     browserWindow: {
       getAllWindows: vi.fn(() => [])
     },
@@ -213,7 +218,7 @@ vi.mock('@relayfile/sdk', () => ({
 vi.mock('electron', () => ({
   BrowserWindow: mock.browserWindow,
   shell: {
-    openExternal: vi.fn(async () => undefined)
+    openExternal: mock.shellOpenExternal
   }
 }))
 
@@ -272,6 +277,21 @@ type SystemMessageSnippetBuilder = {
   ): string
 }
 
+function mockConnectSession(connectLink: string): void {
+  mock.workspaceHandle.requestJson.mockImplementation(async (request: { path: string }) => {
+    if (request.path.endsWith('/status')) {
+      throw new Error('not connected')
+    }
+    if (request.path.endsWith('/connect-session')) {
+      return {
+        connectLink,
+        connectionId: 'connect-session-1'
+      }
+    }
+    throw new Error(`unexpected workspace request: ${request.path}`)
+  })
+}
+
 describe('IntegrationsManager', () => {
   beforeEach(() => {
     mock.fetchCalls.splice(0)
@@ -293,6 +313,11 @@ describe('IntegrationsManager', () => {
     mock.cloudAgentManager.updateMountPaths.mockClear()
     mock.readFileCalls.splice(0)
     mock.relayClient.readFile.mockClear()
+    mock.shellOpenExternal.mockClear()
+    mock.workspaceHandle.requestJson.mockReset()
+    mock.workspaceHandle.requestJson.mockImplementation(async (_request: { path: string }) => {
+      throw new Error('unexpected workspace request')
+    })
     mock.relayWorkspaceManager.withHandle.mockClear()
     mock.relayWorkspaceManager.getWorkspaceHandle.mockClear()
     mock.brokerManager.listAgents.mockClear()
@@ -575,6 +600,73 @@ describe('IntegrationsManager', () => {
 
     expect(manager.getAuthRecoveryState()).toBeNull()
     expect(mock.integrationMountManager.ensureMounted).not.toHaveBeenCalled()
+  })
+
+  it('opens an https connect link returned by the cloud', async () => {
+    vi.useFakeTimers()
+    const connectLink = 'https://cloud.example/integrations/connect?token=abc'
+    mockConnectSession(connectLink)
+    const manager = new IntegrationsManager()
+
+    await expect(manager.startConnect('project-1', 'google-mail')).resolves.toMatchObject({
+      sessionId: 'connect-session-1',
+      status: 'awaiting-user',
+      authUrl: connectLink
+    })
+
+    expect(mock.shellOpenExternal).toHaveBeenCalledTimes(1)
+    expect(mock.shellOpenExternal).toHaveBeenCalledWith(connectLink)
+  })
+
+  it('rejects a file connect link returned by the cloud', async () => {
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    mockConnectSession('file:///tmp/connect-token')
+    const manager = new IntegrationsManager()
+
+    await expect(manager.startConnect('project-1', 'google-mail')).resolves.toMatchObject({
+      sessionId: 'connect-session-1',
+      status: 'awaiting-user',
+      authUrl: 'file:///tmp/connect-token'
+    })
+
+    expect(mock.shellOpenExternal).not.toHaveBeenCalled()
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[integrations] Refusing to open integration connect link:',
+      expect.objectContaining({
+        projectId: 'project-1',
+        provider: 'google-mail',
+        sessionId: 'connect-session-1',
+        reason: 'unsupported-scheme',
+        scheme: 'file:'
+      })
+    )
+    warnSpy.mockRestore()
+  })
+
+  it('rejects a malformed connect link without throwing', async () => {
+    vi.useFakeTimers()
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    mockConnectSession('not a url')
+    const manager = new IntegrationsManager()
+
+    await expect(manager.startConnect('project-1', 'google-mail')).resolves.toMatchObject({
+      sessionId: 'connect-session-1',
+      status: 'awaiting-user',
+      authUrl: 'not a url'
+    })
+
+    expect(mock.shellOpenExternal).not.toHaveBeenCalled()
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[integrations] Refusing to open integration connect link:',
+      expect.objectContaining({
+        projectId: 'project-1',
+        provider: 'google-mail',
+        sessionId: 'connect-session-1',
+        reason: 'invalid-url'
+      })
+    )
+    warnSpy.mockRestore()
   })
 
   it('relays mount-manager auth recovery alerts to renderer integration events', () => {
