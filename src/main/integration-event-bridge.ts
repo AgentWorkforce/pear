@@ -81,6 +81,13 @@ type DeliveryTargets = {
   channels: string[]
 }
 
+type LinearScopePredicates = {
+  teams: string[]
+  projects: string[]
+  labels: string[]
+  assignees: string[]
+}
+
 type SubscriptionSpec = {
   integrationId: string
   provider: string
@@ -90,6 +97,7 @@ type SubscriptionSpec = {
   watches: WatchRegistration[]
   targets: DeliveryTargets
   allowHistoricalReplay: boolean
+  linearPredicates?: LinearScopePredicates
 }
 
 type LocalMountRoot = {
@@ -414,6 +422,10 @@ function stringList(value: unknown): string[] {
   return value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0)
 }
 
+function scopeStringList(scope: Record<string, unknown>, key: string): string[] {
+  return stringList(scope[key])
+}
+
 function dedupeStrings(values: string[]): string[] {
   return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean))).sort()
 }
@@ -442,6 +454,27 @@ function toRelayfileProvider(provider: string): string {
 function isSlackProvider(provider: string): boolean {
   const normalized = toRelayfileProvider(provider)
   return normalized === 'slack' || normalized.startsWith('slack-')
+}
+
+function isLinearProvider(provider: string): boolean {
+  const normalized = toRelayfileProvider(provider)
+  return normalized === 'linear' || normalized.startsWith('linear-')
+}
+
+function linearScopePredicates(scope: Record<string, unknown>): LinearScopePredicates {
+  return {
+    teams: scopeStringList(scope, 'teams'),
+    projects: scopeStringList(scope, 'projects'),
+    labels: scopeStringList(scope, 'labels'),
+    assignees: scopeStringList(scope, 'assignees')
+  }
+}
+
+function hasLinearPredicates(predicates: LinearScopePredicates): boolean {
+  return predicates.teams.length > 0 ||
+    predicates.projects.length > 0 ||
+    predicates.labels.length > 0 ||
+    predicates.assignees.length > 0
 }
 
 function scopeBooleanDefault(scope: Record<string, unknown>, keys: string[], defaultValue: boolean): boolean {
@@ -596,7 +629,10 @@ export function subscriptionSpecsFor(
         coalesceMs: 750
       })),
       targets: deliveryTargetsFor([integration]),
-      allowHistoricalReplay: integration.downloadHistoricalData === true
+      allowHistoricalReplay: integration.downloadHistoricalData === true,
+      ...(isLinearProvider(integration.provider) && hasLinearPredicates(linearScopePredicates(integration.scope))
+        ? { linearPredicates: linearScopePredicates(integration.scope) }
+        : {})
     }
   }).filter((spec) => spec.watches.length > 0)
 }
@@ -1797,6 +1833,89 @@ function eventContextPreviewFromData(path: string, data: unknown): EventContextP
   return eventContextPreviewFromBuffer(path, Buffer.from(content, 'utf8'), 'application/json')
 }
 
+function parseJsonPreview(preview: EventContextPreview | undefined): Record<string, unknown> | null {
+  if (!preview || preview.kind !== 'text') return null
+  try {
+    const parsed = JSON.parse(preview.content)
+    return isRecord(parsed) ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function normalizeLinearFilterValue(value: unknown): string | null {
+  if (typeof value === 'number' && Number.isFinite(value)) return String(value).toLowerCase()
+  if (typeof value !== 'string') return null
+  const trimmed = value.trim()
+  return trimmed ? trimmed.toLowerCase() : null
+}
+
+function addLinearFilterCandidate(candidates: Set<string>, value: unknown): void {
+  const normalized = normalizeLinearFilterValue(value)
+  if (normalized) candidates.add(normalized)
+}
+
+function addLinearRecordCandidates(candidates: Set<string>, value: unknown): void {
+  addLinearFilterCandidate(candidates, value)
+  if (!isRecord(value)) return
+  for (const key of ['id', 'name', 'displayName', 'title', 'key', 'email', 'url', 'identifier']) {
+    addLinearFilterCandidate(candidates, value[key])
+  }
+}
+
+function linearRecordCandidates(record: Record<string, unknown>, key: keyof LinearScopePredicates): Set<string> {
+  const candidates = new Set<string>()
+  if (key === 'teams') {
+    addLinearFilterCandidate(candidates, record.teamId)
+    addLinearRecordCandidates(candidates, record.team)
+    return candidates
+  }
+  if (key === 'projects') {
+    addLinearFilterCandidate(candidates, record.projectId)
+    addLinearRecordCandidates(candidates, record.project)
+    return candidates
+  }
+  if (key === 'assignees') {
+    addLinearFilterCandidate(candidates, record.assigneeId)
+    addLinearRecordCandidates(candidates, record.assignee)
+    return candidates
+  }
+
+  const labelIds = record.labelIds
+  if (Array.isArray(labelIds)) {
+    for (const label of labelIds) addLinearFilterCandidate(candidates, label)
+  }
+  const labels = record.labels
+  if (Array.isArray(labels)) {
+    for (const label of labels) addLinearRecordCandidates(candidates, label)
+  }
+  return candidates
+}
+
+function linearPredicateMatches(
+  record: Record<string, unknown>,
+  predicates: LinearScopePredicates,
+  key: keyof LinearScopePredicates
+): boolean {
+  const selected = predicates[key]
+    .map(normalizeLinearFilterValue)
+    .filter((entry): entry is string => entry !== null)
+  if (selected.length === 0) return true
+  const candidates = linearRecordCandidates(record, key)
+  return selected.some((value) => candidates.has(value))
+}
+
+function linearIssueMatchesPredicates(record: Record<string, unknown>, predicates: LinearScopePredicates): boolean {
+  return linearPredicateMatches(record, predicates, 'teams') &&
+    linearPredicateMatches(record, predicates, 'projects') &&
+    linearPredicateMatches(record, predicates, 'labels') &&
+    linearPredicateMatches(record, predicates, 'assignees')
+}
+
+function isLinearIssueEventPath(path: string): boolean {
+  return /^\/linear\/issues\/[^/]+\.json$/u.test(path)
+}
+
 function isSparseRelayfilePointerData(path: string, data: unknown): boolean {
   if (!isRecord(data)) return false
   const keys = Object.keys(data).sort()
@@ -2485,6 +2604,7 @@ export class IntegrationEventBridge {
         mountPaths: spec.mountPaths,
         localMountRoots: spec.localMountRoots,
         eventPathGlobs: spec.eventPathGlobs,
+        linearPredicates: spec.linearPredicates,
         allowHistoricalReplay: spec.allowHistoricalReplay,
         targets: spec.targets
       }))
@@ -2511,6 +2631,7 @@ export class IntegrationEventBridge {
           mountPaths: spec.mountPaths,
           localMountRoots: spec.localMountRoots,
           eventPathGlobs: spec.eventPathGlobs,
+          linearPredicates: spec.linearPredicates,
           allowHistoricalReplay: spec.allowHistoricalReplay,
           targets: targetLabels(spec.targets)
         }))
@@ -2735,6 +2856,48 @@ export class IntegrationEventBridge {
     }
   }
 
+  private async filterLinearPredicateSpecs(
+    projectId: string,
+    event: ChangeEvent,
+    matchedSpecs: SubscriptionSpec[]
+  ): Promise<SubscriptionSpec[]> {
+    const predicateSpecs = matchedSpecs.filter((spec) => spec.linearPredicates)
+    if (predicateSpecs.length === 0) return matchedSpecs
+    const path = eventSummaryValue(event.resource.path)
+    if (!path || !isLinearIssueEventPath(path)) return matchedSpecs
+
+    const unfilteredSpecs = matchedSpecs.filter((spec) => !spec.linearPredicates)
+    const contextPreview = await this.readEventContextPreview(projectId, event, matchedSpecs)
+    const record = parseJsonPreview(contextPreview)
+    if (!record) {
+      warnIntegrationEventAggregated(
+        `Linear predicate issue read failed:${projectId}`,
+        'Linear predicate issue read failed',
+        {
+          projectId,
+          eventId: event.id,
+          path
+        }
+      )
+      return unfilteredSpecs
+    }
+
+    const filteredPredicateSpecs = predicateSpecs.filter((spec) =>
+      spec.linearPredicates && linearIssueMatchesPredicates(record, spec.linearPredicates)
+    )
+    const droppedCount = predicateSpecs.length - filteredPredicateSpecs.length
+    if (droppedCount > 0) {
+      logIntegrationEvent('filtered Linear event by scope predicates', {
+        projectId,
+        eventId: event.id,
+        path,
+        droppedSpecs: droppedCount
+      })
+    }
+
+    return [...unfilteredSpecs, ...filteredPredicateSpecs]
+  }
+
   private pruneProjectTtlMap(entries: Map<string, number>, now = Date.now()): void {
     for (const [key, expiresAt] of entries.entries()) {
       if (expiresAt <= now) entries.delete(key)
@@ -2865,19 +3028,28 @@ export class IntegrationEventBridge {
     }
 
     const eventMatchedSpecs = specsForEvent(event, specs)
-    const matchedSpecs = historicalRemoteReplayAllowedSpecs(event, eventMatchedSpecs, options)
+    const replayAllowedSpecs = historicalRemoteReplayAllowedSpecs(event, eventMatchedSpecs, options)
+    const matchedSpecs = await this.filterLinearPredicateSpecs(projectId, event, replayAllowedSpecs)
     if (matchedSpecs.length === 0) {
       if (eventMatchedSpecs.length > 0) {
         incrementIntegrationEventCounter(projectId, 'eventsDropped')
-        logIntegrationEvent('skipped historical remote replay', {
-          projectId,
-          eventId: event.id,
-          path: event.resource.path,
-          occurredAt: event.occurredAt,
-          subscriptionStartedAt: new Date(options.subscriptionStartedAtMs).toISOString(),
-          replaySkewToleranceMs: REPLAY_SKEW_TOLERANCE_MS,
-          temporaryPendingSdkContract: true
-        })
+        if (replayAllowedSpecs.length > 0) {
+          logIntegrationEvent('skipped Linear event by scope predicates', {
+            projectId,
+            eventId: event.id,
+            path: event.resource.path
+          })
+        } else {
+          logIntegrationEvent('skipped historical remote replay', {
+            projectId,
+            eventId: event.id,
+            path: event.resource.path,
+            occurredAt: event.occurredAt,
+            subscriptionStartedAt: new Date(options.subscriptionStartedAtMs).toISOString(),
+            replaySkewToleranceMs: REPLAY_SKEW_TOLERANCE_MS,
+            temporaryPendingSdkContract: true
+          })
+        }
       } else {
         logIntegrationEvent('skipped unmatched path', {
           projectId,
