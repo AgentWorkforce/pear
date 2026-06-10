@@ -26,11 +26,14 @@ import {
   clearPtyBuffer,
   diagPtyEnabled,
   flushPtyChunksNow,
-  getPtyChunks,
+  getPtyChunkTotal,
+  getPtyChunksSinceTotal,
   subscribePtyBuffer
 } from '@/stores/pty-buffer-store'
 import { recordChunkEchoed } from '@/lib/typing-trace'
-import { createPredictiveEcho } from '@/lib/predictive-echo'
+import { createPredictiveEcho, type PredictiveEchoWithStatus } from '@/lib/predictive-echo'
+import { createPtySizeSync } from '@/lib/pty-size-sync'
+import { buildModelSeedFromTerminal, createEchoRouter } from '@/lib/echo-router'
 import type { PredictiveEcho } from '@agent-relay/harness-driver/predictive-echo'
 import { awaitFontSettle } from '@/lib/font-settle'
 import type { Theme } from '@/stores/ui-store'
@@ -147,6 +150,10 @@ export interface TerminalRuntime {
   // through a runtime-owned slot to allow rebinding on each hook effect.
   setInputSrttGetter(getter: () => number | null): void
   getPredictiveEcho(): PredictiveEcho | null
+  // Forward user keystrokes for optimistic echo. Routes through the
+  // predictive-echo engine only when measured latency warrants predictions,
+  // transitioning (and reseeding the engine's confirmed model) on demand.
+  noteUserInput(data: string): void
   // Install a handler for `term.onData`. Returns the previous handler so the
   // caller can re-install it later (e.g. on unmount while keeping the
   // runtime alive). The runtime forwards via an internal mutable slot, so
@@ -288,22 +295,45 @@ function createRuntime(
   let disposed = false
   let currentToken: symbol | null = null
   let webglAddon: WebglAddon | null = null
-  let predictiveEcho: PredictiveEcho | null = null
+  let predictiveEcho: PredictiveEchoWithStatus | null = null
   let disposePredictiveEcho: (() => void) | null = null
   let unsubBuffer: (() => void) | null = null
-  let writtenChunks = 0
+  // Replay baseline: the buffer's monotonic chunk total at the moment the
+  // attach snapshot was painted. Chunks at or below this total are already
+  // on screen (inside the snapshot); only chunks past it get replayed.
+  let writtenTotal = 0
   let attachSeeded = false
   let attachInFlight = false
   let pendingInitFrame: number | null = null
-  // Last rows/cols actually sent to the PTY. fitAndSync drops the IPC when
-  // the size hasn't changed — observers fire on every dragged pixel and the
-  // backend reacts to no-op resizes by reflowing.
-  let lastSentRows = -1
-  let lastSentCols = -1
+  // PTY size sync: a size only counts as delivered when the resizePty IPC
+  // RESOLVES; failures retry with backoff until the current desired size
+  // lands. The previous change-gate recorded a size as "sent" even when the
+  // IPC failed, leaving the PTY permanently mismatched with the rendered
+  // grid — a TUI then positions repaints against the wrong row count, so
+  // content lands mid-screen and repaints stack in scrollback instead of
+  // overwriting. See pty-size-sync.ts for the invariants (unit-tested).
+  const sizeSync = createPtySizeSync((rows, cols) =>
+    pear.broker.resizePty(opts.projectId, opts.agentName, rows, cols)
+  )
   // Holder for the current input-SRTT getter. The predictive echo engine
   // captures this once on construction, so we wrap it in a trampoline and
   // let setInputSrttGetter swap the underlying getter on each effect run.
   let currentSrttGetter: () => number | null = opts.getInputSrtt
+  // Routes server output direct-to-xterm while the predictive-echo engine
+  // is dormant and through the engine once latency warrants predictions.
+  // See echo-router.ts for the invariants (equivalence-tested against the
+  // real engine + parser).
+  const echoRouter = createEchoRouter({
+    write: (data, callback) => {
+      if (disposed || !term) return
+      term.write(data, callback)
+    },
+    getEngine: () => (disposed ? null : predictiveEcho),
+    buildModelSeed: () => (term ? buildModelSeedFromTerminal(term) : '\x1bc'),
+    getInputSrtt: () => currentSrttGetter(),
+    isViewportPinned: () => (term ? isViewportPinnedToBottom(term) : false),
+    scrollToBottom: () => term?.scrollToBottom()
+  })
 
   const cancelPendingInit = (): void => {
     if (pendingInitFrame !== null) {
@@ -371,7 +401,6 @@ function createRuntime(
 
   const seedBufferSubscription = (): void => {
     if (unsubBuffer || !term || disposed) return
-    const liveTerm = term
 
     const writeChunks = (newChunks: string[]): void => {
       if (disposed || !term) return
@@ -383,7 +412,6 @@ function createRuntime(
         // eslint-disable-next-line no-console
         console.log(`[diag:runtime:writeChunks] key=${key} count=${newChunks.length} firstPreview="${newChunks[0]?.slice(0, 80).replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\x1b/g, '\\e')}"`)
       }
-      const wasPinned = isViewportPinnedToBottom(liveTerm)
       // Typing-trace accounting stays per-chunk: recordChunkEchoed consumes
       // one pending keystroke per call, so coalescing it would under-count.
       for (const chunk of newChunks) recordChunkEchoed(chunk)
@@ -396,21 +424,16 @@ function createRuntime(
       // keep up and input lagged. Byte content and order are unchanged, so the
       // one-write-per-byte invariant holds.
       const combined = newChunks.length === 1 ? newChunks[0] : newChunks.join('')
-      if (predictiveEcho) {
-        void predictiveEcho.onServerOutput(combined)
-      } else {
-        liveTerm.write(combined)
-      }
-      if (wasPinned) liveTerm.scrollToBottom()
+      echoRouter.onServerOutput(combined)
     }
 
     unsubBuffer = subscribePtyBuffer(key, writeChunks)
     // Initial replay: pull whatever is already in the buffer past the
-    // snapshot baseline (writtenChunks). The listener only receives tails
+    // snapshot baseline (writtenTotal). The listener only receives tails
     // from this point on, so we have to do the catch-up explicitly here.
-    const buffered = getPtyChunks(key)
-    if (writtenChunks > buffered.length) writtenChunks = 0
-    writeChunks(buffered.slice(writtenChunks))
+    // The monotonic-total slice can never replay pre-baseline chunks on top
+    // of the snapshot, even if the buffer trimmed during the attach window.
+    writeChunks(getPtyChunksSinceTotal(key, writtenTotal))
   }
 
   const attachAndSeed = async (
@@ -443,10 +466,16 @@ function createRuntime(
         // them into the buffer AFTER we capture writtenChunks, and the
         // subsequent subscribe would replay them on top of the snapshot.
         flushPtyChunksNow(key)
-        writtenChunks = getPtyChunks(key).length
+        writtenTotal = getPtyChunkTotal(key)
         shouldReplay = false
       }
       attachSeeded = true
+      if (initialSize) {
+        // attachTerminal carried rows/cols, so the PTY is at initialSize
+        // now. Record the ack; if a refit moved `desired` during the IPC
+        // roundtrip, the sync loop re-asserts it immediately.
+        sizeSync.noteAcked(initialSize.rows, initialSize.cols)
+      }
     } catch (err) {
       console.error('[terminal] attachTerminal failed:', err)
       // Don't latch attachSeeded — the next init/mount cycle should retry.
@@ -457,7 +486,7 @@ function createRuntime(
     if (disposed || !term) return
 
     if (shouldReplay) {
-      writtenChunks = 0
+      writtenTotal = 0
       await predictiveEcho?.seed('')
     }
 
@@ -479,19 +508,26 @@ function createRuntime(
       if (disposed || !liveTerm) return
       const { rows, cols } = liveTerm
       if (rows <= 1 || cols <= 0) return
+      // The (rows-1) intermediate is best-effort and deliberately bypasses
+      // the sync loop; the restore below ALWAYS runs (even when the
+      // intermediate fails) and goes through the retrying sync loop, so a
+      // dropped restore IPC can never strand the PTY one row short — the
+      // exact mismatch that makes TUI repaints stack down the screen.
       pear.broker
         .resizePty(opts.projectId, opts.agentName, rows - 1, cols)
+        .catch(() => {})
         .then(() => {
-          if (disposed || !liveTerm) return
-          // Re-read dimensions across the async boundary — the user may
-          // have resized the pane between the first and second IPC.
-          // Sending stale dims would regress the PTY size.
+          if (disposed) return
+          // The PTY may now be at the bounce size; invalidate the ack so the
+          // sync loop re-asserts the real size even if it matches the last
+          // acked value. Re-read dimensions across the async boundary — the
+          // user may have resized the pane since the first IPC.
+          sizeSync.invalidateAck()
           const currentRows = liveTerm.rows
           const currentCols = liveTerm.cols
           if (currentRows <= 0 || currentCols <= 0) return
-          return pear.broker.resizePty(opts.projectId, opts.agentName, currentRows, currentCols)
+          sizeSync.setDesired(currentRows, currentCols)
         })
-        .catch(() => {})
     }, 200)
   }
 
@@ -606,6 +642,8 @@ function createRuntime(
       // writeFromBuffer notification triggered by clearPtyBuffer (with [])
       // runs while the closure is still consistent.
       cancelPendingInit()
+      sizeSync.dispose()
+      echoRouter.dispose()
       clearPtyBuffer(key)
       disposed = true
       currentToken = null
@@ -654,15 +692,10 @@ function createRuntime(
       const size = tryFit()
       if (size) {
         predictiveEcho?.onResize(size.cols, size.rows)
-        // Fix #9: ResizeObserver fires on every dragged pixel; only
-        // round-trip to the backend when the cell grid actually changed.
-        if (size.rows !== lastSentRows || size.cols !== lastSentCols) {
-          lastSentRows = size.rows
-          lastSentCols = size.cols
-          pear.broker
-            .resizePty(opts.projectId, opts.agentName, size.rows, size.cols)
-            .catch(() => {})
-        }
+        // Fix #9: ResizeObserver fires on every dragged pixel; the sync
+        // loop only round-trips when the grid differs from the last ACKED
+        // size, and keeps retrying until the PTY confirms it.
+        sizeSync.setDesired(size.rows, size.cols)
       }
       return size
     },
@@ -680,6 +713,10 @@ function createRuntime(
     },
     getPredictiveEcho(): PredictiveEcho | null {
       return predictiveEcho
+    },
+    noteUserInput(data: string): void {
+      if (disposed || !term) return
+      echoRouter.onUserInput(data)
     },
     setOnData(handler: ((data: string) => void) | null): void {
       onDataHandler = handler

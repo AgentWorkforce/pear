@@ -117,9 +117,11 @@ export function useTerminal(
   const sendInput = useCallback((data: string): void => {
     if (!agentName || terminalModeRef.current === 'view') return
 
-    // Optimistically echo before the round trip; the engine reconciles
-    // against authoritative output and stays dormant on fast local links.
-    runtimeRef.current?.getPredictiveEcho()?.onUserInput(data)
+    // Optimistically echo before the round trip; the runtime routes through
+    // the predictive-echo engine only when measured latency warrants it and
+    // reconciles against authoritative output, staying dormant (and
+    // zero-overhead) on fast local links.
+    runtimeRef.current?.noteUserInput(data)
     recordKeystrokeSent(data)
     pear.broker.sendInputFast(projectId, agentName, data)
   }, [agentName, projectId])

@@ -869,6 +869,30 @@ function normalizeRelayMessageForChat(
   }
 }
 
+interface PtyStreamDedupeState {
+  // Highest numeric seq delivered for this agent stream. -Infinity until the
+  // first numeric seq arrives.
+  lastSeq: number
+  // identity key (seq or event_id) → content hash for the most recent
+  // PTY_CHUNK_REPLAY_WINDOW chunks, insertion-ordered for FIFO eviction.
+  recentByIdentity: Map<string, string>
+  // Telemetry: replayed chunks suppressed for this stream.
+  suppressedReplays: number
+}
+
+// Cheap, allocation-free content fingerprint (FNV-1a 32-bit + length). A
+// false "duplicate" verdict requires an identity match AND a hash collision
+// AND identical length — and only ever suppresses one chunk that renders the
+// same bytes we already delivered for that identity.
+function ptyChunkHash(chunk: string): string {
+  let hash = 0x811c9dc5
+  for (let i = 0; i < chunk.length; i += 1) {
+    hash ^= chunk.charCodeAt(i)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return `${chunk.length}:${hash >>> 0}`
+}
+
 function brokerEventSeq(event: BrokerEvent): number | undefined {
   const seq = (event as Record<string, unknown>).seq
   return typeof seq === 'number' && Number.isFinite(seq) ? seq : undefined
@@ -2474,6 +2498,7 @@ export class BrokerManager {
   }
 
   private forgetAgentSession(name: string, sessionKey: string): void {
+    this.ptyStreamDedupe.delete(`${sessionKey}:${name}`)
     const sessionKeys = this.agentSessions.get(name)
     if (!sessionKeys) return
     sessionKeys.delete(sessionKey)

@@ -4,6 +4,8 @@ import {
   clearPtyBuffer,
   flushPtyChunksNow,
   getPtyChunks,
+  getPtyChunkTotal,
+  getPtyChunksSinceTotal,
   subscribePtyBuffer
 } from './pty-buffer-store'
 
@@ -161,5 +163,115 @@ describe('pty-buffer-store', () => {
     expect(listener).toHaveBeenCalledTimes(1)
     expect(listener).toHaveBeenCalledWith(['dup', 'dup'])
     expect(getPtyChunks('k1')).toEqual(['dup', 'dup'])
+  })
+})
+
+// Invariants for the monotonic replay-baseline API (getPtyChunkTotal /
+// getPtyChunksSinceTotal). The terminal runtime paints an attach snapshot,
+// captures a baseline, then replays only chunks that arrived after it. The
+// baseline must stay valid across the 10k buffer trim: a length-based
+// baseline goes stale when the buffer slides, and the old recovery path
+// (reset to 0, replay the whole buffer) painted duplicate screen content on
+// top of the snapshot. Totals are monotonic per key for the renderer's
+// lifetime — including across clearPtyBuffer — so these tests use unique
+// keys instead of clearing shared ones.
+describe('pty-buffer-store replay baselines', () => {
+  const MAX_PTY_BUFFER_CHUNKS = 10_000
+  let keySerial = 0
+  const testKeys: string[] = []
+
+  function trackedKey(label: string): string {
+    keySerial += 1
+    const key = `baseline:${label}:${keySerial}`
+    testKeys.push(key)
+    return key
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+  })
+
+  afterEach(() => {
+    for (const key of testKeys.splice(0)) clearPtyBuffer(key)
+    vi.useRealTimers()
+  })
+
+  it('counts flushed chunks monotonically with and without subscribers', () => {
+    const key = trackedKey('totals')
+    expect(getPtyChunkTotal(key)).toBe(0)
+
+    // No subscriber: inline flush.
+    appendPtyChunk(key, 'a')
+    appendPtyChunk(key, 'b')
+    expect(getPtyChunkTotal(key)).toBe(2)
+
+    // With subscriber: rAF-batched flush counts at flush time.
+    const unsub = subscribePtyBuffer(key, () => {})
+    appendPtyChunk(key, 'c')
+    expect(getPtyChunkTotal(key)).toBe(2)
+    flushRaf()
+    expect(getPtyChunkTotal(key)).toBe(3)
+    unsub()
+  })
+
+  it('returns only post-baseline chunks', () => {
+    const key = trackedKey('since')
+    appendPtyChunk(key, 'before-1')
+    appendPtyChunk(key, 'before-2')
+    const baseline = getPtyChunkTotal(key)
+
+    appendPtyChunk(key, 'after-1')
+    appendPtyChunk(key, 'after-2')
+
+    expect(getPtyChunksSinceTotal(key, baseline)).toEqual(['after-1', 'after-2'])
+    expect(getPtyChunksSinceTotal(key, getPtyChunkTotal(key))).toEqual([])
+  })
+
+  it('never replays pre-baseline chunks after the buffer trims', () => {
+    const key = trackedKey('trim')
+    appendPtyChunk(key, 'snapshot-covered')
+    const baseline = getPtyChunkTotal(key)
+
+    // Overflow the buffer so the pre-baseline chunk is trimmed away.
+    const appended = MAX_PTY_BUFFER_CHUNKS + 50
+    for (let i = 0; i < appended; i += 1) {
+      appendPtyChunk(key, `post-${i}`)
+    }
+
+    const replay = getPtyChunksSinceTotal(key, baseline)
+    // Everything retained is post-baseline; the trimmed-away middle is
+    // unrecoverable, but nothing from before the baseline is re-returned.
+    expect(replay.length).toBe(MAX_PTY_BUFFER_CHUNKS)
+    expect(replay[0]).toBe(`post-${appended - MAX_PTY_BUFFER_CHUNKS}`)
+    expect(replay.at(-1)).toBe(`post-${appended - 1}`)
+    expect(replay).not.toContain('snapshot-covered')
+  })
+
+  it('keeps totals monotonic across clearPtyBuffer', () => {
+    const key = trackedKey('clear')
+    appendPtyChunk(key, 'one')
+    const baseline = getPtyChunkTotal(key)
+
+    clearPtyBuffer(key)
+    expect(getPtyChunks(key)).toEqual([])
+    // A baseline captured before the clear stays valid: nothing new yet.
+    expect(getPtyChunksSinceTotal(key, baseline)).toEqual([])
+
+    appendPtyChunk(key, 'two')
+    expect(getPtyChunkTotal(key)).toBe(baseline + 1)
+    expect(getPtyChunksSinceTotal(key, baseline)).toEqual(['two'])
+  })
+
+  it('flushPtyChunksNow drains staged chunks into the total before a baseline capture', () => {
+    const key = trackedKey('drain')
+    const unsub = subscribePtyBuffer(key, () => {})
+    appendPtyChunk(key, 'staged')
+    // Without the synchronous drain the staged chunk would be invisible to
+    // the baseline and replayed on top of the snapshot.
+    flushPtyChunksNow(key)
+    const baseline = getPtyChunkTotal(key)
+    expect(baseline).toBe(1)
+    expect(getPtyChunksSinceTotal(key, baseline)).toEqual([])
+    unsub()
   })
 })

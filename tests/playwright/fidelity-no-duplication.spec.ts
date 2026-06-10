@@ -60,6 +60,9 @@ async function bootWithAgents(
 ): Promise<void> {
   await page.addInitScript((initialLayout) => {
     window.localStorage.setItem('pear-terminal-layout', initialLayout)
+    // The web-mock build defaults to the Attention Inbox tab; the fidelity
+    // harness needs the Agents view so terminal runtimes mount.
+    window.localStorage.setItem('pear-web-initial-tab', 'agents')
   }, layout)
 
   await page.goto('/')
@@ -71,6 +74,8 @@ async function bootWithAgents(
     mock.spawnAgents(agentCount, { projectId: 'mock-project', namePrefix, channel: 'general' })
   }, { agentCount: count, namePrefix: prefix })
 
+  // Select the spawned agent so its terminal runtime mounts (the mock build
+  // boots with demo agents; spawning does not auto-select).
   const firstAgent = agentName(prefix)
   await page.getByText('general').click()
   // Role-scoped but not exact: the button's accessible name includes status
@@ -329,6 +334,10 @@ test.describe('terminal output fidelity under high-rate PTY streaming', () => {
     const name = agentName('remount')
     await startStream(page, [{ name, markerPrefix: 'remount-a', total: VARIANT_TOTAL }])
 
+    // Leave the Agents view entirely (Issues tab) and come back mid-stream —
+    // the cross-view unmount/remount that used to replay duplicate buffer
+    // content on top of the parked runtime. (The old 'agent graph' layout
+    // this test used no longer exists.)
     await page.waitForTimeout(120)
     await page.getByRole('button', { name: 'Show split terminal pages' }).click()
     await expectSplitTerminalVisible(page, name)

@@ -1436,7 +1436,12 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
-  it('dedupes repeated PTY chunks when broker events have no identity', async () => {
+  it('delivers identical PTY chunks when broker events have no identity', async () => {
+    // Identical consecutive chunks are NORMAL terminal traffic (the same
+    // keystroke echoed twice, byte-identical TUI repaint frames). Without an
+    // identity there is no way to tell a transport replay from real output,
+    // and dropping real bytes mangles escape sequences — the stacked
+    // "duplicate line" rendering corruption. Never drop on content alone.
     const manager = new BrokerManager()
     const win = createMockWindow()
     const local = await startLocalWithWindow(manager, win)
@@ -1456,7 +1461,107 @@ describe('BrokerManager local + cloud coexistence', () => {
 
     const ptyCalls = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
       .filter(([channel]) => channel === 'broker:pty-chunk')
-    expect(ptyCalls).toEqual([['broker:pty-chunk', PROJECT_ID, 'claude-1', 'pong\n']])
+    expect(ptyCalls).toEqual([
+      ['broker:pty-chunk', PROJECT_ID, 'claude-1', 'pong\n'],
+      ['broker:pty-chunk', PROJECT_ID, 'claude-1', 'pong\n']
+    ])
+
+    await manager.shutdown()
+  })
+
+  it('delivers chunks whose seq repeats with different bytes (daemon seq reset)', async () => {
+    // A daemon restart resets its event seq counter. The replacement stream
+    // reuses seq numbers we have already seen — but the bytes are new output
+    // and must render. Only an (identity AND content) match is a replay.
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    const local = await startLocalWithWindow(manager, win)
+    const listener = local.onEvent.mock.calls.at(-1)?.[0]
+    expect(listener).toBeTypeOf('function')
+
+    listener?.({ kind: 'worker_stream', name: 'claude-1', chunk: 'before restart\n', seq: 90 })
+    listener?.({ kind: 'worker_stream', name: 'claude-1', chunk: 'after restart\n', seq: 90 })
+
+    const ptyCalls = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([channel]) => channel === 'broker:pty-chunk')
+    expect(ptyCalls).toEqual([
+      ['broker:pty-chunk', PROJECT_ID, 'claude-1', 'before restart\n'],
+      ['broker:pty-chunk', PROJECT_ID, 'claude-1', 'after restart\n']
+    ])
+
+    await manager.shutdown()
+  })
+
+  it('delivers low-seq chunks after a watermark reset instead of dropping a window', async () => {
+    // After the daemon restarts, fresh chunks arrive with seqs far below the
+    // old watermark. They must all be delivered immediately — the previous
+    // TTL-based dedup dropped them for up to 60s, losing repaint bytes.
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    const local = await startLocalWithWindow(manager, win)
+    const listener = local.onEvent.mock.calls.at(-1)?.[0]
+    expect(listener).toBeTypeOf('function')
+
+    listener?.({ kind: 'worker_stream', name: 'claude-1', chunk: 'old-high\n', seq: 5_000 })
+    listener?.({ kind: 'worker_stream', name: 'claude-1', chunk: 'fresh-1\n', seq: 1 })
+    listener?.({ kind: 'worker_stream', name: 'claude-1', chunk: 'fresh-2\n', seq: 2 })
+
+    const ptyCalls = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([channel]) => channel === 'broker:pty-chunk')
+    expect(ptyCalls).toEqual([
+      ['broker:pty-chunk', PROJECT_ID, 'claude-1', 'old-high\n'],
+      ['broker:pty-chunk', PROJECT_ID, 'claude-1', 'fresh-1\n'],
+      ['broker:pty-chunk', PROJECT_ID, 'claude-1', 'fresh-2\n']
+    ])
+
+    await manager.shutdown()
+  })
+
+  it('drops a delayed replay of an older seq with identical bytes', async () => {
+    // Rebind replay re-delivers recent events: same seq, same bytes, possibly
+    // long after first delivery. These are the one provable-duplicate case.
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    const local = await startLocalWithWindow(manager, win)
+    const listener = local.onEvent.mock.calls.at(-1)?.[0]
+    expect(listener).toBeTypeOf('function')
+
+    listener?.({ kind: 'worker_stream', name: 'claude-1', chunk: 'a\n', seq: 10 })
+    listener?.({ kind: 'worker_stream', name: 'claude-1', chunk: 'b\n', seq: 11 })
+    // Rebind replays the tail of the stream.
+    listener?.({ kind: 'worker_stream', name: 'claude-1', chunk: 'a\n', seq: 10 })
+    listener?.({ kind: 'worker_stream', name: 'claude-1', chunk: 'b\n', seq: 11 })
+
+    const ptyCalls = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([channel]) => channel === 'broker:pty-chunk')
+    expect(ptyCalls).toEqual([
+      ['broker:pty-chunk', PROJECT_ID, 'claude-1', 'a\n'],
+      ['broker:pty-chunk', PROJECT_ID, 'claude-1', 'b\n']
+    ])
+
+    await manager.shutdown()
+  })
+
+  it('tracks PTY dedup watermarks per agent stream', async () => {
+    // Two agents share the session event-stream seq space; one agent's
+    // watermark must not swallow the other's chunks.
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    const local = await startLocalWithWindow(manager, win)
+    const listener = local.onEvent.mock.calls.at(-1)?.[0]
+    expect(listener).toBeTypeOf('function')
+
+    listener?.({ kind: 'worker_stream', name: 'claude-1', chunk: 'one\n', seq: 100 })
+    listener?.({ kind: 'worker_stream', name: 'codex-1', chunk: 'one\n', seq: 100 })
+    listener?.({ kind: 'worker_stream', name: 'codex-1', chunk: 'two\n', seq: 101 })
+
+    const ptyCalls = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([channel]) => channel === 'broker:pty-chunk')
+    expect(ptyCalls).toEqual([
+      ['broker:pty-chunk', PROJECT_ID, 'claude-1', 'one\n'],
+      ['broker:pty-chunk', PROJECT_ID, 'codex-1', 'one\n'],
+      ['broker:pty-chunk', PROJECT_ID, 'codex-1', 'two\n']
+    ])
 
     await manager.shutdown()
   })
