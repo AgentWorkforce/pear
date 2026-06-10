@@ -186,7 +186,7 @@ function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNod
   const [menuOpen, setMenuOpen] = useState(false)
 
   useEffect(() => {
-    void pear.auth.status().then(setAuth)
+    void pear.auth.status().then(setAuth).catch(() => {})
     // Initial recovery-state probe is best-effort: on failure we leave the
     // banner hidden, and the integration-auth event listener below will set it
     // if recovery is actually needed.

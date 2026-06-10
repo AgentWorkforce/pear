@@ -342,7 +342,12 @@ if (!gotSingleInstanceLock) {
       if (BrowserWindow.getAllWindows().length === 0) createWindow()
     })
   }).catch((err) => {
+    // Fail fast: a partially initialized app (no window, no IPC) must not
+    // keep running. exitCode 1 preserves the pre-lint unhandled-rejection
+    // behavior of exiting non-zero.
     console.error('[main] app initialization failed:', err)
+    process.exitCode = 1
+    app.quit()
   })
 }
 
