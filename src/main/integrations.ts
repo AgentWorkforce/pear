@@ -1060,10 +1060,27 @@ export class IntegrationsManager {
       throw new Error('Integration remote file is outside this project integration scope')
     }
 
-    return this.withIntegrationRemoteHandle(async (handle) => {
-      const file = await handle.client().readFile(handle.workspaceId, path)
-      return remoteFileReadToPreview(file)
-    })
+    try {
+      return await this.withIntegrationRemoteHandle(async (handle) => {
+        const file = await handle.client().readFile(handle.workspaceId, path)
+        return remoteFileReadToPreview(file)
+      })
+    } catch (error) {
+      // A remote 404 means the file was never synced locally (e.g. historical
+      // provider records that are not downloaded) or was removed between a
+      // directory listing and this read. Mirror the local filesystem behavior
+      // (readTextPreview) by reporting it as a missing preview instead of
+      // rejecting the IPC handler, so best-effort enrichment readers degrade
+      // gracefully rather than logging a handler error.
+      if (isHttpStatus(error, 404)) {
+        return {
+          kind: 'missing',
+          content: error instanceof Error ? error.message : 'Remote file not found',
+          size: 0
+        }
+      }
+      throw error
+    }
   }
 
   async listRemoteDirectory(projectId: string, remotePath: string): Promise<filesystem.ExplorerEntry[]> {
