@@ -28,6 +28,7 @@ import {
   type GeneratedCommitDraft
 } from './schemas'
 import { compactBrokerEvent, normalizeEventTimestamp } from '../shared/lib/broker-events'
+import { classifyBrokerEvent } from '../shared/schemas/broker-events'
 import type {
   BrokerEventStreamDiagnostic,
   BrokerReconciledChatMessage,
@@ -544,6 +545,9 @@ const EVENT_STREAM_REBIND_COOLDOWN_MS = 5_000
 const PTY_CHUNK_IDENTITY_DEDUPE_TTL_MS = 60_000
 const PTY_CHUNK_CONTENT_DEDUPE_TTL_MS = 1_000
 const MAX_PTY_CHUNK_DEDUPE_ENTRIES = 2_000
+// Throttle malformed-event warnings per `kind` so a misbehaving broker stream
+// can't flood the terminal (AGENTS.md low-noise telemetry doctrine).
+const MALFORMED_BROKER_EVENT_WARN_THROTTLE_MS = 60_000
 // After this many consecutive failures to open a PTY input stream, give up on
 // the WS fast path for that agent briefly and send over HTTP while it cools down.
 const MAX_INPUT_STREAM_OPEN_FAILURES = 3
@@ -1475,6 +1479,10 @@ export class BrokerManager {
   private eventHistory: BrokerEventRecord[] = []
   private recentPtyChunks = new Map<string, number>()
   private eventSerial = 0
+  // Ingress-validation telemetry: last warn time per malformed `kind`
+  // (throttled) and the set of unknown `kind`s already logged (once each).
+  private malformedEventWarnedAt = new Map<string, number>()
+  private warnedUnknownEventKinds = new Set<string>()
 
   get cwd(): string | null {
     return this.sessions.values().next().value?.cwd || null
@@ -2386,7 +2394,10 @@ export class BrokerManager {
       // dedicated channel so typing latency doesn't pay for compactBrokerEvent,
       // the broker:event metadata spread, or pushing into eventHistory per
       // character. Activity bookkeeping (rememberAgentSession + cloud sandbox
-      // observers) still runs.
+      // observers) still runs. The inline string checks below are the cheap,
+      // per-keystroke validation for worker_stream chunks — a chunk that fails
+      // them falls through to full zod validation at the general boundary
+      // below, so we never pay a discriminated-union parse per character.
       if (
         event.kind === 'worker_stream' &&
         'name' in event && typeof event.name === 'string' &&
@@ -2408,7 +2419,14 @@ export class BrokerManager {
         return
       }
 
-      this.publishBrokerEvent(sessionKey, projectId, win, event as unknown as BrokerEventRecordPayload)
+      // General ingress: validate ONCE with zod. Malformed known events are
+      // dropped (the stream keeps running); unknown kinds are forwarded
+      // unchanged for forward-compat. `forwarded` is the typed payload we
+      // publish, which removes the `as unknown as` cast at the publish call.
+      const forwarded = this.validateIngressBrokerEvent(event)
+      if (!forwarded) return
+
+      this.publishBrokerEvent(sessionKey, projectId, win, forwarded)
 
       if (event.kind === 'agent_spawned' && event.name) {
         this.rememberAgentSession(event.name, sessionKey)
@@ -2504,6 +2522,44 @@ export class BrokerManager {
     }
     this.recentPtyChunks.set(key, now)
     return false
+  }
+
+  /**
+   * Validate a raw broker event at ingress. Returns the typed payload to
+   * forward, or `null` when the event is malformed and should be dropped.
+   *
+   * - Malformed known events: dropped, with a per-`kind` throttled warning.
+   * - Unknown `kind`s: forwarded unchanged, logged once per `kind` (forward
+   *   compat — a future SDK minor may add kinds this build doesn't model).
+   * - Valid events: forwarded as the parsed (passthrough) payload.
+   */
+  private validateIngressBrokerEvent(event: BrokerEvent): BrokerEventRecordPayload | null {
+    const result = classifyBrokerEvent(event)
+    if (result.status === 'malformed') {
+      this.warnMalformedBrokerEvent(result.kind, result.reason)
+      return null
+    }
+    if (result.status === 'unknown') {
+      this.noteUnknownBrokerEventKind(result.kind)
+    }
+    return result.event
+  }
+
+  private warnMalformedBrokerEvent(kind: string | undefined, reason: string): void {
+    const key = kind || '<no-kind>'
+    const now = Date.now()
+    const lastWarnedAt = this.malformedEventWarnedAt.get(key)
+    if (lastWarnedAt !== undefined && now - lastWarnedAt < MALFORMED_BROKER_EVENT_WARN_THROTTLE_MS) {
+      return
+    }
+    this.malformedEventWarnedAt.set(key, now)
+    console.warn('[broker] Dropped malformed broker event:', { kind: key, reason })
+  }
+
+  private noteUnknownBrokerEventKind(kind: string): void {
+    if (this.warnedUnknownEventKinds.has(kind)) return
+    this.warnedUnknownEventKinds.add(kind)
+    console.warn('[broker] Forwarding unrecognized broker event kind (forward-compat):', { kind })
   }
 
   private publishBrokerEvent(
