@@ -591,8 +591,12 @@ describe('getAccessToken (refresh flow)', () => {
       apiUrl: 'https://cloud.example',
       expiresAt: new Date(Date.now() - 1_000).toISOString()
     })
-    let resolveFetch: ((value: unknown) => void) | null = null
-    mock.fetchMock.mockImplementationOnce(() => new Promise((resolve) => {
+    // Promise<unknown> is explicit: the executor never calls resolve() itself
+    // (the test does, below), so TS would otherwise infer the resolve param as
+    // never. The definite-assignment `!` keeps resolveFetch callable since the
+    // mock implementation assigns it synchronously when fetch is first invoked.
+    let resolveFetch!: (value: unknown) => void
+    mock.fetchMock.mockImplementationOnce(() => new Promise<unknown>((resolve) => {
       resolveFetch = resolve
     }))
 

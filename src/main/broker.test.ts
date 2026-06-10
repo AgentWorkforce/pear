@@ -119,7 +119,7 @@ const mock = vi.hoisted(() => {
   }
 
   class HarnessDriverClient {
-    static spawn = vi.fn(async () => {
+    static spawn = vi.fn(async (_options: unknown) => {
       const client = createMockClient(state.nextLocalAgents.splice(0))
       state.spawnedClients.push(client)
       return client
@@ -224,7 +224,7 @@ function restoreProcessResourcesPath(): void {
   if (originalResourcesPathDescriptor) {
     Object.defineProperty(process, 'resourcesPath', originalResourcesPathDescriptor)
   } else {
-    delete (process as NodeJS.Process & { resourcesPath?: string }).resourcesPath
+    delete (process as { resourcesPath?: string }).resourcesPath
   }
 }
 

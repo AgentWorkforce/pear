@@ -649,8 +649,10 @@ function isDeliveryEventForMessage(
 
 function deliveryFailureMessage(event: BrokerEvent): string {
   if (!isRecord(event)) return 'Broker delivery failed'
-  const reason = typeof event.reason === 'string' ? event.reason : undefined
-  const lastError = typeof event.lastError === 'string' ? event.lastError : undefined
+  // reason/lastError are not declared on the base BrokerEvent union; read them
+  // through the same dynamic accessor used for other optional broker fields.
+  const reason = brokerEventString(event, 'reason')
+  const lastError = brokerEventString(event, 'lastError')
   return reason || lastError || 'Broker delivery failed'
 }
 
@@ -841,8 +843,16 @@ function directMessageTargetFromRelayMessage(
     .filter(Boolean)
   const target = message.target
 
-  if (target?.kind === 'agent' && target.agentName) return target.agentName
-  if (target?.kind === 'channel' && target.channelName) return normalizeChatChannelTarget(target.channelName)
+  // RelayMessageTarget's union includes a loose `{ kind: string; [k]: unknown }`
+  // catch-all member, so a `kind` check alone leaves agentName/channelName typed
+  // as `unknown`; the typeof guard narrows them to string (and keeps the
+  // existing truthy/non-empty behavior).
+  if (target?.kind === 'agent' && typeof target.agentName === 'string' && target.agentName) {
+    return target.agentName
+  }
+  if (target?.kind === 'channel' && typeof target.channelName === 'string' && target.channelName) {
+    return normalizeChatChannelTarget(target.channelName)
+  }
 
   if (normalizedParticipants.length > 0) {
     const otherParticipants = normalizedParticipants.filter((participant) =>

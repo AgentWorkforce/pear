@@ -48,7 +48,7 @@ const gitEnvKeys = [
 const originalGitEnv = new Map<string, string | undefined>()
 
 function gitEnv(): NodeJS.ProcessEnv {
-  const env = {
+  const env: NodeJS.ProcessEnv = {
     ...process.env,
     GIT_CONFIG_NOSYSTEM: '1',
     GIT_TERMINAL_PROMPT: '0',

@@ -15,10 +15,27 @@ import {
 const ProjectSchema = makeProjectSchema(ProjectRootSchema)
 const StoreSchema = StoreDataSchema(ProjectSchema)
 
+export type CloudAgentWorkspaceMode = 'git-overlay' | 'git' | 'relayfile'
+
 export type ProjectRoot = z.infer<typeof ProjectRootSchema>
 export type ProjectIntegration = z.infer<typeof ProjectIntegrationSchema>
-export type Project = z.infer<typeof ProjectSchema>
-type StoreData = z.infer<typeof StoreSchema>
+
+// The persisted project schema parses with `.passthrough()`, so wave-additive
+// fields (cloud-agent / proactive-agent / workspace mode) survive a load/save
+// round-trip on disk even though the base zod schema does not name them. Widen
+// the static type to match what is actually persisted and read back, so the
+// main-process consumers (cloud-agent.ts, proactive-agent.ts) see real types
+// instead of property-not-found errors. No runtime behavior changes.
+export type Project = z.infer<typeof ProjectSchema> & {
+  cloudAgent?: ProjectCloudAgent
+  cloudAgentWorkspaceMode?: CloudAgentWorkspaceMode
+  proactiveAgents?: ProactiveAgentBinding[]
+}
+
+type StoreData = Omit<z.infer<typeof StoreSchema>, 'projects'> & {
+  projects: Project[]
+  relayWorkspace?: RelayWorkspaceRecord
+}
 
 const defaultData: StoreData = { projects: [], activeProjectId: null }
 
@@ -64,6 +81,35 @@ const getStorePath = (): string => {
 
 function defaultRootName(path: string): string {
   return basename(path) || path
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+// Normalize an untrusted relay-workspace record read from disk or supplied by a
+// caller into a clean RelayWorkspaceRecord, or undefined when it lacks a usable
+// id. Restores behavior lost in the wave-scaffolding merge (the call sites in
+// setRelayWorkspace/setRelayWorkspaceRecord survived without the definition).
+function normalizeRelayWorkspace(value: unknown): RelayWorkspaceRecord | undefined {
+  if (!isRecord(value)) return undefined
+
+  const id = typeof value.id === 'string' ? value.id.trim() : ''
+  if (!id) return undefined
+
+  const createdAt = typeof value.createdAt === 'string' ? value.createdAt.trim() : ''
+  const createdAtTime = createdAt ? Date.parse(createdAt) : Number.NaN
+  const apiUrl = typeof value.apiUrl === 'string' ? value.apiUrl.trim().replace(/\/+$/, '') : ''
+  const authKey = typeof value.authKey === 'string' ? value.authKey.trim() : ''
+
+  return {
+    id,
+    createdAt: Number.isNaN(createdAtTime)
+      ? new Date(0).toISOString()
+      : new Date(createdAtTime).toISOString(),
+    ...(apiUrl ? { apiUrl } : {}),
+    ...(authKey ? { authKey } : {})
+  }
 }
 
 function loadStoreFromDisk(): StoreData {
@@ -123,9 +169,12 @@ export function setRelayWorkspaceRecord(record: RelayWorkspaceRecord | null): vo
 
 export function addProject(name: string, rootPath: string): Project {
   const data = loadStore()
+  const id = crypto.randomUUID()
   const project: Project = {
-    id: crypto.randomUUID(),
+    id,
     name,
+    // Mirrors the schema default (relayWorkspaceId falls back to the project id).
+    relayWorkspaceId: id,
     rootPath,
     roots: [{ id: crypto.randomUUID(), name: defaultRootName(rootPath), path: rootPath }],
     channels: ['general'],
