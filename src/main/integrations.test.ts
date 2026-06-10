@@ -1079,6 +1079,57 @@ describe('IntegrationsManager', () => {
     expect(integrationUpdateSendInputs()).toHaveLength(0)
   })
 
+  it('does not re-notify a fresh spawn when the broadcast text differs only by staged churn', async () => {
+    // The codex-double-acknowledgment case: an agent spawns with the snippet
+    // embedded in its task; moments later the project broadcast renders a
+    // slightly different text (readiness clause / paths hydrating) and used
+    // to deliver a near-identical second setup message. The spawn grace
+    // skips it; the follow-up after the grace delivers a still-different
+    // text exactly once.
+    vi.useFakeTimers()
+    mock.store.projects[0].integrations = [{
+      id: 'linear-integration-1',
+      name: 'Linear',
+      type: 'linear',
+      provider: 'linear',
+      integrationId: 'linear-integration-1',
+      scope: {},
+      mountPaths: ['/linear'],
+      connectedAt: '2026-06-05T00:00:00.000Z',
+      notifyAgent: true,
+      subscribeAgent: false,
+      downloadHistoricalData: false,
+      visibleInProject: true
+    }]
+    mock.getAccountWorkspaceId.mockRejectedValue(new Error('offline'))
+    mock.brokerManager.listAgents.mockResolvedValue([{ name: 'codex-1', projectId: 'project-1' }] as never)
+    const manager = new IntegrationsManager()
+
+    expect(manager.initialSpawnInstructions('project-1')).toContain('<integrations-update>')
+    manager.recordSpawnInstructionDelivery('project-1', 'codex-1')
+
+    // Simulate staged churn: the store changes right after the spawn, so the
+    // broadcast text differs from the embedded snippet.
+    mock.store.projects[0].integrations = [{
+      ...mock.store.projects[0].integrations[0],
+      mountPaths: ['/linear/issues']
+    }]
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(5_000)
+    // Grace holds: no near-identical second setup message right after spawn.
+    expect(integrationUpdateSendInputs()).toHaveLength(0)
+
+    // After the grace lapses the still-different text arrives exactly once.
+    await vi.advanceTimersByTimeAsync(61_000)
+    expect(integrationUpdateSendInputs()).toHaveLength(1)
+    expect(integrationUpdateSendInputs()[0].to).toBe('codex-1')
+
+    // And an identical reconcile afterwards stays silent.
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(61_000)
+    expect(integrationUpdateSendInputs()).toHaveLength(1)
+  })
+
   it('holds a changed update inside the rebroadcast cooldown and sends the latest text once', async () => {
     vi.useFakeTimers()
     mock.store.projects[0].integrations = []

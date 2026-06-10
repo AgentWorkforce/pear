@@ -226,6 +226,13 @@ type IntegrationSystemMessageOptions = {
 const POLL_INTERVAL_MS = 2_000
 const POLL_TIMEOUT_MS = 5 * 60_000
 const CATALOG_CACHE_MS = 5 * 60_000
+interface AgentSystemMessageRecord {
+  text: string
+  // Set when the record came from a spawn-embedded snippet rather than a
+  // broadcast send; grants the grace window below.
+  fromSpawnAt: number | null
+}
+
 const SYSTEM_MESSAGE_DEBOUNCE_MS = 1_000
 // Minimum gap between integrations-update broadcasts to the same project.
 // Staged state convergence (channel-name discovery, subscription readiness)
@@ -813,7 +820,11 @@ export class IntegrationsManager {
   // per-agent records, retries target only the agents that missed it, and a
   // newly spawned agent receives the current update without re-sending it to
   // everyone else.
-  private lastAgentSystemMessages = new Map<string, Map<string, string>>()
+  private lastAgentSystemMessages = new Map<string, Map<string, AgentSystemMessageRecord>>()
+  // Subscription readiness from the last reconcile, used so spawn-embedded
+  // snippets render with the same readiness clause the next broadcast will
+  // use (a hardcoded `true` made the texts differ and re-notified the agent).
+  private lastSubscriptionsReady = new Map<string, boolean>()
   // When each project's last broadcast went out. Mount-path discovery and
   // subscription readiness converge in stages (e.g. bare → suffixed Slack
   // channel ids), each stage changing the rendered text slightly; without a
@@ -2057,6 +2068,7 @@ export class IntegrationsManager {
   ): Promise<void> {
     let integrations = this.visibleIntegrationsForProject(projectId)
     const subscriptionsReady = await this.syncEventSubscriptions(projectId)
+    this.lastSubscriptionsReady.set(projectId, subscriptionsReady)
 
     if (notifyAgent) {
       this.scheduleSystemMessage(
@@ -2156,7 +2168,10 @@ export class IntegrationsManager {
   initialSpawnInstructions(projectId: string): string | undefined {
     const integrations = this.visibleIntegrationsForProject(projectId)
     if (integrations.length === 0) return undefined
-    const snippet = this.buildSystemMessageSnippet(integrations, true)
+    const snippet = this.buildSystemMessageSnippet(
+      integrations,
+      this.lastSubscriptionsReady.get(projectId) ?? true
+    )
     // Remember what this spawn embedded so recordSpawnInstructionDelivery
     // can mark the new agent as already-notified — without it, the next
     // project broadcast re-delivered the same setup context to the agent
@@ -2180,7 +2195,7 @@ export class IntegrationsManager {
       delivered = new Map()
       this.lastAgentSystemMessages.set(projectId, delivered)
     }
-    delivered.set(agentName, snippet)
+    delivered.set(agentName, { text: snippet, fromSpawnAt: Date.now() })
   }
 
   private mountPathsForAgentWorkspace(integration: ConnectedIntegration): string[] {
@@ -2249,8 +2264,35 @@ export class IntegrationsManager {
       // Only agents that have not already received THIS text. A retry after
       // a partial failure reaches just the agents that missed it; agents
       // that already acknowledged the update never see it twice.
-      const pending = agents.filter((agent) => delivered.get(agent.name) !== message)
-      if (pending.length === 0) return
+      const now = Date.now()
+      let graceRemainingMs = 0
+      const pending = agents.filter((agent) => {
+        const record = delivered.get(agent.name)
+        if (!record) return true
+        if (record.text === message) return false
+        // Spawn grace: right after a spawn the broadcast text routinely
+        // differs only cosmetically from the snippet embedded in the spawn
+        // task (readiness clause, paths still hydrating). Skip the
+        // near-identical second setup message; the follow-up below delivers
+        // any text that still differs once the grace lapses.
+        if (record.fromSpawnAt !== null) {
+          const remaining = record.fromSpawnAt + SYSTEM_MESSAGE_REBROADCAST_COOLDOWN_MS - now
+          if (remaining > 0) {
+            graceRemainingMs = Math.max(graceRemainingMs, remaining)
+            return false
+          }
+        }
+        return true
+      })
+      if (pending.length === 0) {
+        if (graceRemainingMs > 0 && !this.systemMessageTimers.has(projectId)) {
+          // Re-run after the grace lapses so a real post-spawn change still
+          // reaches the fresh agent. Never clobbers a newer pending text —
+          // only scheduled when no timer is waiting.
+          this.scheduleSystemMessage(projectId, message, options, graceRemainingMs)
+        }
+        return
+      }
 
       const results = await Promise.allSettled(
         pending.map((agent) => {
@@ -2274,8 +2316,14 @@ export class IntegrationsManager {
       let anyDelivered = false
       results.forEach((result, index) => {
         if (result.status === 'fulfilled') {
-          delivered.set(pending[index].name, message)
+          delivered.set(pending[index].name, { text: message, fromSpawnAt: null })
           anyDelivered = true
+          // Low-noise send telemetry: integrations-update sends are rare by
+          // design now, and each one triggers a visible agent turn — keep a
+          // breadcrumb so duplicate-transcript reports are diagnosable.
+          console.info(
+            `[integrations] sent integrations-update to ${pending[index].name} (project ${projectId}, ${message.length} chars)`
+          )
         } else {
           console.warn(
             `[integrations] Failed to inject integration system message for ${pending[index].name}:`,
@@ -2294,7 +2342,8 @@ export class IntegrationsManager {
   private scheduleSystemMessage(
     projectId: string,
     message: string,
-    options: IntegrationSystemMessageOptions = {}
+    options: IntegrationSystemMessageOptions = {},
+    minDelayMs = 0
   ): void {
     const existing = this.systemMessageTimers.get(projectId)
     if (existing) clearTimeout(existing)
@@ -2309,7 +2358,7 @@ export class IntegrationsManager {
     const cooldownRemaining = lastBroadcastAt === undefined
       ? 0
       : Math.max(0, lastBroadcastAt + SYSTEM_MESSAGE_REBROADCAST_COOLDOWN_MS - Date.now())
-    const delay = Math.max(SYSTEM_MESSAGE_DEBOUNCE_MS, cooldownRemaining)
+    const delay = Math.max(SYSTEM_MESSAGE_DEBOUNCE_MS, cooldownRemaining, minDelayMs)
 
     const timer = setTimeout(() => {
       this.systemMessageTimers.delete(projectId)
