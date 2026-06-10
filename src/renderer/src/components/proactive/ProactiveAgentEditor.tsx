@@ -233,7 +233,7 @@ function subscriptionProviderForDraft(draft: ProactiveAgentDraft): string {
   if (draft.harness === 'claude') return 'anthropic'
   if (draft.harness === 'codex') return 'openai'
   if (draft.harness === 'opencode') return 'openrouter'
-  return draft.harness
+  return 'anthropic'
 }
 
 function cloudCredentialConnectCommand(draft: ProactiveAgentDraft): string {
@@ -243,6 +243,8 @@ function cloudCredentialConnectCommand(draft: ProactiveAgentDraft): string {
 function subscriptionCredentialBlockMessage(draft: ProactiveAgentDraft, cloudAgents: readonly CloudAgentRecord[]): string | null {
   if (draft.useSubscription !== true) return null
 
+  // Cloud agents expose lastAuthenticatedAt as the renderer credential signal;
+  // the backend must clear it when provider credentials are revoked or expired.
   const selectedAgent = cloudAgents.find((agent) => agent.id === draft.cloudAgentId)
   if (selectedAgent?.lastAuthenticatedAt) return null
 
@@ -774,7 +776,6 @@ export function ProactiveAgentEditor({
       const subscriptionBlock = subscriptionCredentialBlockMessage(selectedDraft, cloudAgents)
       if (subscriptionBlock) {
         setErrors({ deploy: subscriptionBlock })
-        markPhase('bundle', 'error')
         return
       }
 
