@@ -1,3 +1,9 @@
+import {
+  classifyBrokerEvent,
+  type AgentReleasedEvent,
+  type AgentSpawnedEvent,
+  type RelayInboundEvent
+} from '@shared/schemas/broker-events'
 import type {
   AiHistEntry,
   AiHistRecentOptions,
@@ -72,7 +78,7 @@ import type {
 import { getTerminalRuntime } from '@/lib/terminal-runtime-registry'
 
 type BrokerEventLike = Record<string, unknown> & {
-  kind?: string
+  kind: string
   projectId?: string
   name?: string
   from?: string
@@ -642,6 +648,10 @@ function addReconciledMessage(event: BrokerEventLike): void {
 function handleInjectedBrokerEvent(event: BrokerEventLike): void {
   const projectId = event.projectId || state.activeId || defaultProject.id
   const normalized: BrokerEventLike = { ...event, projectId }
+  const classification = classifyBrokerEvent(normalized)
+  if (classification.status === 'malformed') {
+    throw new Error(`ipc-mock: malformed broker event (kind=${classification.kind ?? 'none'}): ${classification.reason}`)
+  }
   if (normalized.kind === 'agent_spawned' && normalized.name) {
     upsertAgent({
       name: normalized.name,
@@ -797,13 +807,14 @@ export const pearMock: PearAPI = {
       const agent = upsertAgent({ ...input, projectId, runtime: 'mock', current_state: 'idle' })
       handleInjectedBrokerEvent({
         kind: 'agent_spawned',
-        projectId,
         name: agent.name,
+        runtime: agent.runtime || 'mock',
         cli: agent.cli,
         model: agent.model,
+        projectId,
         channels: agent.channels,
         event_id: `${projectId}:agent:${agent.name}`
-      })
+      } satisfies AgentSpawnedEvent)
       return { name: agent.name, runtime: agent.runtime || 'mock', cli: agent.cli }
     },
     listPersonas: async (): Promise<WorkforcePersona[]> => [],
@@ -828,12 +839,12 @@ export const pearMock: PearAPI = {
     sendMessage: async (projectId: string | undefined, input: BrokerSendMessageInput) => {
       handleInjectedBrokerEvent({
         kind: 'relay_inbound',
-        projectId,
+        event_id: `${projectId || 'mock'}:human:${++seq}`,
         from: input.from || 'human',
         target: input.to,
         body: input.text,
-        event_id: `${projectId || 'mock'}:human:${++seq}`
-      })
+        projectId
+      } satisfies RelayInboundEvent)
     },
     reconcileMessages: async (input: BrokerReconcileMessagesInput) =>
       clone(state.messages.filter((message) => message.projectId === input.projectId)),
@@ -848,7 +859,7 @@ export const pearMock: PearAPI = {
     subscribeAgentChannel: async () => undefined,
     unsubscribeAgentChannel: async () => undefined,
     releaseAgent: async (projectId: string | undefined, name: string) => {
-      handleInjectedBrokerEvent({ kind: 'agent_released', projectId, name, event_id: `${projectId || 'mock'}:released:${name}` })
+      handleInjectedBrokerEvent({ kind: 'agent_released', name, projectId, event_id: `${projectId || 'mock'}:released:${name}` } satisfies AgentReleasedEvent)
     },
     listAgents: async (projectId?: string) =>
       clone(projectId ? state.agents.filter((agent) => agent.projectId === projectId) : state.agents),
@@ -1124,13 +1135,14 @@ export const pearMockHarness: PearMockHarness = {
       const name = `${prefix}-${String(index + 1).padStart(4, '0')}`
       events.push({
         kind: 'agent_spawned',
-        projectId,
         name,
+        runtime: 'mock',
         cli: index % 2 === 0 ? 'codex' : 'claude',
+        projectId,
         channels: [channel],
         event_id: `${projectId}:agent_spawned:${name}`,
         seq: ++seq
-      })
+      } satisfies AgentSpawnedEvent)
     }
     pearMockHarness.injectBrokerEvents(events)
   },
