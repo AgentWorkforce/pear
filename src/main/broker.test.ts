@@ -196,6 +196,10 @@ import {
   resolveAgentRelayMcpCommand,
   resolveBundledBrokerBinary
 } from './broker'
+import {
+  classifyBrokerEvent,
+  KNOWN_BROKER_EVENT_KINDS
+} from '../shared/schemas/broker-events'
 
 const PROJECT_ID = 'project-1'
 const originalMcpCommand = process.env.AGENT_RELAY_MCP_COMMAND
@@ -1877,6 +1881,221 @@ describe('BrokerManager local + cloud coexistence', () => {
     ])
 
     await manager.shutdown()
+  })
+})
+
+function brokerEventSends(win: BrowserWindow): unknown[] {
+  return (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+    .filter(([channel]) => channel === 'broker:event')
+    .map(([, payload]) => payload)
+}
+
+describe('BrokerManager broker event ingress validation', () => {
+  it('drops a malformed known event, logs once, and keeps the stream alive', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    const local = await startLocalWithWindow(manager, win)
+    const listener = local.onEvent.mock.calls.at(-1)?.[0]
+    expect(listener).toBeTypeOf('function')
+
+    // relay_inbound is a known kind, but `body` is required by the schema.
+    listener?.({
+      kind: 'relay_inbound',
+      from: 'codex-2',
+      target: '#general',
+      event_id: 'evt-malformed'
+    })
+
+    // The malformed event must not be forwarded to the renderer.
+    expect(
+      brokerEventSends(win).some(
+        (payload) => (payload as { event_id?: string }).event_id === 'evt-malformed'
+      )
+    ).toBe(false)
+    expect(warnSpy).toHaveBeenCalledWith(
+      '[broker] Dropped malformed broker event:',
+      expect.objectContaining({ kind: 'relay_inbound' })
+    )
+
+    // A subsequent valid event still flows — the stream is not torn down.
+    listener?.({
+      kind: 'relay_inbound',
+      from: 'codex-2',
+      target: '#general',
+      body: 'still alive',
+      event_id: 'evt-valid'
+    })
+    expect(win.webContents.send).toHaveBeenCalledWith(
+      'broker:event',
+      expect.objectContaining({ kind: 'relay_inbound', body: 'still alive' })
+    )
+
+    warnSpy.mockRestore()
+    await manager.shutdown()
+  })
+
+  it('throttles repeated malformed warnings for the same kind', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    const local = await startLocalWithWindow(manager, win)
+    const listener = local.onEvent.mock.calls.at(-1)?.[0]
+
+    for (let i = 0; i < 3; i += 1) {
+      listener?.({ kind: 'agent_idle', name: 'claude-1' }) // missing idle_secs
+    }
+
+    const idleWarnings = warnSpy.mock.calls.filter(
+      ([message, detail]) =>
+        message === '[broker] Dropped malformed broker event:' &&
+        (detail as { kind?: string }).kind === 'agent_idle'
+    )
+    expect(idleWarnings).toHaveLength(1)
+
+    warnSpy.mockRestore()
+    await manager.shutdown()
+  })
+
+  it('forwards unknown event kinds unchanged and logs once per kind', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    const local = await startLocalWithWindow(manager, win)
+    const listener = local.onEvent.mock.calls.at(-1)?.[0]
+
+    listener?.({ kind: 'future_event_kind', name: 'claude-1', detail: 'one' })
+    listener?.({ kind: 'future_event_kind', name: 'claude-1', detail: 'two' })
+
+    // Both unknown events are forwarded (not dropped) — forward-compat.
+    const forwarded = brokerEventSends(win).filter(
+      (payload) => (payload as { kind?: string }).kind === 'future_event_kind'
+    )
+    expect(forwarded).toHaveLength(2)
+    expect(forwarded[0]).toMatchObject({ detail: 'one' })
+
+    // But the unknown-kind telemetry warning fires only once for the kind.
+    const unknownWarnings = warnSpy.mock.calls.filter(
+      ([message, detail]) =>
+        message === '[broker] Forwarding unrecognized broker event kind (forward-compat):' &&
+        (detail as { kind?: string }).kind === 'future_event_kind'
+    )
+    expect(unknownWarnings).toHaveLength(1)
+
+    warnSpy.mockRestore()
+    await manager.shutdown()
+  })
+
+  it('parses and forwards valid events of each major shape', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    const local = await startLocalWithWindow(manager, win)
+    const listener = local.onEvent.mock.calls.at(-1)?.[0]
+
+    listener?.({ kind: 'agent_spawned', name: 'claude-2', runtime: 'pty', cli: 'claude' })
+    listener?.({
+      kind: 'relay_inbound',
+      from: 'codex-2',
+      target: '#general',
+      body: 'hello',
+      event_id: 'evt-shape'
+    })
+    listener?.({ kind: 'agent_idle', name: 'claude-2', idle_secs: 5 })
+    listener?.({ kind: 'delivery_queued', name: 'claude-2', delivery_id: 'd1', event_id: 'e1' })
+    // worker_stream is delivered out-of-band on broker:pty-chunk, not broker:event.
+    listener?.({ kind: 'worker_stream', name: 'claude-2', stream: 'stdout', chunk: 'tick\n' })
+
+    const kinds = brokerEventSends(win).map((payload) => (payload as { kind?: string }).kind)
+    expect(kinds).toEqual(
+      expect.arrayContaining(['agent_spawned', 'relay_inbound', 'agent_idle', 'delivery_queued'])
+    )
+    const ptyCalls = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
+      .filter(([channel]) => channel === 'broker:pty-chunk')
+    expect(ptyCalls).toEqual([['broker:pty-chunk', PROJECT_ID, 'claude-2', 'tick\n']])
+
+    // None of the valid shapes should have warned.
+    expect(warnSpy).not.toHaveBeenCalledWith(
+      '[broker] Dropped malformed broker event:',
+      expect.anything()
+    )
+
+    warnSpy.mockRestore()
+    await manager.shutdown()
+  })
+})
+
+describe('classifyBrokerEvent', () => {
+  it('classifies a valid known event and preserves passthrough fields', () => {
+    const result = classifyBrokerEvent({
+      kind: 'worker_stream',
+      name: 'claude-1',
+      stream: 'stdout',
+      chunk: 'hi',
+      // Extra fields the SDK may add / dedupe reads dynamically must survive.
+      seq: 42,
+      event_id: 'evt-1'
+    })
+    expect(result.status).toBe('valid')
+    if (result.status === 'valid') {
+      expect(result.kind).toBe('worker_stream')
+      expect(result.event).toMatchObject({ chunk: 'hi', seq: 42, event_id: 'evt-1' })
+    }
+  })
+
+  it('flags a known event with a wrong field type as malformed', () => {
+    const result = classifyBrokerEvent({ kind: 'worker_stream', name: 'claude-1', stream: 'stdout', chunk: 123 })
+    expect(result.status).toBe('malformed')
+    if (result.status === 'malformed') {
+      expect(result.kind).toBe('worker_stream')
+      expect(result.reason).toContain('chunk')
+    }
+  })
+
+  it('accepts delivery events without delivery_id', () => {
+    // The app's delivery logic keys on event_id + name only
+    // (isDeliveryEventForMessage); requiring delivery_id would silently drop
+    // confirmations from brokers that omit it and leave pending-delivery UI
+    // state stuck.
+    for (const kind of ['delivery_injected', 'delivery_verified', 'delivery_ack', 'delivery_active']) {
+      const result = classifyBrokerEvent({ kind, name: 'claude-1', event_id: 'evt-9' })
+      expect(result.status).toBe('valid')
+    }
+    expect(classifyBrokerEvent({
+      kind: 'delivery_failed', name: 'claude-1', event_id: 'evt-9', reason: 'timeout'
+    }).status).toBe('valid')
+    expect(classifyBrokerEvent({
+      kind: 'message_delivery_confirmed', name: 'claude-1', event_id: 'evt-9', from: 'a', to: 'b'
+    }).status).toBe('valid')
+  })
+
+  it('treats an unknown kind as forwardable, not malformed', () => {
+    const result = classifyBrokerEvent({ kind: 'brand_new_kind', name: 'x' })
+    expect(result.status).toBe('unknown')
+    if (result.status === 'unknown') {
+      expect(result.event).toMatchObject({ kind: 'brand_new_kind', name: 'x' })
+    }
+  })
+
+  it('treats a payload with no usable kind as malformed', () => {
+    expect(classifyBrokerEvent({ name: 'x' }).status).toBe('malformed')
+    expect(classifyBrokerEvent(null).status).toBe('malformed')
+    expect(classifyBrokerEvent({ kind: 42 }).status).toBe('malformed')
+  })
+
+  it('recognizes the broker event kinds the app consumes', () => {
+    for (const kind of [
+      'agent_spawned',
+      'agent_exited',
+      'relay_inbound',
+      'worker_stream',
+      'delivery_queued',
+      'channel_subscribed',
+      'agent_idle',
+      'agent_blocked_on_send'
+    ]) {
+      expect(KNOWN_BROKER_EVENT_KINDS.has(kind)).toBe(true)
+    }
   })
 })
 

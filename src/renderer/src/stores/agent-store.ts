@@ -815,33 +815,37 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
   },
 
   handleBrokerEvent: (event) => {
-    const { kind } = event
+    // Destructure the discriminator and the two fields the guards key off.
+    // Because `name`/`parent` are `const`, a `&& name` guard narrows them to
+    // `string` for the whole branch — including the `set(...)` closures — so we
+    // no longer need non-null assertions on event fields inside those closures.
+    const { kind, name, parent } = event
 
-    if (kind === 'agent_spawned' && event.name) {
+    if (kind === 'agent_spawned' && name) {
       set((state) => {
-        const parentAgent = event.parent
-          ? state.agents.find((agent) => matchesAgent(agent, event.projectId, event.parent!))
+        const parentAgent = parent
+          ? state.agents.find((agent) => matchesAgent(agent, event.projectId, parent))
           : undefined
         const { brokerProjectId, activeProjectId } = useProjectStore.getState()
         const projectId = event.projectId || parentAgent?.projectId || activeProjectId || brokerProjectId || undefined
         const rootId = parentAgent?.rootId
         const rootPath = parentAgent?.rootPath
-        const agentKey = getAgentKey(projectId, event.name!)
+        const agentKey = getAgentKey(projectId, name)
         const currentState: AgentCurrentState = 'idle'
         const channels = normalizeChannelList(event.channels)
-        const existingAgent = state.agents.find((a) => matchesAgent(a, projectId, event.name!))
+        const existingAgent = state.agents.find((a) => matchesAgent(a, projectId, name))
         const existingChannels = existingAgent?.channels || []
         const notices = channels
           ? channels
               .filter((channel) => !existingChannels.includes(channel))
-              .map((channel) => createChannelJoinNotice(projectId, channel, event.name!))
+              .map((channel) => createChannelJoinNotice(projectId, channel, name))
               .filter((notice): notice is ChatMessage => notice !== null)
           : []
 
         return {
-          agents: state.agents.some((a) => matchesAgent(a, projectId, event.name!))
+          agents: state.agents.some((a) => matchesAgent(a, projectId, name))
             ? state.agents.map((a) =>
-                matchesAgent(a, projectId, event.name!)
+                matchesAgent(a, projectId, name)
                   ? {
                       ...a,
                       cli: event.cli || a.cli,
@@ -861,7 +865,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
             : [
                 ...state.agents,
                 {
-                  name: event.name!,
+                  name,
                   cli: event.cli || 'unknown',
                   model: event.model,
                   status: 'running',
@@ -880,7 +884,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
           messages: notices.length > 0 ? appendJoinNotices(state.messages, notices) : state.messages
         }
       })
-    } else if ((kind === 'channel_subscribed' || kind === 'channel_unsubscribed') && event.name) {
+    } else if ((kind === 'channel_subscribed' || kind === 'channel_unsubscribed') && name) {
       const channels = normalizeChannelList(event.channels)
       if (!channels || channels.length === 0) return
 
@@ -889,7 +893,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
         let matchedAgent = false
 
         const agents = state.agents.map((agent) => {
-          if (!matchesAgent(agent, event.projectId, event.name!)) return agent
+          if (!matchesAgent(agent, event.projectId, name)) return agent
           matchedAgent = true
 
           const projectChannels = useProjectStore.getState().projects
@@ -904,7 +908,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
             : currentChannels.filter((channel) => !channels.includes(channel))
 
           for (const channel of joinedChannels) {
-            const notice = createChannelJoinNotice(event.projectId || agent.projectId, channel, event.name!)
+            const notice = createChannelJoinNotice(event.projectId || agent.projectId, channel, name)
             if (notice) notices.push(notice)
           }
 
@@ -913,7 +917,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
 
         if (!matchedAgent && kind === 'channel_subscribed') {
           for (const channel of channels) {
-            const notice = createChannelJoinNotice(event.projectId, channel, event.name!)
+            const notice = createChannelJoinNotice(event.projectId, channel, name)
             if (notice) notices.push(notice)
           }
         }
@@ -923,12 +927,12 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
           messages: notices.length > 0 ? appendJoinNotices(state.messages, notices) : state.messages
         }
       })
-    } else if ((kind === 'agent_exited' || kind === 'agent_released') && event.name) {
-      const removedKeyForExpiry = getAgentKey(event.projectId, event.name!)
+    } else if ((kind === 'agent_exited' || kind === 'agent_released') && name) {
+      const removedKeyForExpiry = getAgentKey(event.projectId, name)
       set((state) => {
-        const removed = state.agents.find((a) => matchesAgent(a, event.projectId, event.name!))
+        const removed = state.agents.find((a) => matchesAgent(a, event.projectId, name))
         const removedKey = removed ? getAgentKeyForAgent(removed) : removedKeyForExpiry
-        const remaining = state.agents.filter((a) => !matchesAgent(a, event.projectId, event.name!))
+        const remaining = state.agents.filter((a) => !matchesAgent(a, event.projectId, name))
         const needNewActive = state.activeAgentKey === removedKey
         const nextActiveAgent = remaining.find((a) => a.status === 'running') || remaining[0]
         useTypingStore.getState().clear(removedKey)
@@ -945,10 +949,10 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
     } else if (kind === 'worker_stream') {
       // worker_stream is delivered out-of-band via broker:pty-chunk for typing
       // latency reasons; nothing to do here.
-    } else if (kind === 'delivery_queued' && event.name) {
+    } else if (kind === 'delivery_queued' && name) {
       set((state) => ({
         agents: state.agents.map((a) =>
-          matchesAgent(a, event.projectId, event.name!)
+          matchesAgent(a, event.projectId, name)
             ? {
                 ...addPendingDelivery(a, event.event_id),
                 activity: a.terminalMode === 'drive' ? a.activity : 'active',
@@ -957,11 +961,11 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
             : a
         )
       }))
-    } else if (kind === 'delivery_active' && event.name) {
-      useTypingStore.getState().noteActivity(getAgentKey(event.projectId, event.name))
+    } else if (kind === 'delivery_active' && name) {
+      useTypingStore.getState().noteActivity(getAgentKey(event.projectId, name))
       set((state) => ({
         agents: state.agents.map((a) => {
-          if (!matchesAgent(a, event.projectId, event.name!)) return a
+          if (!matchesAgent(a, event.projectId, name)) return a
           return {
             ...addPendingDelivery(a, event.event_id),
             activity: 'active',
@@ -971,15 +975,15 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
       }))
     } else if (
       ['delivery_injected', 'delivery_verified', 'delivery_ack', 'delivery_failed', 'message_delivery_confirmed', 'message_delivery_failed'].includes(kind) &&
-      event.name
+      name
     ) {
       const startsActivity = ['delivery_injected', 'delivery_verified', 'message_delivery_confirmed'].includes(kind)
       if (startsActivity) {
-        useTypingStore.getState().noteActivity(getAgentKey(event.projectId, event.name))
+        useTypingStore.getState().noteActivity(getAgentKey(event.projectId, name))
       }
       set((state) => ({
         agents: state.agents.map((a) => {
-          if (!matchesAgent(a, event.projectId, event.name!)) return a
+          if (!matchesAgent(a, event.projectId, name)) return a
           const nextAgent = clearPendingDeliveries(a, event.event_id)
           if (!startsActivity) {
             return nextAgent
@@ -987,16 +991,16 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
           return { ...nextAgent, activity: 'active', currentState: 'working' }
         })
       }))
-    } else if (kind === 'agent_pending_drained' && event.name) {
+    } else if (kind === 'agent_pending_drained' && name) {
       set((state) => ({
         agents: state.agents.map((a) =>
-          matchesAgent(a, event.projectId, event.name!) ? clearPendingDeliveries(a) : a
+          matchesAgent(a, event.projectId, name) ? clearPendingDeliveries(a) : a
         )
       }))
-    } else if (kind === 'agent_inbound_delivery_mode_changed' && event.name) {
+    } else if (kind === 'agent_inbound_delivery_mode_changed' && name) {
       set((state) => ({
         agents: state.agents.map((a) => {
-          if (!matchesAgent(a, event.projectId, event.name!)) return a
+          if (!matchesAgent(a, event.projectId, name)) return a
           if (event.mode === 'manual_flush') {
             return { ...a, terminalMode: 'drive' }
           }
@@ -1059,18 +1063,18 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
           relayMessages: capByCount([...state.relayMessages, relay], MAX_RELAY_MESSAGES)
         }
       })
-    } else if (kind === 'agent_blocked_on_send' && event.name) {
+    } else if (kind === 'agent_blocked_on_send' && name) {
       set((state) => ({
         agents: state.agents.map((a) => {
-          if (!matchesAgent(a, event.projectId, event.name!)) return a
+          if (!matchesAgent(a, event.projectId, name)) return a
           useTypingStore.getState().clear(getAgentKeyForAgent(a))
           return { ...a, activity: 'active', currentState: 'blocked_on_send' }
         })
       }))
-    } else if (kind === 'agent_idle' && event.name) {
+    } else if (kind === 'agent_idle' && name) {
       set((state) => ({
         agents: state.agents.map((a) => {
-          if (!matchesAgent(a, event.projectId, event.name!)) return a
+          if (!matchesAgent(a, event.projectId, name)) return a
           useTypingStore.getState().clear(getAgentKeyForAgent(a))
           return { ...clearPendingDeliveries(a), activity: 'idle', currentState: 'idle' }
         })
