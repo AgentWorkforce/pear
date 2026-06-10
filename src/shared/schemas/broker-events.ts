@@ -403,10 +403,10 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function describeIssue(error: z.ZodError): string {
-  const issue = error.issues[0]
-  if (!issue) return 'invalid event shape'
-  const path = issue.path.join('.')
-  return path ? `${path}: ${issue.message}` : issue.message
+  if (error.issues.length === 0) return 'invalid event shape'
+  return error.issues
+    .map((issue) => (issue.path.length ? `${issue.path.join('.')}: ${issue.message}` : issue.message))
+    .join('; ')
 }
 
 /**
