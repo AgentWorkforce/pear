@@ -109,7 +109,7 @@ export function useBrokerEvents(): void {
     const unsubRelease = pear.onMenu('menu:release-agent', () => {
       const activeAgentKey = useAgentStore.getState().activeAgentKey
       const agent = useAgentStore.getState().agents.find((entry) => getAgentKeyForAgent(entry) === activeAgentKey)
-      if (agent) pear.broker.releaseAgent(agent.projectId, agent.name)
+      if (agent) void pear.broker.releaseAgent(agent.projectId, agent.name)
     })
 
     // `pear open <dir>` from the CLI: the main process has already created or

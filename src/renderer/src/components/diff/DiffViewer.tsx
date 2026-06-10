@@ -457,7 +457,7 @@ export const DiffViewer = memo(function DiffViewer({
 
     let ignore = false
 
-    Promise.all(
+    void Promise.all(
       files.map(async (file) => {
         const filePath = getDiffFilePath(file)
         const sourcePath = sourcePathForFile(file)
