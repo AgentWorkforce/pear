@@ -21,6 +21,8 @@
 //   7. reconcileMessages returns the SAME messages array reference when
 //      called twice with the same canonical input — downstream selectors
 //      must not see a spurious change.
+//   8. The replay guard handles the 1000-agent/50-message duplicate case
+//      without regressing to a full-buffer scan per incoming event.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -33,6 +35,10 @@ import { useAgentStore } from './agent-store'
 import type { BrokerReconciledChatMessage } from '@shared/types/ipc'
 
 const MAX_CHAT_MESSAGES = 5_000
+
+function monotonicMs(): number {
+  return Number(process.hrtime.bigint()) / 1_000_000
+}
 
 // Matches the shape `agent-store.handleBrokerEvent` expects for relay_inbound;
 // the index signature aligns with the internal BrokerEvent discriminated
@@ -153,6 +159,47 @@ describe('agent-store stress', () => {
     expect(messages.length).toBe(MAX_CHAT_MESSAGES)
   }, 60_000)
 
+  it('1000 agents × 50 replay echoes stay bounded by indexed duplicate lookups', () => {
+    const store = useAgentStore.getState()
+    const agentCount = 1_000
+    const replayCount = 50
+
+    for (let agentIndex = 0; agentIndex < agentCount; agentIndex += 1) {
+      const agentName = `replay-agent-${agentIndex}`
+      store.handleBrokerEvent(relayInbound({
+        from: agentName,
+        target: agentIndex % 2 === 0 ? '#general' : 'human',
+        body: `stable-replay-body-${agentName}`,
+        projectId: 'replay-project',
+        event_id: `replay-seed-${agentIndex}`
+      }))
+    }
+
+    vi.advanceTimersByTime(250)
+    const startedAt = monotonicMs()
+    for (let replay = 0; replay < replayCount; replay += 1) {
+      for (let agentIndex = 0; agentIndex < agentCount; agentIndex += 1) {
+        const agentName = `replay-agent-${agentIndex}`
+        store.handleBrokerEvent(relayInbound({
+          from: agentName,
+          target: agentIndex % 2 === 0 ? '#general' : 'human',
+          body: `stable-replay-body-${agentName}`,
+          projectId: 'replay-project',
+          event_id: `replay-echo-${replay}-${agentIndex}`
+        }))
+      }
+      vi.advanceTimersByTime(1)
+    }
+    const elapsedMs = monotonicMs() - startedAt
+
+    const messages = useAgentStore.getState().messages.filter((message) =>
+      message.projectId === 'replay-project'
+    )
+    expect(messages.length).toBe(agentCount)
+    expect(new Set(messages.map((message) => message.id)).size).toBe(agentCount)
+    expect(elapsedMs).toBeLessThan(5_000)
+  }, 10_000)
+
   it('addHumanMessage never drops repeated identical sends', () => {
     // Invariant 2 — the optimistic path is local-only; repeats must survive.
     // (Even with capByCount, 100 sends are well under MAX_CHAT_MESSAGES.)
@@ -250,6 +297,177 @@ describe('agent-store stress', () => {
     expect(messages.length).toBe(1)
     // The first (evt-A) wins — it was already in the buffer when evt-B arrived.
     expect(messages[0]!.id).toBe('evt-A')
+  })
+
+  it('agent dedupe keeps the 2s boundary exclusive', () => {
+    const store = useAgentStore.getState()
+    store.handleBrokerEvent(relayInbound({
+      from: 'agent-boundary',
+      target: '#general',
+      body: 'boundary-body',
+      projectId: 'p1',
+      event_id: 'evt-boundary-1'
+    }))
+    vi.advanceTimersByTime(2_000)
+    store.handleBrokerEvent(relayInbound({
+      from: 'agent-boundary',
+      target: '#general',
+      body: 'boundary-body',
+      projectId: 'p1',
+      event_id: 'evt-boundary-2'
+    }))
+
+    const messages = useAgentStore.getState().messages.filter(
+      (m) => m.body === 'boundary-body'
+    )
+    expect(messages.map((m) => m.id)).toEqual(['evt-boundary-1', 'evt-boundary-2'])
+  })
+
+  it('agent dedupe matches trimmed case-insensitive senders and hashless channel targets', () => {
+    const store = useAgentStore.getState()
+    store.handleBrokerEvent(relayInbound({
+      from: ' Agent-Normalized ',
+      target: '#general',
+      body: 'normalized-body',
+      projectId: 'p1',
+      event_id: 'evt-normalized-1'
+    }))
+    vi.advanceTimersByTime(250)
+    store.handleBrokerEvent(relayInbound({
+      from: 'agent-normalized',
+      target: 'general',
+      body: 'normalized-body',
+      projectId: 'p1',
+      event_id: 'evt-normalized-2'
+    }))
+
+    const messages = useAgentStore.getState().messages.filter(
+      (m) => m.body === 'normalized-body'
+    )
+    expect(messages.map((m) => m.id)).toEqual(['evt-normalized-1'])
+  })
+
+  it('agent dedupe treats target case and undefined projectId exactly like the scan path', () => {
+    const store = useAgentStore.getState()
+    store.handleBrokerEvent(relayInbound({
+      from: 'agent-exact',
+      target: '#General',
+      body: 'exact-target-body',
+      projectId: 'p1',
+      event_id: 'evt-exact-target-1'
+    }))
+    vi.advanceTimersByTime(250)
+    store.handleBrokerEvent(relayInbound({
+      from: 'agent-exact',
+      target: '#general',
+      body: 'exact-target-body',
+      projectId: 'p1',
+      event_id: 'evt-exact-target-2'
+    }))
+
+    store.handleBrokerEvent(relayInbound({
+      from: 'agent-exact',
+      target: '#general',
+      body: 'exact-project-body',
+      event_id: 'evt-exact-project-1'
+    }))
+    vi.advanceTimersByTime(250)
+    store.handleBrokerEvent(relayInbound({
+      from: 'agent-exact',
+      target: '#general',
+      body: 'exact-project-body',
+      projectId: 'p1',
+      event_id: 'evt-exact-project-2'
+    }))
+
+    expect(useAgentStore.getState().messages.filter(
+      (m) => m.body === 'exact-target-body'
+    ).map((m) => m.id)).toEqual(['evt-exact-target-1', 'evt-exact-target-2'])
+    expect(useAgentStore.getState().messages.filter(
+      (m) => m.body === 'exact-project-body'
+    ).map((m) => m.id)).toEqual(['evt-exact-project-1', 'evt-exact-project-2'])
+  })
+
+  it('reconcile agent dedupe sees earlier messages in the same batch', () => {
+    const store = useAgentStore.getState()
+    const now = Date.now()
+    store.reconcileMessages([
+      {
+        id: 'reconcile-batch-first',
+        from: 'agent-batch',
+        to: '#general',
+        body: 'batch-body',
+        timestamp: now,
+        isHuman: false,
+        projectId: 'p1'
+      },
+      {
+        id: 'reconcile-batch-second',
+        from: 'agent-batch',
+        to: 'general',
+        body: 'batch-body',
+        timestamp: now + 250,
+        isHuman: false,
+        projectId: 'p1'
+      }
+    ])
+
+    const messages = useAgentStore.getState().messages.filter(
+      (m) => m.body === 'batch-body'
+    )
+    expect(messages.map((m) => m.id)).toEqual(['reconcile-batch-first'])
+  })
+
+  it('reconcile agent dedupe uses updated records, not stale pre-merge identity', () => {
+    const store = useAgentStore.getState()
+    const now = Date.now()
+    store.reconcileMessages([{
+      id: 'reconcile-update-seed',
+      from: 'agent-update',
+      to: '#general',
+      body: 'old-body',
+      timestamp: now,
+      isHuman: false,
+      projectId: 'p1'
+    }])
+
+    store.reconcileMessages([
+      {
+        id: 'reconcile-update-seed',
+        from: 'agent-update',
+        to: '#general',
+        body: 'new-body',
+        timestamp: now + 100,
+        isHuman: false,
+        projectId: 'p1'
+      },
+      {
+        id: 'reconcile-update-duplicate-new',
+        from: 'agent-update',
+        to: '#general',
+        body: 'new-body',
+        timestamp: now + 200,
+        isHuman: false,
+        projectId: 'p1'
+      },
+      {
+        id: 'reconcile-update-distinct-old',
+        from: 'agent-update',
+        to: '#general',
+        body: 'old-body',
+        timestamp: now + 300,
+        isHuman: false,
+        projectId: 'p1'
+      }
+    ])
+
+    const messages = useAgentStore.getState().messages
+    expect(messages.filter((m) => m.body === 'new-body').map((m) => m.id)).toEqual([
+      'reconcile-update-seed'
+    ])
+    expect(messages.filter((m) => m.body === 'old-body').map((m) => m.id)).toEqual([
+      'reconcile-update-distinct-old'
+    ])
   })
 
   it('reconcileMessages with the same canonical input twice returns the same messages array reference', () => {
