@@ -31,6 +31,7 @@ const mock = vi.hoisted(() => {
   let mountExpiresAt: string | null = null
   let mountSuggestedRefreshAt: string | null = null
   let mountDelay: Promise<void> | null = null
+  const stoppedRemotePaths: string[] = []
 
   class RelayfileSetup {
     readonly cloudApiUrl: string
@@ -49,7 +50,9 @@ const mock = vi.hoisted(() => {
         expiresAt: mountExpiresAt,
         localDir: input.localDir,
         suggestedRefreshAt: mountSuggestedRefreshAt,
-        stop: vi.fn(async () => undefined),
+        stop: vi.fn(async () => {
+          stoppedRemotePaths.push(input.remotePath)
+        }),
         status: vi.fn(async () => ({ ready: true }))
       })
     }
@@ -57,6 +60,7 @@ const mock = vi.hoisted(() => {
 
   return {
     mountInputs,
+    stoppedRemotePaths,
     startMount,
     mkdir: vi.fn(async () => undefined),
     chmod: vi.fn(async () => undefined),
@@ -123,6 +127,7 @@ import { IntegrationMountManager, readStalledInjectedRevisions } from './integra
 describe('IntegrationMountManager', () => {
   beforeEach(() => {
     mock.mountInputs.splice(0)
+    mock.stoppedRemotePaths.splice(0)
     mock.mkdir.mockClear()
     mock.chmod.mockClear()
     mock.readFile.mockClear()
@@ -431,6 +436,31 @@ describe('IntegrationMountManager', () => {
     expect(manager.localPathsFor('account-workspace-id', {
       provider: 'slack',
       mountPaths: ['/slack/channels/C001']
+    })).toEqual([])
+  })
+
+  it('stops a deselected writeback resource during mount reconciliation', async () => {
+    const manager = new IntegrationMountManager()
+
+    await manager.ensureMounted([
+      {
+        provider: 'linear',
+        mountPaths: ['/discovery/linear', '/linear/issues']
+      }
+    ])
+    expect(mock.mountInputs.map((input) => input.remotePath)).toEqual(['/discovery/linear', '/linear/issues'])
+
+    await manager.ensureMounted([
+      {
+        provider: 'linear',
+        mountPaths: ['/discovery/linear']
+      }
+    ])
+
+    expect(mock.stoppedRemotePaths).toContain('/linear/issues')
+    expect(manager.localPathsFor('account-workspace-id', {
+      provider: 'linear',
+      mountPaths: ['/linear/issues']
     })).toEqual([])
   })
 

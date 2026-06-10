@@ -390,14 +390,24 @@ function isNarrowHistoricalMountPath(mountPath: string): boolean {
   return segments[0] !== 'discovery' && segments.length >= 3
 }
 
+function isNarrowHistoricalMountPathForProvider(provider: string, mountPath: string): boolean {
+  const segments = mountPath.split('/').filter(Boolean)
+  if (segments[0] === 'discovery') return false
+  if (toRelayfileProvider(provider) === 'slack') return segments.length >= 3
+  return segments.length >= 2
+}
+
 function isDiscoveryMountPath(mountPath: string): boolean {
   return mountPath.split('/').filter(Boolean)[0] === 'discovery'
 }
 
 function writebackCommandMountPathsForIntegration(integration: ConnectedIntegration): string[] {
   return canonicalMountPathsForConnectedIntegration(integration)
-    .filter(isNarrowHistoricalMountPath)
-    .map((mountPath) => slackWritebackCommandMountPathFor(toRelayfileProvider(integration.provider), mountPath))
+    .filter((mountPath) => isNarrowHistoricalMountPathForProvider(integration.provider, mountPath))
+    .map((mountPath) =>
+      slackWritebackCommandMountPathFor(toRelayfileProvider(integration.provider), mountPath) ??
+      (toRelayfileProvider(integration.provider) === 'slack' ? null : mountPath)
+    )
     .filter((mountPath): mountPath is string => !!mountPath)
 }
 
@@ -418,7 +428,8 @@ function slackThreadContextMountPathsForIntegration(integration: ConnectedIntegr
 export function localSyncMountPathsForIntegration(integration: ConnectedIntegration): string[] {
   const discoveryPath = discoveryMountPathForProvider(integration.provider)
   const historicalPaths = integration.downloadHistoricalData === true
-    ? canonicalMountPathsForConnectedIntegration(integration).filter(isNarrowHistoricalMountPath)
+    ? canonicalMountPathsForConnectedIntegration(integration)
+      .filter((mountPath) => isNarrowHistoricalMountPathForProvider(integration.provider, mountPath))
     : writebackCommandMountPathsForIntegration(integration)
   const liveContextPaths = integration.downloadHistoricalData === true
     ? []
@@ -429,7 +440,10 @@ export function localSyncMountPathsForIntegration(integration: ConnectedIntegrat
 function skippedHistoricalMountPathsForIntegration(integration: ConnectedIntegration): string[] {
   if (integration.downloadHistoricalData !== true) return []
   return canonicalMountPathsForConnectedIntegration(integration)
-    .filter((mountPath) => !isDiscoveryMountPath(mountPath) && !isNarrowHistoricalMountPath(mountPath))
+    .filter((mountPath) =>
+      !isDiscoveryMountPath(mountPath) &&
+      !isNarrowHistoricalMountPathForProvider(integration.provider, mountPath)
+    )
 }
 
 function skippedCappedLocalSyncMountPathsForIntegration(integration: ConnectedIntegration): string[] {

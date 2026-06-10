@@ -96,6 +96,13 @@ const mock = vi.hoisted(() => {
             version: '1',
             backends: ['nango'],
             defaultMountPaths: ['/google-mail/messages']
+          },
+          {
+            id: 'linear',
+            displayName: 'Linear',
+            version: '1',
+            backends: ['nango'],
+            defaultMountPaths: ['/linear/issues']
           }
         ]
       })
@@ -616,6 +623,20 @@ describe('IntegrationsManager', () => {
       '/slack/dms/D123/threads',
       '/slack/users/U123/messages'
     ])
+
+    expect(localSyncMountPathsForIntegration({
+      provider: 'linear',
+      integrationId: 'linear-integration-1',
+      scope: {},
+      mountPaths: ['/discovery/linear', '/linear', '/linear/issues'],
+      connectedAt: '2026-06-05T00:00:00.000Z',
+      notifyAgent: true,
+      subscribeAgent: true,
+      downloadHistoricalData: false
+    })).toEqual([
+      '/discovery/linear',
+      '/linear/issues'
+    ])
   })
 
   it('only includes narrow provider record paths when historical download is on', () => {
@@ -649,6 +670,24 @@ describe('IntegrationsManager', () => {
     expect(message).toContain('Writeback command roots are mounted at .integrations/slack/channels/C123/messages')
     expect(message).toContain('live thread context roots are mounted at .integrations/slack/channels/C123/threads')
     expect(message).not.toContain('create writeback files under .integrations/slack/channels/C123, not under discovery')
+  })
+
+  it('names non-Slack narrow resources as writeback command roots', () => {
+    const manager = new IntegrationsManager() as unknown as SystemMessageSnippetBuilder
+
+    const message = manager.buildSystemMessageSnippet([{
+      provider: 'linear',
+      integrationId: 'linear-integration-1',
+      scope: { resources: ['issues'] },
+      mountPaths: ['/linear/issues'],
+      connectedAt: '2026-06-05T00:00:00.000Z',
+      notifyAgent: true,
+      subscribeAgent: true,
+      downloadHistoricalData: false
+    }], true)
+
+    expect(message).toContain('create writeback files under .integrations/linear/issues')
+    expect(message).toContain('Writeback command roots are mounted at .integrations/linear/issues')
   })
 
   it('surfaces local mount budget skips in agent guidance', () => {
@@ -703,6 +742,42 @@ describe('IntegrationsManager', () => {
     ])
 
     finishMountReconcile()
+  })
+
+  it('reconciles non-Slack writeback mounts after a live scope change', async () => {
+    mock.store.projects[0].integrations = [{
+      id: 'linear-integration-1',
+      name: 'Linear',
+      type: 'linear',
+      provider: 'linear',
+      integrationId: 'linear-integration-1',
+      scope: {},
+      mountPaths: ['/linear'],
+      connectedAt: '2026-06-05T00:00:00.000Z',
+      notifyAgent: true,
+      subscribeAgent: false,
+      downloadHistoricalData: false,
+      visibleInProject: true
+    }]
+    const manager = new IntegrationsManager()
+
+    await manager.updateScope(
+      'project-1',
+      'linear-integration-1',
+      { resources: ['issues'] },
+      ['/linear/issues']
+    )
+
+    await vi.waitFor(() => {
+      expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalledWith(
+        expect.arrayContaining([
+          {
+            provider: 'linear',
+            mountPaths: ['/discovery/linear', '/linear/issues']
+          }
+        ])
+      )
+    })
   })
 
   it('waits for a newly spawned agent before injecting integration guidance', async () => {
