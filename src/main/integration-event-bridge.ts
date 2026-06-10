@@ -60,6 +60,8 @@ const MAX_BROKER_SENDS_PER_SECOND = 25
 const DEFAULT_DELIVERY_INJECTED_CONFIRMATION_TIMEOUT_MS = 5_000
 const REMOTE_STREAM_ERROR_POLLING_FALLBACK_THRESHOLD = 5
 const REMOTE_STREAM_POLL_INTERVAL_MS = 5_000
+const MERGE_ON_GREEN_LABEL = 'merge-on-green'
+const MERGE_ON_GREEN_ACTIVATION_TTL_MS = SLACK_RECORD_REPLAY_TTL_MS
 
 type IntegrationEventCounterName =
   | 'eventsReceived'
@@ -233,6 +235,18 @@ type RelayfileEventClient = {
     }
   ): Subscription
   readFile?(workspaceId: string, path: string): Promise<FileReadResponse>
+  writeFile?(input: {
+    workspaceId: string
+    path: string
+    baseRevision: string
+    content: string
+    contentType?: string
+    contentIdentity?: {
+      kind: string
+      key: string
+      ttlSeconds?: number
+    }
+  }): Promise<unknown>
 }
 
 type RelayfileWorkspaceHandle = {
@@ -251,6 +265,18 @@ type IntegrationRelayFileSyncOptionsInput = Omit<RelayFileSyncOptions, 'token'> 
 type IntegrationEventBridgeDeps = {
   broker?: BrokerEventBridge
   getWorkspaceHandle?: () => Promise<RelayfileWorkspaceHandle>
+}
+
+type MergeOnGreenActivation = {
+  owner: string
+  repo: string
+  pullNumber: number
+  sourceText: string
+}
+
+type MergeOnGreenActivationState = {
+  expiresAt: number
+  pending?: Promise<void>
 }
 
 type EventDeliverySource = 'remote' | 'local-mount'
@@ -1862,6 +1888,97 @@ function slackPreviewAuthorIsBot(preview: EventContextPreview | undefined): bool
     rawEvent?.user_is_bot === true
 }
 
+function hasPrReviewerMention(text: string): boolean {
+  return /(?:^|[\s,.:;!?([{"'`])@?pr[-_\s]?reviewer\b/iu.test(text)
+}
+
+function hasMergeOnGreenIntent(text: string): boolean {
+  return /\b(?:merge[-\s]?on[-\s]?green|merge\s+when\s+green|automerge|auto[-\s]?merge)\b/iu.test(text)
+}
+
+export function parseMergeOnGreenActivation(text: string): MergeOnGreenActivation | null {
+  const sourceText = text.trim()
+  if (!sourceText || !hasPrReviewerMention(sourceText) || !hasMergeOnGreenIntent(sourceText)) return null
+
+  const urlMatch = sourceText.match(/https?:\/\/github\.com\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pull\/(\d+)\b/iu)
+  const shorthandMatch = urlMatch ? null : sourceText.match(/\b([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)#(\d+)\b/u)
+  const owner = urlMatch?.[1] || shorthandMatch?.[1]
+  const repo = urlMatch?.[2] || shorthandMatch?.[2]
+  const pullNumberText = urlMatch?.[3] || shorthandMatch?.[3]
+  const pullNumber = pullNumberText ? Number.parseInt(pullNumberText, 10) : NaN
+  if (!owner || !repo || !Number.isInteger(pullNumber) || pullNumber <= 0) return null
+
+  // The merge watcher currently only supports AgentWorkforce repositories.
+  if (owner.toLowerCase() !== 'agentworkforce') return null
+
+  return {
+    owner,
+    repo,
+    pullNumber,
+    sourceText
+  }
+}
+
+function githubLabelsFromRecord(record: Record<string, unknown> | undefined): string[] {
+  const payload = isRecord(record?.payload) ? record.payload : record
+  const labels = Array.isArray(payload?.labels) ? payload.labels : []
+  return dedupeStringsInOrder(labels.map((label) => {
+    if (typeof label === 'string') return label
+    if (isRecord(label) && typeof label.name === 'string') return label.name
+    return ''
+  }))
+}
+
+function githubRepoSlug(owner: string, repo: string): string {
+  return `${owner}__${repo}`
+}
+
+function githubPullReadPaths(activation: MergeOnGreenActivation): string[] {
+  const { owner, repo, pullNumber } = activation
+  return dedupeStringsInOrder([
+    `/github/repos/${githubRepoSlug(owner, repo)}/pulls/by-id/${pullNumber}.json`,
+    `/github/repos/${owner}/${repo}/pulls/by-id/${pullNumber}.json`,
+    `/github/repos/${owner}/${repo}/pulls/${pullNumber}.json`
+  ])
+}
+
+function githubIssueUpdatePath(activation: MergeOnGreenActivation): string {
+  return `/github/repos/${activation.owner}/${activation.repo}/issues/${activation.pullNumber}.json`
+}
+
+function mergeOnGreenTargetLabel(activation: MergeOnGreenActivation): string {
+  return `${activation.owner}/${activation.repo}#${activation.pullNumber}`
+}
+
+function mergeOnGreenActivationDedupeKey(
+  projectId: string,
+  event: ChangeEvent,
+  activation: MergeOnGreenActivation
+): string {
+  const fingerprint = eventChangeFingerprint(event) || event.id || event.resource.path
+  return `${projectId}:${fingerprint}:${activation.owner}/${activation.repo}#${activation.pullNumber}`
+}
+
+function slackConfirmationWritePath(path: string, activationKey: string): string | null {
+  const segments = pathSegments(path)
+  const channelIndex = segments.indexOf('channels')
+  const dmIndex = segments.indexOf('dms')
+  const userIndex = segments.indexOf('users')
+  const scopeIndex = channelIndex >= 0 ? channelIndex : dmIndex >= 0 ? dmIndex : userIndex
+  if (scopeIndex < 0 || !segments[scopeIndex + 1]) return null
+
+  const scopePrefix = `/${segments.slice(0, scopeIndex + 2).join('/')}`
+  const threadIndex = segments.indexOf('threads')
+  const replyIndex = segments.indexOf('replies')
+  const suffix = stableContentFingerprint(activationKey)
+
+  if (threadIndex >= 0 && segments[threadIndex + 1] && (replyIndex >= 0 || segments[threadIndex + 2])) {
+    return `${scopePrefix}/threads/${segments[threadIndex + 1]}/replies/merge-on-green-${suffix}.json`
+  }
+
+  return `${scopePrefix}/messages/merge-on-green-${suffix}.json`
+}
+
 function shouldNotifyRelayfilePath(pathValue: string): boolean {
   const path = pathValue.trim()
   if (!path || !path.startsWith('/')) return false
@@ -2433,6 +2550,7 @@ export class IntegrationEventBridge {
   private inFlightDedupeClaims = new Map<string, Set<Promise<DeliveryDedupeClaimOutcome>>>()
   private selfBotUserIds = new Map<string, Map<string, number>>()
   private recentOutboundWritebacks = new Map<string, Map<string, number>>()
+  private mergeOnGreenActivations = new Map<string, MergeOnGreenActivationState>()
   private projectAgentRecipientCache = new Map<string, ProjectAgentRecipientCacheEntry>()
   private notificationTargetCache = new Map<string, NotificationTargetCacheEntry>()
   private brokerSendPacers = new Map<string, ProjectBrokerSendPacer>()
@@ -2653,6 +2771,9 @@ export class IntegrationEventBridge {
     this.brokerSendPacers.delete(projectId)
     this.selfBotUserIds.delete(projectId)
     this.recentOutboundWritebacks.delete(projectId)
+    for (const key of Array.from(this.mergeOnGreenActivations.keys())) {
+      if (key.startsWith(`${projectId}:`)) this.mergeOnGreenActivations.delete(key)
+    }
     this.invalidateProjectAgentCache(projectId)
     this.invalidateNotificationTargetCache(projectId)
     setIntegrationEventGauge(projectId, 'queueDepth', 0)
@@ -2849,6 +2970,136 @@ export class IntegrationEventBridge {
     return false
   }
 
+  private pruneMergeOnGreenActivations(now = Date.now()): void {
+    for (const [key, entry] of this.mergeOnGreenActivations.entries()) {
+      if (entry.expiresAt <= now && !entry.pending) this.mergeOnGreenActivations.delete(key)
+    }
+  }
+
+  private async maybeHandleMergeOnGreenActivation(
+    projectId: string,
+    event: ChangeEvent,
+    contextPreview: EventContextPreview | undefined,
+    resolvedPath: string
+  ): Promise<void> {
+    if (eventProvider(event) !== 'slack') return
+    const messageText = slackPreviewText(contextPreview)
+    if (!messageText) return
+
+    const activation = parseMergeOnGreenActivation(messageText)
+    if (!activation) return
+
+    const key = mergeOnGreenActivationDedupeKey(projectId, event, activation)
+    const now = Date.now()
+    this.pruneMergeOnGreenActivations(now)
+    const existing = this.mergeOnGreenActivations.get(key)
+    if (existing?.pending) {
+      await existing.pending
+      return
+    }
+    if (existing && existing.expiresAt > now) {
+      logIntegrationEvent('suppressed duplicate merge-on-green activation', {
+        projectId,
+        eventId: event.id,
+        path: resolvedPath,
+        target: mergeOnGreenTargetLabel(activation)
+      })
+      return
+    }
+
+    const pending = this.applyMergeOnGreenActivation(projectId, activation, resolvedPath, key)
+    this.mergeOnGreenActivations.set(key, {
+      expiresAt: now + MERGE_ON_GREEN_ACTIVATION_TTL_MS,
+      pending
+    })
+    try {
+      await pending
+      this.mergeOnGreenActivations.set(key, {
+        expiresAt: Date.now() + MERGE_ON_GREEN_ACTIVATION_TTL_MS
+      })
+    } catch (error) {
+      this.mergeOnGreenActivations.delete(key)
+      throw error
+    }
+  }
+
+  private async applyMergeOnGreenActivation(
+    projectId: string,
+    activation: MergeOnGreenActivation,
+    slackPath: string,
+    activationKey: string
+  ): Promise<void> {
+    const handle = await this.getWorkspaceHandle()
+    const client = handle.client()
+    if (typeof client.writeFile !== 'function') {
+      throw new Error('Relayfile writeFile is unavailable for merge-on-green activation')
+    }
+
+    let existingLabels: string[] = []
+    for (const readPath of githubPullReadPaths(activation)) {
+      if (typeof client.readFile !== 'function') break
+      try {
+        const file = await client.readFile(handle.workspaceId, readPath)
+        const preview = eventContextPreviewFromFile(file)
+        existingLabels = githubLabelsFromRecord(previewRecord(preview))
+        break
+      } catch {
+        // Try the next known GitHub PR alias. Label application can still be
+        // expressed as an issue update when the PR record is not locally synced.
+      }
+    }
+
+    const labels = dedupeStringsInOrder([...existingLabels, MERGE_ON_GREEN_LABEL])
+    await client.writeFile({
+      workspaceId: handle.workspaceId,
+      path: githubIssueUpdatePath(activation),
+      baseRevision: '*',
+      content: JSON.stringify({ labels }, null, 2),
+      contentType: 'application/json',
+      contentIdentity: {
+        kind: 'pear:merge-on-green-label',
+        key: activationKey,
+        ttlSeconds: Math.ceil(MERGE_ON_GREEN_ACTIVATION_TTL_MS / 1000)
+      }
+    })
+
+    const confirmationPath = slackConfirmationWritePath(slackPath, activationKey)
+    if (!confirmationPath) {
+      warnIntegrationEventAggregated(
+        `merge-on-green Slack confirmation path unavailable:${projectId}`,
+        'merge-on-green Slack confirmation path unavailable',
+        {
+          projectId,
+          target: mergeOnGreenTargetLabel(activation),
+          slackPath
+        }
+      )
+      return
+    }
+
+    await client.writeFile({
+      workspaceId: handle.workspaceId,
+      path: confirmationPath,
+      baseRevision: '*',
+      content: JSON.stringify({
+        text: `Enabled merge-on-green for ${mergeOnGreenTargetLabel(activation)}. I applied the \`${MERGE_ON_GREEN_LABEL}\` label; the merge watcher will merge it once required checks and reviews are green.`
+      }, null, 2),
+      contentType: 'application/json',
+      contentIdentity: {
+        kind: 'pear:merge-on-green-slack-confirmation',
+        key: activationKey,
+        ttlSeconds: Math.ceil(MERGE_ON_GREEN_ACTIVATION_TTL_MS / 1000)
+      }
+    })
+
+    logIntegrationEvent('activated merge-on-green from Slack', {
+      projectId,
+      slackPath,
+      target: mergeOnGreenTargetLabel(activation),
+      labels
+    })
+  }
+
   private async enqueueEvent(
     projectId: string,
     event: ChangeEvent,
@@ -2910,6 +3161,25 @@ export class IntegrationEventBridge {
     let dedupe = eventDedupeKeyWithFingerprint(duplicateKey, fingerprint)
     let dedupeClaimed = false
 
+    const eventMetadata = integrationEventMetadata(event)
+    const contextPreview = await this.readEventContextPreview(projectId, event, matchedSpecs)
+    const resolvedPath = contextPreview?.path || resolvedSlackContextPath(event.resource.path, matchedSpecs)
+    if (this.shouldSuppressSlackSelfEcho(projectId, event, contextPreview, resolvedPath)) {
+      return
+    }
+    await this.maybeHandleMergeOnGreenActivation(projectId, event, contextPreview, resolvedPath).catch((error) => {
+      warnIntegrationEventAggregated(
+        `merge-on-green activation failed:${projectId}`,
+        'merge-on-green activation failed',
+        {
+          projectId,
+          eventId: event.id,
+          path: resolvedPath,
+          error: toErrorMessage(error)
+        }
+      )
+    })
+
     const bridge = await this.bridge()
     const uniqueRecipients = await this.recipientsForMatchedSpecs(projectId, matchedSpecs, bridge)
     if (uniqueRecipients.length === 0) {
@@ -2927,13 +3197,6 @@ export class IntegrationEventBridge {
           path: event.resource.path
         }
       )
-      return
-    }
-
-    const eventMetadata = integrationEventMetadata(event)
-    const contextPreview = await this.readEventContextPreview(projectId, event, matchedSpecs)
-    const resolvedPath = contextPreview?.path || resolvedSlackContextPath(event.resource.path, matchedSpecs)
-    if (this.shouldSuppressSlackSelfEcho(projectId, event, contextPreview, resolvedPath)) {
       return
     }
     const usesConcreteAgentTargets = uniqueRecipients.every((recipient) => !recipient.startsWith('#'))

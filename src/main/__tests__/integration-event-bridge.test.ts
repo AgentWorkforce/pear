@@ -14,6 +14,7 @@ import {
   integrationRelayFileSyncOptions,
   localWatchEventPathsForFilename,
   localWatchRootsFor,
+  parseMergeOnGreenActivation,
   relayfileSdkPathFiltersFor,
   resetIntegrationEventTelemetryForTests,
   subscriptionSpecsFor
@@ -76,6 +77,15 @@ type SubscribeCall = {
     onCoalesced?: () => void
     onQueueDepth?: (depth: number) => void
   }
+}
+
+type WriteFileCall = {
+  workspaceId: string
+  path: string
+  baseRevision: string
+  content: string
+  contentType?: string
+  contentIdentity?: { kind: string; key: string; ttlSeconds?: number }
 }
 
 function integration(overrides: Partial<ConnectedIntegration> & {
@@ -181,6 +191,7 @@ function makeHarness(
     readFileFailuresBeforeSuccess?: number
     failReadFile?: boolean
     readFileError?: Error
+    writeFileError?: Error
     sendDelayMs?: number
     onSendStart?: (activeSends: number) => void
     waitForDeliveryNeverSettles?: boolean
@@ -193,6 +204,7 @@ function makeHarness(
   bridge: IntegrationEventBridge
   subscribeCalls: SubscribeCall[]
   readFileCalls: Array<{ workspaceId: string; path: string }>
+  writeFileCalls: WriteFileCall[]
   sent: SentMessage[]
   listAgentsCalls: string[]
   deliveryConfirmationCalls: SentMessage[]
@@ -203,6 +215,7 @@ function makeHarness(
 } {
   const subscribeCalls: SubscribeCall[] = []
   const readFileCalls: Array<{ workspaceId: string; path: string }> = []
+  const writeFileCalls: WriteFileCall[] = []
   const sent: SentMessage[] = []
   const listAgentsCalls: string[] = []
   const deliveryConfirmationCalls: SentMessage[] = []
@@ -238,6 +251,22 @@ function makeHarness(
             contentType: 'application/json',
             content: JSON.stringify({ provider: 'slack', text: 'targeted Slack context' }),
             encoding: 'utf-8'
+          }
+        },
+        async writeFile(input) {
+          if (options.writeFileError) throw options.writeFileError
+          writeFileCalls.push({
+            workspaceId: input.workspaceId,
+            path: input.path,
+            baseRevision: input.baseRevision,
+            content: input.content,
+            contentType: input.contentType,
+            contentIdentity: input.contentIdentity
+          })
+          return {
+            opId: `op-${writeFileCalls.length}`,
+            status: 'queued',
+            targetRevision: `rev-${writeFileCalls.length}`
           }
         }
       })
@@ -307,6 +336,7 @@ function makeHarness(
     bridge,
     subscribeCalls,
     readFileCalls,
+    writeFileCalls,
     sent,
     listAgentsCalls,
     deliveryConfirmationCalls,
@@ -321,6 +351,29 @@ beforeEach(() => {
   resetIntegrationEventTelemetryForTests()
   delete process.env.PEAR_INTEGRATION_EVENTS_DEBUG
   delete process.env.PEAR_INTEGRATION_EVENT_INJECTED_CONFIRMATION_TIMEOUT_MS
+})
+
+test('parseMergeOnGreenActivation requires pr-reviewer intent and an AgentWorkforce PR', () => {
+  assert.deepEqual(
+    parseMergeOnGreenActivation('@pr-reviewer enable merge-on-green for https://github.com/AgentWorkforce/pear/pull/204'),
+    {
+      owner: 'AgentWorkforce',
+      repo: 'pear',
+      pullNumber: 204,
+      sourceText: '@pr-reviewer enable merge-on-green for https://github.com/AgentWorkforce/pear/pull/204'
+    }
+  )
+  assert.deepEqual(
+    parseMergeOnGreenActivation('pr reviewer merge when green AgentWorkforce/cloud#2038'),
+    {
+      owner: 'AgentWorkforce',
+      repo: 'cloud',
+      pullNumber: 2038,
+      sourceText: 'pr reviewer merge when green AgentWorkforce/cloud#2038'
+    }
+  )
+  assert.equal(parseMergeOnGreenActivation('@pr-reviewer please review https://github.com/AgentWorkforce/pear/pull/204'), null)
+  assert.equal(parseMergeOnGreenActivation('@pr-reviewer merge-on-green https://github.com/other/pear/pull/204'), null)
 })
 
 test('relayfile sdk path filters broaden partial-segment Slack DM globs', () => {
@@ -794,6 +847,82 @@ test('slack raw-id and slug alias paths with distinct revisions inject once per 
   ))
   await waitForSent(harness, 3)
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'alice', 'alice'])
+})
+
+test('slack pr-reviewer merge-on-green mention labels the PR and confirms once', async () => {
+  const slackText = '@pr-reviewer enable merge-on-green for https://github.com/AgentWorkforce/pear/pull/204'
+  const harness = makeHarness(['alice'], {
+    readFileResponse: (_workspaceId, path) => {
+      if (path.startsWith('/github/')) {
+        return {
+          path,
+          revision: 'github-pr-rev-1',
+          contentType: 'application/json',
+          content: JSON.stringify({
+            provider: 'github',
+            payload: {
+              labels: [
+                { name: 'size:M' },
+                'reviewed'
+              ]
+            }
+          }),
+          encoding: 'utf-8'
+        }
+      }
+      return {
+        path,
+        revision: 'slack-rev-1',
+        contentType: 'application/json',
+        content: JSON.stringify({ provider: 'slack', text: slackText, user: 'U123' }),
+        encoding: 'utf-8'
+      }
+    }
+  })
+
+  await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+        downloadHistoricalData: false,
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+  })
+
+  const path = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
+  await harness.emit(changeEvent(path, 'slack', { digest: 'revision:slack-command-1' }))
+  await waitForSent(harness, 1)
+
+  assert.equal(harness.writeFileCalls.length, 2)
+  assert.equal(harness.writeFileCalls[0].workspaceId, 'workspace-id')
+  assert.equal(harness.writeFileCalls[0].path, '/github/repos/AgentWorkforce/pear/issues/204.json')
+  assert.equal(harness.writeFileCalls[0].contentType, 'application/json')
+  assert.deepEqual(JSON.parse(harness.writeFileCalls[0].content), {
+    labels: ['size:M', 'reviewed', 'merge-on-green']
+  })
+  assert.equal(harness.writeFileCalls[0].contentIdentity?.kind, 'pear:merge-on-green-label')
+
+  assert.match(
+    harness.writeFileCalls[1].path,
+    /^\/slack\/channels\/C123ABC__proj-cloud\/messages\/merge-on-green-[a-f0-9]+\.json$/u
+  )
+  assert.deepEqual(JSON.parse(harness.writeFileCalls[1].content), {
+    text: 'Enabled merge-on-green for AgentWorkforce/pear#204. I applied the `merge-on-green` label; the merge watcher will merge it once required checks and reviews are green.'
+  })
+  assert.equal(harness.writeFileCalls[1].contentIdentity?.kind, 'pear:merge-on-green-slack-confirmation')
+  assert.equal(
+    harness.writeFileCalls[0].contentIdentity?.key,
+    harness.writeFileCalls[1].contentIdentity?.key
+  )
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
+
+  await harness.emit(changeEvent(path, 'slack', { digest: 'revision:slack-command-replay' }))
+  await waitForDropped('project-1', 1)
+  assert.equal(harness.writeFileCalls.length, 2)
+  assert.equal(harness.sent.length, 1)
 })
 
 test('slack thread parent materialized under both messages and threads trees injects once', async () => {
