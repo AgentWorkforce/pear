@@ -34,6 +34,7 @@ import { recordChunkEchoed } from '@/lib/typing-trace'
 import { createPredictiveEcho, type PredictiveEchoWithStatus } from '@/lib/predictive-echo'
 import { createPtySizeSync } from '@/lib/pty-size-sync'
 import { buildModelSeedFromTerminal, createEchoRouter } from '@/lib/echo-router'
+import { createTerminalReconciler, RECONCILE_QUIET_MS } from '@/lib/terminal-reconciler'
 import type { PredictiveEcho } from '@agent-relay/harness-driver/predictive-echo'
 import { awaitFontSettle } from '@/lib/font-settle'
 import type { Theme } from '@/stores/ui-store'
@@ -302,6 +303,11 @@ function createRuntime(
   // attach snapshot was painted. Chunks at or below this total are already
   // on screen (inside the snapshot); only chunks past it get replayed.
   let writtenTotal = 0
+  // Reconciler activity tracking: serial bumps once per server-output
+  // delivery; lastOutputAt gates the quiet window. Both are read by the
+  // quiet-time screen reconciler below.
+  let activitySerial = 0
+  let lastOutputAt = 0
   let attachSeeded = false
   let attachInFlight = false
   let pendingInitFrame: number | null = null
@@ -333,6 +339,40 @@ function createRuntime(
     getInputSrtt: () => currentSrttGetter(),
     isViewportPinned: () => (term ? isViewportPinnedToBottom(term) : false),
     scrollToBottom: () => term?.scrollToBottom()
+  })
+  // Quiet-time convergence to the broker's authoritative screen. Catches the
+  // divergence class no creation-vector fix can: once the grid and a diffing
+  // TUI's model disagree (e.g. an xterm reflow scroll during a width
+  // resize), every subsequent diff-repaint preserves the stale cells. See
+  // terminal-reconciler.ts for the gating invariants.
+  const reconciler = createTerminalReconciler({
+    fetchSnapshot: (format) => pear.broker.snapshotTerminal(opts.projectId, opts.agentName, format),
+    readViewport: () => {
+      if (!term || !opened) return null
+      const buffer = term.buffer.active
+      const lines: string[] = []
+      for (let row = 0; row < term.rows; row += 1) {
+        const line = buffer.getLine(buffer.baseY + row)
+        lines.push(line ? line.translateToString(true) : '')
+      }
+      return { rows: term.rows, cols: term.cols, lines }
+    },
+    writeRepair: (ansi) => {
+      // Through the router so the repair is ordered behind any queued engine
+      // writes and, on the engine route, also repairs the engine's model.
+      echoRouter.onServerOutput(ansi)
+    },
+    isQuiet: () => {
+      if (disposed || !attachSeeded || currentToken === null || !opened) return false
+      // A hidden window stalls the rAF chunk flush, so "no recent output"
+      // says nothing about what is actually pending — never reconcile there.
+      if (document.visibilityState !== 'visible') return false
+      if (predictiveEcho?.hasPredictions) return false
+      return Date.now() - lastOutputAt >= RECONCILE_QUIET_MS
+    },
+    activitySerial: () => activitySerial,
+    flushPending: () => flushPtyChunksNow(key),
+    log: (message) => console.warn(message)
   })
 
   const cancelPendingInit = (): void => {
@@ -405,6 +445,8 @@ function createRuntime(
     const writeChunks = (newChunks: string[]): void => {
       if (disposed || !term) return
       if (newChunks.length === 0) return
+      activitySerial += 1
+      lastOutputAt = Date.now()
       // Optional diagnostic, gated on localStorage.PEAR_DIAG_PTY === '1'.
       // See pty-buffer-store.ts for the enable instructions. Flag is
       // cached to avoid a per-batch localStorage read.
@@ -642,6 +684,7 @@ function createRuntime(
       // writeFromBuffer notification triggered by clearPtyBuffer (with [])
       // runs while the closure is still consistent.
       cancelPendingInit()
+      reconciler.dispose()
       sizeSync.dispose()
       echoRouter.dispose()
       clearPtyBuffer(key)

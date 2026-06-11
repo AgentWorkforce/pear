@@ -22,10 +22,15 @@ export interface IssueViewModel {
   description: string
   stage: string
   stageType?: string
+  stateId?: string
+  /** Canonical mount path of the issue file, used for writeback (state changes, comments). */
+  issueRemotePath?: string
   actor: 'agent' | 'pairing' | 'human' | 'unknown'
   labels: string[]
   assigneeName?: string
   assignedAgentName?: string
+  teamId?: string
+  teamKey?: string
   teamName?: string
   projectName?: string
   priority?: number
@@ -40,14 +45,32 @@ export interface IssueViewModel {
   githubLinks: IssueGithubLink[]
 }
 
+export interface IssueWorkflowState {
+  id: string
+  name: string
+  type?: string
+}
+
 interface IssuesState {
   issues: IssueViewModel[]
+  /**
+   * Authoritative workflow states from the materialized `/linear/states` mount,
+   * when available. Empty until the states resource is in the project scope and
+   * synced — callers should fall back to states derived from loaded issues.
+   */
+  workflowStates: IssueWorkflowState[]
   loading: boolean
   error: string | null
   loadedProjectId: string | null
   lastLoadedAt: number | null
   load: (projectId: string, options?: { force?: boolean }) => Promise<void>
   subscribe: (projectId: string) => () => void
+  /**
+   * Change an issue's Linear workflow state via writeback. Writes the target
+   * `stateId` to the canonical issue file path and optimistically updates the
+   * local view model; the resulting `relayfile-change` event reconciles it.
+   */
+  setIssueState: (projectId: string, issueId: string, state: IssueWorkflowState) => Promise<void>
 }
 
 const STAGE_ORDER = ['Backlog', 'Planning', 'To do', 'In Progress', 'In review', 'Merged', 'Done']
@@ -221,7 +244,11 @@ async function readGithubLink(projectId: string, sync: Record<string, unknown>):
   }
 }
 
-async function normalizeIssue(projectId: string, raw: Record<string, unknown>): Promise<IssueViewModel> {
+async function normalizeIssue(
+  projectId: string,
+  raw: Record<string, unknown>,
+  remotePath?: string
+): Promise<IssueViewModel> {
   const issue = payloadRecord(raw)
   const state = readRecord(issue.state)
   const attention = readRecord(issue.attention)
@@ -247,10 +274,14 @@ async function normalizeIssue(projectId: string, raw: Record<string, unknown>): 
     description: readString(issue.description) || '',
     stage,
     stageType: readString(state.type),
+    stateId: readString(state.id) || readString(issue.stateId) || readString(issue.state_id),
+    issueRemotePath: remotePath,
     actor: resolveActor(labels, !!assigneeName),
     labels,
     assigneeName,
     assignedAgentName,
+    teamId: readString(team.id) || readString(issue.teamId) || readString(issue.team_id),
+    teamKey: readString(team.key),
     teamName: readString(team.name) || readString(team.key),
     projectName: readString(project.name),
     priority: readNumber(issue.priority),
@@ -267,6 +298,51 @@ async function normalizeIssue(projectId: string, raw: Record<string, unknown>): 
     recentAgentMessages,
     trajectoryId: readString(agentSession.trajectoryId),
     githubLinks
+  }
+}
+
+/**
+ * Build the writeback payload for an issue state change.
+ *
+ * The `@relayfile/adapter-linear` `issues` resource (discovery/linear/.adapter.md)
+ * defines Edit semantics as: "write the resource update payload to the canonical
+ * resource path; included mutable fields PATCH; fields marked readOnly in
+ * .schema.json are rejected." The schema is `additionalProperties: false`, so we
+ * send ONLY the single mutable field we intend to change — `stateId`. Including
+ * identity/`state`/`team` objects (readOnly or non-schema) would be rejected.
+ */
+function buildStateWritebackPayload(state: IssueWorkflowState): Record<string, unknown> {
+  return { stateId: state.id }
+}
+
+/**
+ * Load the authoritative workflow-state list from the materialized
+ * `/linear/states` mount (adapter-linear `states` resource). Returns [] if the
+ * resource is out of scope, not yet synced, or unreadable — callers fall back to
+ * states derived from loaded issues.
+ */
+async function loadWorkflowStates(projectId: string): Promise<IssueWorkflowState[]> {
+  try {
+    const entries = await pear.integrations.listRemoteDir(projectId, '/linear/states')
+    const parsed: Array<{ id: string; name: string; type?: string; position: number }> = []
+    await Promise.all(
+      entries.filter(isIssueFile).map(async (entry) => {
+        const preview = await pear.integrations.readRemoteFile(projectId, entry.path)
+        if (preview.kind !== 'text') return
+        const record = parseJsonPreview(preview.content, entry.path)
+        if (!record) return
+        const data = payloadRecord(record)
+        const id = readString(data.id)
+        const name = readString(data.name)
+        if (!id || !name) return
+        parsed.push({ id, name, type: readString(data.type), position: readNumber(data.position) ?? Number.MAX_SAFE_INTEGER })
+      })
+    )
+    return parsed
+      .sort((a, b) => a.position - b.position)
+      .map(({ id, name, type }) => ({ id, name, type }))
+  } catch {
+    return []
   }
 }
 
@@ -296,6 +372,7 @@ function scheduleRefresh(projectId: string, generation: number, load: IssuesStat
 
 export const useIssuesStore = create<IssuesState>((set, get) => ({
   issues: [],
+  workflowStates: [],
   loading: false,
   error: null,
   loadedProjectId: null,
@@ -309,21 +386,26 @@ export const useIssuesStore = create<IssuesState>((set, get) => ({
     const promise = (async () => {
       set({ loading: true, error: null })
       try {
-        const entries = await pear.integrations.listRemoteDir(projectId, '/linear/issues')
+        const [entries, workflowStates] = await Promise.all([
+          pear.integrations.listRemoteDir(projectId, '/linear/issues'),
+          loadWorkflowStates(projectId)
+        ])
         const records = await Promise.all(
           entries.filter(isIssueFile).map(async (entry) => {
             const preview = await pear.integrations.readRemoteFile(projectId, entry.path)
-            return preview.kind === 'text' ? parseJsonPreview(preview.content, entry.path) : null
+            const record = preview.kind === 'text' ? parseJsonPreview(preview.content, entry.path) : null
+            return record ? { path: entry.path, record } : null
           })
         )
         const issues = await Promise.all(
           records
-            .filter((record): record is Record<string, unknown> => !!record)
-            .map((record) => normalizeIssue(projectId, record))
+            .filter((entry): entry is { path: string; record: Record<string, unknown> } => !!entry)
+            .map(({ path, record }) => normalizeIssue(projectId, record, path))
         )
 
         set({
           issues: sortIssues(issues),
+          workflowStates,
           loading: false,
           error: null,
           loadedProjectId: projectId,
@@ -370,6 +452,34 @@ export const useIssuesStore = create<IssuesState>((set, get) => ({
         refreshTimer = null
       }
     }
+  },
+
+  setIssueState: async (projectId, issueId, state) => {
+    const issue = get().issues.find((candidate) => candidate.id === issueId)
+    if (!issue) throw new Error(`Issue ${issueId} not found`)
+    if (!issue.issueRemotePath) throw new Error('Issue is missing its mount path; cannot change status')
+    if (!state.id) throw new Error('Target workflow state id is required')
+    if (state.id === issue.stateId) return
+
+    const payload = buildStateWritebackPayload(state)
+    await pear.integrations.writeRemoteFile(projectId, issue.issueRemotePath, JSON.stringify(payload, null, 2))
+
+    // Optimistic update; the resulting relayfile-change event reconciles via load().
+    set((current) => ({
+      issues: sortIssues(
+        current.issues.map((candidate) =>
+          candidate.id === issueId
+            ? {
+                ...candidate,
+                stage: state.name,
+                stageType: state.type ?? candidate.stageType,
+                stateId: state.id,
+                band: classifyIssue(state.name, state.type, candidate.labels, {})
+              }
+            : candidate
+        )
+      )
+    }))
   }
 }))
 

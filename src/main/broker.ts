@@ -48,6 +48,8 @@ import type {
   BrokerEventStreamDiagnostic,
   BrokerReconciledChatMessage,
   BrokerReconcileMessagesInput,
+  BrokerTerminalSnapshot,
+  BrokerTerminalSnapshotFormat,
   WorkforcePersona
 } from '../shared/types/ipc'
 import {
@@ -3407,6 +3409,50 @@ export class BrokerManager {
       if (isMissingAgentError(err)) return
       throw err
     }
+  }
+
+  // Side-effect-free read of the broker's authoritative PTY screen, used by
+  // the renderer's quiet-time terminal reconciler (terminal-reconciler.ts).
+  // Unlike attachTerminal this never resets input streams, never touches the
+  // delivery mode, and degrades to null on every failure — a skipped
+  // reconcile check is always safe, a thrown one floods the IPC log on a
+  // periodic poll. Polled read ⇒ wedge recovery, same as getPending.
+  async snapshotTerminal(
+    projectId: string | undefined,
+    name: string,
+    format: BrokerTerminalSnapshotFormat
+  ): Promise<BrokerTerminalSnapshot | null> {
+    const trimmedName = name.trim()
+    if (!trimmedName) return null
+    let session: BrokerSession
+    try {
+      session = this.getSessionForAgent(trimmedName, projectId)
+    } catch {
+      return null
+    }
+    return this.withWedgeRecovery<BrokerTerminalSnapshot | null>(
+      session,
+      'snapshotTerminal',
+      null,
+      async (current) => {
+        try {
+          const snapshot = await current.client.snapshot(trimmedName, format)
+          return {
+            rows: snapshot.rows,
+            cols: snapshot.cols,
+            cursor: snapshot.cursor,
+            screen:
+              format === 'ansi'
+                ? Buffer.from(snapshot.screen, 'base64').toString('utf-8')
+                : snapshot.screen
+          }
+        } catch (err) {
+          if (isMissingAgentError(err)) return null
+          throw err
+        }
+      },
+      { degradeOnTimeout: true }
+    )
   }
 
   async sendMessage(projectId: string | undefined, input: SendMessageInput): Promise<void> {

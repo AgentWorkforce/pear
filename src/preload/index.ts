@@ -22,6 +22,8 @@ import type {
   BrokerSpawnAgentInput,
   BrokerSpawnAgentResult,
   BrokerStatusEvent,
+  BrokerTerminalSnapshot,
+  BrokerTerminalSnapshotFormat,
   BurnAgentBreakdown,
   BurnAgentInput,
   BurnAgentSummary,
@@ -258,6 +260,8 @@ const api = {
       invoke<{ flushed: number }>('broker:flush-pending', projectId, name),
     resizePty: (projectId: string | undefined, name: string, rows: number, cols: number) =>
       invoke<void>('broker:resize-pty', projectId, name, rows, cols),
+    snapshotTerminal: (projectId: string | undefined, name: string, format: BrokerTerminalSnapshotFormat) =>
+      invoke<BrokerTerminalSnapshot | null>('broker:snapshot-terminal', projectId, name, format),
     inputSrtt: (projectId: string | undefined, name: string) =>
       invoke<number | null>('broker:input-srtt', projectId, name),
     sendMessage: (projectId: string | undefined, input: BrokerSendMessageInput) =>

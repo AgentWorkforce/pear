@@ -383,6 +383,16 @@ export interface BrokerSetTerminalModeResult {
   pending: number
 }
 
+export type BrokerTerminalSnapshotFormat = 'plain' | 'ansi'
+
+export interface BrokerTerminalSnapshot {
+  rows: number
+  cols: number
+  cursor: [number, number]
+  /** Row text for `plain`; decoded ANSI reproduction byte stream for `ansi`. */
+  screen: string
+}
+
 export interface BrokerSendMessageInput {
   to: string
   text: string
@@ -877,6 +887,11 @@ export interface PearAPI {
     getPending: (projectId: string | undefined, name: string) => Promise<PendingRelayMessage[]>
     flushPending: (projectId: string | undefined, name: string) => Promise<{ flushed: number }>
     resizePty: (projectId: string | undefined, name: string, rows: number, cols: number) => Promise<void>
+    snapshotTerminal: (
+      projectId: string | undefined,
+      name: string,
+      format: BrokerTerminalSnapshotFormat
+    ) => Promise<BrokerTerminalSnapshot | null>
     inputSrtt: (projectId: string | undefined, name: string) => Promise<number | null>
     sendMessage: (projectId: string | undefined, input: BrokerSendMessageInput) => Promise<void>
     reconcileMessages: (input: BrokerReconcileMessagesInput) => Promise<BrokerReconciledChatMessage[]>
