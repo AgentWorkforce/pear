@@ -19,12 +19,34 @@ const live = (overrides: Record<string, unknown> = {}) => ({
 })
 
 describe('GithubMergeGate', () => {
-  it('returns READY only for MERGEABLE+CLEAN, matching head, and all checks SUCCESS', async () => {
+  it('returns READY only for MERGEABLE+CLEAN, matching head, and no blocking checks', async () => {
     const gate = new GhCliGithubMergeGate(async () => ({ stdout: JSON.stringify(live()) }))
 
     await expect(gate.check(input)).resolves.toMatchObject({
       verdict: 'READY',
       ready: true,
+    })
+  })
+
+  it('returns READY for MERGEABLE+CLEAN with neutral, skipped, or expected advisory checks', () => {
+    expect(evaluateGithubMergeGate(input, live({
+      statusCheckRollup: [
+        { name: 'required', conclusion: 'SUCCESS' },
+        { name: 'advisory-neutral', conclusion: 'NEUTRAL' },
+        { name: 'advisory-skipped', conclusion: 'SKIPPED' },
+        { name: 'expected-but-nonblocking', conclusion: 'EXPECTED' },
+      ],
+    }))).toMatchObject({
+      verdict: 'READY',
+      ready: true,
+    })
+  })
+
+  it('refuses when the live head differs from the expected head sha', () => {
+    expect(evaluateGithubMergeGate(input, live({ headRefOid: 'different-sha' }))).toMatchObject({
+      verdict: 'REFUSE',
+      ready: false,
+      reason: expect.stringMatching(/head moved/),
     })
   })
 
@@ -74,12 +96,24 @@ describe('GithubMergeGate', () => {
     })
   })
 
-  it('refuses missing or non-success status checks', () => {
+  it('refuses missing, blocking, pending, or unknown status checks', () => {
     expect(evaluateGithubMergeGate(input, live({ statusCheckRollup: [] }))).toMatchObject({
       verdict: 'REFUSE',
       ready: false,
     })
     expect(evaluateGithubMergeGate(input, live({ statusCheckRollup: [{ conclusion: 'FAILURE' }] }))).toMatchObject({
+      verdict: 'REFUSE',
+      ready: false,
+    })
+    expect(evaluateGithubMergeGate(input, live({ statusCheckRollup: [{ status: 'IN_PROGRESS' }] }))).toMatchObject({
+      verdict: 'REFUSE',
+      ready: false,
+    })
+    expect(evaluateGithubMergeGate(input, live({ statusCheckRollup: [{ conclusion: 'UNKNOWN' }] }))).toMatchObject({
+      verdict: 'REFUSE',
+      ready: false,
+    })
+    expect(evaluateGithubMergeGate(input, live({ statusCheckRollup: [{ status: 'COMPLETED' }] }))).toMatchObject({
       verdict: 'REFUSE',
       ready: false,
     })

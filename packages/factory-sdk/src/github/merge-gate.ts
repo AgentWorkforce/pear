@@ -110,15 +110,15 @@ export function evaluateGithubMergeGate(
     return refuse('no successful status checks observed', { mergeable, mergeStateStatus, headRefOid, checkStates })
   }
 
-  const failing = checkStates.filter((state) => state !== 'SUCCESS')
-  if (failing.length > 0) {
-    return refuse(`checks not successful: ${failing.join(', ')}`, { mergeable, mergeStateStatus, headRefOid, checkStates })
+  const blocking = checkStates.filter(isBlockingCheckState)
+  if (blocking.length > 0) {
+    return refuse(`checks not merge-ready: ${blocking.join(', ')}`, { mergeable, mergeStateStatus, headRefOid, checkStates })
   }
 
   return {
     verdict: 'READY',
     ready: true,
-    reason: 'MERGEABLE+CLEAN with matching head and successful checks',
+    reason: 'MERGEABLE+CLEAN with matching head and no blocking checks',
     live: { mergeable, mergeStateStatus, headRefOid, checkStates },
   }
 }
@@ -155,9 +155,13 @@ const checkStatesFromRollup = (value: unknown): string[] => {
     }
 
     const status = stringValue(record.status)
-    return status === 'COMPLETED' ? 'SUCCESS' : status ?? 'UNKNOWN'
+    return status ?? 'UNKNOWN'
   })
 }
+
+const nonBlockingCheckStates = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED', 'EXPECTED'])
+
+const isBlockingCheckState = (state: string): boolean => !nonBlockingCheckStates.has(state)
 
 const asRecord = (value: unknown): Record<string, unknown> =>
   value !== null && typeof value === 'object' && !Array.isArray(value)
