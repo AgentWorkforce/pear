@@ -808,6 +808,9 @@ export class IntegrationsManager {
   private catalogFetchedAt = 0
   private localMountCloudHydrationStartedAt = 0
   private localMountCloudHydrationPromise: Promise<void> | null = null
+  private localMountSyncPromise: Promise<void> | null = null
+  private localMountSyncIncludesCloud = false
+  private settingsLocalMountSyncPromises = new Map<string, Promise<void>>()
   private projectCloudHydrationStartedAt = new Map<string, number>()
   private projectCloudHydrationPromises = new Map<string, Promise<void>>()
   private authRecoveryState: IntegrationAuthRecoveryState | null = null
@@ -995,11 +998,12 @@ export class IntegrationsManager {
     const project = this.findProject(projectId)
     if (!project) {
       console.warn(`[integrations] listConnectedForSettings: project ${projectId} not found in local store; returning local list only (${local.length} items)`)
-      return this.withLocalMountPaths(local)
+      return this.withCurrentLocalMountPaths(local)
     }
 
     void this.hydrateProjectCloudIntegrations(projectId)
-    return this.withLocalMountPaths(local)
+    this.syncSettingsLocalMountsEventually(projectId)
+    return this.withCurrentLocalMountPaths(local)
   }
 
   // Background cloud hydration for a single project's settings list. Deduped and
@@ -2321,7 +2325,52 @@ export class IntegrationsManager {
     return pending
   }
 
+  private syncSettingsLocalMountsEventually(projectId: string): void {
+    if (this.settingsLocalMountSyncPromises.has(projectId)) return
+
+    const before = this.settingsLocalMountSignature(projectId)
+    const pending = this.syncLocalMounts({ hydrateCloud: false })
+      .then(() => {
+        if (this.settingsLocalMountSignature(projectId) !== before) {
+          this.emit({ type: 'integrations-hydrated', projectId })
+        }
+      })
+      .catch((error) => {
+        if (!isIntegrationAuthRecoveryError(error)) {
+          console.warn('[integrations] Background local mount sync failed:', toErrorMessage(error))
+        }
+      })
+      .finally(() => {
+        if (this.settingsLocalMountSyncPromises.get(projectId) === pending) {
+          this.settingsLocalMountSyncPromises.delete(projectId)
+        }
+      })
+
+    this.settingsLocalMountSyncPromises.set(projectId, pending)
+  }
+
   private async syncLocalMounts(options: { hydrateCloud?: boolean } = {}): Promise<void> {
+    const hydrateCloud = options.hydrateCloud !== false
+    if (this.localMountSyncPromise) {
+      if (!hydrateCloud || this.localMountSyncIncludesCloud) return this.localMountSyncPromise
+      return this.localMountSyncPromise
+        .catch(() => undefined)
+        .then(() => this.syncLocalMounts(options))
+    }
+
+    this.localMountSyncIncludesCloud = hydrateCloud
+    const pending = this.performSyncLocalMounts(options)
+      .finally(() => {
+        if (this.localMountSyncPromise === pending) {
+          this.localMountSyncPromise = null
+          this.localMountSyncIncludesCloud = false
+        }
+      })
+    this.localMountSyncPromise = pending
+    return pending
+  }
+
+  private async performSyncLocalMounts(options: { hydrateCloud?: boolean } = {}): Promise<void> {
     if (options.hydrateCloud !== false) {
       await this.hydrateCloudIntegrationsForLocalMounts()
     }
@@ -2400,6 +2449,14 @@ export class IntegrationsManager {
         })
       }
     })
+  }
+
+  private settingsLocalMountSignature(projectId: string): string {
+    return JSON.stringify(this.withCurrentLocalMountPaths(this.listConnected(projectId)).map((integration) => ({
+      provider: integration.provider,
+      integrationId: integration.integrationId,
+      localMountPaths: integration.localMountPaths ?? []
+    })))
   }
 
   private async withLocalMountPaths(integrations: ConnectedIntegration[]): Promise<ConnectedIntegration[]> {
