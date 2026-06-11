@@ -28,13 +28,12 @@ describe('GithubMergeGate', () => {
     })
   })
 
-  it('returns READY for MERGEABLE+CLEAN with neutral, skipped, or expected advisory checks', () => {
+  it('returns READY for MERGEABLE+CLEAN with neutral or skipped advisory checks', () => {
     expect(evaluateGithubMergeGate(input, live({
       statusCheckRollup: [
         { name: 'required', conclusion: 'SUCCESS' },
         { name: 'advisory-neutral', conclusion: 'NEUTRAL' },
         { name: 'advisory-skipped', conclusion: 'SKIPPED' },
-        { name: 'expected-but-nonblocking', conclusion: 'EXPECTED' },
       ],
     }))).toMatchObject({
       verdict: 'READY',
@@ -106,6 +105,10 @@ describe('GithubMergeGate', () => {
       ready: false,
     })
     expect(evaluateGithubMergeGate(input, live({ statusCheckRollup: [{ status: 'IN_PROGRESS' }] }))).toMatchObject({
+      verdict: 'REFUSE',
+      ready: false,
+    })
+    expect(evaluateGithubMergeGate(input, live({ statusCheckRollup: [{ state: 'EXPECTED' }] }))).toMatchObject({
       verdict: 'REFUSE',
       ready: false,
     })

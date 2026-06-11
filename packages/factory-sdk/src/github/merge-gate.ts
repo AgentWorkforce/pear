@@ -159,7 +159,7 @@ const checkStatesFromRollup = (value: unknown): string[] => {
   })
 }
 
-const nonBlockingCheckStates = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED', 'EXPECTED'])
+const nonBlockingCheckStates = new Set(['SUCCESS', 'NEUTRAL', 'SKIPPED'])
 
 const isBlockingCheckState = (state: string): boolean => !nonBlockingCheckStates.has(state)
 
