@@ -590,7 +590,7 @@ const PERSONA_READY_PROBE_TIMEOUT_MS = 5_000
 // skill install calls process.exit) would otherwise burn the entire
 // PERSONA_HARNESS_READY_TIMEOUT_MS before surfacing an error.
 const PERSONA_LIVENESS_POLL_MS = 2_000
-const AGENTWORKFORCE_CLI_VERSION = '3.0.51'
+const AGENTWORKFORCE_CLI_VERSION = '4.0.2'
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
