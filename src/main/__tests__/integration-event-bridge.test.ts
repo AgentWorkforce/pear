@@ -2468,6 +2468,7 @@ test('resource alias mount paths inject the same relative event only once', asyn
   await harness.emit(changeEvent('/chat/channels/C123ABC/threads/1780607825_485189/replies/1780611452_510669.json', 'chat'))
   await harness.emit(changeEvent('/chat/channels/C123ABC__proj-cloud/threads/1780607825_485189/replies/1780611452_510669.json', 'chat'))
 
+  await waitForSent(harness, 1)
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
 })
 
