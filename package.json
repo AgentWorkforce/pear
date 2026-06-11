@@ -29,7 +29,7 @@
     "test:fidelity": "npm run build:web && playwright test --config playwright.fidelity.config.ts",
     "test:stress": "npm run build:web && playwright test --config playwright.stress.config.ts",
     "test:redraw": "npm run build:web && playwright test --config playwright.redraw.config.ts",
-    "personas:refresh": "npx --yes agentworkforce install @agentworkforce/persona-autonomous-actor --overwrite && npx --yes agentworkforce install @agentworkforce/persona-slack-comms --overwrite",
+    "personas:refresh": "npx --yes agentworkforce install @agentworkforce/persona-autonomous-actor --overwrite && npx --yes agentworkforce install @agentworkforce/persona-slack-comms --overwrite && npx --yes agentworkforce install @agentworkforce/persona-linear-dispatcher --overwrite && npx --yes agentworkforce install @agentworkforce/persona-repo-router --overwrite",
     "lint": "eslint ."
   },
   "dependencies": {

@@ -1,0 +1,50 @@
+{
+  "id": "repo-router",
+  "intent": "agent-relay-workflow",
+  "tags": [
+    "routing",
+    "dispatch",
+    "orchestration",
+    "codebase"
+  ],
+  "description": "Codebase navigator and issue-to-repo dispatcher. Maps all sibling repos in the AgentWorkforce ecosystem, determines which repo(s) an issue requires changes in, and spawns codex implementer + claude reviewer agents pointed at the correct repos. Handles multi-repo issues by splitting work across parallel implementers.",
+  "integrations": {
+    "github": {}
+  },
+  "skills": [
+    {
+      "id": "agentworkforce-repo-map",
+      "source": "./skills/agentworkforce-repo-map.md",
+      "description": "Canonical map of all AgentWorkforce GitHub org repos, their roles, responsibilities, key signals, and routing rules. Read this first before routing any issue. Use gh repo list + gh api to verify against the live org."
+    },
+    {
+      "id": "@agent-relay/orchestrating-agent-relay",
+      "source": "@agent-relay/orchestrating-agent-relay",
+      "description": "How to spawn, coordinate, and release agents via agent-relay MCP. Core to dispatching codex implementer + claude reviewer teams per repo and tracking completion via DMs."
+    },
+    {
+      "id": "@agent-relay/workspace-layout",
+      "source": "@agent-relay/workspace-layout",
+      "description": "How to navigate a relayfile mount: by-state/, by-id/, by-uuid/ alias subtrees and the AR-{id}__{uuid} filename convention. Used when reading issue metadata from the Linear integration mount."
+    },
+    {
+      "id": "persona-relayfile-mount",
+      "source": "./skills/persona-relayfile-mount.md",
+      "description": "Local mount-field policy shipped with this persona pack. Read before relying on the relayfile mount for issue context."
+    }
+  ],
+  "harness": "claude",
+  "model": "claude-sonnet-4-6",
+  "systemPrompt": "$TASK_DESCRIPTION",
+  "harnessSettings": {
+    "reasoning": "high",
+    "timeoutSeconds": 300
+  },
+  "inputs": {
+    "TASK_DESCRIPTION": {
+      "description": "Issue title, description, labels, and project to route. The agent will map repos, determine the correct target(s), and spawn implementer + reviewer agents. When called by linear-dispatcher, the full issue context is passed here.",
+      "optional": false
+    }
+  },
+  "agentsMd": "__assets/repo-router/repo-router.md"
+}
