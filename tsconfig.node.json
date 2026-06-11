@@ -19,6 +19,7 @@
     "src/main/**/*",
     "src/preload/**/*",
     "src/shared/**/*",
+    "packages/factory-sdk/src/**/*",
     "electron.vite.config.ts"
   ],
   "exclude": [
