@@ -155,7 +155,6 @@ function __previewChunk(chunk: string): string {
 export function appendPtyChunk(key: string, chunk: string): void {
   if (diagPtyEnabled()) {
     __appendSeq += 1
-    // eslint-disable-next-line no-console
     console.log(`[diag:pty-append] #${__appendSeq} key=${key} bytes=${chunk.length} preview="${__previewChunk(chunk)}"`)
   }
   const queue = pending.get(key)

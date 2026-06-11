@@ -28,7 +28,7 @@ import { getIntegrationEventTelemetrySnapshot, integrationEventBridge } from './
 import { aiHistManager } from './ai-hist'
 import { burnManager, type BurnAgentInput, type BurnProjectInput, type BurnSessionBreakdownInput, type BurnFingerprintInput } from './burn'
 import { resetRelayWorkspaceManager } from './relay-workspace'
-import { assertDirectory, isDirectory } from './path-utils'
+import { isDirectory } from './path-utils'
 import { findProjectForPath, projectContainsPath } from './cli'
 import type { BrokerReconcileMessagesInput, BrokerSpawnAgentResult } from '../shared/types/ipc'
 import type { ProactiveAgentDraft } from './proactive-agent.types'

@@ -869,30 +869,6 @@ function normalizeRelayMessageForChat(
   }
 }
 
-interface PtyStreamDedupeState {
-  // Highest numeric seq delivered for this agent stream. -Infinity until the
-  // first numeric seq arrives.
-  lastSeq: number
-  // identity key (seq or event_id) → content hash for the most recent
-  // PTY_CHUNK_REPLAY_WINDOW chunks, insertion-ordered for FIFO eviction.
-  recentByIdentity: Map<string, string>
-  // Telemetry: replayed chunks suppressed for this stream.
-  suppressedReplays: number
-}
-
-// Cheap, allocation-free content fingerprint (FNV-1a 32-bit + length). A
-// false "duplicate" verdict requires an identity match AND a hash collision
-// AND identical length — and only ever suppresses one chunk that renders the
-// same bytes we already delivered for that identity.
-function ptyChunkHash(chunk: string): string {
-  let hash = 0x811c9dc5
-  for (let i = 0; i < chunk.length; i += 1) {
-    hash ^= chunk.charCodeAt(i)
-    hash = Math.imul(hash, 0x01000193)
-  }
-  return `${chunk.length}:${hash >>> 0}`
-}
-
 function brokerEventSeq(event: BrokerEvent): number | undefined {
   const seq = (event as Record<string, unknown>).seq
   return typeof seq === 'number' && Number.isFinite(seq) ? seq : undefined
@@ -972,18 +948,6 @@ function isBrokerTimeoutError(err: unknown): boolean {
 // failure — callers fall through to HTTP without logging it as an error.
 function isInputStreamClosedError(err: unknown): boolean {
   return (err as { code?: unknown } | null | undefined)?.code === 'input_stream_closed'
-}
-
-function getBrokerEventName(event: BrokerEvent): string | undefined {
-  return 'name' in event && typeof event.name === 'string' && event.name.trim()
-    ? event.name
-    : undefined
-}
-
-function getBrokerEventFrom(event: BrokerEvent): string | undefined {
-  return 'from' in event && typeof event.from === 'string' && event.from.trim()
-    ? event.from
-    : undefined
 }
 
 function withBrokerDetailsTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
@@ -1092,11 +1056,6 @@ function brokerConnectionPathCandidates(cwd: string): string[] {
     join(cwd, '.agentworkforce', 'relay', 'connection.json'),
     join(cwd, '.agent-relay', 'connection.json')
   ]
-}
-
-function resolveBrokerConnectionPath(cwd: string): string {
-  const candidates = brokerConnectionPathCandidates(cwd)
-  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]
 }
 
 function toInboundDeliveryMode(mode?: TerminalAttachMode): InboundDeliveryMode {
@@ -1688,8 +1647,7 @@ export class BrokerManager {
 
     const { cwd, name, channels } = session
     const brokerPid = session.client.brokerPid
-    let promise!: Promise<boolean>
-    promise = (async () => {
+    const promise = (async () => {
       console.warn(`[broker] Broker for project ${projectId} is unreachable; restarting on a fresh port`)
       this.dropSession(projectId, { disconnectOnly: true })
       await terminateOwnedBrokerProcess(brokerPid)

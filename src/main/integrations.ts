@@ -2066,7 +2066,7 @@ export class IntegrationsManager {
     notifyAgent: boolean,
     systemMessageOptions: IntegrationSystemMessageOptions = {}
   ): Promise<void> {
-    let integrations = this.visibleIntegrationsForProject(projectId)
+    const integrations = this.visibleIntegrationsForProject(projectId)
     const subscriptionsReady = await this.syncEventSubscriptions(projectId)
     this.lastSubscriptionsReady.set(projectId, subscriptionsReady)
 
