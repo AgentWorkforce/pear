@@ -239,8 +239,16 @@ function tabInputForViewMode(mode: ViewMode): AppTabInput {
 
 // The browser demo build has no real projects, so default straight to the
 // Attention Inbox (the web-first surface) instead of the empty Agents view.
+// The Playwright rendering harnesses (fidelity/redraw/stress) need the
+// Agents view to mount terminals — they opt in via this localStorage key in
+// an init script, the same way they seed pear-terminal-layout.
 const isWebMock = import.meta.env.VITE_PEAR_MOCK_IPC === 'true'
-const initialTab = createTab({ kind: isWebMock ? 'issues' : 'agents' })
+const webMockInitialTab = readStored(
+  'pear-web-initial-tab',
+  z.enum(['agents', 'issues']),
+  'issues'
+)
+const initialTab = createTab({ kind: isWebMock ? webMockInitialTab : 'agents' })
 
 export const useUIStore = create<UIState>((set, get) => ({
   viewMode: viewModeForTab(initialTab),

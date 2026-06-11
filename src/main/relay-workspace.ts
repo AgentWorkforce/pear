@@ -109,8 +109,7 @@ export class RelayWorkspaceManager {
     authContext: RelayWorkspaceAuthContext,
     generation: number
   ): Promise<WorkspaceHandle> {
-    let pendingHandle!: Promise<WorkspaceHandle>
-    pendingHandle = this.bootstrap(auth)
+    const pendingHandle: Promise<WorkspaceHandle> = this.bootstrap(auth)
       .then((result) => {
         if (!this.isCurrentBootstrap(pendingHandle, authContext, generation)) {
           return this.getCurrentOrNextHandle()

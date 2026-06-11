@@ -257,10 +257,14 @@ test.describe('renderer redraw drain', () => {
       appendFileSync(resultPath, `${JSON.stringify({ ...result, consoleErrorCount: consoleErrors.length, recordedAt: new Date().toISOString() })}\n`)
     }
 
-    // Non-gating: assert only that the harness ran end-to-end. The drain /
-    // backpressure numbers are recorded for the before/after comparison, not
-    // enforced as thresholds yet.
     expect(result.framesInjected, 'no redraw frames were injected').toBeGreaterThan(0)
     expect(result.finalRenderedSeq, 'terminal grid never rendered any redraw frame').toBeGreaterThan(0)
+    // GATING drain invariants (machine-independent booleans, not timing
+    // thresholds): after the burst stops, the grid must fully catch up
+    // within the drain deadline and the final repaint must be the one on
+    // screen. A regression that reintroduces parser backlog (the typing-lag
+    // class) shows up here as drained=false long before users feel it.
+    expect(result.drained, `terminal never drained within ${config.drainTimeoutMs}ms — render backlog regression: ${JSON.stringify(result)}`).toBe(true)
+    expect(result.finalFrameRendered, `final repaint never rendered: ${JSON.stringify(result)}`).toBe(true)
   })
 })

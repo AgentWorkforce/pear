@@ -22,6 +22,13 @@ type Listener = (newChunks: string[]) => void
 
 const buffers = new Map<string, string[]>()
 const listeners = new Map<string, Set<Listener>>()
+// Monotonic count of chunks ever flushed into each key's buffer. Unlike
+// `buffers.get(key).length` this never moves backwards on trim, so consumers
+// can capture it as a replay baseline that stays valid across the 10k trim —
+// comparing against buffer length instead made a trimmed baseline look
+// "past the end", and the recovery path replayed the WHOLE buffer on top of
+// an already-painted snapshot (the duplicated-screen-content bug class).
+const totals = new Map<string, number>()
 
 // Chunks staged for the next animation frame, keyed by agent key.
 const pending = new Map<string, string[]>()
@@ -72,6 +79,7 @@ function flushPending(key: string): void {
     ? combined.slice(combined.length - MAX_PTY_BUFFER_CHUNKS)
     : combined
   buffers.set(key, trimmed)
+  totals.set(key, (totals.get(key) ?? 0) + queued.length)
 
   const keyListeners = listeners.get(key)
   if (!keyListeners || keyListeners.size === 0) return
@@ -86,6 +94,26 @@ function flushPending(key: string): void {
 
 export function getPtyChunks(key: string): string[] {
   return buffers.get(key) ?? []
+}
+
+// Monotonic count of chunks ever flushed into this key's buffer. Capture it
+// (after flushPtyChunksNow) as a baseline, then read the chunks that arrived
+// after the baseline with getPtyChunksSinceTotal.
+export function getPtyChunkTotal(key: string): number {
+  return totals.get(key) ?? 0
+}
+
+// Chunks flushed after `baselineTotal` that are still in the buffer. When
+// more chunks arrived than the buffer retains (trim during the window), the
+// trimmed-away middle is unrecoverable — return everything retained rather
+// than nothing, and never re-return chunks from before the baseline (no
+// duplicate replay).
+export function getPtyChunksSinceTotal(key: string, baselineTotal: number): string[] {
+  const buffer = buffers.get(key) ?? []
+  const missed = (totals.get(key) ?? 0) - baselineTotal
+  if (missed <= 0) return []
+  if (missed >= buffer.length) return buffer.slice()
+  return buffer.slice(buffer.length - missed)
 }
 
 // Synchronously drain any chunks staged for the next rAF into the buffer.
@@ -127,7 +155,6 @@ function __previewChunk(chunk: string): string {
 export function appendPtyChunk(key: string, chunk: string): void {
   if (diagPtyEnabled()) {
     __appendSeq += 1
-    // eslint-disable-next-line no-console
     console.log(`[diag:pty-append] #${__appendSeq} key=${key} bytes=${chunk.length} preview="${__previewChunk(chunk)}"`)
   }
   const queue = pending.get(key)

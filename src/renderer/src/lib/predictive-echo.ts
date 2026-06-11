@@ -57,8 +57,16 @@ class HeadlessScreenModel implements ScreenModel {
   }
 }
 
+// The published PredictiveEcho interface omits the engine's hasPredictions
+// getter; the runtime's echo router needs it to decide whether an output
+// flood can bypass the model double-parse (only safe with no optimistic
+// glyphs on screen to reconcile).
+export interface PredictiveEchoWithStatus extends PredictiveEcho {
+  readonly hasPredictions: boolean
+}
+
 export interface PredictiveEchoHandle {
-  engine: PredictiveEcho
+  engine: PredictiveEchoWithStatus
   dispose: () => void
 }
 

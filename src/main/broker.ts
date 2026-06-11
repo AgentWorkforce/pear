@@ -950,18 +950,6 @@ function isInputStreamClosedError(err: unknown): boolean {
   return (err as { code?: unknown } | null | undefined)?.code === 'input_stream_closed'
 }
 
-function getBrokerEventName(event: BrokerEvent): string | undefined {
-  return 'name' in event && typeof event.name === 'string' && event.name.trim()
-    ? event.name
-    : undefined
-}
-
-function getBrokerEventFrom(event: BrokerEvent): string | undefined {
-  return 'from' in event && typeof event.from === 'string' && event.from.trim()
-    ? event.from
-    : undefined
-}
-
 function withBrokerDetailsTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -1068,11 +1056,6 @@ function brokerConnectionPathCandidates(cwd: string): string[] {
     join(cwd, '.agentworkforce', 'relay', 'connection.json'),
     join(cwd, '.agent-relay', 'connection.json')
   ]
-}
-
-function resolveBrokerConnectionPath(cwd: string): string {
-  const candidates = brokerConnectionPathCandidates(cwd)
-  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]
 }
 
 function toInboundDeliveryMode(mode?: TerminalAttachMode): InboundDeliveryMode {
@@ -1414,7 +1397,7 @@ export class BrokerManager {
   // prune) plus the replay query the renderer rehydrates from. BrokerManager
   // keeps event publishing / IPC fan-out inline and delegates storage here.
   private brokerEventHistory = new BrokerEventHistory()
-  private ptyDeduper = new PtyChunkDeduper()
+  private ptyDeduper = new PtyChunkDeduper({ debugEnabled: isBrokerDebugEnabled })
   // Ingress-validation telemetry: last warn time per malformed `kind`
   // (throttled) and the set of unknown `kind`s already logged (once each).
   private malformedEventWarnedAt = new Map<string, number>()
@@ -1664,7 +1647,10 @@ export class BrokerManager {
 
     const { cwd, name, channels } = session
     const brokerPid = session.client.brokerPid
-    let promise!: Promise<boolean>
+    // `let` + undefined: the closure reads `promise` after its first await,
+    // by which point the assignment below has run; TS can't prove that.
+    let promise: Promise<boolean> | undefined
+    // eslint-disable-next-line prefer-const
     promise = (async () => {
       console.warn(`[broker] Broker for project ${projectId} is unreachable; restarting on a fresh port`)
       this.dropSession(projectId, { disconnectOnly: true })
@@ -2474,6 +2460,7 @@ export class BrokerManager {
   }
 
   private forgetAgentSession(name: string, sessionKey: string): void {
+    this.ptyDeduper.forgetStream(sessionKey, name)
     const sessionKeys = this.agentSessions.get(name)
     if (!sessionKeys) return
     sessionKeys.delete(sessionKey)
