@@ -16,6 +16,7 @@ import {
   canListRemoteDirectoryForMountPaths,
   canShowRemoteDirectoryEntryForMountPaths,
   isRelayfilePathWithinRoot,
+  isLinearStatesListablePath,
   isSlackDmListablePath,
   normalizeRemoteDirectoryPath,
   remotePathName
@@ -1111,7 +1112,8 @@ export class IntegrationsManager {
     const allowSlackDms = this.slackDmListingEnabledForProject(projectId)
     const withinScope =
       mountPaths.some((mountPath) => isRelayfilePathWithinRoot(mountPath, path)) ||
-      (allowSlackDms && isSlackDmListablePath(path))
+      (allowSlackDms && isSlackDmListablePath(path)) ||
+      (this.linearStatesListingEnabledForProject(projectId) && isLinearStatesListablePath(path))
     if (!withinScope) {
       throw new Error('Integration remote file is outside this project integration scope')
     }
@@ -1153,7 +1155,30 @@ export class IntegrationsManager {
     }
 
     await this.withIntegrationRemoteWriterHandle(async (handle) => {
-      await handle.client().writeFile({ workspaceId: handle.workspaceId, path, baseRevision: '0', content })
+      const client = handle.client()
+      // The server enforces optimistic concurrency: a write lands only when
+      // baseRevision matches the file's current revision, where '0' means
+      // "must not exist yet". Creates (e.g. Slack writeback message files)
+      // pass on '0', but updates to existing canonical files (e.g. an Issues
+      // status change writing stateId onto the issue record) need the live
+      // revision — read it first, and retry once if a concurrent sync bumps
+      // the file between our read and write.
+      const writeAtCurrentRevision = async (): Promise<void> => {
+        let baseRevision = '0'
+        try {
+          const existing = await client.readFile(handle.workspaceId, path)
+          baseRevision = existing.revision
+        } catch (error) {
+          if (!isHttpStatus(error, 404)) throw error
+        }
+        await client.writeFile({ workspaceId: handle.workspaceId, path, baseRevision, content })
+      }
+      try {
+        await writeAtCurrentRevision()
+      } catch (error) {
+        if (!isHttpStatus(error, 409)) throw error
+        await writeAtCurrentRevision()
+      }
     })
   }
 
@@ -1163,7 +1188,12 @@ export class IntegrationsManager {
     if (!path || path === '/') throw new Error('Integration remote directory path is required')
     const mountPaths = this.listableRemoteMountPaths(projectId)
     const allowSlackDms = this.slackDmListingEnabledForProject(projectId)
-    if (!canListRemoteDirectoryForMountPaths(path, mountPaths) && !(allowSlackDms && isSlackDmListablePath(path))) {
+    const allowLinearStates = this.linearStatesListingEnabledForProject(projectId)
+    if (
+      !canListRemoteDirectoryForMountPaths(path, mountPaths) &&
+      !(allowSlackDms && isSlackDmListablePath(path)) &&
+      !(allowLinearStates && isLinearStatesListablePath(path))
+    ) {
       throw new Error('Integration remote directory is outside this project integration scope')
     }
 
@@ -1182,7 +1212,8 @@ export class IntegrationsManager {
           if (entry.path === path) continue
           if (
             !canShowRemoteDirectoryEntryForMountPaths(entry.path, mountPaths) &&
-            !(allowSlackDms && isSlackDmListablePath(entry.path))
+            !(allowSlackDms && isSlackDmListablePath(entry.path)) &&
+            !(allowLinearStates && isLinearStatesListablePath(entry.path))
           ) {
             continue
           }
@@ -1599,7 +1630,7 @@ export class IntegrationsManager {
       })
       const handle = await setup.joinWorkspace(workspaceId, {
         agentName: mode === 'read' ? 'pear-integrations-reader' : 'pear-integrations-writer',
-        scopes: mode === 'read' ? ['relayfile:fs:read:/**'] : ['relayfile:fs:write:/**']
+        scopes: mode === 'read' ? ['relayfile:fs:read:/**'] : ['relayfile:fs:read:/**', 'relayfile:fs:write:/**']
       })
       if (mode === 'read') this.integrationRemoteReaderHandle = handle
       else this.integrationRemoteWriterHandle = handle
@@ -2299,6 +2330,15 @@ export class IntegrationsManager {
   // only under this flag (see isSlackDmListablePath).
   private slackDmListingEnabledForProject(projectId: string): boolean {
     return this.visibleIntegrationsForProject(projectId).some((integration) => slackListenDms(integration))
+  }
+
+  // True when any visible Linear integration exists for the project. The
+  // /linear/states reference subtree is listable/readable (never writable)
+  // under exactly this condition — see isLinearStatesListablePath.
+  private linearStatesListingEnabledForProject(projectId: string): boolean {
+    return this.visibleIntegrationsForProject(projectId).some(
+      (integration) => toRelayfileProvider(integration.provider) === 'linear'
+    )
   }
 
   private async listSystemMessageAgents(

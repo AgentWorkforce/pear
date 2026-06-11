@@ -62,7 +62,11 @@ const mock = vi.hoisted(() => {
     writeFile: vi.fn(async (input: { workspaceId: string; path: string; baseRevision: string; content: string }) => {
       writeFileCalls.push(input)
       return { opId: 'op-1', status: 'queued' }
-    })
+    }),
+    listTree: vi.fn(async (_workspaceId: string, _options: { path: string; depth?: number; cursor?: string }) => ({
+      entries: [] as Array<{ path: string; type: 'file' | 'dir' }>,
+      nextCursor: null as string | null
+    }))
   }
   const shellOpenExternal = vi.fn(async () => undefined)
   const workspaceHandle = {
@@ -335,6 +339,7 @@ describe('IntegrationsManager', () => {
     mock.joinWorkspaceCalls.splice(0)
     mock.relayClient.readFile.mockClear()
     mock.relayClient.writeFile.mockClear()
+    mock.relayClient.listTree.mockClear()
     mock.shellOpenExternal.mockClear()
     mock.workspaceHandle.requestJson.mockReset()
     mock.workspaceHandle.requestJson.mockImplementation(async (_request: { path: string }) => {
@@ -386,17 +391,23 @@ describe('IntegrationsManager', () => {
     )
   })
 
-  it('writes remote files through Relayfile using the configured project scope', async () => {
+  it('writes remote files at the current revision (read-then-write)', async () => {
     const manager = new IntegrationsManager()
 
     await expect(manager.writeRemoteFile('project-1', '/slack/channels/C123/messages/draft.json', '{"text":"hello"}'))
       .resolves.toBeUndefined()
 
+    // The file exists remotely (mock read returns rev-1), so the write must
+    // carry that revision — not '0', which the server rejects with a 409 for
+    // any existing file (e.g. Issues status changes updating the issue record).
+    expect(mock.readFileCalls).toEqual([
+      { workspaceId: 'account-workspace-id', path: '/slack/channels/C123/messages/draft.json' }
+    ])
     expect(mock.writeFileCalls).toEqual([
       {
         workspaceId: 'account-workspace-id',
         path: '/slack/channels/C123/messages/draft.json',
-        baseRevision: '0',
+        baseRevision: 'rev-1',
         content: '{"text":"hello"}'
       }
     ])
@@ -405,10 +416,101 @@ describe('IntegrationsManager', () => {
         workspaceId: 'account-workspace-id',
         options: {
           agentName: 'pear-integrations-writer',
-          scopes: ['relayfile:fs:write:/**']
+          scopes: ['relayfile:fs:read:/**', 'relayfile:fs:write:/**']
         }
       }
     ])
+  })
+
+  it('creates a new remote file with baseRevision 0 when the pre-write read 404s', async () => {
+    mock.relayClient.readFile.mockRejectedValueOnce(
+      Object.assign(new Error('not found'), { status: 404 })
+    )
+    const manager = new IntegrationsManager()
+
+    await expect(manager.writeRemoteFile('project-1', '/slack/channels/C123/messages/draft.json', '{"text":"hi"}'))
+      .resolves.toBeUndefined()
+
+    expect(mock.writeFileCalls).toEqual([
+      expect.objectContaining({ baseRevision: '0', content: '{"text":"hi"}' })
+    ])
+  })
+
+  it('re-reads and retries exactly once on a revision conflict', async () => {
+    const fileAt = (revision: string) => ({
+      path: '/slack/channels/C123/messages/draft.json',
+      revision,
+      contentType: 'application/json',
+      content: '{}',
+      encoding: 'utf-8' as const
+    })
+    mock.relayClient.readFile
+      .mockResolvedValueOnce(fileAt('rev-1'))
+      .mockResolvedValueOnce(fileAt('rev-2'))
+    mock.relayClient.writeFile.mockRejectedValueOnce(
+      Object.assign(new Error('revision conflict'), { status: 409, code: 'revision_conflict' })
+    )
+    const manager = new IntegrationsManager()
+
+    await expect(manager.writeRemoteFile('project-1', '/slack/channels/C123/messages/draft.json', '{"a":1}'))
+      .resolves.toBeUndefined()
+
+    expect(
+      mock.relayClient.writeFile.mock.calls.map(([input]) => (input as { baseRevision: string }).baseRevision)
+    ).toEqual(['rev-1', 'rev-2'])
+  })
+
+  it('does not swallow a second consecutive revision conflict', async () => {
+    const conflict = () =>
+      Object.assign(new Error('revision conflict'), { status: 409, code: 'revision_conflict' })
+    mock.relayClient.writeFile.mockRejectedValueOnce(conflict()).mockRejectedValueOnce(conflict())
+    const manager = new IntegrationsManager()
+
+    await expect(manager.writeRemoteFile('project-1', '/slack/channels/C123/messages/draft.json', '{}'))
+      .rejects.toMatchObject({ status: 409 })
+    expect(mock.relayClient.writeFile).toHaveBeenCalledTimes(2)
+  })
+
+  it('allows /linear/states list + read when a Linear integration is visible, but never write', async () => {
+    mock.store.projects[0].integrations.push({
+      id: 'linear-integration-1',
+      name: 'Linear',
+      type: 'linear',
+      provider: 'linear',
+      integrationId: 'linear-integration-1',
+      scope: {},
+      mountPaths: ['/linear/issues'],
+      connectedAt: '2026-06-05T00:00:00.000Z',
+      notifyAgent: true,
+      subscribeAgent: false,
+      downloadHistoricalData: false,
+      visibleInProject: true
+    })
+    mock.relayClient.listTree.mockResolvedValueOnce({
+      entries: [
+        { path: '/linear/states', type: 'dir' },
+        { path: '/linear/states/state-1.json', type: 'file' }
+      ],
+      nextCursor: null
+    })
+    const manager = new IntegrationsManager()
+
+    await expect(manager.listRemoteDirectory('project-1', '/linear/states')).resolves.toEqual([
+      { name: 'state-1.json', path: '/linear/states/state-1.json', type: 'file' }
+    ])
+    await expect(manager.readRemoteFile('project-1', '/linear/states/state-1.json'))
+      .resolves.toMatchObject({ kind: 'text' })
+    // The carve-out is read-only: workflow states are reference data.
+    await expect(manager.writeRemoteFile('project-1', '/linear/states/state-1.json', '{}'))
+      .rejects.toThrow('Integration remote file is outside this project integration scope')
+  })
+
+  it('rejects /linear/states listing without a visible Linear integration', async () => {
+    const manager = new IntegrationsManager()
+
+    await expect(manager.listRemoteDirectory('project-1', '/linear/states'))
+      .rejects.toThrow('Integration remote directory is outside this project integration scope')
+    expect(mock.relayClient.listTree).not.toHaveBeenCalled()
   })
 
   it('rejects remote writes outside the configured project scope', async () => {

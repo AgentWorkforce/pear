@@ -47,6 +47,12 @@ export const RECONCILE_QUIET_MS = 1_500
 export const RECONCILE_MIN_REPAIR_GAP_MS = 15_000
 // Confirmations required on consecutive checks before repairing.
 export const RECONCILE_CONFIRM_CHECKS = 2
+// Consecutive quiet checks with snapshot dims ≠ grid dims before the
+// mismatch counts as persistent rather than a resize in flight (one check
+// interval is ample time for the size-sync loop to settle a real resize).
+export const RECONCILE_DIMS_MISMATCH_CHECKS = 2
+export const RECONCILE_DIMS_KICK_GAP_MS = 30_000
+export const RECONCILE_ERROR_LOG_GAP_MS = 60_000
 
 export interface ReconcileSnapshot {
   rows: number
@@ -73,6 +79,20 @@ export interface TerminalReconcilerDeps {
   activitySerial(): number
   /** Force rAF-staged chunks out so the serial reflects everything received. */
   flushPending(): void
+  /**
+   * The PTY and the rendered grid have disagreed on dimensions for
+   * RECONCILE_DIMS_MISMATCH_CHECKS consecutive quiet checks. The dims gate
+   * exists to skip repairs while a resize is propagating — but a PERSISTENT
+   * mismatch means the size-sync loop lost the PTY: the TUI frames its
+   * repaints for the wrong row count (the exact state that creates
+   * stacked-frame corruption), and the gate would otherwise disable this
+   * backstop silently, forever. Wire this to a forced size resync.
+   * Rate-limited by RECONCILE_DIMS_KICK_GAP_MS.
+   */
+  onPersistentDimsMismatch?(
+    grid: { rows: number; cols: number },
+    snapshot: { rows: number; cols: number }
+  ): void
   log?(message: string): void
   now?(): number
 }
@@ -90,6 +110,9 @@ export function createTerminalReconciler(deps: TerminalReconcilerDeps): Terminal
   let disposed = false
   let checking = false
   let mismatchStreak = 0
+  let dimsMismatchStreak = 0
+  let lastDimsKickAt = 0
+  let lastErrorLogAt = 0
   let lastRepairAt = 0
   let repairCount = 0
 
@@ -103,6 +126,13 @@ export function createTerminalReconciler(deps: TerminalReconcilerDeps): Terminal
     checking = true
     try {
       await checkInner()
+    } catch (err) {
+      // A thrown check must never kill the interval loop (snapshotTerminal
+      // degrades to null, but the IPC bridge itself can still reject).
+      if (now() - lastErrorLogAt >= RECONCILE_ERROR_LOG_GAP_MS) {
+        lastErrorLogAt = now()
+        log(`[terminal] reconcile check failed: ${String(err)}`)
+      }
     } finally {
       checking = false
     }
@@ -117,7 +147,25 @@ export function createTerminalReconciler(deps: TerminalReconcilerDeps): Terminal
     if (deps.activitySerial() !== serial || !deps.isQuiet()) return
     const viewport = deps.readViewport()
     if (!viewport) return
-    if (plain.rows !== viewport.rows || plain.cols !== viewport.cols) return
+    if (plain.rows !== viewport.rows || plain.cols !== viewport.cols) {
+      mismatchStreak = 0
+      dimsMismatchStreak += 1
+      if (
+        dimsMismatchStreak >= RECONCILE_DIMS_MISMATCH_CHECKS &&
+        now() - lastDimsKickAt >= RECONCILE_DIMS_KICK_GAP_MS
+      ) {
+        lastDimsKickAt = now()
+        log(
+          `[terminal] PTY ${plain.rows}x${plain.cols} disagrees with grid ${viewport.rows}x${viewport.cols} across ${dimsMismatchStreak} quiet checks; forcing size resync`
+        )
+        deps.onPersistentDimsMismatch?.(
+          { rows: viewport.rows, cols: viewport.cols },
+          { rows: plain.rows, cols: plain.cols }
+        )
+      }
+      return
+    }
+    dimsMismatchStreak = 0
     if (screensMatch(plain.screen, viewport.lines)) {
       mismatchStreak = 0
       return

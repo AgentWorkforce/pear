@@ -3,6 +3,8 @@ import {
   createTerminalReconciler,
   screensMatch,
   RECONCILE_CONFIRM_CHECKS,
+  RECONCILE_DIMS_KICK_GAP_MS,
+  RECONCILE_ERROR_LOG_GAP_MS,
   RECONCILE_MIN_REPAIR_GAP_MS,
   type ReconcileSnapshot,
   type ReconcileViewport,
@@ -157,6 +159,92 @@ describe('createTerminalReconciler', () => {
     state.viewport!.lines.push('')
     await confirmCycles(reconciler)
     expect(repairs).toEqual([])
+    reconciler.dispose()
+  })
+
+  it('requires fresh divergence confirmations after a dims-mismatch skip', async () => {
+    const { deps, repairs, state } = makeHarness()
+    const reconciler = createTerminalReconciler(deps)
+    diverge(state)
+    await reconciler.checkNow()
+    state.viewport = { rows: 3, cols: 10, lines: ['row one', 'GARBAGE tw', ''] }
+    await reconciler.checkNow()
+    state.viewport = { rows: 2, cols: 10, lines: ['row one', 'GARBAGE tw'] }
+    await reconciler.checkNow()
+    expect(repairs).toEqual([])
+    await reconciler.checkNow()
+    expect(repairs).toHaveLength(1)
+    reconciler.dispose()
+  })
+
+  it('escalates a persistent dims mismatch to onPersistentDimsMismatch, rate-limited', async () => {
+    const { deps, repairs, state } = makeHarness()
+    const kicks: Array<{ grid: { rows: number; cols: number }; snapshot: { rows: number; cols: number } }> = []
+    deps.onPersistentDimsMismatch = (grid, snapshot) => kicks.push({ grid, snapshot })
+    const reconciler = createTerminalReconciler(deps)
+    state.viewport = { rows: 3, cols: 10, lines: ['row one', 'row two', ''] }
+    await reconciler.checkNow()
+    // First sighting could be a resize still propagating — no kick yet.
+    expect(kicks).toEqual([])
+    await reconciler.checkNow()
+    expect(kicks).toEqual([
+      { grid: { rows: 3, cols: 10 }, snapshot: { rows: 2, cols: 10 } }
+    ])
+    // Still mismatched inside the kick gap: no re-kick.
+    await reconciler.checkNow()
+    expect(kicks).toHaveLength(1)
+    state.now += RECONCILE_DIMS_KICK_GAP_MS + 1
+    await reconciler.checkNow()
+    expect(kicks).toHaveLength(2)
+    // Dims mismatch never repaints.
+    expect(repairs).toEqual([])
+    reconciler.dispose()
+  })
+
+  it('resets the dims-mismatch streak once dimensions agree again', async () => {
+    const { deps, state } = makeHarness()
+    const kicks: number[] = []
+    deps.onPersistentDimsMismatch = () => kicks.push(1)
+    const reconciler = createTerminalReconciler(deps)
+    const matched = state.viewport!
+    state.viewport = { rows: 3, cols: 10, lines: ['row one', 'row two', ''] }
+    await reconciler.checkNow()
+    state.viewport = matched
+    await reconciler.checkNow()
+    state.viewport = { rows: 3, cols: 10, lines: ['row one', 'row two', ''] }
+    await reconciler.checkNow()
+    expect(kicks).toEqual([])
+    reconciler.dispose()
+  })
+
+  it('survives a throwing snapshot fetch and keeps checking (rate-limited log)', async () => {
+    const { deps, repairs, state } = makeHarness()
+    const logs: string[] = []
+    deps.log = (message) => logs.push(message)
+    let failNext = true
+    const baseFetch = deps.fetchSnapshot
+    deps.fetchSnapshot = async (format) => {
+      if (failNext) {
+        failNext = false
+        throw new Error('ipc bridge dead')
+      }
+      return baseFetch(format)
+    }
+    const reconciler = createTerminalReconciler(deps)
+    diverge(state)
+    await reconciler.checkNow() // throws internally; must not propagate
+    expect(logs.some((m) => m.includes('reconcile check failed'))).toBe(true)
+    await confirmCycles(reconciler)
+    expect(repairs).toHaveLength(1)
+    // Error log is rate-limited: a second failure inside the gap is silent.
+    const logCount = logs.filter((m) => m.includes('reconcile check failed')).length
+    failNext = true
+    await reconciler.checkNow()
+    expect(logs.filter((m) => m.includes('reconcile check failed'))).toHaveLength(logCount)
+    state.now += RECONCILE_ERROR_LOG_GAP_MS + 1
+    failNext = true
+    await reconciler.checkNow()
+    expect(logs.filter((m) => m.includes('reconcile check failed'))).toHaveLength(logCount + 1)
     reconciler.dispose()
   })
 
