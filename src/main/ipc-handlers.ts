@@ -338,6 +338,10 @@ export function registerIpcHandlers(): void {
     await brokerManager.resizePty(projectId, name, rows, cols)
   })
 
+  ipcMain.handle('broker:snapshot-terminal', async (_, projectId: string | undefined, name: string, format: 'plain' | 'ansi') => {
+    return brokerManager.snapshotTerminal(projectId, name, format)
+  })
+
   ipcMain.handle('broker:input-srtt', (_, projectId: string | undefined, name: string) => {
     return brokerManager.getInputSrtt(projectId, name)
   })

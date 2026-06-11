@@ -897,6 +897,9 @@ export const pearMock: PearAPI = {
     getPending: async (): Promise<PendingRelayMessage[]> => [],
     flushPending: async () => ({ flushed: 0 }),
     resizePty: async () => undefined,
+    // No authoritative PTY emulation behind the mock: the reconciler treats
+    // null as "skip this check", so it stays dormant in web/harness builds.
+    snapshotTerminal: async () => null,
     inputSrtt: async () => mockInputSrttMs,
     sendMessage: async (projectId: string | undefined, input: BrokerSendMessageInput) => {
       handleInjectedBrokerEvent({
