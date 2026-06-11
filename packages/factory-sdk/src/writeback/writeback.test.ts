@@ -181,6 +181,31 @@ describe('MountSlackWriteback', () => {
     expect(timeoutMount.writes).toHaveLength(1)
     await expect(timeoutMount.readFile(timeoutMount.writes[0]?.path ?? '')).resolves.toBeTruthy()
   })
+
+  it('preserves non-timestamp thread client IDs with underscores for cold replies', async () => {
+    const mount = new FakeMountClient()
+    const slack = MountSlackWriteback(mount, {
+      channelDir: 'C0AD7UU0J1G__proj_cloud',
+      clientIdPrefix: 'factory_w4',
+    })
+
+    await slack.reply('factory_w4-c0ad7uu0j1g-abc123', 'Cold reply')
+
+    expect(mount.writes).toEqual([
+      {
+        path: slackReplyPath(
+          'C0AD7UU0J1G__proj_cloud',
+          'factory_w4-c0ad7uu0j1g-abc123',
+          'factory_w4-reply-factory_w4-c0ad7uu0j1g-abc123-8417xr',
+        ),
+        content: {
+          channelId: 'C0AD7UU0J1G',
+          thread_ts: 'factory_w4-c0ad7uu0j1g-abc123',
+          text: 'Cold reply',
+        },
+      },
+    ])
+  })
 })
 
 describe('MountGithubRead', () => {
@@ -215,6 +240,31 @@ describe('MountGithubRead', () => {
         { name: 'test', status: 'completed', conclusion: 'success' },
       ],
       mergeable: 'unknown',
+    })
+  })
+
+  it('extracts checks from nested check_runs API payloads', async () => {
+    const mount = new FakeMountClient({
+      '/github/repos/AgentWorkforce__cloud/pulls/by-id/2086.json': {
+        payload: {
+          number: 2086,
+          title: 'Add direct-proxy writeback fast path',
+          state: 'open',
+          check_runs: {
+            total_count: 1,
+            check_runs: [
+              { name: 'build', status: 'completed', conclusion: 'success' },
+            ],
+          },
+        },
+      },
+    })
+    const github = MountGithubRead(mount)
+
+    await expect(github.getPr('AgentWorkforce/cloud', 2086)).resolves.toMatchObject({
+      checks: [
+        { name: 'build', status: 'completed', conclusion: 'success' },
+      ],
     })
   })
 })

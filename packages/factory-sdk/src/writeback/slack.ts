@@ -18,7 +18,8 @@ const channelIdFromDir = (channelDir: string): string => channelDir.split('__')[
 
 const pathTs = (threadTs: string): string => threadTs.replace(/\./g, '_')
 
-const payloadTs = (threadId: string): string => threadId.replace(/_/g, '.')
+const payloadTs = (threadId: string): string =>
+  /^\d+_\d+$/.test(threadId) ? threadId.replace(/_/g, '.') : threadId
 
 const rootClientId = (prefix: string, channelDir: string, text: string): string =>
   `${safePathSegment(prefix)}-${safePathSegment(channelIdFromDir(channelDir))}-${stableHash(text)}`

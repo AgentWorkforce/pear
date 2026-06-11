@@ -19,7 +19,11 @@ const prPath = (repo: string, number: number): string =>
   `/github/repos/${repoDir(repo)}/pulls/by-id/${number}.json`
 
 const checksFromPayload = (payload: Record<string, unknown>): Array<{ name: string; status: string; conclusion?: string }> | undefined => {
-  const checks = payload.checks ?? payload.check_runs ?? payload.status_checks
+  const rawChecks = payload.checks ?? payload.check_runs ?? payload.status_checks
+  const checksRecord = asRecord(rawChecks)
+  const checks = checksRecord
+    ? checksRecord.check_runs ?? checksRecord.status_checks ?? checksRecord.checks
+    : rawChecks
   if (!Array.isArray(checks)) {
     return undefined
   }
