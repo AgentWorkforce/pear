@@ -513,7 +513,7 @@ function createRuntime(
       // intermediate fails) and goes through the retrying sync loop, so a
       // dropped restore IPC can never strand the PTY one row short — the
       // exact mismatch that makes TUI repaints stack down the screen.
-      pear.broker
+      void pear.broker
         .resizePty(opts.projectId, opts.agentName, rows - 1, cols)
         .catch(() => {})
         .then(() => {
