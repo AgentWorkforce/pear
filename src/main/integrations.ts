@@ -1630,7 +1630,7 @@ export class IntegrationsManager {
       })
       const handle = await setup.joinWorkspace(workspaceId, {
         agentName: mode === 'read' ? 'pear-integrations-reader' : 'pear-integrations-writer',
-        scopes: mode === 'read' ? ['relayfile:fs:read:/**'] : ['relayfile:fs:write:/**']
+        scopes: mode === 'read' ? ['relayfile:fs:read:/**'] : ['relayfile:fs:read:/**', 'relayfile:fs:write:/**']
       })
       if (mode === 'read') this.integrationRemoteReaderHandle = handle
       else this.integrationRemoteWriterHandle = handle

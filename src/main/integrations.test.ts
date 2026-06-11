@@ -416,7 +416,7 @@ describe('IntegrationsManager', () => {
         workspaceId: 'account-workspace-id',
         options: {
           agentName: 'pear-integrations-writer',
-          scopes: ['relayfile:fs:write:/**']
+          scopes: ['relayfile:fs:read:/**', 'relayfile:fs:write:/**']
         }
       }
     ])
