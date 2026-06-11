@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { mkdir, mkdtemp, rm, stat, writeFile } from 'node:fs/promises'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { beforeEach, test } from 'node:test'
+import { afterEach, beforeEach, test } from 'node:test'
 
 import type { ChangeEvent, Subscription } from '@relayfile/sdk'
 import {
@@ -77,6 +77,8 @@ type SubscribeCall = {
     onQueueDepth?: (depth: number) => void
   }
 }
+
+const harnessesToClose = new Set<{ bridge: IntegrationEventBridge }>()
 
 function integration(overrides: Partial<ConnectedIntegration> & {
   provider: string
@@ -296,14 +298,7 @@ function makeHarness(
       }
     }
   })
-
-  async function emit(event: ChangeEvent): Promise<void> {
-    assert.equal(subscribeCalls.length, 1, 'expected a single relayfile subscription')
-    subscribeCalls[0].onChange(event)
-    await waitForDispatcherTick()
-  }
-
-  return {
+  const harness = {
     bridge,
     subscribeCalls,
     readFileCalls,
@@ -315,12 +310,27 @@ function makeHarness(
     unsubscribedCount: () => unsubscribedCount,
     emit
   }
+  harnessesToClose.add(harness)
+
+  async function emit(event: ChangeEvent): Promise<void> {
+    assert.equal(subscribeCalls.length, 1, 'expected a single relayfile subscription')
+    subscribeCalls[0].onChange(event)
+    await waitForDispatcherTick()
+  }
+
+  return harness
 }
 
 beforeEach(() => {
   resetIntegrationEventTelemetryForTests()
   delete process.env.PEAR_INTEGRATION_EVENTS_DEBUG
   delete process.env.PEAR_INTEGRATION_EVENT_INJECTED_CONFIRMATION_TIMEOUT_MS
+  delete process.env.PEAR_INTEGRATION_EVENT_INJECTED_RETRY_DELAYS_MS
+})
+
+afterEach(async () => {
+  await Promise.all(Array.from(harnessesToClose).map((harness) => harness.bridge.closeAll()))
+  harnessesToClose.clear()
 })
 
 test('relayfile sdk path filters broaden partial-segment Slack DM globs', () => {
@@ -1217,9 +1227,9 @@ test('slack local context fallback rejects traversal outside matched mount root'
   }
 })
 
-test('slack unchanged-content replay re-drives after injected delivery is not confirmed', async () => {
-  const options = { failInjected: true }
-  const harness = makeHarness(['alice'], options)
+test('slack unchanged-content injected confirmation retries before committing dedupe', async () => {
+  process.env.PEAR_INTEGRATION_EVENT_INJECTED_RETRY_DELAYS_MS = '5,5'
+  const harness = makeHarness(['alice'], { manualInjectedConfirmations: true })
   const warnCalls: unknown[][] = []
   const originalWarn = console.warn
   console.warn = (...args: unknown[]) => {
@@ -1241,20 +1251,125 @@ test('slack unchanged-content replay re-drives after injected delivery is not co
     const path = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
     await harness.emit(changeEvent(path, 'slack'))
     await waitForSent(harness, 1)
+    assert.equal(harness.pendingInjectedConfirmations.length, 1)
+    harness.pendingInjectedConfirmations[0].reject(new Error('delivery injection timed out'))
     await waitUntil(() => warnCalls.some((call) => call[0] === '[integration-events] delivery injected confirmation failed'))
-
-    options.failInjected = false
-    await harness.emit(changeEvent(path, 'slack'))
     await waitForSent(harness, 2)
+    assert.equal(harness.pendingInjectedConfirmations.length, 2)
+    harness.pendingInjectedConfirmations[1].resolve()
+    await waitUntil(() => (getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsInjected || 0) === 1)
+
+    await harness.emit(changeEvent(path, 'slack'))
+    await waitForDropped('project-1', 1)
   } finally {
     console.warn = originalWarn
   }
 
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'alice'])
+  assert.equal(getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsInjected, 1)
 })
 
-test('content-present slack replay waits for hung injected delivery then re-drives after timeout release', async () => {
+test('slack injected confirmation retries exhausted releases dedupe key', async () => {
+  process.env.PEAR_INTEGRATION_EVENT_INJECTED_RETRY_DELAYS_MS = '5,5'
+  const harness = makeHarness(['alice'], { manualInjectedConfirmations: true })
+  const warnCalls: unknown[][] = []
+  const originalWarn = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnCalls.push(args)
+  }
+
+  try {
+    await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+      await harness.bridge.reconcile('project-1', [
+        integration({
+          provider: 'slack',
+          integrationId: 'slack-1',
+          mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+          scope: { notifyAgents: ['alice'] }
+        })
+      ])
+    })
+
+    const path = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
+    await harness.emit(changeEvent(path, 'slack'))
+    await waitForSent(harness, 1)
+    harness.pendingInjectedConfirmations[0].reject(new Error('first delivery was not injected'))
+
+    await waitForSent(harness, 2)
+    harness.pendingInjectedConfirmations[1].reject(new Error('second delivery was not injected'))
+
+    await waitForSent(harness, 3)
+    harness.pendingInjectedConfirmations[2].reject(new Error('third delivery was not injected'))
+
+    await waitUntil(() => warnCalls.some((call) => call[0] === '[integration-events] delivery injected retries exhausted'))
+    const exhaustedWarning = warnCalls.find((call) => call[0] === '[integration-events] delivery injected retries exhausted')
+    assert.equal((exhaustedWarning?.[1] as { recipient?: string }).recipient, 'alice')
+    assert.equal((exhaustedWarning?.[1] as { attempts?: number }).attempts, 3)
+    assert.equal(getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsInjected || 0, 0)
+
+    await harness.emit(changeEvent(path, 'slack'))
+    await waitForSent(harness, 4)
+    harness.pendingInjectedConfirmations[3].resolve()
+    await waitUntil(() => (getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsInjected || 0) === 1)
+  } finally {
+    console.warn = originalWarn
+  }
+
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'alice', 'alice', 'alice'])
+})
+
+test('slack injected confirmation retry resends only failed recipient', async () => {
+  process.env.PEAR_INTEGRATION_EVENT_INJECTED_RETRY_DELAYS_MS = '5,5'
+  const harness = makeHarness(['alice', 'bob'], { manualInjectedConfirmations: true })
+  const warnCalls: unknown[][] = []
+  const originalWarn = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnCalls.push(args)
+  }
+
+  try {
+    await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+      await harness.bridge.reconcile('project-1', [
+        integration({
+          provider: 'slack',
+          integrationId: 'slack-1',
+          mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+          scope: { notifyAgents: ['alice', 'bob'] }
+        })
+      ])
+    })
+
+    const path = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
+    await harness.emit(changeEvent(path, 'slack'))
+    await waitForSent(harness, 2)
+    assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'bob'])
+
+    harness.pendingInjectedConfirmations[0].reject(new Error('alice delivery was not injected'))
+    harness.pendingInjectedConfirmations[1].resolve()
+
+    await waitForSent(harness, 3)
+    assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'bob', 'alice'])
+    assert.equal(harness.pendingInjectedConfirmations.length, 3)
+    harness.pendingInjectedConfirmations[2].resolve()
+    await waitUntil(() => (getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsInjected || 0) === 1)
+    assert.ok(warnCalls.some((call) =>
+      call[0] === '[integration-events] delivery injected confirmation failed' &&
+      (call[1] as { recipient?: string }).recipient === 'alice'
+    ))
+
+    await harness.emit(changeEvent(path, 'slack'))
+    await waitForDropped('project-1', 1)
+  } finally {
+    console.warn = originalWarn
+  }
+
+  assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'bob', 'alice'])
+  assert.equal(getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsInjected, 1)
+})
+
+test('content-present slack replay waits for hung injected delivery retry before dedupe commit', async () => {
   process.env.PEAR_INTEGRATION_EVENT_INJECTED_CONFIRMATION_TIMEOUT_MS = '20'
+  process.env.PEAR_INTEGRATION_EVENT_INJECTED_RETRY_DELAYS_MS = '5,5'
   const options = { waitForInjectedNeverSettles: true }
   const harness = makeHarness(['slack-comms'], options)
   const warnCalls: unknown[][] = []
@@ -1280,13 +1395,13 @@ test('content-present slack replay waits for hung injected delivery then re-driv
     await waitForSent(harness, 1)
 
     // A replay of the same human message arrives while the original steer has
-    // been accepted but has not produced delivery_injected. It must not be
-    // finalized as a duplicate skip; after timeout releases the provisional
-    // claim, this replay re-drives delivery.
+    // been accepted but has not produced delivery_injected. It must wait on the
+    // in-flight claim while the retry path re-drives delivery.
     options.waitForInjectedNeverSettles = false
     await harness.emit(changeEvent(path, 'slack'))
     await waitForSent(harness, 2, 1_500)
     await waitUntil(() => warnCalls.some((call) => call[0] === '[integration-events] delivery injected confirmation failed'))
+    await waitForDropped('project-1', 1, 2_500)
   } finally {
     console.warn = originalWarn
   }
@@ -1294,7 +1409,7 @@ test('content-present slack replay waits for hung injected delivery then re-driv
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['slack-comms', 'slack-comms'])
   assert.match(harness.sent[0].input.text, /Message:\ntargeted Slack context/u)
   assert.match(harness.sent[1].input.text, /Message:\ntargeted Slack context/u)
-  assert.equal(getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsDropped || 0, 0)
+  assert.equal(getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsDropped || 0, 1)
   assert.equal(getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsInjected, 1)
 })
 
@@ -1802,6 +1917,7 @@ test('slack blind thread-reply delivery does not suppress a later content-bearin
 })
 
 test('slack blind commit does not commit an in-flight content-bearing replay hash', async () => {
+  process.env.PEAR_INTEGRATION_EVENT_INJECTED_RETRY_DELAYS_MS = '5,5'
   let readable = false
   const warnCalls: unknown[][] = []
   const originalWarn = console.warn
@@ -1858,9 +1974,12 @@ test('slack blind commit does not commit an in-flight content-bearing replay has
     await waitUntil(() => (getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsInjected || 0) >= 1)
     harness.pendingInjectedConfirmations[1].reject(new Error('content replay was not injected'))
     await waitUntil(() => warnCalls.some((call) => call[0] === '[integration-events] delivery injected confirmation failed'))
+    await waitForSent(harness, 3, 2_500)
+    harness.pendingInjectedConfirmations[2].resolve()
+    await waitUntil(() => (getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsInjected || 0) >= 2)
 
     await harness.emit(changeEvent(replyPath, 'slack', { digest: 'revision:content-retry' }))
-    await waitForSent(harness, 3, 2_500)
+    await waitForDropped('project-1', 1, 2_500)
   } finally {
     console.warn = originalWarn
   }
@@ -1871,6 +1990,7 @@ test('slack blind commit does not commit an in-flight content-bearing replay has
 })
 
 test('slack blind release does not release an in-flight content-bearing replay hash', async () => {
+  process.env.PEAR_INTEGRATION_EVENT_INJECTED_RETRY_DELAYS_MS = '5,5'
   let readable = false
   const warnCalls: unknown[][] = []
   const originalWarn = console.warn
@@ -1925,13 +2045,15 @@ test('slack blind release does not release an in-flight content-bearing replay h
 
     harness.pendingInjectedConfirmations[0].reject(new Error('blind delivery was not injected'))
     await waitUntil(() => warnCalls.some((call) => call[0] === '[integration-events] delivery injected confirmation failed'))
-
-    const duplicateDelivery = harness.emit(changeEvent(replyPath, 'slack', { digest: 'revision:content-duplicate' }))
-    await new Promise((resolve) => setTimeout(resolve, 50))
-    assert.equal(harness.sent.length, 2)
+    await waitForSent(harness, 3, 2_500)
+    harness.pendingInjectedConfirmations[2].reject(new Error('blind retry was not injected'))
+    await waitForSent(harness, 4, 2_500)
+    harness.pendingInjectedConfirmations[3].reject(new Error('blind final retry was not injected'))
+    await waitUntil(() => warnCalls.some((call) => call[0] === '[integration-events] delivery injected retries exhausted'))
 
     harness.pendingInjectedConfirmations[1].resolve()
-    await duplicateDelivery
+    await waitUntil(() => (getIntegrationEventTelemetrySnapshot().projects['project-1']?.eventsInjected || 0) >= 1)
+    await harness.emit(changeEvent(replyPath, 'slack', { digest: 'revision:content-duplicate' }))
     await waitForDropped('project-1', 1, 2_500)
   } finally {
     console.warn = originalWarn
@@ -1939,7 +2061,9 @@ test('slack blind release does not release an in-flight content-bearing replay h
 
   assert.match(harness.sent[0].input.text, /Message: unavailable/u)
   assert.match(harness.sent[1].input.text, /Message:\nlate thread reply content/u)
-  assert.equal(harness.sent.length, 2)
+  assert.match(harness.sent[2].input.text, /Message: unavailable/u)
+  assert.match(harness.sent[3].input.text, /Message: unavailable/u)
+  assert.equal(harness.sent.length, 4)
 })
 
 test('integration event targeted context previews skip binary files', async () => {
@@ -2762,6 +2886,7 @@ test('integration event debug flag enables verbose delivery logs', async () => {
 })
 
 test('integration event delivery failures use aggregated warn cadence by default without verbose logs', async () => {
+  process.env.PEAR_INTEGRATION_EVENT_INJECTED_RETRY_DELAYS_MS = '60000,60000'
   const harness = makeHarness(['alice'], { failSend: true })
   const debugCalls: unknown[][] = []
   const warnCalls: unknown[][] = []
@@ -2787,19 +2912,23 @@ test('integration event delivery failures use aggregated warn cadence by default
     for (let index = 1; index <= 26; index += 1) {
       await harness.emit(changeEvent(`/github/repos/acme/widgets-${index}.json`, 'github'))
     }
-    await waitUntil(() => warnCalls.length === 2)
+    await waitUntil(() =>
+      warnCalls.filter((call) => call[0] === '[integration-events] delivery injected confirmation failed').length === 2
+    )
+    await harness.bridge.close('project-1')
   } finally {
     console.debug = originalDebug
     console.warn = originalWarn
   }
 
+  const deliveryFailureWarnCalls = warnCalls.filter((call) =>
+    call[0] === '[integration-events] delivery injected confirmation failed'
+  )
   assert.equal(debugCalls.length, 0)
-  assert.equal(warnCalls.length, 2)
-  assert.equal(warnCalls[0][0], '[integration-events] delivery injected confirmation failed')
-  assert.equal(warnCalls[1][0], '[integration-events] delivery injected confirmation failed')
-  assert.deepEqual(warnCalls.map((call) => (call[1] as { occurrences: number }).occurrences), [1, 26])
+  assert.equal(deliveryFailureWarnCalls.length, 2)
+  assert.deepEqual(deliveryFailureWarnCalls.map((call) => (call[1] as { occurrences: number }).occurrences), [1, 26])
   assert.deepEqual(
-    warnCalls.map((call) => (call[1] as { suppressedSinceLastLog: number }).suppressedSinceLastLog),
+    deliveryFailureWarnCalls.map((call) => (call[1] as { suppressedSinceLastLog: number }).suppressedSinceLastLog),
     [0, 24]
   )
   const telemetry = getIntegrationEventTelemetrySnapshot().projects['project-1']
@@ -2820,6 +2949,7 @@ test('integration event delivery failures use aggregated warn cadence by default
 })
 
 test('failed deliveries release the dedupe key so duplicate events retry', async () => {
+  process.env.PEAR_INTEGRATION_EVENT_INJECTED_RETRY_DELAYS_MS = '5,5'
   const options = { failSend: true }
   const harness = makeHarness(['alice'], options)
   const warnCalls: unknown[][] = []
@@ -2843,10 +2973,11 @@ test('failed deliveries release the dedupe key so duplicate events retry', async
     const path = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
     await harness.emit(changeEvent(path, 'slack'))
     await waitUntil(() => warnCalls.some((call) => call[0] === '[integration-events] delivery injected confirmation failed'))
+    await waitUntil(() => warnCalls.some((call) => call[0] === '[integration-events] delivery injected retries exhausted'))
     assert.equal(harness.sent.length, 0)
 
     // The same logical change arrives again (remote copy of a local mount
-    // change). The failed injection must not have pinned the dedupe key.
+    // change). Exhausted retries must not have pinned the dedupe key.
     options.failSend = false
     await harness.emit(changeEvent(path, 'slack'))
     await waitForSent(harness, 1)
