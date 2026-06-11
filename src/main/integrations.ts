@@ -1103,6 +1103,24 @@ export class IntegrationsManager {
     }
   }
 
+  async writeRemoteFile(projectId: string, remotePath: string, content: string): Promise<void> {
+    if (!this.findProject(projectId)) throw new Error(`Project not found: ${projectId}`)
+    const path = normalizeRemoteDirectoryPath(remotePath)
+    if (!path || path === '/') throw new Error('Integration remote file path is required')
+    const mountPaths = this.listableRemoteMountPaths(projectId)
+    const allowSlackDms = this.slackDmListingEnabledForProject(projectId)
+    const withinScope =
+      mountPaths.some((mountPath) => isRelayfilePathWithinRoot(mountPath, path)) ||
+      (allowSlackDms && isSlackDmListablePath(path))
+    if (!withinScope) {
+      throw new Error('Integration remote file is outside this project integration scope')
+    }
+
+    await this.withIntegrationRemoteHandle(async (handle) => {
+      await handle.client().writeFile(handle.workspaceId, path, content)
+    })
+  }
+
   async listRemoteDirectory(projectId: string, remotePath: string): Promise<filesystem.ExplorerEntry[]> {
     if (!this.findProject(projectId)) throw new Error(`Project not found: ${projectId}`)
     const path = normalizeRemoteDirectoryPath(remotePath)

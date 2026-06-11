@@ -685,6 +685,10 @@ export function registerIpcHandlers(): void {
     return integrationsManager.readRemoteFile(projectId, remotePath)
   })
 
+  ipcMain.handle('integrations:write-remote-file', async (_, projectId: string, remotePath: string, content: string) => {
+    return integrationsManager.writeRemoteFile(projectId, remotePath, content)
+  })
+
   ipcMain.handle('integrations:list-options', async (_, projectId: string, provider: string, resource: string) => {
     return integrationsManager.listOptions(projectId, provider, resource)
   })

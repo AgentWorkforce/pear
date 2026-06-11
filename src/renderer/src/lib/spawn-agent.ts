@@ -119,6 +119,43 @@ export async function listProjectPersonas(project: Project, rootOverride?: Proje
   return pear.broker.listPersonas(project.id, root.path)
 }
 
+export type TeamComposition = {
+  issueId: string
+  issueIdentifier: string
+  issueTitle: string
+  issueDescription: string
+  repo?: string
+}
+
+export async function spawnTeamForIssue(
+  project: Project,
+  composition: TeamComposition,
+  rootOverride?: ProjectRoot
+): Promise<{ implName: string; reviewName: string }> {
+  const implName = await spawnProjectAgent(project, 'codex', `${composition.issueIdentifier}-impl`, rootOverride)
+  const reviewName = await spawnProjectAgent(project, 'claude', `${composition.issueIdentifier}-review`, rootOverride)
+
+  const implPrompt = [
+    'Implement this issue and open a PR when done.',
+    '',
+    `Issue: ${composition.issueIdentifier} — ${composition.issueTitle}`,
+    composition.issueDescription,
+    composition.repo ? `Repository: ${composition.repo}` : ''
+  ].filter(Boolean).join('\n')
+
+  const reviewPrompt = [
+    `Review the implementation by ${implName} for this issue. Watch for correctness, security, and test coverage.`,
+    '',
+    `Issue: ${composition.issueIdentifier} — ${composition.issueTitle}`,
+    composition.issueDescription
+  ].join('\n')
+
+  await pear.broker.sendMessage(project.id, { to: implName, text: implPrompt })
+  await pear.broker.sendMessage(project.id, { to: reviewName, text: reviewPrompt })
+
+  return { implName, reviewName }
+}
+
 export async function spawnProjectPersona(project: Project, personaId: string, rootOverride?: ProjectRoot): Promise<string> {
   if (rootOverride && !rootOverride.pathExists) {
     throw new Error(`Project root not found: ${rootOverride.path || project.rootPath}`)
