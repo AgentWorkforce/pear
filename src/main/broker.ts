@@ -1397,7 +1397,7 @@ export class BrokerManager {
   // prune) plus the replay query the renderer rehydrates from. BrokerManager
   // keeps event publishing / IPC fan-out inline and delegates storage here.
   private brokerEventHistory = new BrokerEventHistory()
-  private ptyDeduper = new PtyChunkDeduper()
+  private ptyDeduper = new PtyChunkDeduper({ debugEnabled: isBrokerDebugEnabled })
   // Ingress-validation telemetry: last warn time per malformed `kind`
   // (throttled) and the set of unknown `kind`s already logged (once each).
   private malformedEventWarnedAt = new Map<string, number>()
@@ -2460,6 +2460,7 @@ export class BrokerManager {
   }
 
   private forgetAgentSession(name: string, sessionKey: string): void {
+    this.ptyDeduper.forgetStream(sessionKey, name)
     const sessionKeys = this.agentSessions.get(name)
     if (!sessionKeys) return
     sessionKeys.delete(sessionKey)
