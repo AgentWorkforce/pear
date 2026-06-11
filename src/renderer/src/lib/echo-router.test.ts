@@ -32,8 +32,10 @@ const COLS = 80
 
 class HeadlessModel implements ScreenModel {
   private readonly term: Terminal
-  // Test hook: when set, model writes resolve only after this many ms —
-  // simulates a busy renderer where the engine's async tail backs up.
+  // Test hook: when set, model bytes sit in a backlog for this many ms
+  // BEFORE being parsed — the model's cursor/rows stay stale meanwhile.
+  // This is what a busy renderer looks like: xterm's WriteBuffer queues
+  // the chunk and the parse (cursor advance included) happens ticks later.
   writeDelayMs = 0
 
   constructor(cols: number, rows: number) {
@@ -41,10 +43,13 @@ class HeadlessModel implements ScreenModel {
   }
 
   write(data: string): Promise<void> {
-    const written = new Promise<void>((resolve) => this.term.write(data, resolve))
-    if (this.writeDelayMs <= 0) return written
-    const delay = new Promise<void>((resolve) => setTimeout(resolve, this.writeDelayMs))
-    return Promise.all([written, delay]).then(() => {})
+    if (this.writeDelayMs <= 0) {
+      return new Promise<void>((resolve) => this.term.write(data, resolve))
+    }
+    const delay = this.writeDelayMs
+    return new Promise<void>((resolve) =>
+      setTimeout(() => this.term.write(data, resolve), delay)
+    )
   }
 
   cursor(): { row: number; col: number } {
@@ -335,6 +340,41 @@ describe('echo-router — real engine + real parser equivalence', () => {
     await settle(harness)
 
     expect(readScreen(harness.live)).toBe(await reference(a + b + flood))
+  })
+
+  it('skips optimistic echo while a chunk is mid-flight in the engine tail (stale-cursor strand)', async () => {
+    // Get on the engine route with a prompt at row 0.
+    harness.router.onServerOutput('\x1b[2J\x1b[H$ ')
+    harness.setSrtt(80)
+    harness.router.onUserInput('q')
+    await drain(harness.live)
+    await settle(harness)
+    expect(harness.router.route()).toBe('engine')
+
+    // Back up the model parse, deliver a chunk that moves the cursor to a
+    // new row, and type while that chunk's model parse is still backlogged.
+    // The live terminal already shows the chunk (pass-through precedes the
+    // model parse) but the model cursor is still on the OLD row — a
+    // prediction placed now renders at the stale row, overwriting real
+    // content, and the engine's cleanup skips erasing glyphs whose row no
+    // longer matches its prediction row, stranding them on screen.
+    harness.model.writeDelayMs = 30
+    harness.router.onServerOutput('hello\r\nworld$ ')
+    // Let the op start (live write issued, model parse backlogged) …
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    harness.router.onUserInput('a') // mid-flight: optimistic echo must be skipped
+    harness.model.writeDelayMs = 0
+    await new Promise((resolve) => setTimeout(resolve, 80))
+    await settle(harness)
+    expect((harness.engine as PredictiveEchoEngine).hasPredictions).toBe(false)
+
+    // The authoritative echo arrives later and lands at the real cursor.
+    harness.router.onServerOutput('a')
+    await settle(harness)
+
+    expect(readScreen(harness.live)).toBe(
+      await reference('\x1b[2J\x1b[H$ hello\r\nworld$ a')
+    )
   })
 
   it('re-engages predictions after a flood bypass via a fresh reseed', async () => {

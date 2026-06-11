@@ -94,8 +94,10 @@ function readReferenceViewport(stream: string, rows: number, cols: number): Prom
 // Bisect knobs for iterating on a divergence:
 //   STORM_SRTT=0   → engine never engages (direct route only)
 //   STORM_TYPE=0   → no typing (no predictions, no echo traffic)
+//   STORM_CPU=4    → 4x CDP CPU throttling (reproduces slow-CI timing)
 const STORM_SRTT = process.env.STORM_SRTT === '0' ? null : 80
 const STORM_TYPE = process.env.STORM_TYPE !== '0'
+const STORM_CPU = Number(process.env.STORM_CPU || '1')
 
 test.describe('rendering corruption repro — flood + typing + engine routing', () => {
   test('screen stays byte-faithful through an Ink-style storm with engaged predictions', async ({ page }, testInfo) => {
@@ -109,6 +111,10 @@ test.describe('rendering corruption repro — flood + typing + engine routing', 
       window.localStorage.setItem('pear-web-initial-tab', 'agents')
       window.localStorage.setItem('pear-terminal-layout', 'tabs')
     })
+    if (STORM_CPU > 1) {
+      const cdp = await page.context().newCDPSession(page)
+      await cdp.send('Emulation.setCPUThrottlingRate', { rate: STORM_CPU })
+    }
     await page.goto('/')
     await expect(page.getByText('Mock Project')).toBeVisible()
 

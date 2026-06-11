@@ -269,7 +269,17 @@ export function createEchoRouter(deps: EchoRouterDeps): EchoRouter {
       const engine = deps.getEngine()
       if (!engine) return
       if (route === 'engine') {
-        engine.onUserInput(data)
+        // Only hand keystrokes to the engine at a chain-quiescent point.
+        // The engine places optimistic glyphs by reading its confirmed
+        // model's cursor SYNCHRONOUSLY, but while ops are queued a server
+        // chunk has already reached the live terminal whose model parse is
+        // still in flight — the model cursor is stale. A prediction placed
+        // then renders on the wrong row, and the engine's cleanup skips
+        // erasing glyphs whose row no longer matches its prediction row,
+        // stranding them on screen (the stacked-frame-remnant / displaced-
+        // echo corruption class). Skipping only costs the optimistic echo;
+        // the keystroke still reaches the PTY and echoes back.
+        if (queuedOps === 0) engine.onUserInput(data)
         return
       }
       const srtt = deps.getInputSrtt()

@@ -1647,7 +1647,11 @@ export class BrokerManager {
 
     const { cwd, name, channels } = session
     const brokerPid = session.client.brokerPid
-    const promise = (async () => {
+    // `let` + undefined: the closure reads `promise` after its first await,
+    // by which point the assignment below has run; TS can't prove that.
+    let promise: Promise<boolean> | undefined
+    // eslint-disable-next-line prefer-const
+    promise = (async () => {
       console.warn(`[broker] Broker for project ${projectId} is unreachable; restarting on a fresh port`)
       this.dropSession(projectId, { disconnectOnly: true })
       await terminateOwnedBrokerProcess(brokerPid)
@@ -2456,8 +2460,6 @@ export class BrokerManager {
   }
 
   private forgetAgentSession(name: string, sessionKey: string): void {
-    this.ptyStreamDedupe.delete(`${sessionKey}:${name}`)
-    this.ptyStreamsMissingIdentity.delete(`${sessionKey}:${name}`)
     const sessionKeys = this.agentSessions.get(name)
     if (!sessionKeys) return
     sessionKeys.delete(sessionKey)
