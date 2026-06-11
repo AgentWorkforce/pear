@@ -587,6 +587,11 @@ const PERSONA_REGISTRATION_TIMEOUT_MS = 5_000
 const PERSONA_REGISTRATION_STABILITY_MS = 1_000
 const PERSONA_HARNESS_READY_TIMEOUT_MS = 120_000
 const PERSONA_READY_PROBE_TIMEOUT_MS = 5_000
+// How often the harness-ready wait re-checks that the persona's worker is
+// still registered. A workforce CLI that dies during setup (e.g. a failed
+// skill install calls process.exit) would otherwise burn the entire
+// PERSONA_HARNESS_READY_TIMEOUT_MS before surfacing an error.
+const PERSONA_LIVENESS_POLL_MS = 2_000
 const AGENTWORKFORCE_CLI_VERSION = '3.0.51'
 
 function delay(ms: number): Promise<void> {
@@ -632,6 +637,15 @@ function deliveryFailureMessage(event: BrokerEvent): string {
 
 function isWorkerStreamForAgent(event: BrokerEvent, name: string): boolean {
   return brokerEventString(event, 'kind') === 'worker_stream' && brokerEventString(event, 'name') === name
+}
+
+const AGENT_EXIT_EVENT_KINDS = ['agent_exit', 'agent_exited', 'agent_released']
+
+function isAgentExitEventForAgent(event: BrokerEvent, name: string): boolean {
+  return (
+    AGENT_EXIT_EVENT_KINDS.includes(brokerEventString(event, 'kind') || '') &&
+    brokerEventString(event, 'name') === name
+  )
 }
 
 function brokerEventChunk(event: BrokerEvent): string {
@@ -2914,6 +2928,7 @@ export class BrokerManager {
   ): Promise<void> {
     let output = ''
     let timer: ReturnType<typeof setTimeout> | undefined
+    let livenessTimer: ReturnType<typeof setInterval> | undefined
     let settled = false
     let resolveReady: (() => void) | undefined
     let rejectReady: ((error: Error) => void) | undefined
@@ -2922,6 +2937,7 @@ export class BrokerManager {
       if (settled) return
       settled = true
       if (timer) clearTimeout(timer)
+      if (livenessTimer) clearInterval(livenessTimer)
       if (error) {
         rejectReady?.(error)
       } else {
@@ -2929,7 +2945,16 @@ export class BrokerManager {
       }
     }
 
+    const exitedError = (): Error =>
+      new Error(
+        `Workforce persona ${personaId} process exited before its harness became ready. Last output:\n${tailText(output) || '(no output)'}`
+      )
+
     const observe = (event: BrokerEvent): void => {
+      if (isAgentExitEventForAgent(event, name)) {
+        finish(exitedError())
+        return
+      }
       if (!isWorkerStreamForAgent(event, name)) return
       output += brokerEventChunk(event)
       const failure = personaHarnessFailedFromOutput(output)
@@ -2959,6 +2984,25 @@ export class BrokerManager {
     const unsubscribe = session.client.onEvent((event) => {
       observe(event)
     })
+    // Belt-and-suspenders for exits the event stream can miss (e.g. the
+    // worker died between spawn and this subscription): poll registration
+    // and fail fast when the agent is gone instead of waiting out the full
+    // readiness timeout. agent_exit handling releases dead workers, so a
+    // missing name in listAgents means the CLI process is gone.
+    livenessTimer = setInterval(() => {
+      void session.client
+        .listAgents()
+        .then((agents) => {
+          if (settled) return
+          if (!agents.some((agent) => agent.name === name)) {
+            finish(exitedError())
+          }
+        })
+        .catch(() => {
+          // Transient broker errors are fine — the readiness timeout still
+          // bounds the wait.
+        })
+    }, PERSONA_LIVENESS_POLL_MS)
 
     try {
       const events = this.workerStreamEvents(session, name, 1000)
@@ -2971,6 +3015,7 @@ export class BrokerManager {
       await readyPromise
     } finally {
       if (timer) clearTimeout(timer)
+      if (livenessTimer) clearInterval(livenessTimer)
       unsubscribe()
     }
   }

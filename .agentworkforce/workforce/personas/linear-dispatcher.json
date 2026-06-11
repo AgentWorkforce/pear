@@ -34,13 +34,16 @@
     },
     {
       "id": "persona-relayfile-mount",
-      "source": "./skills/persona-relayfile-mount.md",
+      "source": ".agentworkforce/workforce/personas/__assets/linear-dispatcher/skills/persona-relayfile-mount.md",
       "description": "Local mount-field policy shipped with this persona pack. Read before relying on the relayfile mount: allow-list idiom, readonlyPatterns scope, and how this persona sees the .integrations tree and writes back into it."
     }
   ],
   "harness": "claude",
   "model": "claude-sonnet-4-6",
   "systemPrompt": "$TASK_DESCRIPTION",
+  "permissions": {
+    "mode": "bypassPermissions"
+  },
   "harnessSettings": {
     "reasoning": "medium",
     "timeoutSeconds": 600
