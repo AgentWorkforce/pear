@@ -79,7 +79,20 @@ describe('MountLinearWriteback', () => {
       },
     ])
     expect(commentPath).toContain('/linear/issues/AR-99__04ef067e-35b6-4ec4-81e7-66acc1f2e31f.json/comments/')
+    expect(commentPath).toMatch(/\/comments\/[^/]+\.json$/)
+    expect(commentPath.endsWith('.json.json')).toBe(false)
     expect(await linear.verify(issue, { commentName })).toBe(true)
+  })
+
+  it('surfaces non-acked state writebacks even when local read-back matches', async () => {
+    const mount = new FakeMountClient({
+      [issuePath]: { stateId: 'ready-state' },
+    })
+    mount.setConfirmWrite(issuePath, 'timeout')
+    const linear = MountLinearWriteback(mount)
+
+    await expect(linear.setState(issue, 'implementing-state')).rejects.toThrow(/not acked/)
+    expect(await linear.verify(issue, { stateId: 'implementing-state' })).toBe(true)
   })
 
   it('surfaces stale writebacks instead of swallowing read-back failures', async () => {
@@ -141,6 +154,32 @@ describe('MountSlackWriteback', () => {
       thread_ts: '1780751612.176219',
       text: 'Full PR links:\nhttps://github.example/pr/1',
     })
+  })
+
+  it('surfaces non-acked thread writes even when local read-back succeeds', async () => {
+    class TimeoutAfterWriteMountClient extends FakeMountClient {
+      override async confirmWrite(
+        path: string,
+        opts?: { timeoutMs?: number },
+      ): Promise<'acked' | 'pending' | 'failed' | 'timeout'> {
+        void path
+        void opts
+        return 'timeout'
+      }
+    }
+
+    const timeoutMount = new TimeoutAfterWriteMountClient()
+    const timeoutSlack = MountSlackWriteback(timeoutMount, {
+      channelDir: 'C0AD7UU0J1G__proj-cloud',
+      clientIdPrefix: 'factory-w4',
+    })
+
+    await expect(timeoutSlack.postThread({
+      channel: 'C0AD7UU0J1G__proj-cloud',
+      text: 'Another shipped update',
+    })).rejects.toThrow(/not acked/)
+    expect(timeoutMount.writes).toHaveLength(1)
+    await expect(timeoutMount.readFile(timeoutMount.writes[0]?.path ?? '')).resolves.toBeTruthy()
   })
 })
 

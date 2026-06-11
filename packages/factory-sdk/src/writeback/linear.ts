@@ -25,7 +25,7 @@ const issuePath = (issue: LinearIssue): string =>
   issue.path || linearIssuePath(issue.key, issue.uuid)
 
 export const linearCommentName = (issue: LinearIssue, body: string): string =>
-  `factory-${safePathSegment(issue.key)}-${stableHash(body)}.json`
+  `factory-${safePathSegment(issue.key)}-${stableHash(body)}`
 
 const issueUrl = (issue: LinearIssue): string => {
   const rawUrl = asRecord(issue.raw)?.url
@@ -57,8 +57,8 @@ const confirmWriteback = async (
   verify: () => Promise<boolean>,
 ): Promise<void> => {
   const confirmation = await mount.confirmWrite(path, { timeoutMs: 90_000 })
-  if (confirmation === 'failed') {
-    throw new Error(`Writeback failed for ${path}`)
+  if (confirmation !== 'acked') {
+    throw new Error(`Writeback not acked for ${path}: ${confirmation}`)
   }
 
   if (!await verify()) {

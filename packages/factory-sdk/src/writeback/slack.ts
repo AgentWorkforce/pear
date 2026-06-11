@@ -28,8 +28,8 @@ const replyClientId = (prefix: string, threadId: string, text: string): string =
 
 const confirmPath = async (mount: MountClient, path: string): Promise<void> => {
   const confirmation = await mount.confirmWrite(path, { timeoutMs: 90_000 })
-  if (confirmation === 'failed') {
-    throw new Error(`Writeback failed for ${path}`)
+  if (confirmation !== 'acked') {
+    throw new Error(`Writeback not acked for ${path}: ${confirmation}`)
   }
 
   await mount.readFile(path)
