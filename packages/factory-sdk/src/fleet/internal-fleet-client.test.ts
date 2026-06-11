@@ -377,4 +377,86 @@ describe('InternalFleetClient', () => {
       vi.useRealTimers()
     }
   })
+
+  it('reports a same-name exit after a successful restart starts a new lifecycle', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-11T00:00:00.000Z'))
+
+    try {
+      const harness = new FakeHarnessDriverClient()
+      const fleet = new InternalFleetClient({ client: harness })
+      const exits: Array<{ name: string; reason?: string }> = []
+
+      fleet.onAgentExit((name, reason) => exits.push({ name, reason }))
+
+      harness.emit({
+        kind: 'agent_exited',
+        name: 'ar-1-impl',
+        code: 1,
+        reason: 'crashed',
+        event_id: 'exit-event-1',
+      } as BrokerEvent)
+
+      await fleet.spawn({
+        name: 'ar-1-impl',
+        capability: 'spawn:codex',
+      })
+
+      harness.emit({
+        kind: 'agent_exited',
+        name: 'ar-1-impl',
+        code: 1,
+        reason: 'crashed-again',
+        event_id: 'exit-event-2',
+      } as BrokerEvent)
+
+      expect(exits).toEqual([
+        { name: 'ar-1-impl', reason: 'crashed' },
+        { name: 'ar-1-impl', reason: 'crashed-again' },
+      ])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('reports a same-name exit after a successful resume starts a new lifecycle', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-11T00:00:00.000Z'))
+
+    try {
+      const harness = new FakeHarnessDriverClient()
+      const fleet = new InternalFleetClient({ client: harness })
+      const exits: Array<{ name: string; reason?: string }> = []
+
+      fleet.onAgentExit((name, reason) => exits.push({ name, reason }))
+
+      harness.emit({
+        kind: 'agent_exited',
+        name: 'ar-1-impl',
+        code: 1,
+        reason: 'crashed',
+        event_id: 'exit-event-1',
+      } as BrokerEvent)
+
+      await fleet.resume({
+        name: 'ar-1-impl',
+        sessionRef: 'session-1',
+      })
+
+      harness.emit({
+        kind: 'agent_exited',
+        name: 'ar-1-impl',
+        code: 1,
+        reason: 'crashed-again',
+        event_id: 'exit-event-2',
+      } as BrokerEvent)
+
+      expect(exits).toEqual([
+        { name: 'ar-1-impl', reason: 'crashed' },
+        { name: 'ar-1-impl', reason: 'crashed-again' },
+      ])
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })

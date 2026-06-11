@@ -92,6 +92,8 @@ export class InternalFleetClient implements FleetClient {
       continueFrom: input.sessionRef,
     })
 
+    this.#forgetAgentExit(input.name)
+    this.#forgetAgentExit(handle.name)
     return { name: handle.name, sessionRef: sessionRefFrom(handle) }
   }
 
@@ -106,6 +108,8 @@ export class InternalFleetClient implements FleetClient {
       continueFrom: input.sessionRef,
     })
 
+    this.#forgetAgentExit(input.name ?? input.sessionRef)
+    this.#forgetAgentExit(handle.name)
     return { name: handle.name, sessionRef: sessionRefFrom(handle) ?? input.sessionRef }
   }
 
@@ -318,6 +322,10 @@ export class InternalFleetClient implements FleetClient {
         this.#recentAgentExits.delete(name)
       }
     }
+  }
+
+  #forgetAgentExit(name: string): void {
+    this.#recentAgentExits.delete(name)
   }
 
   #rememberEvent(identity: EventIdentity): boolean {
