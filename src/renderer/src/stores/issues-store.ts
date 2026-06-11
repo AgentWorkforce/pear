@@ -22,10 +22,15 @@ export interface IssueViewModel {
   description: string
   stage: string
   stageType?: string
+  stateId?: string
+  /** Canonical mount path of the issue file, used for writeback (state changes, comments). */
+  issueRemotePath?: string
   actor: 'agent' | 'pairing' | 'human' | 'unknown'
   labels: string[]
   assigneeName?: string
   assignedAgentName?: string
+  teamId?: string
+  teamKey?: string
   teamName?: string
   projectName?: string
   priority?: number
@@ -40,6 +45,12 @@ export interface IssueViewModel {
   githubLinks: IssueGithubLink[]
 }
 
+export interface IssueWorkflowState {
+  id: string
+  name: string
+  type?: string
+}
+
 interface IssuesState {
   issues: IssueViewModel[]
   loading: boolean
@@ -48,6 +59,12 @@ interface IssuesState {
   lastLoadedAt: number | null
   load: (projectId: string, options?: { force?: boolean }) => Promise<void>
   subscribe: (projectId: string) => () => void
+  /**
+   * Change an issue's Linear workflow state via writeback. Writes the target
+   * `stateId` to the canonical issue file path and optimistically updates the
+   * local view model; the resulting `relayfile-change` event reconciles it.
+   */
+  setIssueState: (projectId: string, issueId: string, state: IssueWorkflowState) => Promise<void>
 }
 
 const STAGE_ORDER = ['Backlog', 'Planning', 'To do', 'In Progress', 'In review', 'Merged', 'Done']
@@ -221,7 +238,11 @@ async function readGithubLink(projectId: string, sync: Record<string, unknown>):
   }
 }
 
-async function normalizeIssue(projectId: string, raw: Record<string, unknown>): Promise<IssueViewModel> {
+async function normalizeIssue(
+  projectId: string,
+  raw: Record<string, unknown>,
+  remotePath?: string
+): Promise<IssueViewModel> {
   const issue = payloadRecord(raw)
   const state = readRecord(issue.state)
   const attention = readRecord(issue.attention)
@@ -247,10 +268,14 @@ async function normalizeIssue(projectId: string, raw: Record<string, unknown>): 
     description: readString(issue.description) || '',
     stage,
     stageType: readString(state.type),
+    stateId: readString(state.id) || readString(issue.stateId) || readString(issue.state_id),
+    issueRemotePath: remotePath,
     actor: resolveActor(labels, !!assigneeName),
     labels,
     assigneeName,
     assignedAgentName,
+    teamId: readString(team.id) || readString(issue.teamId) || readString(issue.team_id),
+    teamKey: readString(team.key),
     teamName: readString(team.name) || readString(team.key),
     projectName: readString(project.name),
     priority: readNumber(issue.priority),
@@ -268,6 +293,31 @@ async function normalizeIssue(projectId: string, raw: Record<string, unknown>): 
     trajectoryId: readString(agentSession.trajectoryId),
     githubLinks
   }
+}
+
+/**
+ * Build the writeback payload for an issue state change. Written to the
+ * canonical issue file path; the Linear adapter interprets `stateId` as a
+ * workflow-state transition. Only identity + the changed state are included —
+ * read-only fields (url, timestamps, actor) are deliberately omitted so the
+ * adapter derives them, mirroring the comment-writeback contract.
+ */
+function buildStateWritebackPayload(issue: IssueViewModel, state: IssueWorkflowState): Record<string, unknown> {
+  const payload: Record<string, unknown> = {
+    id: issue.id,
+    identifier: issue.identifier,
+    stateId: state.id,
+    state: state.type ? { id: state.id, name: state.name, type: state.type } : { id: state.id, name: state.name }
+  }
+  if (issue.teamId) payload.teamId = issue.teamId
+  if (issue.teamId || issue.teamKey || issue.teamName) {
+    const team: Record<string, string> = {}
+    if (issue.teamId) team.id = issue.teamId
+    if (issue.teamKey) team.key = issue.teamKey
+    if (issue.teamName) team.name = issue.teamName
+    payload.team = team
+  }
+  return payload
 }
 
 function isIssueFile(entry: FsDirEntry): boolean {
@@ -313,13 +363,14 @@ export const useIssuesStore = create<IssuesState>((set, get) => ({
         const records = await Promise.all(
           entries.filter(isIssueFile).map(async (entry) => {
             const preview = await pear.integrations.readRemoteFile(projectId, entry.path)
-            return preview.kind === 'text' ? parseJsonPreview(preview.content, entry.path) : null
+            const record = preview.kind === 'text' ? parseJsonPreview(preview.content, entry.path) : null
+            return record ? { path: entry.path, record } : null
           })
         )
         const issues = await Promise.all(
           records
-            .filter((record): record is Record<string, unknown> => !!record)
-            .map((record) => normalizeIssue(projectId, record))
+            .filter((entry): entry is { path: string; record: Record<string, unknown> } => !!entry)
+            .map(({ path, record }) => normalizeIssue(projectId, record, path))
         )
 
         set({
@@ -370,6 +421,34 @@ export const useIssuesStore = create<IssuesState>((set, get) => ({
         refreshTimer = null
       }
     }
+  },
+
+  setIssueState: async (projectId, issueId, state) => {
+    const issue = get().issues.find((candidate) => candidate.id === issueId)
+    if (!issue) throw new Error(`Issue ${issueId} not found`)
+    if (!issue.issueRemotePath) throw new Error('Issue is missing its mount path; cannot change status')
+    if (!state.id) throw new Error('Target workflow state id is required')
+    if (state.id === issue.stateId) return
+
+    const payload = buildStateWritebackPayload(issue, state)
+    await pear.integrations.writeRemoteFile(projectId, issue.issueRemotePath, JSON.stringify(payload, null, 2))
+
+    // Optimistic update; the resulting relayfile-change event reconciles via load().
+    set((current) => ({
+      issues: sortIssues(
+        current.issues.map((candidate) =>
+          candidate.id === issueId
+            ? {
+                ...candidate,
+                stage: state.name,
+                stageType: state.type ?? candidate.stageType,
+                stateId: state.id,
+                band: classifyIssue(state.name, state.type, candidate.labels, {})
+              }
+            : candidate
+        )
+      )
+    }))
   }
 }))
 

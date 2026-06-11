@@ -38,6 +38,9 @@
   "harness": "claude",
   "model": "claude-sonnet-4-6",
   "systemPrompt": "$TASK_DESCRIPTION",
+  "permissions": {
+    "mode": "bypassPermissions"
+  },
   "harnessSettings": {
     "reasoning": "medium",
     "timeoutSeconds": 600

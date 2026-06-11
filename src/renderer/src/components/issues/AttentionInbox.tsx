@@ -23,7 +23,7 @@ import { detectRepo } from '@/lib/issue-scoping'
 import { jumpToIssueWork } from '@/lib/issue-navigation'
 import { spawnTeamForIssue, type TeamComposition } from '@/lib/spawn-agent'
 import { useAgentStore, type ChatMessage } from '@/stores/agent-store'
-import { useIssuesStore, type IssueBand, type IssueGithubLink, type IssueViewModel } from '@/stores/issues-store'
+import { useIssuesStore, type IssueBand, type IssueGithubLink, type IssueViewModel, type IssueWorkflowState } from '@/stores/issues-store'
 import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 
@@ -360,11 +360,15 @@ function IssueGroupSection({
 function DetailPanel({
   issue,
   narration,
-  onOpenLiveProject
+  availableStates,
+  onOpenLiveProject,
+  onChangeState
 }: {
   issue: IssueViewModel | null
   narration: string
+  availableStates: IssueWorkflowState[]
   onOpenLiveProject: () => void
+  onChangeState: (issue: IssueViewModel, state: IssueWorkflowState) => void
 }): React.ReactNode {
   if (!issue) {
     return (
@@ -421,7 +425,34 @@ function DetailPanel({
 
       <div className="mt-5">
         <div className="text-[12px] font-semibold uppercase tracking-[0.12em] text-[var(--pear-text-faint)]">Status detail</div>
-        <dl className="mt-2 grid grid-cols-[88px_1fr] gap-x-3 gap-y-2 text-sm">
+        <dl className="mt-2 grid grid-cols-[88px_1fr] items-center gap-x-3 gap-y-2 text-sm">
+          <dt className="text-[var(--pear-text-faint)]">Status</dt>
+          <dd className="text-[var(--pear-text)]">
+            {issue.stateId && issue.issueRemotePath && availableStates.length > 0 ? (
+              <select
+                value={issue.stateId}
+                onChange={(event) => {
+                  const next = availableStates.find((state) => state.id === event.target.value)
+                  if (next && next.id !== issue.stateId) onChangeState(issue, next)
+                }}
+                className="w-full rounded-md border border-[var(--pear-border)] bg-[var(--pear-bg-surface)] px-2 py-1 text-[13px] font-medium text-[var(--pear-text)] focus:border-[var(--pear-purple)] focus:outline-none"
+                title="Change Linear status"
+              >
+                {!availableStates.some((state) => state.id === issue.stateId) && (
+                  <option value={issue.stateId}>{issue.stage}</option>
+                )}
+                {availableStates.map((state) => (
+                  <option key={state.id} value={state.id}>
+                    {state.name}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span className={`inline-block rounded-full border px-2 py-0.5 text-[11px] font-semibold ${stageClass(issue.stage)}`}>
+                {issue.stage}
+              </span>
+            )}
+          </dd>
           <dt className="text-[var(--pear-text-faint)]">Owner</dt>
           <dd className="text-[var(--pear-text)]">{issue.assignedAgentName || issue.assigneeName || 'Unassigned'}</dd>
           <dt className="text-[var(--pear-text-faint)]">Actor</dt>
@@ -529,6 +560,7 @@ export function AttentionInbox({
   const lastLoadedAt = useIssuesStore((s) => s.lastLoadedAt)
   const load = useIssuesStore((s) => s.load)
   const subscribe = useIssuesStore((s) => s.subscribe)
+  const setIssueState = useIssuesStore((s) => s.setIssueState)
   const [expandedBands, setExpandedBands] = useState<Record<IssueBand, boolean>>({
     'needs-you': true,
     'ready-for-agent': true,
@@ -571,6 +603,18 @@ export function AttentionInbox({
     () => orderStages(Array.from(new Set(issues.map((issue) => issue.stage)))),
     [issues]
   )
+  // Distinct workflow states that carry a stateId — the only ones we can write back to.
+  const availableStates = useMemo<IssueWorkflowState[]>(() => {
+    const byId = new Map<string, IssueWorkflowState>()
+    for (const issue of issues) {
+      if (issue.stateId && !byId.has(issue.stateId)) {
+        byId.set(issue.stateId, { id: issue.stateId, name: issue.stage, type: issue.stageType })
+      }
+    }
+    return orderStages(Array.from(byId.values()).map((state) => state.name)).map(
+      (name) => Array.from(byId.values()).find((state) => state.name === name) as IssueWorkflowState
+    )
+  }, [issues])
   const activeStatusFilter = statusFilter && availableStages.includes(statusFilter) ? statusFilter : null
   const visibleIssues = activeStatusFilter
     ? issues.filter((issue) => issue.stage === activeStatusFilter)
@@ -611,6 +655,19 @@ export function AttentionInbox({
   async function openLiveProject(issue: IssueViewModel): Promise<void> {
     const result = await jumpToIssueWork(issue)
     setNavNotice(result.message)
+  }
+
+  async function handleChangeState(issue: IssueViewModel, state: IssueWorkflowState): Promise<void> {
+    if (!resolvedProjectId) {
+      setNavNotice('No project for status change')
+      return
+    }
+    try {
+      await setIssueState(resolvedProjectId, issue.id, state)
+      setNavNotice(`Moved ${issue.identifier} → ${state.name}`)
+    } catch (error) {
+      setNavNotice(error instanceof Error ? error.message : 'Failed to change status')
+    }
   }
 
   async function handleSpawnTeam(issue: IssueViewModel): Promise<void> {
@@ -794,7 +851,9 @@ export function AttentionInbox({
       <DetailPanel
         issue={selectedIssue}
         narration={selectedIssue ? narrations.get(selectedIssue.id) || selectedIssue.agentNarration || '' : ''}
+        availableStates={availableStates}
         onOpenLiveProject={() => selectedIssue && void openLiveProject(selectedIssue)}
+        onChangeState={handleChangeState}
       />
 
       {navNotice && (
