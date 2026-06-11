@@ -12,6 +12,7 @@ import {
   GitFork,
   GitPullRequest,
   Inbox,
+  Layers,
   MessageSquare,
   RefreshCw,
   Reply,
@@ -241,29 +242,35 @@ function IssueOverviewCard({
   )
 }
 
-function BandSection({
-  band,
+function IssueGroupSection({
+  title,
+  subtitle,
+  icon,
+  count,
   issues,
   selectedIssueId,
   expanded,
   expandedChatIds,
   narrations,
+  emptyLabel,
   onToggleExpanded,
   onSelectIssue,
   onToggleChat
 }: {
-  band: IssueBand
+  title: string
+  subtitle?: string
+  icon: React.ReactNode
+  count: number
   issues: IssueViewModel[]
   selectedIssueId: string | null
   expanded: boolean
   expandedChatIds: Set<string>
   narrations: Map<string, string>
+  emptyLabel: string
   onToggleExpanded: () => void
   onSelectIssue: (issueId: string) => void
   onToggleChat: (issueId: string) => void
 }): React.ReactNode {
-  const title = BAND_TITLES[band]
-  const subtitle = BAND_SUBTITLES[band]
   const Chevron = expanded ? ChevronDown : ChevronRight
 
   return (
@@ -275,18 +282,18 @@ function BandSection({
         aria-expanded={expanded}
       >
         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-[var(--pear-bg)]">
-          {bandIcon(band)}
+          {icon}
         </span>
         <span className="min-w-0 flex-1">
           <span className="flex items-center gap-2">
-            <span className="text-[12px] font-semibold uppercase tracking-[0.12em] text-[var(--pear-text)]">
+            <span className="truncate text-[12px] font-semibold uppercase tracking-[0.12em] text-[var(--pear-text)]">
               {title}
             </span>
             <span className="rounded-full bg-[var(--pear-bg)] px-1.5 py-0.5 text-[10px] font-semibold text-[var(--pear-text-faint)]">
-              {issues.length}
+              {count}
             </span>
           </span>
-          <span className="mt-0.5 block text-[11px] text-[var(--pear-text-faint)]">{subtitle}</span>
+          {subtitle && <span className="mt-0.5 block text-[11px] text-[var(--pear-text-faint)]">{subtitle}</span>}
         </span>
         <Chevron size={15} className="shrink-0 text-[var(--pear-text-faint)]" />
       </button>
@@ -295,7 +302,7 @@ function BandSection({
         <div className="mt-3 space-y-2">
           {issues.length === 0 ? (
             <div className="rounded-lg border border-dashed border-[var(--pear-border-subtle)] px-4 py-6 text-center text-[12px] text-[var(--pear-text-faint)]">
-              {band === 'needs-you' ? 'All clear.' : 'Nothing here.'}
+              {emptyLabel}
             </div>
           ) : (
             issues.map((issue) => (
@@ -447,6 +454,27 @@ function issuesByBand(issues: IssueViewModel[], band: IssueBand): IssueViewModel
   return issues.filter((issue) => issue.band === band)
 }
 
+type GroupMode = 'band' | 'project'
+
+const NO_PROJECT_LABEL = 'No project'
+
+// Groups issues by project name, preserving the store's global sort order within each
+// group. Returns entries sorted alphabetically with the "No project" bucket pinned last.
+function issuesByProject(issues: IssueViewModel[]): Array<[string, IssueViewModel[]]> {
+  const groups = new Map<string, IssueViewModel[]>()
+  for (const issue of issues) {
+    const key = issue.projectName?.trim() || NO_PROJECT_LABEL
+    const existing = groups.get(key)
+    if (existing) existing.push(issue)
+    else groups.set(key, [issue])
+  }
+  return Array.from(groups.entries()).sort(([left], [right]) => {
+    if (left === NO_PROJECT_LABEL) return 1
+    if (right === NO_PROJECT_LABEL) return -1
+    return left.localeCompare(right)
+  })
+}
+
 interface AttentionInboxProps {
   projectId?: string
   projectName?: string
@@ -474,6 +502,8 @@ export function AttentionInbox({
   })
   const [expandedChatIds, setExpandedChatIds] = useState<Set<string>>(() => new Set())
   const [statusFilter, setStatusFilter] = useState<string | null>(null)
+  const [groupMode, setGroupMode] = useState<GroupMode>('band')
+  const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(() => new Set())
   const selectedIssueId = useUIStore((s) => s.selectedIssueId)
   const setSelectedIssueId = useUIStore((s) => s.setSelectedIssueId)
   const [navNotice, setNavNotice] = useState<string | null>(null)
@@ -515,9 +545,22 @@ export function AttentionInbox({
   const needsYou = issuesByBand(visibleIssues, 'needs-you')
   const inMotion = issuesByBand(visibleIssues, 'in-motion')
   const settled = issuesByBand(visibleIssues, 'settled')
+  const projectGroups = useMemo(
+    () => (groupMode === 'project' ? issuesByProject(visibleIssues) : []),
+    [groupMode, visibleIssues]
+  )
 
   function toggleBand(band: IssueBand): void {
     setExpandedBands((current) => ({ ...current, [band]: !current[band] }))
+  }
+
+  function toggleProject(name: string): void {
+    setCollapsedProjects((current) => {
+      const next = new Set(current)
+      if (next.has(name)) next.delete(name)
+      else next.add(name)
+      return next
+    })
   }
 
   function toggleChat(issueId: string): void {
@@ -569,6 +612,11 @@ export function AttentionInbox({
               </>
             )}
           </div>
+          <div className="mt-3 flex flex-wrap items-center gap-1.5">
+            <span className="mr-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--pear-text-faint)]">Group</span>
+            <StatusFilterChip label="Band" active={groupMode === 'band'} onClick={() => setGroupMode('band')} />
+            <StatusFilterChip label="Project" active={groupMode === 'project'} onClick={() => setGroupMode('project')} />
+          </div>
           {availableStages.length > 1 && (
             <div className="mt-3 flex flex-wrap items-center gap-1.5">
               <span className="mr-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--pear-text-faint)]">Status</span>
@@ -593,37 +641,71 @@ export function AttentionInbox({
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-2">
           {loading && issues.length === 0 ? (
             <div className="flex h-full items-center justify-center text-sm text-[var(--pear-text-faint)]">Loading issues...</div>
+          ) : groupMode === 'project' ? (
+            projectGroups.length === 0 ? (
+              <div className="flex h-full items-center justify-center text-sm text-[var(--pear-text-faint)]">No issues to group.</div>
+            ) : (
+              projectGroups.map(([name, groupIssues]) => (
+                <IssueGroupSection
+                  key={name}
+                  title={name}
+                  icon={<Layers size={15} className="text-[var(--pear-purple)]" />}
+                  count={groupIssues.length}
+                  issues={groupIssues}
+                  selectedIssueId={selectedIssueId}
+                  expanded={!collapsedProjects.has(name)}
+                  expandedChatIds={expandedChatIds}
+                  narrations={narrations}
+                  emptyLabel="Nothing here."
+                  onToggleExpanded={() => toggleProject(name)}
+                  onSelectIssue={setSelectedIssueId}
+                  onToggleChat={toggleChat}
+                />
+              ))
+            )
           ) : (
             <>
-              <BandSection
-                band="needs-you"
+              <IssueGroupSection
+                title={BAND_TITLES['needs-you']}
+                subtitle={BAND_SUBTITLES['needs-you']}
+                icon={bandIcon('needs-you')}
+                count={needsYou.length}
                 issues={needsYou}
                 selectedIssueId={selectedIssueId}
                 expanded={expandedBands['needs-you']}
                 expandedChatIds={expandedChatIds}
                 narrations={narrations}
+                emptyLabel="All clear."
                 onToggleExpanded={() => toggleBand('needs-you')}
                 onSelectIssue={setSelectedIssueId}
                 onToggleChat={toggleChat}
               />
-              <BandSection
-                band="in-motion"
+              <IssueGroupSection
+                title={BAND_TITLES['in-motion']}
+                subtitle={BAND_SUBTITLES['in-motion']}
+                icon={bandIcon('in-motion')}
+                count={inMotion.length}
                 issues={inMotion}
                 selectedIssueId={selectedIssueId}
                 expanded={expandedBands['in-motion']}
                 expandedChatIds={expandedChatIds}
                 narrations={narrations}
+                emptyLabel="Nothing here."
                 onToggleExpanded={() => toggleBand('in-motion')}
                 onSelectIssue={setSelectedIssueId}
                 onToggleChat={toggleChat}
               />
-              <BandSection
-                band="settled"
+              <IssueGroupSection
+                title={BAND_TITLES.settled}
+                subtitle={BAND_SUBTITLES.settled}
+                icon={bandIcon('settled')}
+                count={settled.length}
                 issues={settled}
                 selectedIssueId={selectedIssueId}
                 expanded={expandedBands.settled}
                 expandedChatIds={expandedChatIds}
                 narrations={narrations}
+                emptyLabel="Nothing here."
                 onToggleExpanded={() => toggleBand('settled')}
                 onSelectIssue={setSelectedIssueId}
                 onToggleChat={toggleChat}
