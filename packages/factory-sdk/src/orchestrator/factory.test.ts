@@ -516,6 +516,42 @@ describe('FactoryLoop', () => {
     await flush()
     expect(markedCalls).toEqual([])
   })
+
+  it('does not resolve a probe PR when the factory-e2e marker is only in body or branch', async () => {
+    const mount = new FakeMountClient({
+      [issuePath(23)]: issueFile(23),
+      '/github/repos/AgentWorkforce__pear/pulls/by-id/23.json': {
+        provider: 'github',
+        objectType: 'pull_request',
+        objectId: '23',
+        payload: {
+          number: 23,
+          title: 'AR-23 probe without title marker',
+          body: '[factory-e2e] Synthetic probe for AR-23',
+          head_ref: 'factory-e2e/ar-23-probe',
+        },
+      },
+    })
+    const fleet = new FakeFleetClient()
+    const closeInputs: unknown[] = []
+    const factory = createFactory(config(), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      probeCloser: async (input) => {
+        closeInputs.push(input)
+        return { repo: input.repo, prNumber: input.prNumber, state: 'CLOSED' }
+      },
+    })
+    const decision = await factory.triageIssue(parseLinearIssue(issuePath(23), issueFile(23)))
+
+    await factory.dispatch(decision)
+    fleet.emitAgentExit('ar-23-impl', 'issue-done')
+    await flush()
+
+    expect(closeInputs).toEqual([])
+    expect(fleet.releases.map((release) => release.name)).toEqual(['ar-23-impl', 'ar-23-review'])
+  })
 })
 
 const changeEvent = (path: string, id: string) => ({

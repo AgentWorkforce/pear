@@ -64,16 +64,13 @@ const assertOpenProbe = (live: Record<string, unknown>, input: CloseProbePrInput
   if (!containsIssueKey(haystack, input.expectedIssueKey)) {
     throw new Error(`Refusing to close probe PR #${input.prNumber}: missing issue key ${input.expectedIssueKey}`)
   }
-  if (!hasFactoryE2eMarker({ title, body, headRefName })) {
+  if (!hasFactoryE2eMarker(title)) {
     throw new Error(`Refusing to close probe PR #${input.prNumber}: missing ${FACTORY_E2E_MARKER} probe marker`)
   }
 }
 
-const hasFactoryE2eMarker = (input: { title: string; body: string; headRefName: string }): boolean =>
-  input.title === FACTORY_E2E_MARKER ||
-  input.title.startsWith(`${FACTORY_E2E_MARKER} `) ||
-  input.body.includes(FACTORY_E2E_MARKER) ||
-  input.headRefName.toLowerCase().includes('factory-e2e')
+const hasFactoryE2eMarker = (title: string): boolean =>
+  title === FACTORY_E2E_MARKER || title.startsWith(`${FACTORY_E2E_MARKER} `)
 
 const containsIssueKey = (value: string, issueKey: string): boolean => {
   const escaped = issueKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')

@@ -22,6 +22,8 @@ const outfile = join(cacheDir, `fleet-${hash}.mjs`)
 mkdirSync(cacheDir, { recursive: true })
 
 if (!existsSync(outfile)) {
+  // The SDK package is type=commonjs, so Node strip-types loads .ts as CJS and rejects ESM imports.
+  // Bundle the thin CLI entry locally instead; esbuild is declared in this package for that launcher path.
   const { buildSync } = require('esbuild')
   buildSync({
     entryPoints: [entry],

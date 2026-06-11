@@ -684,8 +684,7 @@ const probePrMatchesIssue = (
   marker: string,
 ): boolean => {
   const haystack = `${pr.title}\n${pr.body}\n${pr.headRef}`
-  return containsIssueKey(haystack, issue.key) &&
-    (pr.title === marker || pr.title.startsWith(`${marker} `) || pr.body.includes(marker) || pr.headRef.toLowerCase().includes('factory-e2e'))
+  return containsIssueKey(haystack, issue.key) && (pr.title === marker || pr.title.startsWith(`${marker} `))
 }
 
 const containsIssueKey = (value: string, issueKey: string): boolean => {

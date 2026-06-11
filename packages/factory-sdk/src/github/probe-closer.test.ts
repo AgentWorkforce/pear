@@ -62,6 +62,29 @@ describe('closeProbePr', () => {
     expect(calls[0]?.slice(0, 3)).toEqual(['pr', 'view', '124'])
   })
 
+  it('requires the factory-e2e marker as a title prefix, not only body or branch text', async () => {
+    const calls: string[][] = []
+    const runner: GhRunner = async (args) => {
+      calls.push(args)
+      return {
+        stdout: JSON.stringify({
+          state: 'OPEN',
+          headRefName: 'factory-e2e/ar-42-probe',
+          title: 'AR-42 probe without title marker',
+          body: '[factory-e2e] Closes AR-42',
+        }),
+      }
+    }
+
+    await expect(closeProbePr({
+      repo: 'AgentWorkforce/pear',
+      prNumber: 128,
+      expectedIssueKey: 'AR-42',
+      runner,
+    })).rejects.toThrow(/missing \[factory-e2e\] probe marker/)
+    expect(calls).toHaveLength(1)
+  })
+
   it('refuses a probe that is not tied to the expected issue key before closing', async () => {
     const calls: string[][] = []
     const runner: GhRunner = async (args) => {
