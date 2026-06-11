@@ -38,6 +38,7 @@ const mock = vi.hoisted(() => {
   let mountReconcilePromise: Promise<void> = Promise.resolve()
   const readFileCalls: Array<{ workspaceId: string; path: string }> = []
   const writeFileCalls: Array<{ workspaceId: string; path: string; baseRevision: string; content: string }> = []
+  const joinWorkspaceCalls: Array<{ workspaceId: string; options: { agentName: string; scopes: string[] } }> = []
   const relayClient = {
     readFile: vi.fn(async (workspaceId: string, path: string) => {
       readFileCalls.push({ workspaceId, path })
@@ -197,6 +198,7 @@ const mock = vi.hoisted(() => {
     },
     readFileCalls,
     writeFileCalls,
+    joinWorkspaceCalls,
     relayClient,
     relayWorkspaceManager,
     workspaceHandle,
@@ -216,13 +218,14 @@ const mock = vi.hoisted(() => {
   }
 })
 
-// readRemoteFile/listRemoteDirectory now resolve a reader handle via
-// RelayfileSetup.joinWorkspace (integrations.ts getIntegrationRemoteReaderHandle).
+// Remote read/list/write operations resolve scoped handles via
+// RelayfileSetup.joinWorkspace.
 // Mock the SDK so that path returns the in-memory handle instead of doing a
 // real network join.
 vi.mock('@relayfile/sdk', () => ({
   RelayfileSetup: class {
-    async joinWorkspace() {
+    async joinWorkspace(workspaceId: string, options: { agentName: string; scopes: string[] }) {
+      mock.joinWorkspaceCalls.push({ workspaceId, options })
       return mock.workspaceHandle
     }
   }
@@ -326,6 +329,7 @@ describe('IntegrationsManager', () => {
     mock.cloudAgentManager.updateMountPaths.mockClear()
     mock.readFileCalls.splice(0)
     mock.writeFileCalls.splice(0)
+    mock.joinWorkspaceCalls.splice(0)
     mock.relayClient.readFile.mockClear()
     mock.relayClient.writeFile.mockClear()
     mock.shellOpenExternal.mockClear()
@@ -391,6 +395,15 @@ describe('IntegrationsManager', () => {
         path: '/slack/channels/C123/messages/draft.json',
         baseRevision: '0',
         content: '{"text":"hello"}'
+      }
+    ])
+    expect(mock.joinWorkspaceCalls).toEqual([
+      {
+        workspaceId: 'account-workspace-id',
+        options: {
+          agentName: 'pear-integrations-writer',
+          scopes: ['relayfile:fs:write:/**']
+        }
       }
     ])
   })

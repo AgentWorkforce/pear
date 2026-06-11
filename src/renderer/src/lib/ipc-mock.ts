@@ -596,7 +596,7 @@ const mockGithubRecords: Record<string, Record<string, unknown>> = {
   }
 }
 
-const mockRemoteFiles: Record<string, Record<string, unknown>> = Object.fromEntries([
+const mockRemoteFiles: Record<string, Record<string, unknown> | string> = Object.fromEntries([
   ...mockLinearIssues.map((issue) => [
     `/linear/issues/${String(issue.identifier)}.json`,
     issue
@@ -1081,13 +1081,13 @@ export const pearMock: PearAPI = {
       const normalized = normalizeMockRemotePath(remotePath)
       const record = mockRemoteFiles[normalized]
       if (!record) return { kind: 'missing', content: '', size: 0 }
-      const content = JSON.stringify(record, null, 2)
+      const content = typeof record === 'string' ? record : JSON.stringify(record, null, 2)
       return { kind: 'text', content, size: content.length }
     },
     writeRemoteFile: async (_projectId: string, remotePath: string, content: string): Promise<void> => {
       const normalized = normalizeMockRemotePath(remotePath)
       console.log('[ipc-mock] writeRemoteFile', normalized, content.length, 'bytes')
-      mockRemoteFiles[normalized] = JSON.parse(content)
+      mockRemoteFiles[normalized] = content
     },
     readMountPreview: async (): Promise<FsReadPreviewResult> => ({ kind: 'missing', content: '', size: 0 }),
     listOptions: async (): Promise<IntegrationOption[]> => [],

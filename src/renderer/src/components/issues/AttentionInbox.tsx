@@ -571,8 +571,11 @@ export function AttentionInbox({
   }
 
   async function handleSpawnTeam(issue: IssueViewModel): Promise<void> {
-    const project = useProjectStore.getState().getActiveProject()
-    if (!project) return
+    const project = resolvedProjectId ? useProjectStore.getState().projects.find((candidate) => candidate.id === resolvedProjectId) : undefined
+    if (!project) {
+      setNavNotice('Project not found for issue dispatch')
+      return
+    }
     try {
       const repo = detectRepo(issue.title, issue.description) ?? undefined
       const composition: TeamComposition = {
