@@ -314,7 +314,10 @@ describe('IntegrationsManager', () => {
     mock.fetch.mockClear()
     mock.browserWindow.getAllWindows.mockClear()
     mock.resolveCloudAuth.mockClear()
-    mock.getAccountWorkspaceId.mockClear()
+    // Full reset (not just calls): tests that block cloud hydration override
+    // the implementation with a rejection, which must not leak forward.
+    mock.getAccountWorkspaceId.mockReset()
+    mock.getAccountWorkspaceId.mockImplementation(async () => 'account-workspace-id')
     mock.accountWorkspaceReadyRetryOptions.mockClear()
     mock.loadStore.mockClear()
     mock.saveStore.mockClear()
@@ -480,6 +483,51 @@ describe('IntegrationsManager', () => {
     expect(mock.fetchCalls.some((call) => call.url.includes('/api/v1/workspaces/account-workspace-id/integrations'))).toBe(true)
   })
 
+  it('returns settings integrations before local mount reconciliation finishes', async () => {
+    let finishMountReconcile!: () => void
+    mock.setMountReconcilePromise(new Promise((resolve) => {
+      finishMountReconcile = resolve
+    }))
+    const manager = new IntegrationsManager()
+    let resolved = false
+
+    const loadPromise = manager.listConnectedForSettings('project-1')
+      .then((integrations) => {
+        resolved = true
+        return integrations
+      })
+
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(resolved).toBe(true)
+    expect(await loadPromise).toEqual([
+      expect.objectContaining({ provider: 'slack', integrationId: 'slack-integration-1' })
+    ])
+    expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalledTimes(1)
+
+    finishMountReconcile()
+    await Promise.resolve()
+  })
+
+  it('coalesces repeated settings mount syncs while reconciliation is pending', async () => {
+    let finishMountReconcile!: () => void
+    mock.setMountReconcilePromise(new Promise((resolve) => {
+      finishMountReconcile = resolve
+    }))
+    const manager = new IntegrationsManager()
+
+    await Promise.all([
+      manager.listConnectedForSettings('project-1'),
+      manager.listConnectedForSettings('project-1')
+    ])
+
+    expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalledTimes(1)
+
+    finishMountReconcile()
+    await Promise.resolve()
+  })
+
   it('does not throw or raise a banner when background cloud hydration hits a transient failure', async () => {
     mock.getAccountWorkspaceId.mockRejectedValueOnce(new Error('network unreachable'))
     const manager = new IntegrationsManager()
@@ -506,11 +554,11 @@ describe('IntegrationsManager', () => {
       })
     ])
 
-    expect(events).toContainEqual({
+    await vi.waitFor(() => expect(events).toContainEqual({
       type: 'integration-auth-required',
       reason: 'account-workspace-required',
       message: 'account-workspace-required'
-    })
+    }))
   })
 
   it('keeps boot-time auth recovery queryable after the event is missed by renderer listeners', () => {
@@ -546,12 +594,12 @@ describe('IntegrationsManager', () => {
         integrationId: 'slack-integration-1'
       })
     ])
+    await vi.waitFor(() => expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalledTimes(1))
     expect(manager.getAuthRecoveryState()).toMatchObject({
       reason: 'account-workspace-required',
       failureClass: 'whoami-http-500',
       message: 'account-workspace-required:whoami-http-500'
     })
-    expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalledTimes(1)
 
     await vi.advanceTimersByTimeAsync(30_000)
     await Promise.resolve()
@@ -574,6 +622,7 @@ describe('IntegrationsManager', () => {
         integrationId: 'slack-integration-1'
       })
     ])
+    await vi.waitFor(() => expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalledTimes(1))
     expect(manager.getAuthRecoveryState()).toMatchObject({
       reason: 'account-workspace-required',
       failureClass: 'whoami-http-500'
@@ -977,9 +1026,203 @@ describe('IntegrationsManager', () => {
     warnSpy.mockRestore()
   })
 
+  // Typed view over the untyped sendMessage mock: the integrations-update
+  // send inputs in call order.
+  const integrationUpdateSendInputs = (): Array<{ to: string; text: string }> =>
+    (mock.brokerManager.sendMessage as unknown as {
+      mock: { calls: Array<[unknown, { to: string; text: string; data?: { kind?: string } }]> }
+    }).mock.calls
+      .map((call) => call[1])
+      .filter((input) => input?.data?.kind === 'integrations-update')
+
+  it('retries a partially failed broadcast only to the agents that missed it', async () => {
+    vi.useFakeTimers()
+    // Hermetic snippet text: background cloud hydration re-adds integrations
+    // to the store and changes the rendered text between broadcasts (the
+    // separate staged-churn case the cooldown test covers). Block hydration
+    // and pin the store empty so the text is identical across reconciles.
+    mock.store.projects[0].integrations = []
+    mock.getAccountWorkspaceId.mockRejectedValue(new Error('offline'))
+    mock.brokerManager.listAgents.mockResolvedValue([
+      { name: 'claude-1', projectId: 'project-1' },
+      { name: 'codex-1', projectId: 'project-1' }
+    ] as never)
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    // First broadcast: codex-1's send fails, claude-1's succeeds.
+    mock.brokerManager.sendMessage.mockImplementation((async (_projectId: string, input: { to: string }) => {
+      if (input.to === 'codex-1') throw new Error('input stream wedged')
+      return undefined
+    }) as never)
+    const manager = new IntegrationsManager()
+
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(1_000)
+    const sentTo = (): string[] => integrationUpdateSendInputs().map((input) => input.to)
+    expect(sentTo()).toEqual(['claude-1', 'codex-1'])
+
+    // Retry reconcile: ONLY codex-1 (which missed it) may be re-sent —
+    // claude-1 already received and acknowledged this update. Re-sending to
+    // everyone is the duplicated-transcript bug.
+    mock.brokerManager.sendMessage.mockResolvedValue(undefined)
+    await vi.advanceTimersByTimeAsync(60_000) // clear the broadcast cooldown
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(61_000)
+    expect(sentTo()).toEqual(['claude-1', 'codex-1', 'codex-1'])
+    warnSpy.mockRestore()
+  })
+
+  it('sends an unchanged update to a newly arrived agent without re-sending to existing agents', async () => {
+    vi.useFakeTimers()
+    mock.store.projects[0].integrations = []
+    mock.getAccountWorkspaceId.mockRejectedValue(new Error('offline'))
+    mock.brokerManager.listAgents.mockResolvedValue([{ name: 'claude-1', projectId: 'project-1' }] as never)
+    const manager = new IntegrationsManager()
+
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(1_000)
+
+    mock.brokerManager.listAgents.mockResolvedValue([
+      { name: 'claude-1', projectId: 'project-1' },
+      { name: 'codex-1', projectId: 'project-1' }
+    ] as never)
+    await vi.advanceTimersByTimeAsync(60_000)
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(61_000)
+
+    expect(integrationUpdateSendInputs().map((input) => input.to)).toEqual(['claude-1', 'codex-1'])
+  })
+
+  it('skips the broadcast for an agent whose spawn task already embedded the snippet', async () => {
+    vi.useFakeTimers()
+    mock.store.projects[0].integrations = [{
+      id: 'linear-integration-1',
+      name: 'Linear',
+      type: 'linear',
+      provider: 'linear',
+      integrationId: 'linear-integration-1',
+      scope: {},
+      mountPaths: ['/linear'],
+      connectedAt: '2026-06-05T00:00:00.000Z',
+      notifyAgent: true,
+      subscribeAgent: false,
+      downloadHistoricalData: false,
+      visibleInProject: true
+    }]
+    mock.brokerManager.listAgents.mockResolvedValue([{ name: 'claude-1', projectId: 'project-1' }] as never)
+    const manager = new IntegrationsManager()
+
+    // Spawn path: the snippet rides inside the spawn task, and the spawn
+    // handler records delivery for the new agent.
+    const instructions = manager.initialSpawnInstructions('project-1')
+    expect(instructions).toContain('<integrations-update>')
+    manager.recordSpawnInstructionDelivery('project-1', 'claude-1')
+
+    // The post-spawn broadcast of the same snippet must be a no-op for the
+    // agent that just received it in its spawn task ("Setup context
+    // received" acknowledged twice was this bug).
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(integrationUpdateSendInputs()).toHaveLength(0)
+  })
+
+  it('does not re-notify a fresh spawn when the broadcast text differs only by staged churn', async () => {
+    // The codex-double-acknowledgment case: an agent spawns with the snippet
+    // embedded in its task; moments later the project broadcast renders a
+    // slightly different text (readiness clause / paths hydrating) and used
+    // to deliver a near-identical second setup message. The spawn grace
+    // skips it; the follow-up after the grace delivers a still-different
+    // text exactly once.
+    vi.useFakeTimers()
+    mock.store.projects[0].integrations = [{
+      id: 'linear-integration-1',
+      name: 'Linear',
+      type: 'linear',
+      provider: 'linear',
+      integrationId: 'linear-integration-1',
+      scope: {},
+      mountPaths: ['/linear'],
+      connectedAt: '2026-06-05T00:00:00.000Z',
+      notifyAgent: true,
+      subscribeAgent: false,
+      downloadHistoricalData: false,
+      visibleInProject: true
+    }]
+    mock.getAccountWorkspaceId.mockRejectedValue(new Error('offline'))
+    mock.brokerManager.listAgents.mockResolvedValue([{ name: 'codex-1', projectId: 'project-1' }] as never)
+    const manager = new IntegrationsManager()
+
+    expect(manager.initialSpawnInstructions('project-1')).toContain('<integrations-update>')
+    manager.recordSpawnInstructionDelivery('project-1', 'codex-1')
+
+    // Simulate staged churn: the store changes right after the spawn, so the
+    // broadcast text differs from the embedded snippet.
+    mock.store.projects[0].integrations = [{
+      ...mock.store.projects[0].integrations[0],
+      mountPaths: ['/linear/issues']
+    }]
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(5_000)
+    // Grace holds: no near-identical second setup message right after spawn.
+    expect(integrationUpdateSendInputs()).toHaveLength(0)
+
+    // After the grace lapses the still-different text arrives exactly once.
+    await vi.advanceTimersByTimeAsync(61_000)
+    expect(integrationUpdateSendInputs()).toHaveLength(1)
+    expect(integrationUpdateSendInputs()[0].to).toBe('codex-1')
+
+    // And an identical reconcile afterwards stays silent.
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(61_000)
+    expect(integrationUpdateSendInputs()).toHaveLength(1)
+  })
+
+  it('holds a changed update inside the rebroadcast cooldown and sends the latest text once', async () => {
+    vi.useFakeTimers()
+    mock.store.projects[0].integrations = []
+    mock.getAccountWorkspaceId.mockRejectedValue(new Error('offline'))
+    mock.brokerManager.listAgents.mockResolvedValue([{ name: 'claude-1', projectId: 'project-1' }] as never)
+    const manager = new IntegrationsManager()
+    const updateTexts = (): string[] => integrationUpdateSendInputs().map((input) => input.text)
+
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(updateTexts()).toHaveLength(1)
+
+    // Integration state converges in stages right after the first broadcast
+    // (channel-name discovery renames mount paths, readiness flips). The
+    // changed text must NOT go out immediately — it waits out the cooldown,
+    // and the trailing broadcast carries the latest text exactly once.
+    mock.store.projects[0].integrations = [{
+      id: 'linear-integration-1',
+      name: 'Linear',
+      type: 'linear',
+      provider: 'linear',
+      integrationId: 'linear-integration-1',
+      scope: {},
+      mountPaths: ['/linear'],
+      connectedAt: '2026-06-05T00:00:00.000Z',
+      notifyAgent: true,
+      subscribeAgent: false,
+      downloadHistoricalData: false,
+      visibleInProject: true
+    }]
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(updateTexts()).toHaveLength(1) // held by the cooldown
+
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(updateTexts()).toHaveLength(2)
+    expect(updateTexts()[1]).toContain('linear')
+  })
+
   it('does not re-send an unchanged integrations update after the dedupe window lapses', async () => {
     vi.useFakeTimers()
-    mock.brokerManager.listAgents.mockResolvedValue([{ name: 'claude-1', projectId: 'project-1' }])
+    // Pin the state so the rendered text is identical across reconciles
+    // (background hydration would otherwise change it, which is the
+    // legitimate-rebroadcast case).
+    mock.store.projects[0].integrations = []
+    mock.getAccountWorkspaceId.mockRejectedValue(new Error('offline'))
+    mock.brokerManager.listAgents.mockResolvedValue([{ name: 'claude-1', projectId: 'project-1' }] as never)
     const manager = new IntegrationsManager()
     const integrationsUpdateSends = (): number =>
       mock.brokerManager.sendMessage.mock.calls.filter(
@@ -989,19 +1232,16 @@ describe('IntegrationsManager', () => {
     await manager.notifyAgentState('project-1')
     await vi.advanceTimersByTimeAsync(1_000)
     expect(integrationsUpdateSends()).toBe(1)
-    await vi.waitFor(() => expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalled())
-    mock.brokerManager.sendMessage.mockClear()
 
     // A later reconcile with identical integration state must not re-broadcast
     // regardless of elapsed time — duplicate <integrations-update> messages
     // were observed minutes apart with the old 30s text-TTL dedupe.
     await manager.notifyAgentState('project-1')
-    await vi.advanceTimersByTimeAsync(1_000)
+    await vi.advanceTimersByTimeAsync(61_000)
     expect(integrationsUpdateSends()).toBe(1)
 
-    await vi.advanceTimersByTimeAsync(60_000)
     await manager.notifyAgentState('project-1')
-    await vi.advanceTimersByTimeAsync(1_000)
+    await vi.advanceTimersByTimeAsync(61_000)
     expect(integrationsUpdateSends()).toBe(1)
   })
 

@@ -28,7 +28,7 @@ import { getIntegrationEventTelemetrySnapshot, integrationEventBridge } from './
 import { aiHistManager } from './ai-hist'
 import { burnManager, type BurnAgentInput, type BurnProjectInput, type BurnSessionBreakdownInput, type BurnFingerprintInput } from './burn'
 import { resetRelayWorkspaceManager } from './relay-workspace'
-import { assertDirectory, isDirectory } from './path-utils'
+import { isDirectory } from './path-utils'
 import { findProjectForPath, projectContainsPath } from './cli'
 import type { BrokerReconcileMessagesInput, BrokerSpawnAgentResult } from '../shared/types/ipc'
 import type { ProactiveAgentDraft } from './proactive-agent.types'
@@ -261,6 +261,12 @@ export function registerIpcHandlers(): void {
             : integrationInstructions
         }
       : input)
+    if (integrationInstructions && result?.name) {
+      // The spawn task embedded the current integrations snippet — mark the
+      // new agent as already notified so the next project broadcast doesn't
+      // deliver the same setup context to it a second time.
+      integrationsManager.recordSpawnInstructionDelivery(projectId, result.name)
+    }
     integrationEventBridge.invalidateProjectAgentCache(projectId)
     return toBrokerSpawnAgentResult(result)
   })

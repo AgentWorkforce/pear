@@ -2,7 +2,7 @@ import { defineConfig, devices } from '@playwright/test'
 
 export default defineConfig({
   testDir: './tests/playwright',
-  testMatch: /fidelity-no-duplication\.spec\.ts/,
+  testMatch: /(fidelity-no-duplication|rendering-corruption)\.spec\.ts/,
   timeout: 90_000,
   expect: {
     timeout: 15_000

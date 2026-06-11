@@ -35,10 +35,14 @@ grid then keeps up — full drain, lag bounded to the current burst, longest
 frame nearly halved.
 
 Numbers are from a single dev-machine run (macOS, headless Chrome) and are
-indicative, not thresholds — the suite asserts only that the harness ran
-end-to-end. The byte-for-byte correctness of coalescing is proven separately by
-the real-parser equivalence unit test
-(`src/renderer/src/lib/pty-coalesce-equivalence.test.ts`).
+indicative, not thresholds. The suite GATES on the machine-independent drain
+invariants (`drained === true` within the deadline and
+`finalFrameRendered === true`) so a parser-backlog regression fails CI, while
+the timing metrics stay informational. Byte-for-byte correctness of
+coalescing is proven separately by the real-parser equivalence unit test
+(`src/renderer/src/lib/pty-coalesce-equivalence.test.ts`), and routing
+correctness (direct/engine transitions, reseed, flood bypass) by
+`src/renderer/src/lib/echo-router.test.ts`.
 
 ## Knobs
 

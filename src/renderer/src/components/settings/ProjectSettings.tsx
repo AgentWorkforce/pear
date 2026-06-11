@@ -11,6 +11,7 @@ import {
   EyeOff,
   Folder,
   Hash,
+  ListFilter,
   Loader2,
   Plug,
   Plus,
@@ -23,6 +24,10 @@ import { AgentHarnessIcon } from '@/components/common/AgentIcons'
 import { ProactiveAgentsSection } from '@/components/proactive/ProactiveAgentsSection'
 import { pear, type ConnectedIntegration } from '@/lib/ipc'
 import {
+  LinearAssigneePicker,
+  LinearLabelPicker,
+  LinearProjectPicker,
+  LinearTeamPicker,
   SlackChannelPicker,
   SlackDmRecipientPicker,
   type IntegrationAccessibleResource,
@@ -185,6 +190,11 @@ function isSlackProvider(provider: string): boolean {
   return normalized === 'slack' || normalized.startsWith('slack-')
 }
 
+function isLinearProvider(provider: string): boolean {
+  const normalized = provider.trim().toLowerCase().replace(/-(app-oauth|app|oauth|bot-oauth|bot|api-key|apikey)$/, '')
+  return normalized === 'linear' || normalized.startsWith('linear-')
+}
+
 function cloudAgentWorkspaceMode(project: unknown): CloudAgentWorkspaceMode {
   const mode = project && typeof project === 'object'
     ? (project as { cloudAgentWorkspaceMode?: unknown }).cloudAgentWorkspaceMode
@@ -310,6 +320,37 @@ function slackChannelResourceFromOption(option: { value: string; label: string; 
   }
 }
 
+function linearResourceFromOption(option: { value: string; label: string; hint?: string }): IntegrationAccessibleResource {
+  const id = option.value.trim()
+  const label = option.label.trim() || id
+  return {
+    id,
+    displayName: label,
+    name: label,
+    metadata: {
+      ...(option.hint ? { hint: option.hint, key: option.hint } : {})
+    }
+  }
+}
+
+function isLinearTeamMountPath(path: string): boolean {
+  return /^\/(?:integrations\/)?linear\/teams(?:\/|$)/u.test(path)
+}
+
+function mergeLinearScopeMountPaths({
+  existing,
+  teamPaths
+}: {
+  existing: string[]
+  teamPaths: string[] | null
+}): string[] {
+  const retained = existing.filter((path) => !isLinearTeamMountPath(path))
+  return Array.from(new Set([
+    ...retained,
+    ...(teamPaths ?? existing.filter(isLinearTeamMountPath))
+  ].filter(Boolean)))
+}
+
 function integrationStatusSummary(
   integration: ConnectedIntegration,
   visibility: ProjectVisibilityMetadata,
@@ -393,23 +434,33 @@ function IntegrationVisibilitySection({
   const [pendingScopeValue, setPendingScopeValue] = useState<ScopePickerValue | null>(null)
   const [pendingDmScopeValue, setPendingDmScopeValue] = useState<ScopePickerValue | null>(null)
   const [pendingSlackListenDms, setPendingSlackListenDms] = useState<boolean | null>(null)
+  const [pendingLinearTeamScopeValue, setPendingLinearTeamScopeValue] = useState<ScopePickerValue | null>(null)
+  const [pendingLinearProjectScopeValue, setPendingLinearProjectScopeValue] = useState<ScopePickerValue | null>(null)
+  const [pendingLinearLabelScopeValue, setPendingLinearLabelScopeValue] = useState<ScopePickerValue | null>(null)
+  const [pendingLinearAssigneeScopeValue, setPendingLinearAssigneeScopeValue] = useState<ScopePickerValue | null>(null)
   const resourceCacheRef = useRef(new Map<string, ResourceCacheEntry>())
 
   const load = useCallback(async () => {
     setError(null)
     setLoading(true)
     try {
-      const auth = await pear.auth.status()
+      const [authResult, integrationsResult] = await Promise.allSettled([
+        pear.auth.status(),
+        pear.integrations.list(projectId)
+      ])
+      if (authResult.status === 'rejected') throw authResult.reason
+      const auth = authResult.value
       if (!auth.loggedIn) {
         setAuthRequired(true)
         setWorkspaceRequired(false)
         setIntegrations([])
         return
       }
+      if (integrationsResult.status === 'rejected') throw integrationsResult.reason
 
       setAuthRequired(false)
       setWorkspaceRequired(false)
-      setIntegrations(await pear.integrations.list(projectId))
+      setIntegrations(integrationsResult.value)
     } catch (err) {
       if (isIntegrationAuthRequired(err)) {
         setAuthRequired(true)
@@ -663,6 +714,36 @@ function IntegrationVisibilitySection({
     })
   }, [cachedResources, projectId])
 
+  const listLinearOptionResources = useCallback(async (
+    integration: ConnectedIntegration,
+    resource: 'teams' | 'projects' | 'labels' | 'assignees'
+  ): Promise<IntegrationAccessibleResource[]> => {
+    const cacheKey = `linear-${resource}:${projectId}:${integration.integrationId}`
+    return cachedResources(cacheKey, async () => {
+      const listOptions = (pear.integrations as typeof pear.integrations & {
+        listOptions?: typeof pear.integrations.listOptions
+      }).listOptions
+      if (typeof listOptions !== 'function') {
+        throw new Error(`Linear ${resource} options are not available yet.`)
+      }
+
+      try {
+        const options = await listOptions(projectId, integration.provider, resource)
+        if (!Array.isArray(options)) {
+          throw new Error(`Linear ${resource} options returned an unexpected response.`)
+        }
+        return options.map(linearResourceFromOption)
+      } catch (err) {
+        const message = getErrorMessage(err)
+        if (/\b(400|404)\b|unsupported_resource|not found|does not expose/i.test(message)) {
+          console.warn(`[integrations] Linear ${resource} options are unavailable; leaving picker empty:`, err)
+          return []
+        }
+        throw err
+      }
+    })
+  }, [cachedResources, projectId])
+
   const saveSlackSourceChannels = useCallback(async (integration: ConnectedIntegration) => {
     const listenDms = pendingSlackListenDms ?? slackListenDmsFromScope(integration.scope)
     const nextScope = {
@@ -708,6 +789,53 @@ function IntegrationVisibilitySection({
       setBusyIntegrationId(null)
     }
   }, [pendingScopeValue, pendingDmScopeValue, pendingSlackListenDms, projectId])
+
+  const saveLinearScope = useCallback(async (integration: ConnectedIntegration) => {
+    const nextScope = {
+      ...integration.scope,
+      provider: integration.scope.provider ?? 'linear',
+      selection: pendingLinearTeamScopeValue?.scope.selection ?? integration.scope.selection ?? 'selected',
+      teams: pendingLinearTeamScopeValue?.scope.teams ?? integration.scope.teams ?? [],
+      projects: pendingLinearProjectScopeValue?.scope.projects ?? integration.scope.projects ?? [],
+      labels: pendingLinearLabelScopeValue?.scope.labels ?? integration.scope.labels ?? [],
+      assignees: pendingLinearAssigneeScopeValue?.scope.assignees ?? integration.scope.assignees ?? []
+    }
+    const nextMountPaths = mergeLinearScopeMountPaths({
+      existing: integration.mountPaths ?? [],
+      teamPaths: pendingLinearTeamScopeValue?.mountPaths ?? null
+    })
+
+    setBusyIntegrationId(integration.integrationId)
+    setError(null)
+    try {
+      const nextIntegration = await pear.integrations.updateScope(
+        projectId,
+        integration.integrationId,
+        nextScope,
+        nextMountPaths
+      )
+      setIntegrations((current) =>
+        current.map((entry) =>
+          entry.integrationId === nextIntegration.integrationId ? nextIntegration : entry
+        )
+      )
+      setScopeEditorIntegrationId(null)
+      setPendingLinearTeamScopeValue(null)
+      setPendingLinearProjectScopeValue(null)
+      setPendingLinearLabelScopeValue(null)
+      setPendingLinearAssigneeScopeValue(null)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err))
+    } finally {
+      setBusyIntegrationId(null)
+    }
+  }, [
+    pendingLinearAssigneeScopeValue,
+    pendingLinearLabelScopeValue,
+    pendingLinearProjectScopeValue,
+    pendingLinearTeamScopeValue,
+    projectId
+  ])
 
   return (
     <Section
@@ -766,6 +894,7 @@ function IntegrationVisibilitySection({
             const historyDownload = integration.downloadHistoricalData === true
             const busy = busyIntegrationId === integration.integrationId
             const slack = isSlackProvider(integration.provider)
+            const linear = isLinearProvider(integration.provider)
             const scopeEditorOpen = scopeEditorIntegrationId === integration.integrationId
             const savedSlackListenDms = slackListenDmsFromScope(integration.scope)
             const slackListenDms = pendingSlackListenDms ?? savedSlackListenDms
@@ -784,6 +913,19 @@ function IntegrationVisibilitySection({
             const slackScopeDirty = !!pendingScopeValue || !!pendingDmScopeValue || (
               pendingSlackListenDms !== null && pendingSlackListenDms !== savedSlackListenDms
             )
+            const selectedLinearTeamIds = Array.from(new Set([
+              ...integrationMountPaths
+                .filter(isLinearTeamMountPath)
+                .map((path) => path.split('/').filter(Boolean).at(-1) || path),
+              ...scopeStringList(integration.scope, 'teams')
+            ]))
+            const selectedLinearProjectIds = scopeStringList(integration.scope, 'projects')
+            const selectedLinearLabelIds = scopeStringList(integration.scope, 'labels')
+            const selectedLinearAssigneeIds = scopeStringList(integration.scope, 'assignees')
+            const linearScopeDirty = !!pendingLinearTeamScopeValue ||
+              !!pendingLinearProjectScopeValue ||
+              !!pendingLinearLabelScopeValue ||
+              !!pendingLinearAssigneeScopeValue
             const knownTargetValues = new Set([
               'all',
               ...agentNames.map((agent) => `agent:${agent}`),
@@ -823,6 +965,10 @@ function IntegrationVisibilitySection({
                         setPendingScopeValue(null)
                         setPendingDmScopeValue(null)
                         setPendingSlackListenDms(scopeEditorOpen ? null : savedSlackListenDms)
+                        setPendingLinearTeamScopeValue(null)
+                        setPendingLinearProjectScopeValue(null)
+                        setPendingLinearLabelScopeValue(null)
+                        setPendingLinearAssigneeScopeValue(null)
                         setScopeEditorIntegrationId(scopeEditorOpen ? null : integration.integrationId)
                       }}
                       className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md border transition-colors disabled:opacity-40 ${
@@ -835,6 +981,32 @@ function IntegrationVisibilitySection({
                       aria-label="Choose Slack channels to listen to"
                     >
                       <Hash size={13} />
+                    </button>
+                  )}
+                  {linear && (
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => {
+                        setPendingScopeValue(null)
+                        setPendingDmScopeValue(null)
+                        setPendingSlackListenDms(null)
+                        setPendingLinearTeamScopeValue(null)
+                        setPendingLinearProjectScopeValue(null)
+                        setPendingLinearLabelScopeValue(null)
+                        setPendingLinearAssigneeScopeValue(null)
+                        setScopeEditorIntegrationId(scopeEditorOpen ? null : integration.integrationId)
+                      }}
+                      className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md border transition-colors disabled:opacity-40 ${
+                        scopeEditorOpen
+                          ? 'border-[var(--pear-accent-dim)] text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)]'
+                          : 'border-[var(--pear-border)] text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]'
+                      }`}
+                      aria-expanded={scopeEditorOpen}
+                      title="Choose Linear event filters"
+                      aria-label="Choose Linear event filters"
+                    >
+                      <ListFilter size={13} />
                     </button>
                   )}
                   <button
@@ -960,6 +1132,66 @@ function IntegrationVisibilitySection({
                         type="button"
                         disabled={busy || !slackScopeDirty}
                         onClick={() => void saveSlackSourceChannels(integration)}
+                        className="flex h-8 items-center gap-2 rounded-md border border-[var(--pear-accent-dim)] px-3 text-xs text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)] disabled:opacity-40"
+                      >
+                        {busy ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}
+                        Save
+                      </button>
+                    </div>
+                  </div>
+                )}
+
+                {scopeEditorOpen && linear && (
+                  <div className="pl-0 md:pl-8">
+                    <LinearTeamPicker
+                      provider="linear"
+                      disabled={busy}
+                      initialSelectedIds={selectedLinearTeamIds}
+                      listAccessibleResources={() => listLinearOptionResources(integration, 'teams')}
+                      onChange={setPendingLinearTeamScopeValue}
+                    />
+                    <div className="mt-3 grid gap-3 lg:grid-cols-3">
+                      <LinearProjectPicker
+                        provider="linear"
+                        disabled={busy}
+                        initialSelectedIds={selectedLinearProjectIds}
+                        listAccessibleResources={() => listLinearOptionResources(integration, 'projects')}
+                        onChange={setPendingLinearProjectScopeValue}
+                      />
+                      <LinearLabelPicker
+                        provider="linear"
+                        disabled={busy}
+                        initialSelectedIds={selectedLinearLabelIds}
+                        listAccessibleResources={() => listLinearOptionResources(integration, 'labels')}
+                        onChange={setPendingLinearLabelScopeValue}
+                      />
+                      <LinearAssigneePicker
+                        provider="linear"
+                        disabled={busy}
+                        initialSelectedIds={selectedLinearAssigneeIds}
+                        listAccessibleResources={() => listLinearOptionResources(integration, 'assignees')}
+                        onChange={setPendingLinearAssigneeScopeValue}
+                      />
+                    </div>
+                    <div className="mt-3 flex justify-end gap-2">
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => {
+                          setScopeEditorIntegrationId(null)
+                          setPendingLinearTeamScopeValue(null)
+                          setPendingLinearProjectScopeValue(null)
+                          setPendingLinearLabelScopeValue(null)
+                          setPendingLinearAssigneeScopeValue(null)
+                        }}
+                        className="h-8 rounded-md border border-[var(--pear-border)] px-3 text-xs text-[var(--pear-text-dim)] hover:text-[var(--pear-text)] disabled:opacity-40"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy || !linearScopeDirty}
+                        onClick={() => void saveLinearScope(integration)}
                         className="flex h-8 items-center gap-2 rounded-md border border-[var(--pear-accent-dim)] px-3 text-xs text-[var(--pear-accent-bright)] hover:bg-[var(--pear-bg-overlay)] disabled:opacity-40"
                       >
                         {busy ? <Loader2 size={13} className="animate-spin" /> : <Check size={13} />}

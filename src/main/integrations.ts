@@ -226,7 +226,18 @@ type IntegrationSystemMessageOptions = {
 const POLL_INTERVAL_MS = 2_000
 const POLL_TIMEOUT_MS = 5 * 60_000
 const CATALOG_CACHE_MS = 5 * 60_000
+interface AgentSystemMessageRecord {
+  text: string
+  // Set when the record came from a spawn-embedded snippet rather than a
+  // broadcast send; grants the grace window below.
+  fromSpawnAt: number | null
+}
+
 const SYSTEM_MESSAGE_DEBOUNCE_MS = 1_000
+// Minimum gap between integrations-update broadcasts to the same project.
+// Staged state convergence (channel-name discovery, subscription readiness)
+// otherwise re-broadcasts a slightly-different full update every few seconds.
+const SYSTEM_MESSAGE_REBROADCAST_COOLDOWN_MS = 60_000
 const SYSTEM_MESSAGE_AGENT_WAIT_TIMEOUT_MS = 8_000
 const SYSTEM_MESSAGE_AGENT_WAIT_INTERVAL_MS = 500
 const LOCAL_MOUNT_CLOUD_HYDRATION_THROTTLE_MS = 30_000
@@ -803,14 +814,35 @@ export class IntegrationsManager {
   private sessionMetadata = new Map<string, SessionMetadata>()
   private pollTimers = new Map<string, NodeJS.Timeout>()
   private systemMessageTimers = new Map<string, NodeJS.Timeout>()
-  // Last successfully broadcast system message per project. Content-keyed (not
-  // TTL-keyed): an unchanged integrations update is never re-broadcast, no
-  // matter how often reconcile runs; any content change re-sends immediately.
-  private lastBroadcastSystemMessages = new Map<string, string>()
+  // Last integrations-update text each agent has CONFIRMED-SENT, per project.
+  // Content-keyed and per-agent (not per-project): a project-level signature
+  // recorded only when every send succeeded meant one flaky agent send
+  // re-broadcast the identical update to EVERY agent on the next reconcile —
+  // the agents that already received it replied again (the duplicated
+  // "<integrations-update>…" / duplicated acknowledgment transcripts). With
+  // per-agent records, retries target only the agents that missed it, and a
+  // newly spawned agent receives the current update without re-sending it to
+  // everyone else.
+  private lastAgentSystemMessages = new Map<string, Map<string, AgentSystemMessageRecord>>()
+  // Subscription readiness from the last reconcile, used so spawn-embedded
+  // snippets render with the same readiness clause the next broadcast will
+  // use (a hardcoded `true` made the texts differ and re-notified the agent).
+  private lastSubscriptionsReady = new Map<string, boolean>()
+  // When each project's last broadcast went out. Mount-path discovery and
+  // subscription readiness converge in stages (e.g. bare → suffixed Slack
+  // channel ids), each stage changing the rendered text slightly; without a
+  // cooldown every stage re-broadcast the full update mid-task.
+  private lastSystemMessageBroadcastAt = new Map<string, number>()
+  // Snippet most recently embedded into spawn instructions, per project, so
+  // the spawn path can record it as already-delivered for the new agent.
+  private lastSpawnInstructionSnippets = new Map<string, string>()
   private catalogCache: IntegrationAdapter[] | null = null
   private catalogFetchedAt = 0
   private localMountCloudHydrationStartedAt = 0
   private localMountCloudHydrationPromise: Promise<void> | null = null
+  private localMountSyncPromise: Promise<void> | null = null
+  private localMountSyncIncludesCloud = false
+  private settingsLocalMountSyncPromises = new Map<string, Promise<void>>()
   private projectCloudHydrationStartedAt = new Map<string, number>()
   private projectCloudHydrationPromises = new Map<string, Promise<void>>()
   private authRecoveryState: IntegrationAuthRecoveryState | null = null
@@ -998,11 +1030,12 @@ export class IntegrationsManager {
     const project = this.findProject(projectId)
     if (!project) {
       console.warn(`[integrations] listConnectedForSettings: project ${projectId} not found in local store; returning local list only (${local.length} items)`)
-      return this.withLocalMountPaths(local)
+      return this.withCurrentLocalMountPaths(local)
     }
 
     void this.hydrateProjectCloudIntegrations(projectId)
-    return this.withLocalMountPaths(local)
+    this.syncSettingsLocalMountsEventually(projectId)
+    return this.withCurrentLocalMountPaths(local)
   }
 
   // Background cloud hydration for a single project's settings list. Deduped and
@@ -2104,8 +2137,9 @@ export class IntegrationsManager {
     notifyAgent: boolean,
     systemMessageOptions: IntegrationSystemMessageOptions = {}
   ): Promise<void> {
-    let integrations = this.visibleIntegrationsForProject(projectId)
+    const integrations = this.visibleIntegrationsForProject(projectId)
     const subscriptionsReady = await this.syncEventSubscriptions(projectId)
+    this.lastSubscriptionsReady.set(projectId, subscriptionsReady)
 
     if (notifyAgent) {
       this.scheduleSystemMessage(
@@ -2205,10 +2239,34 @@ export class IntegrationsManager {
   initialSpawnInstructions(projectId: string): string | undefined {
     const integrations = this.visibleIntegrationsForProject(projectId)
     if (integrations.length === 0) return undefined
+    const snippet = this.buildSystemMessageSnippet(
+      integrations,
+      this.lastSubscriptionsReady.get(projectId) ?? true
+    )
+    // Remember what this spawn embedded so recordSpawnInstructionDelivery
+    // can mark the new agent as already-notified — without it, the next
+    // project broadcast re-delivered the same setup context to the agent
+    // that just received it in its spawn task ("Setup context received"
+    // acknowledged twice).
+    this.lastSpawnInstructionSnippets.set(projectId, snippet)
     return [
       'Initial project integration context. Treat this as setup context, not as the user task.',
-      this.buildSystemMessageSnippet(integrations, true)
+      snippet
     ].join('\n')
+  }
+
+  // Called after a spawn whose task embedded initialSpawnInstructions: the
+  // new agent already has the current integrations snippet, so per-agent
+  // delivery records treat it as up to date.
+  recordSpawnInstructionDelivery(projectId: string, agentName: string): void {
+    const snippet = this.lastSpawnInstructionSnippets.get(projectId)
+    if (!snippet) return
+    let delivered = this.lastAgentSystemMessages.get(projectId)
+    if (!delivered) {
+      delivered = new Map()
+      this.lastAgentSystemMessages.set(projectId, delivered)
+    }
+    delivered.set(agentName, { text: snippet, fromSpawnAt: Date.now() })
   }
 
   private mountPathsForAgentWorkspace(integration: ConnectedIntegration): string[] {
@@ -2265,34 +2323,88 @@ export class IntegrationsManager {
     options: IntegrationSystemMessageOptions = {}
   ): Promise<void> {
     try {
-      if (this.lastBroadcastSystemMessages.get(projectId) === message) return
-
       const bridge = brokerManager as unknown as IntegrationSystemMessageBridge
       const agents = await this.listSystemMessageAgents(bridge, projectId, options.waitForAgent === true)
       if (agents.length === 0) return
-      await Promise.all(
-        agents
-          .map((agent) => {
-            const input = {
-              to: agent.name,
-              from: 'system',
-              text: message,
-              priority: 0,
-              mode: 'steer',
-              data: {
-                kind: 'integrations-update',
-                system: true
-              }
-            } as const
-            // Delivery confirmations can hang behind inactive PTYs. Integration
-            // updates are setup context, so broker send acceptance is the
-            // reliable boundary for idempotent notification.
-            return bridge.sendMessage(projectId, input)
-          })
+
+      let delivered = this.lastAgentSystemMessages.get(projectId)
+      if (!delivered) {
+        delivered = new Map()
+        this.lastAgentSystemMessages.set(projectId, delivered)
+      }
+      // Only agents that have not already received THIS text. A retry after
+      // a partial failure reaches just the agents that missed it; agents
+      // that already acknowledged the update never see it twice.
+      const now = Date.now()
+      let graceRemainingMs = 0
+      const pending = agents.filter((agent) => {
+        const record = delivered.get(agent.name)
+        if (!record) return true
+        if (record.text === message) return false
+        // Spawn grace: right after a spawn the broadcast text routinely
+        // differs only cosmetically from the snippet embedded in the spawn
+        // task (readiness clause, paths still hydrating). Skip the
+        // near-identical second setup message; the follow-up below delivers
+        // any text that still differs once the grace lapses.
+        if (record.fromSpawnAt !== null) {
+          const remaining = record.fromSpawnAt + SYSTEM_MESSAGE_REBROADCAST_COOLDOWN_MS - now
+          if (remaining > 0) {
+            graceRemainingMs = Math.max(graceRemainingMs, remaining)
+            return false
+          }
+        }
+        return true
+      })
+      if (pending.length === 0) {
+        if (graceRemainingMs > 0 && !this.systemMessageTimers.has(projectId)) {
+          // Re-run after the grace lapses so a real post-spawn change still
+          // reaches the fresh agent. Never clobbers a newer pending text —
+          // only scheduled when no timer is waiting.
+          this.scheduleSystemMessage(projectId, message, options, graceRemainingMs)
+        }
+        return
+      }
+
+      const results = await Promise.allSettled(
+        pending.map((agent) => {
+          const input = {
+            to: agent.name,
+            from: 'system',
+            text: message,
+            priority: 0,
+            mode: 'steer',
+            data: {
+              kind: 'integrations-update',
+              system: true
+            }
+          } as const
+          // Delivery confirmations can hang behind inactive PTYs. Integration
+          // updates are setup context, so broker send acceptance is the
+          // reliable boundary for idempotent notification.
+          return bridge.sendMessage(projectId, input)
+        })
       )
-      // Recorded only after every send was accepted: a failed broadcast leaves
-      // no signature, so the next reconcile retries the identical message.
-      this.lastBroadcastSystemMessages.set(projectId, message)
+      let anyDelivered = false
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled') {
+          delivered.set(pending[index].name, { text: message, fromSpawnAt: null })
+          anyDelivered = true
+          // Low-noise send telemetry: integrations-update sends are rare by
+          // design now, and each one triggers a visible agent turn — keep a
+          // breadcrumb so duplicate-transcript reports are diagnosable.
+          console.info(
+            `[integrations] sent integrations-update to ${pending[index].name} (project ${projectId}, ${message.length} chars)`
+          )
+        } else {
+          console.warn(
+            `[integrations] Failed to inject integration system message for ${pending[index].name}:`,
+            toErrorMessage(result.reason)
+          )
+        }
+      })
+      if (anyDelivered) {
+        this.lastSystemMessageBroadcastAt.set(projectId, Date.now())
+      }
     } catch (error) {
       console.warn('[integrations] Failed to inject integration system message:', toErrorMessage(error))
     }
@@ -2301,15 +2413,28 @@ export class IntegrationsManager {
   private scheduleSystemMessage(
     projectId: string,
     message: string,
-    options: IntegrationSystemMessageOptions = {}
+    options: IntegrationSystemMessageOptions = {},
+    minDelayMs = 0
   ): void {
     const existing = this.systemMessageTimers.get(projectId)
     if (existing) clearTimeout(existing)
 
+    // Cooldown after a real broadcast: integration text converges in stages
+    // (channel-name discovery, subscription readiness), and each stage used
+    // to re-broadcast the whole update to every agent mid-task. Later
+    // schedules within the cooldown replace the timer, so the trailing
+    // broadcast carries the latest text. Per-agent delivery records make
+    // the eventual send a no-op for agents already up to date.
+    const lastBroadcastAt = this.lastSystemMessageBroadcastAt.get(projectId)
+    const cooldownRemaining = lastBroadcastAt === undefined
+      ? 0
+      : Math.max(0, lastBroadcastAt + SYSTEM_MESSAGE_REBROADCAST_COOLDOWN_MS - Date.now())
+    const delay = Math.max(SYSTEM_MESSAGE_DEBOUNCE_MS, cooldownRemaining, minDelayMs)
+
     const timer = setTimeout(() => {
       this.systemMessageTimers.delete(projectId)
       void this.safeInjectSystemMessage(projectId, message, options)
-    }, SYSTEM_MESSAGE_DEBOUNCE_MS)
+    }, delay)
     this.systemMessageTimers.set(projectId, timer)
   }
 
@@ -2392,7 +2517,52 @@ export class IntegrationsManager {
     return pending
   }
 
+  private syncSettingsLocalMountsEventually(projectId: string): void {
+    if (this.settingsLocalMountSyncPromises.has(projectId)) return
+
+    const before = this.settingsLocalMountSignature(projectId)
+    const pending = this.syncLocalMounts({ hydrateCloud: false })
+      .then(() => {
+        if (this.settingsLocalMountSignature(projectId) !== before) {
+          this.emit({ type: 'integrations-hydrated', projectId })
+        }
+      })
+      .catch((error) => {
+        if (!isIntegrationAuthRecoveryError(error)) {
+          console.warn('[integrations] Background local mount sync failed:', toErrorMessage(error))
+        }
+      })
+      .finally(() => {
+        if (this.settingsLocalMountSyncPromises.get(projectId) === pending) {
+          this.settingsLocalMountSyncPromises.delete(projectId)
+        }
+      })
+
+    this.settingsLocalMountSyncPromises.set(projectId, pending)
+  }
+
   private async syncLocalMounts(options: { hydrateCloud?: boolean } = {}): Promise<void> {
+    const hydrateCloud = options.hydrateCloud !== false
+    if (this.localMountSyncPromise) {
+      if (!hydrateCloud || this.localMountSyncIncludesCloud) return this.localMountSyncPromise
+      return this.localMountSyncPromise
+        .catch(() => undefined)
+        .then(() => this.syncLocalMounts(options))
+    }
+
+    this.localMountSyncIncludesCloud = hydrateCloud
+    const pending = this.performSyncLocalMounts(options)
+      .finally(() => {
+        if (this.localMountSyncPromise === pending) {
+          this.localMountSyncPromise = null
+          this.localMountSyncIncludesCloud = false
+        }
+      })
+    this.localMountSyncPromise = pending
+    return pending
+  }
+
+  private async performSyncLocalMounts(options: { hydrateCloud?: boolean } = {}): Promise<void> {
     if (options.hydrateCloud !== false) {
       await this.hydrateCloudIntegrationsForLocalMounts()
     }
@@ -2471,6 +2641,14 @@ export class IntegrationsManager {
         })
       }
     })
+  }
+
+  private settingsLocalMountSignature(projectId: string): string {
+    return JSON.stringify(this.withCurrentLocalMountPaths(this.listConnected(projectId)).map((integration) => ({
+      provider: integration.provider,
+      integrationId: integration.integrationId,
+      localMountPaths: integration.localMountPaths ?? []
+    })))
   }
 
   private async withLocalMountPaths(integrations: ConnectedIntegration[]): Promise<ConnectedIntegration[]> {

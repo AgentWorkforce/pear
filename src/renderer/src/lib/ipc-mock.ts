@@ -129,6 +129,11 @@ export interface PearMockHarness {
   injectBrokerEvent: (event: BrokerEventLike) => void
   injectBrokerEvents: (events: BrokerEventLike[]) => void
   injectPtyChunk: (projectId: string, name: string, chunk: string) => void
+  // Rendering-harness knobs: force the input SRTT the renderer polls (so the
+  // predictive-echo engine route engages) and echo typed bytes back through
+  // the PTY stream after a delay (so predictions reconcile end-to-end).
+  setInputSrtt: (ms: number | null) => void
+  setInputEcho: (options: { delayMs: number } | null) => void
   spawnAgents: (count: number, options?: { projectId?: string; channel?: string; namePrefix?: string }) => void
   openChannel: (projectId: string, channelName: string) => void
   openAgents: (projectId?: string) => void
@@ -229,6 +234,10 @@ function createState(): MockState {
 
 let state = createState()
 let seq = 0
+// Rendering-harness knobs (setInputSrtt / setInputEcho): survive reset() so
+// a spec can configure them before booting agents.
+let mockInputSrttMs: number | null = null
+let mockInputEchoDelayMs: number | null = null
 
 const mockNow = new Date('2026-06-09T09:42:00.000Z').getTime()
 
@@ -871,7 +880,16 @@ export const pearMock: PearAPI = {
       snapshot: { rows: input.rows || 24, cols: input.cols || 80, cursor: [0, 0], screen: '' }
     }),
     sendInput: async (_projectId: string | undefined, name: string, data: string) => ({ name, bytes_written: data.length }),
-    sendInputFast: () => undefined,
+    sendInputFast: (projectId: string | undefined, name: string, data: string) => {
+      // Optional raw echo back through the PTY stream (setInputEcho) so the
+      // rendering harnesses can exercise predictive echo end-to-end: type →
+      // optimistic glyph → delayed authoritative echo → reconcile.
+      if (mockInputEchoDelayMs === null) return
+      const resolvedProject = projectId || state.activeId || defaultProject.id
+      setTimeout(() => {
+        pearMockHarness.injectPtyChunk(resolvedProject, name, data)
+      }, mockInputEchoDelayMs)
+    },
     setTerminalMode: async (projectId: string | undefined, name: string, mode: TerminalAttachMode): Promise<BrokerSetTerminalModeResult> => {
       state.terminalModes.set(key(projectId, name), mode)
       return { name, mode: mode === 'drive' ? 'manual_flush' : 'auto_inject', flushed: 0, pending: 0 }
@@ -879,7 +897,7 @@ export const pearMock: PearAPI = {
     getPending: async (): Promise<PendingRelayMessage[]> => [],
     flushPending: async () => ({ flushed: 0 }),
     resizePty: async () => undefined,
-    inputSrtt: async () => null,
+    inputSrtt: async () => mockInputSrttMs,
     sendMessage: async (projectId: string | undefined, input: BrokerSendMessageInput) => {
       handleInjectedBrokerEvent({
         kind: 'relay_inbound',
@@ -1174,6 +1192,12 @@ export const pearMockHarness: PearMockHarness = {
     const ptyKey = key(projectId, name)
     state.ptyChunks[ptyKey] = [...(state.ptyChunks[ptyKey] || []), chunk]
     for (const listener of [...state.ptyChunkListeners]) listener(projectId, name, chunk)
+  },
+  setInputSrtt: (ms: number | null) => {
+    mockInputSrttMs = ms
+  },
+  setInputEcho: (options: { delayMs: number } | null) => {
+    mockInputEchoDelayMs = options ? options.delayMs : null
   },
   spawnAgents: (count: number, options?: { projectId?: string; channel?: string; namePrefix?: string }) => {
     const projectId = options?.projectId || state.activeId || defaultProject.id

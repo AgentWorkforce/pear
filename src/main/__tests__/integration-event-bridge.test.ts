@@ -580,6 +580,82 @@ test('integration events route only to the targets for the matching integration 
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'bob'])
 })
 
+test('Linear issue predicates filter delivery by project, label, and assignee fields', async () => {
+  const issueRecords: Record<string, Record<string, unknown>> = {
+    '/linear/issues/PEAR-145.json': {
+      id: 'lin-pear-145',
+      identifier: 'PEAR-145',
+      projectId: 'project-control-center',
+      project: { id: 'project-control-center', name: 'Issue Control Center' },
+      labelIds: ['label-human', 'label-review'],
+      labels: [{ id: 'label-human', name: 'human' }],
+      assigneeId: 'agent-implementer',
+      assignee: { id: 'agent-implementer', name: 'implementer', email: 'implementer@agents.local' }
+    },
+    '/linear/issues/PEAR-149.json': {
+      id: 'lin-pear-149',
+      identifier: 'PEAR-149',
+      projectId: 'project-control-center',
+      project: { id: 'project-control-center', name: 'Issue Control Center' },
+      labelIds: ['label-human'],
+      labels: [{ id: 'label-human', name: 'human' }],
+      assigneeId: 'agent-claude-1',
+      assignee: { id: 'agent-claude-1', name: 'claude-1', email: 'claude-1@agents.local' }
+    }
+  }
+  const harness = makeHarness(['alice'], {
+    readFileResponse: (_workspaceId, path) => ({
+      path,
+      revision: 'rev-1',
+      contentType: 'application/json',
+      content: JSON.stringify(issueRecords[path] ?? {}),
+      encoding: 'utf-8'
+    })
+  })
+
+  await harness.bridge.reconcile('project-1', [
+    integration({
+      provider: 'linear',
+      integrationId: 'linear-1',
+      mountPaths: ['/linear/issues'],
+      scope: {
+        notifyAgents: ['alice'],
+        projects: ['Issue Control Center'],
+        labels: ['human'],
+        assignees: ['implementer']
+      }
+    })
+  ])
+
+  await harness.emit(changeEvent('/linear/issues/PEAR-145.json', 'linear', { revision: 'rev-1' }))
+  await waitForSent(harness, 1)
+  assert.equal(harness.sent[0].input.to, 'alice')
+
+  await harness.emit(changeEvent('/linear/issues/PEAR-149.json', 'linear', { revision: 'rev-2' }))
+  await waitForDropped('project-1', 1)
+  assert.equal(harness.sent.length, 1)
+})
+
+test('Linear issue predicates fail closed when the issue record cannot be read', async () => {
+  const harness = makeHarness(['alice'], { failReadFile: true })
+
+  await harness.bridge.reconcile('project-1', [
+    integration({
+      provider: 'linear',
+      integrationId: 'linear-1',
+      mountPaths: ['/linear/issues'],
+      scope: {
+        notifyAgents: ['alice'],
+        projects: ['project-control-center']
+      }
+    })
+  ])
+
+  await harness.emit(changeEvent('/linear/issues/PEAR-145.json', 'linear', { revision: 'rev-1' }))
+  await waitForDropped('project-1', 1)
+  assert.equal(harness.sent.length, 0)
+})
+
 test('can close stale project subscriptions while keeping the active project stream', async () => {
   const harness = makeHarness()
 
