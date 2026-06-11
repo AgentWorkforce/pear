@@ -75,6 +75,7 @@ const MAX_DISPATCHED_EVENTS_PER_SECOND = 25
 const PROJECT_AGENT_RECIPIENT_CACHE_TTL_MS = 2_000
 const MAX_BROKER_SENDS_PER_SECOND = 25
 const DEFAULT_DELIVERY_INJECTED_CONFIRMATION_TIMEOUT_MS = 5_000
+const DEFAULT_DELIVERY_INJECTED_RETRY_DELAYS_MS = [2_000, 5_000]
 const REMOTE_STREAM_ERROR_POLLING_FALLBACK_THRESHOLD = 5
 const REMOTE_STREAM_POLL_INTERVAL_MS = 5_000
 
@@ -162,6 +163,12 @@ type DeliveryDedupeClaimOutcome = 'committed' | 'released'
 type InFlightDedupeClaim = {
   promise: Promise<DeliveryDedupeClaimOutcome>
   settle: (outcome: DeliveryDedupeClaimOutcome) => void
+}
+
+type InjectedConfirmation = {
+  recipient: string
+  input: BrokerMessageInput
+  promise: Promise<unknown>
 }
 
 type DispatchItem = {
@@ -411,13 +418,53 @@ function isUnauthorizedError(error: unknown): boolean {
   return typeof message === 'string' && /\b(401|403|unauthor|forbidden)\b/i.test(message)
 }
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (signal?.aborted) return Promise.reject(abortError())
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, ms)
+    const onAbort = (): void => {
+      clearTimeout(timer)
+      reject(abortError())
+    }
+    signal?.addEventListener('abort', onAbort, { once: true })
+  })
 }
 
 function deliveryInjectedConfirmationTimeoutMs(): number {
   const value = Number.parseInt(process.env.PEAR_INTEGRATION_EVENT_INJECTED_CONFIRMATION_TIMEOUT_MS || '', 10)
   return Number.isFinite(value) && value > 0 ? value : DEFAULT_DELIVERY_INJECTED_CONFIRMATION_TIMEOUT_MS
+}
+
+function deliveryInjectedRetryDelaysMs(): number[] {
+  const configured = process.env.PEAR_INTEGRATION_EVENT_INJECTED_RETRY_DELAYS_MS
+  if (!configured) return DEFAULT_DELIVERY_INJECTED_RETRY_DELAYS_MS
+  const delays = configured
+    .split(',')
+    .map((entry) => Number.parseInt(entry.trim(), 10))
+    .filter((entry) => Number.isFinite(entry) && entry >= 0)
+  return delays.length > 0 ? delays : DEFAULT_DELIVERY_INJECTED_RETRY_DELAYS_MS
+}
+
+function abortError(): Error {
+  const error = new Error('integration event delivery retry aborted')
+  error.name = 'AbortError'
+  return error
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === 'AbortError'
+}
+
+function withAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortError())
+  return new Promise((resolve, reject) => {
+    const onAbort = (): void => reject(abortError())
+    signal.addEventListener('abort', onAbort, { once: true })
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+  })
 }
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -2579,6 +2626,7 @@ export class IntegrationEventBridge {
   private projectAgentRecipientCache = new Map<string, ProjectAgentRecipientCacheEntry>()
   private notificationTargetCache = new Map<string, NotificationTargetCacheEntry>()
   private brokerSendPacers = new Map<string, ProjectBrokerSendPacer>()
+  private deliveryRetryAbortControllers = new Map<string, AbortController>()
   private readonly deps: IntegrationEventBridgeDeps
 
   constructor(deps: IntegrationEventBridgeDeps = {}) {
@@ -2796,6 +2844,8 @@ export class IntegrationEventBridge {
     this.dispatchers.delete(projectId)
     this.brokerSendPacers.get(projectId)?.dispose()
     this.brokerSendPacers.delete(projectId)
+    this.deliveryRetryAbortControllers.get(projectId)?.abort()
+    this.deliveryRetryAbortControllers.delete(projectId)
     this.selfBotUserIds.delete(projectId)
     this.recentOutboundWritebacks.delete(projectId)
     this.invalidateProjectAgentCache(projectId)
@@ -3219,7 +3269,7 @@ export class IntegrationEventBridge {
     })
     let deliveredCount = 0
     const sendErrors: Array<{ recipient: string; error: unknown }> = []
-    const injectedConfirmations: Array<Promise<unknown>> = []
+    const injectedConfirmations: InjectedConfirmation[] = []
     for (const recipient of uniqueRecipients) {
       const input = {
         to: recipient,
@@ -3243,7 +3293,13 @@ export class IntegrationEventBridge {
         const sendResult = await this.sendBrokerMessage(projectId, input, bridge, {
           waitForInjected: canTrackInjectedDelivery
         })
-        if (sendResult.injectedConfirmation) injectedConfirmations.push(sendResult.injectedConfirmation)
+        if (sendResult.injectedConfirmation) {
+          injectedConfirmations.push({
+            recipient,
+            input,
+            promise: sendResult.injectedConfirmation
+          })
+        }
         deliveredCount += 1
       } catch (error) {
         sendErrors.push({ recipient, error })
@@ -3271,25 +3327,14 @@ export class IntegrationEventBridge {
       )
     }
     if (deliveryClaim && injectedConfirmations.length > 0) {
-      void Promise.all(injectedConfirmations)
+      void this.confirmInjectedDeliveryWithRetry(projectId, event, bridge, deliveryClaim, injectedConfirmations)
         .then(() => {
           this.commitDedupeKey(deliveryClaim)
           incrementIntegrationEventCounter(projectId, 'eventsInjected')
           inFlightClaim?.settle('committed')
         })
-        .catch((error) => {
+        .catch(() => {
           this.releaseDedupeKey(deliveryClaim.key, deliveryClaim.isSlackLogicalKey, deliveryClaim.contentHash)
-          warnIntegrationEventAggregated(
-            `delivery injected confirmation failed:${projectId}`,
-            'delivery injected confirmation failed',
-            {
-              projectId,
-              eventId: event.id,
-              path: event.resource.path,
-              duplicateKey: deliveryClaim.key,
-              error: toErrorMessage(error)
-            }
-          )
           inFlightClaim?.settle('released')
         })
     } else if (deliveryClaim) {
@@ -3298,6 +3343,128 @@ export class IntegrationEventBridge {
     } else {
       incrementIntegrationEventCounter(projectId, 'eventsInjected')
     }
+  }
+
+  private async confirmInjectedDeliveryWithRetry(
+    projectId: string,
+    event: ChangeEvent,
+    bridge: BrokerEventBridge,
+    deliveryClaim: DeliveryDedupeClaim,
+    confirmations: InjectedConfirmation[]
+  ): Promise<void> {
+    const retryDelays = deliveryInjectedRetryDelaysMs()
+    const signal = this.deliveryRetrySignalForProject(projectId)
+    const attemptsByRecipient = new Map(confirmations.map((confirmation) => [confirmation.recipient, 1]))
+    let pending = confirmations
+
+    for (let retryIndex = 0; ; retryIndex += 1) {
+      const results = await Promise.all(pending.map(async (confirmation) => {
+        try {
+          await withAbort(confirmation.promise, signal)
+          return { confirmation, error: undefined }
+        } catch (error) {
+          return { confirmation, error }
+        }
+      }))
+      const failed = results.filter((result): result is { confirmation: InjectedConfirmation; error: unknown } =>
+        result.error !== undefined
+      )
+      if (failed.length === 0) return
+      const aborted = failed.find((result) => isAbortError(result.error))
+      if (aborted) throw aborted.error
+
+      for (const { confirmation, error } of failed) {
+        this.warnDeliveryInjectedConfirmationFailed(projectId, event, deliveryClaim, confirmation, error)
+      }
+
+      const delayMs = retryDelays[retryIndex]
+      if (delayMs === undefined) {
+        for (const { confirmation, error } of failed) {
+          console.warn('[integration-events] delivery injected retries exhausted', {
+            projectId,
+            eventId: event.id,
+            path: event.resource.path,
+            recipient: confirmation.recipient,
+            duplicateKey: deliveryClaim.key,
+            attempts: attemptsByRecipient.get(confirmation.recipient) ?? 1,
+            error: toErrorMessage(error)
+          })
+        }
+        throw failed[0].error
+      }
+
+      for (const { confirmation, error } of failed) {
+        warnIntegrationEventAggregated(
+          `delivery injected confirmation retrying:${projectId}`,
+          'delivery injected confirmation retrying',
+          {
+            projectId,
+            eventId: event.id,
+            path: event.resource.path,
+            recipient: confirmation.recipient,
+            duplicateKey: deliveryClaim.key,
+            attempt: attemptsByRecipient.get(confirmation.recipient) ?? 1,
+            nextAttempt: (attemptsByRecipient.get(confirmation.recipient) ?? 1) + 1,
+            delayMs,
+            error: toErrorMessage(error)
+          }
+        )
+      }
+
+      await delay(delayMs, signal)
+      const retryConfirmations: InjectedConfirmation[] = []
+      for (const { confirmation } of failed) {
+        const nextAttempt = (attemptsByRecipient.get(confirmation.recipient) ?? 1) + 1
+        attemptsByRecipient.set(confirmation.recipient, nextAttempt)
+        try {
+          const sendResult = await this.sendBrokerMessage(projectId, confirmation.input, bridge, {
+            waitForInjected: true
+          })
+          retryConfirmations.push({
+            recipient: confirmation.recipient,
+            input: confirmation.input,
+            promise: sendResult.injectedConfirmation ?? Promise.reject(new Error('Broker delivery_injected confirmation is unavailable'))
+          })
+        } catch (error) {
+          retryConfirmations.push({
+            recipient: confirmation.recipient,
+            input: confirmation.input,
+            promise: Promise.reject(error)
+          })
+        }
+      }
+      pending = retryConfirmations
+    }
+  }
+
+  private warnDeliveryInjectedConfirmationFailed(
+    projectId: string,
+    event: ChangeEvent,
+    deliveryClaim: DeliveryDedupeClaim,
+    confirmation: InjectedConfirmation,
+    error: unknown
+  ): void {
+    warnIntegrationEventAggregated(
+      `delivery injected confirmation failed:${projectId}`,
+      'delivery injected confirmation failed',
+      {
+        projectId,
+        eventId: event.id,
+        path: event.resource.path,
+        recipient: confirmation.recipient,
+        duplicateKey: deliveryClaim.key,
+        error: toErrorMessage(error)
+      }
+    )
+  }
+
+  private deliveryRetrySignalForProject(projectId: string): AbortSignal {
+    let controller = this.deliveryRetryAbortControllers.get(projectId)
+    if (!controller || controller.signal.aborted) {
+      controller = new AbortController()
+      this.deliveryRetryAbortControllers.set(projectId, controller)
+    }
+    return controller.signal
   }
 
   private reportSkippedDuplicatePath(projectId: string, event: ChangeEvent, duplicateKey: string): void {
