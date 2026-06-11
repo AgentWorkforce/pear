@@ -43,9 +43,7 @@ export class FakeMountClient implements MountClient {
 
   async writeFile(path: string, content: unknown): Promise<void> {
     const revision = String((Number(this.files.get(path)?.revision ?? 0) || 0) + 1)
-    const existing = this.files.get(path)?.content
-    const storedContent = mergedLinearIssueContent(existing, content) ?? content
-    this.files.set(path, { content: storedContent, revision })
+    this.files.set(path, { content, revision })
     this.writes.push({ path, content })
   }
 
@@ -107,26 +105,6 @@ export class FakeMountClient implements MountClient {
     for (const subscriber of this.#subscribers) {
       subscriber(event)
     }
-  }
-}
-
-const record = (value: unknown): Record<string, unknown> | undefined =>
-  value !== null && typeof value === 'object' && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined
-
-const mergedLinearIssueContent = (existing: unknown, content: unknown): unknown | undefined => {
-  const existingRecord = record(existing)
-  const payload = record(existingRecord?.payload)
-  const update = record(content)
-  if (!existingRecord || existingRecord.objectType !== 'issue' || !payload || !update) return undefined
-  if (Object.keys(update).some((key) => key !== 'stateId')) return undefined
-  return {
-    ...existingRecord,
-    payload: {
-      ...payload,
-      ...update,
-    },
   }
 }
 

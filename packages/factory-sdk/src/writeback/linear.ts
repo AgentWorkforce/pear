@@ -1,7 +1,7 @@
 import { linearCommentPath, linearIssuePath } from '../constants/linear'
 import type { MountClient } from '../ports'
 import type { LinearIssue } from '../types'
-import { asRecord, safePathSegment, stableHash, wrappedPayload } from './shared'
+import { asRecord, parseJsonContent, safePathSegment, stableHash, wrappedPayload } from './shared'
 
 export interface LinearStateIds {
   [name: string]: string
@@ -124,12 +124,36 @@ const payloadInFactoryScope = (
 const readIssuePayloadForGuard = async (
   mount: MountClient,
   issue: LinearIssue,
-): Promise<Record<string, unknown>> => {
+): Promise<{ path: string; content: unknown; payload: Record<string, unknown> }> => {
   const path = issuePath(issue)
   try {
-    return wrappedPayload((await mount.readFile(path)).content)
+    const { content } = await mount.readFile(path)
+    return {
+      path,
+      content,
+      payload: wrappedPayload(content),
+    }
   } catch {
     throw new Error(`Refusing Linear writeback for ${issue.key}: unable to read guard fields from ${path}`)
+  }
+}
+
+const issueContentWithState = (content: unknown, stateId: string): Record<string, unknown> => {
+  const parsed = parseJsonContent(content)
+  const record = asRecord(parsed) ?? {}
+  const payload = wrappedPayload(parsed)
+  if (asRecord(record.payload)) {
+    return {
+      ...record,
+      payload: {
+        ...payload,
+        stateId,
+      },
+    }
+  }
+  return {
+    ...payload,
+    stateId,
   }
 }
 
@@ -164,14 +188,15 @@ export const MountLinearWriteback = (
   const safety = safetyFromConfig(configOrStateIds)
   const adapter = {
     async setState(issue: LinearIssue, stateId: string): Promise<void> {
-      assertPayloadInFactoryScope(await readIssuePayloadForGuard(mount, issue), safety, issue.key)
-      const path = issuePath(issue)
-      await mount.writeFile(path, { stateId })
+      const guarded = await readIssuePayloadForGuard(mount, issue)
+      assertPayloadInFactoryScope(guarded.payload, safety, issue.key)
+      await mount.writeFile(guarded.path, issueContentWithState(guarded.content, stateId))
+      const path = guarded.path
       await confirmWriteback(mount, path, () => adapter.verify(issue, { stateId }))
     },
 
     async postComment(issue: LinearIssue, body: string): Promise<void> {
-      assertPayloadInFactoryScope(await readIssuePayloadForGuard(mount, issue), safety, issue.key)
+      assertPayloadInFactoryScope((await readIssuePayloadForGuard(mount, issue)).payload, safety, issue.key)
       const name = linearCommentName(issue, body)
       const path = linearCommentPath(issuePath(issue), name)
       await mount.writeFile(path, linearCommentPayload(issue, body))

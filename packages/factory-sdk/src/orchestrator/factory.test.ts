@@ -140,7 +140,10 @@ describe('FactoryLoop', () => {
     expect(fleet.spawns).toHaveLength(4)
     expect(factory.status().inFlight.map((issue) => issue.key)).toEqual(['AR-1', 'AR-2'])
     expect(factory.status().queued.map((issue) => issue.key)).toEqual(['AR-3'])
-    expect(mount.writes.some((write) => write.path === issuePath(1) && (write.content as { stateId?: string }).stateId === implementing)).toBe(true)
+    expect(mount.writes.some((write) => (
+      write.path === issuePath(1) &&
+      (write.content as { payload?: { stateId?: string } }).payload?.stateId === implementing
+    ))).toBe(true)
 
     fleet.emitAgentExit('ar-1-impl', 'issue-done')
     await flush()

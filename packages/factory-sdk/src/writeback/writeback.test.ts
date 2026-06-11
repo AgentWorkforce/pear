@@ -46,7 +46,7 @@ const wrappedIssueRecord = (overrides: Record<string, unknown> = {}) => ({
 })
 
 describe('MountLinearWriteback', () => {
-  it('writes only stateId to the canonical AR-prefixed issue file and verifies read-back', async () => {
+  it('updates only payload.stateId in the canonical AR-prefixed issue file and verifies read-back', async () => {
     const mount = new FakeMountClient({
       [issuePath]: wrappedIssueRecord(),
     })
@@ -55,7 +55,7 @@ describe('MountLinearWriteback', () => {
     await linear.setState(issue, 'implementing-state')
 
     expect(mount.writes).toEqual([
-      { path: issuePath, content: { stateId: 'implementing-state' } },
+      { path: issuePath, content: wrappedIssueRecord({ stateId: 'implementing-state' }) },
     ])
     expect(await linear.verify(issue, { stateId: 'implementing-state' })).toBe(true)
   })
@@ -180,7 +180,7 @@ describe('MountLinearWriteback', () => {
     await expect(MountLinearWriteback(mount).setState(issue, 'implementing-state'))
       .resolves.toBeUndefined()
     expect(mount.writes).toEqual([
-      { path: issuePath, content: { stateId: 'implementing-state' } },
+      { path: issuePath, content: wrappedIssueRecord({ stateId: 'implementing-state', team: undefined }) },
     ])
   })
 
