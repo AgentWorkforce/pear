@@ -93,6 +93,15 @@ const TERMINAL_FONT_FAMILY =
   "'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, monospace"
 const IDLE_DISPOSE_MS = 5 * 60_000
 const IDLE_SWEEP_MS = 30_000
+// Outstanding optimistic-echo predictions close the reconciler's quiet gate
+// (the screen comparison would see unconfirmed glyphs). But a prediction is
+// only ever confirmed or dropped by server output — if none arrives for this
+// long, the echo is never coming (keystroke swallowed by the TUI, or typed
+// into a hung agent) and the gate would stay closed FOREVER, silently
+// disabling the convergence backstop. Rolling back only erases the
+// optimistic glyphs; confirmed bytes are untouched, and a real echo that
+// arrives later repaints the characters authoritatively.
+export const STRANDED_PREDICTION_ROLLBACK_MS = 10_000
 
 // Default-on, demoted to DOM after the first webgl failure for the rest of
 // the session. We don't recover: if webgl construction blew up once we
@@ -367,8 +376,32 @@ function createRuntime(
       // A hidden window stalls the rAF chunk flush, so "no recent output"
       // says nothing about what is actually pending — never reconcile there.
       if (document.visibilityState !== 'visible') return false
-      if (predictiveEcho?.hasPredictions) return false
-      return Date.now() - lastOutputAt >= RECONCILE_QUIET_MS
+      const sinceOutput = Date.now() - lastOutputAt
+      if (predictiveEcho?.hasPredictions) {
+        if (sinceOutput < STRANDED_PREDICTION_ROLLBACK_MS) return false
+        // See STRANDED_PREDICTION_ROLLBACK_MS: the confirming echo is never
+        // coming; without this escape the quiet gate never reopens.
+        console.warn(
+          '[terminal] rolling back stranded optimistic-echo predictions (no confirming output)'
+        )
+        predictiveEcho.rollback()
+        if (predictiveEcho.hasPredictions) return false
+      }
+      return sinceOutput >= RECONCILE_QUIET_MS
+    },
+    onPersistentDimsMismatch: () => {
+      // The size-sync loop believes the PTY is at the last acked size, but
+      // the broker snapshot says otherwise. Invalidate the ack so the
+      // re-send isn't swallowed by the change gate, refit against the live
+      // container, and re-assert the rendered grid as the PTY size.
+      sizeSync.invalidateAck()
+      const size = tryFit()
+      if (size) {
+        predictiveEcho?.onResize(size.cols, size.rows)
+        sizeSync.setDesired(size.rows, size.cols)
+      } else if (term && term.rows > 0 && term.cols > 0) {
+        sizeSync.setDesired(term.rows, term.cols)
+      }
     },
     activitySerial: () => activitySerial,
     flushPending: () => flushPtyChunksNow(key),
