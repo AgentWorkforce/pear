@@ -22,7 +22,15 @@ export interface CloseProbePrResult {
 export async function closeProbePr(input: CloseProbePrInput): Promise<CloseProbePrResult> {
   const run = input.runner ?? defaultGhRunner
   const before = await viewPr(run, input)
-  assertOpenProbe(before, input)
+  assertProbeIdentity(before, input)
+
+  const beforeState = normalizeState(stringValue(before.state))
+  if (beforeState === 'CLOSED') {
+    return { repo: input.repo, prNumber: input.prNumber, state: 'CLOSED' }
+  }
+  if (beforeState !== 'OPEN') {
+    throw new Error(`Refusing to close probe PR #${input.prNumber}: live state is ${stringValue(before.state) ?? 'unknown'}`)
+  }
 
   await run(['pr', 'close', String(input.prNumber), '--repo', input.repo])
 
@@ -51,12 +59,7 @@ const viewPr = async (run: GhRunner, input: CloseProbePrInput): Promise<Record<s
   return parseGhJson(result.stdout)
 }
 
-const assertOpenProbe = (live: Record<string, unknown>, input: CloseProbePrInput): void => {
-  const state = stringValue(live.state)
-  if (normalizeState(state) !== 'OPEN') {
-    throw new Error(`Refusing to close probe PR #${input.prNumber}: live state is ${state ?? 'unknown'}`)
-  }
-
+const assertProbeIdentity = (live: Record<string, unknown>, input: CloseProbePrInput): void => {
   const title = stringValue(live.title) ?? ''
   const body = stringValue(live.body) ?? ''
   const headRefName = stringValue(live.headRefName) ?? ''

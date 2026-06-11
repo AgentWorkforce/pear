@@ -38,6 +38,28 @@ describe('closeProbePr', () => {
     ])
   })
 
+  it('treats an already closed guarded probe as a no-op', async () => {
+    const calls: string[][] = []
+    const runner: GhRunner = async (args) => {
+      calls.push(args)
+      if (args[0] === 'pr' && args[1] === 'view') {
+        return { stdout: JSON.stringify({ ...openProbe, state: 'CLOSED' }) }
+      }
+      throw new Error(`unexpected gh args ${args.join(' ')}`)
+    }
+
+    await expect(closeProbePr({
+      repo: 'AgentWorkforce/pear',
+      prNumber: 123,
+      expectedIssueKey: 'AR-42',
+      runner,
+    })).resolves.toEqual({ repo: 'AgentWorkforce/pear', prNumber: 123, state: 'CLOSED' })
+
+    expect(calls.map((args) => args.slice(0, 3))).toEqual([
+      ['pr', 'view', '123'],
+    ])
+  })
+
   it('refuses a non-probe PR before closing', async () => {
     const calls: string[][] = []
     const runner: GhRunner = async (args) => {
