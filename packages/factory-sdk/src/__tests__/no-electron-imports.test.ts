@@ -8,6 +8,10 @@ const sourceRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
 const importSpecifierPattern =
   /(?:import|export)\s+(?:type\s+)?(?:[^'"]*?\s+from\s+)?['"]([^'"]+)['"]|import\s*\(\s*['"]([^'"]+)['"]\s*\)/g
 
+const stripComments = (source: string) => source
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/\/\/.*/g, '')
+
 async function walk(dir: string): Promise<string[]> {
   const entries = await readdir(dir, { withFileTypes: true })
   const files = await Promise.all(entries.map(async (entry) => {
@@ -26,7 +30,7 @@ describe('factory-sdk imports', () => {
     const violations: string[] = []
 
     for (const file of await walk(sourceRoot)) {
-      const source = await readFile(file, 'utf8')
+      const source = stripComments(await readFile(file, 'utf8'))
       for (const match of source.matchAll(importSpecifierPattern)) {
         const specifier = match[1] ?? match[2] ?? ''
         if (specifier.includes('electron') || specifier.includes('src/main')) {
@@ -36,5 +40,20 @@ describe('factory-sdk imports', () => {
     }
 
     expect(violations).toEqual([])
+  })
+
+  it('ignores import-like text inside comments', () => {
+    const source = stripComments(`
+      // import 'electron'
+      /*
+       * export { broker } from '../../src/main/broker'
+       */
+      import { FactoryConfigSchema } from '../config/schema'
+    `)
+
+    const specifiers = [...source.matchAll(importSpecifierPattern)]
+      .map((match) => match[1] ?? match[2] ?? '')
+
+    expect(specifiers).toEqual(['../config/schema'])
   })
 })

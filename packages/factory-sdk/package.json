@@ -2,6 +2,11 @@
   "name": "@pear/factory-sdk",
   "private": true,
   "type": "commonjs",
+  "dependencies": {
+    "@agent-relay/harness-driver": "^8.3.7",
+    "@relayfile/sdk": "^0.8.21",
+    "zod": "^3.25.76"
+  },
   "exports": {
     ".": {
       "types": "./src/index.ts",

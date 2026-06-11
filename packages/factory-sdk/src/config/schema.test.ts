@@ -51,4 +51,23 @@ describe('FactoryConfigSchema', () => {
       batchSize: 6,
     })).toThrow()
   })
+
+  it('merges partial state id overrides with defaults', () => {
+    const parsed = FactoryConfigSchema.parse({
+      workspaceId: 'ws_123',
+      repos: {
+        byLabel: {
+          pear: 'AgentWorkforce/pear',
+        },
+      },
+      stateIds: {
+        readyForAgent: 'custom-ready',
+      },
+    })
+
+    expect(parsed.stateIds).toEqual({
+      ...LINEAR_STATE_IDS,
+      readyForAgent: 'custom-ready',
+    })
+  })
 })

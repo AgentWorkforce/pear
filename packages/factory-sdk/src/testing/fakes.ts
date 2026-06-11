@@ -14,6 +14,9 @@ import type {
 type ExitListener = (name: string, reason?: string) => void
 type DeliveryFailedListener = (info: { to: string; msgId?: string; reason?: string }) => void
 
+const cloneContent = (content: unknown): unknown =>
+  content && typeof content === 'object' ? structuredClone(content) : content
+
 export class FakeMountClient implements MountClient {
   readonly files = new Map<string, { content: unknown; revision?: string }>()
   readonly writes: Array<{ path: string; content: unknown }> = []
@@ -26,7 +29,7 @@ export class FakeMountClient implements MountClient {
 
   constructor(initialFiles: Record<string, unknown> = {}) {
     for (const [path, content] of Object.entries(initialFiles)) {
-      this.files.set(path, { content })
+      this.files.set(path, { content: cloneContent(content) })
     }
   }
 
@@ -36,13 +39,13 @@ export class FakeMountClient implements MountClient {
       throw new Error(`File not found: ${path}`)
     }
 
-    return { ...entry }
+    return { content: cloneContent(entry.content), revision: entry.revision }
   }
 
   async writeFile(path: string, content: unknown): Promise<void> {
     const revision = String((Number(this.files.get(path)?.revision ?? 0) || 0) + 1)
-    this.files.set(path, { content, revision })
-    this.writes.push({ path, content })
+    this.files.set(path, { content: cloneContent(content), revision })
+    this.writes.push({ path, content: cloneContent(content) })
   }
 
   async listTree(prefix: string): Promise<string[]> {

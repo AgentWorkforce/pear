@@ -29,11 +29,11 @@ export const FactoryConfigSchema = z.object({
   }).optional(),
   mergePolicy: z.enum(['never', 'on-green-with-review']).default('never'),
   stateIds: z.object({
-    readyForAgent: z.string(),
-    agentImplementing: z.string(),
-    done: z.string(),
-    inPlanning: z.string(),
-  }).default(LINEAR_STATE_IDS),
+    readyForAgent: z.string().default(LINEAR_STATE_IDS.readyForAgent),
+    agentImplementing: z.string().default(LINEAR_STATE_IDS.agentImplementing),
+    done: z.string().default(LINEAR_STATE_IDS.done),
+    inPlanning: z.string().default(LINEAR_STATE_IDS.inPlanning),
+  }).default({}),
   dryRun: z.boolean().default(false),
 })
 
