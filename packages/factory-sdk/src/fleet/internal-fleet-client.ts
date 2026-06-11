@@ -175,7 +175,7 @@ export class InternalFleetClient implements FleetClient {
     this.#client.addListener?.('deliveryUpdate', (event) => this.#handleBrokerEvent(event))
     this.#client.addListener?.('agentExited', (agent) =>
       this.#emitAgentExit(agent.name, 'exited', {
-        key: `agentExited:${agent.name}`,
+        key: `agentExited:${JSON.stringify(agent)}`,
         hasStableId: false,
       }),
     )

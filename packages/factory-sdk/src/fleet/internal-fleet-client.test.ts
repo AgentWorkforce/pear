@@ -251,4 +251,21 @@ describe('InternalFleetClient', () => {
     expect(deliveryFailures).toEqual([{ to: 'ar-1-review', msgId: 'event-1', reason: 'recipient unavailable' }])
     expect(exits).toEqual([{ name: 'ar-1-impl', reason: 'crashed' }])
   })
+
+  it('does not suppress distinct legacy agent exit callbacks for the same agent name', () => {
+    const harness = new FakeHarnessDriverClient()
+    const fleet = new InternalFleetClient({ client: harness })
+    const exits: Array<{ name: string; reason?: string }> = []
+
+    fleet.onAgentExit((name, reason) => exits.push({ name, reason }))
+
+    harness.emitAgentExited({ name: 'ar-1-impl', sessionId: 'session-1' })
+    harness.emitAgentExited({ name: 'ar-1-impl', sessionId: 'session-1' })
+    harness.emitAgentExited({ name: 'ar-1-impl', sessionId: 'session-2' })
+
+    expect(exits).toEqual([
+      { name: 'ar-1-impl', reason: 'exited' },
+      { name: 'ar-1-impl', reason: 'exited' },
+    ])
+  })
 })
