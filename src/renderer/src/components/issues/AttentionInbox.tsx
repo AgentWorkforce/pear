@@ -561,6 +561,7 @@ export function AttentionInbox({
   const load = useIssuesStore((s) => s.load)
   const subscribe = useIssuesStore((s) => s.subscribe)
   const setIssueState = useIssuesStore((s) => s.setIssueState)
+  const workflowStates = useIssuesStore((s) => s.workflowStates)
   const [expandedBands, setExpandedBands] = useState<Record<IssueBand, boolean>>({
     'needs-you': true,
     'ready-for-agent': true,
@@ -603,8 +604,12 @@ export function AttentionInbox({
     () => orderStages(Array.from(new Set(issues.map((issue) => issue.stage)))),
     [issues]
   )
-  // Distinct workflow states that carry a stateId — the only ones we can write back to.
+  // Prefer the authoritative `/linear/states` list (every workflow state, in
+  // board order). Fall back to states inferred from loaded issues when the
+  // states mount isn't live yet — those carry real stateIds too, but only cover
+  // states currently in use.
   const availableStates = useMemo<IssueWorkflowState[]>(() => {
+    if (workflowStates.length > 0) return workflowStates
     const byId = new Map<string, IssueWorkflowState>()
     for (const issue of issues) {
       if (issue.stateId && !byId.has(issue.stateId)) {
@@ -614,7 +619,7 @@ export function AttentionInbox({
     return orderStages(Array.from(byId.values()).map((state) => state.name)).map(
       (name) => Array.from(byId.values()).find((state) => state.name === name) as IssueWorkflowState
     )
-  }, [issues])
+  }, [workflowStates, issues])
   const activeStatusFilter = statusFilter && availableStages.includes(statusFilter) ? statusFilter : null
   const visibleIssues = activeStatusFilter
     ? issues.filter((issue) => issue.stage === activeStatusFilter)

@@ -53,6 +53,12 @@ export interface IssueWorkflowState {
 
 interface IssuesState {
   issues: IssueViewModel[]
+  /**
+   * Authoritative workflow states from the materialized `/linear/states` mount,
+   * when available. Empty until the states resource is in the project scope and
+   * synced — callers should fall back to states derived from loaded issues.
+   */
+  workflowStates: IssueWorkflowState[]
   loading: boolean
   error: string | null
   loadedProjectId: string | null
@@ -296,28 +302,48 @@ async function normalizeIssue(
 }
 
 /**
- * Build the writeback payload for an issue state change. Written to the
- * canonical issue file path; the Linear adapter interprets `stateId` as a
- * workflow-state transition. Only identity + the changed state are included —
- * read-only fields (url, timestamps, actor) are deliberately omitted so the
- * adapter derives them, mirroring the comment-writeback contract.
+ * Build the writeback payload for an issue state change.
+ *
+ * The `@relayfile/adapter-linear` `issues` resource (discovery/linear/.adapter.md)
+ * defines Edit semantics as: "write the resource update payload to the canonical
+ * resource path; included mutable fields PATCH; fields marked readOnly in
+ * .schema.json are rejected." The schema is `additionalProperties: false`, so we
+ * send ONLY the single mutable field we intend to change — `stateId`. Including
+ * identity/`state`/`team` objects (readOnly or non-schema) would be rejected.
  */
-function buildStateWritebackPayload(issue: IssueViewModel, state: IssueWorkflowState): Record<string, unknown> {
-  const payload: Record<string, unknown> = {
-    id: issue.id,
-    identifier: issue.identifier,
-    stateId: state.id,
-    state: state.type ? { id: state.id, name: state.name, type: state.type } : { id: state.id, name: state.name }
+function buildStateWritebackPayload(state: IssueWorkflowState): Record<string, unknown> {
+  return { stateId: state.id }
+}
+
+/**
+ * Load the authoritative workflow-state list from the materialized
+ * `/linear/states` mount (adapter-linear `states` resource). Returns [] if the
+ * resource is out of scope, not yet synced, or unreadable — callers fall back to
+ * states derived from loaded issues.
+ */
+async function loadWorkflowStates(projectId: string): Promise<IssueWorkflowState[]> {
+  try {
+    const entries = await pear.integrations.listRemoteDir(projectId, '/linear/states')
+    const parsed: Array<{ id: string; name: string; type?: string; position: number }> = []
+    await Promise.all(
+      entries.filter(isIssueFile).map(async (entry) => {
+        const preview = await pear.integrations.readRemoteFile(projectId, entry.path)
+        if (preview.kind !== 'text') return
+        const record = parseJsonPreview(preview.content, entry.path)
+        if (!record) return
+        const data = payloadRecord(record)
+        const id = readString(data.id)
+        const name = readString(data.name)
+        if (!id || !name) return
+        parsed.push({ id, name, type: readString(data.type), position: readNumber(data.position) ?? Number.MAX_SAFE_INTEGER })
+      })
+    )
+    return parsed
+      .sort((a, b) => a.position - b.position)
+      .map(({ id, name, type }) => ({ id, name, type }))
+  } catch {
+    return []
   }
-  if (issue.teamId) payload.teamId = issue.teamId
-  if (issue.teamId || issue.teamKey || issue.teamName) {
-    const team: Record<string, string> = {}
-    if (issue.teamId) team.id = issue.teamId
-    if (issue.teamKey) team.key = issue.teamKey
-    if (issue.teamName) team.name = issue.teamName
-    payload.team = team
-  }
-  return payload
 }
 
 function isIssueFile(entry: FsDirEntry): boolean {
@@ -346,6 +372,7 @@ function scheduleRefresh(projectId: string, generation: number, load: IssuesStat
 
 export const useIssuesStore = create<IssuesState>((set, get) => ({
   issues: [],
+  workflowStates: [],
   loading: false,
   error: null,
   loadedProjectId: null,
@@ -359,7 +386,10 @@ export const useIssuesStore = create<IssuesState>((set, get) => ({
     const promise = (async () => {
       set({ loading: true, error: null })
       try {
-        const entries = await pear.integrations.listRemoteDir(projectId, '/linear/issues')
+        const [entries, workflowStates] = await Promise.all([
+          pear.integrations.listRemoteDir(projectId, '/linear/issues'),
+          loadWorkflowStates(projectId)
+        ])
         const records = await Promise.all(
           entries.filter(isIssueFile).map(async (entry) => {
             const preview = await pear.integrations.readRemoteFile(projectId, entry.path)
@@ -375,6 +405,7 @@ export const useIssuesStore = create<IssuesState>((set, get) => ({
 
         set({
           issues: sortIssues(issues),
+          workflowStates,
           loading: false,
           error: null,
           loadedProjectId: projectId,
@@ -430,7 +461,7 @@ export const useIssuesStore = create<IssuesState>((set, get) => ({
     if (!state.id) throw new Error('Target workflow state id is required')
     if (state.id === issue.stateId) return
 
-    const payload = buildStateWritebackPayload(issue, state)
+    const payload = buildStateWritebackPayload(state)
     await pear.integrations.writeRemoteFile(projectId, issue.issueRemotePath, JSON.stringify(payload, null, 2))
 
     // Optimistic update; the resulting relayfile-change event reconciles via load().

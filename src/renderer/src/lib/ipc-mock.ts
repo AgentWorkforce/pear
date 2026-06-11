@@ -605,11 +605,23 @@ const mockGithubRecords: Record<string, Record<string, unknown>> = {
   }
 }
 
+// Mirrors the materialized `/linear/states` resource (adapter-linear `states`).
+const mockLinearStates: Array<Record<string, unknown>> = [
+  { id: 'state-planning', name: 'Planning', type: 'unstarted', color: '#9aa0aa', position: 0 },
+  { id: 'state-to-do', name: 'To do', type: 'unstarted', color: '#9aa0aa', position: 1 },
+  { id: 'state-ready-for-agent', name: 'Ready for Agent', type: 'unstarted', color: '#b083f0', position: 2 },
+  { id: 'state-in-progress', name: 'In Progress', type: 'started', color: '#5a8de6', position: 3 },
+  { id: 'state-in-review', name: 'In review', type: 'started', color: '#e6d78d', position: 4 },
+  { id: 'state-merged', name: 'Merged', type: 'completed', color: '#6cc36c', position: 5 },
+  { id: 'state-done', name: 'Done', type: 'completed', color: '#6cc36c', position: 6 }
+]
+
 const mockRemoteFiles: Record<string, Record<string, unknown> | string> = Object.fromEntries([
   ...mockLinearIssues.map((issue) => [
     `/linear/issues/${String(issue.identifier)}.json`,
     issue
   ]),
+  ...mockLinearStates.map((state) => [`/linear/states/${String(state.id)}.json`, state]),
   ...Object.entries(mockGithubRecords)
 ])
 
@@ -1088,6 +1100,14 @@ export const pearMock: PearAPI = {
         })
       }
 
+      if (normalized === '/linear/states') {
+        return mockLinearStates.map((state) => ({
+          name: `${String(state.id)}.json`,
+          path: `/linear/states/${String(state.id)}.json`,
+          type: 'file'
+        }))
+      }
+
       if (normalized === '/github/repos/AgentWorkforce/pear/issues') {
         return Object.keys(mockGithubRecords).map((path) => ({
           name: path.split('/').at(-1) || path,
@@ -1108,6 +1128,25 @@ export const pearMock: PearAPI = {
     writeRemoteFile: async (_projectId: string, remotePath: string, content: string): Promise<void> => {
       const normalized = normalizeMockRemotePath(remotePath)
       console.log('[ipc-mock] writeRemoteFile', normalized, content.length, 'bytes')
+      // Mirror the adapter's Edit/PATCH semantics for canonical issue records:
+      // merge the included mutable fields (e.g. { stateId }) into the existing
+      // record and re-derive the embedded `state` so a reload reflects the move.
+      const existing = mockRemoteFiles[normalized]
+      const issueMatch = /^\/linear\/issues\/[^/]+\.json$/.test(normalized)
+      if (issueMatch && existing && typeof existing !== 'string') {
+        try {
+          const patch = JSON.parse(content) as Record<string, unknown>
+          const merged = { ...existing, ...patch }
+          if (typeof patch.stateId === 'string') {
+            const state = mockLinearStates.find((candidate) => candidate.id === patch.stateId)
+            if (state) merged.state = state
+          }
+          mockRemoteFiles[normalized] = merged
+          return
+        } catch {
+          // fall through to raw write on unparseable payloads
+        }
+      }
       mockRemoteFiles[normalized] = content
     },
     readMountPreview: async (): Promise<FsReadPreviewResult> => ({ kind: 'missing', content: '', size: 0 }),
