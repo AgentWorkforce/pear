@@ -162,6 +162,21 @@ describe('createTerminalReconciler', () => {
     reconciler.dispose()
   })
 
+  it('requires fresh divergence confirmations after a dims-mismatch skip', async () => {
+    const { deps, repairs, state } = makeHarness()
+    const reconciler = createTerminalReconciler(deps)
+    diverge(state)
+    await reconciler.checkNow()
+    state.viewport = { rows: 3, cols: 10, lines: ['row one', 'GARBAGE tw', ''] }
+    await reconciler.checkNow()
+    state.viewport = { rows: 2, cols: 10, lines: ['row one', 'GARBAGE tw'] }
+    await reconciler.checkNow()
+    expect(repairs).toEqual([])
+    await reconciler.checkNow()
+    expect(repairs).toHaveLength(1)
+    reconciler.dispose()
+  })
+
   it('escalates a persistent dims mismatch to onPersistentDimsMismatch, rate-limited', async () => {
     const { deps, repairs, state } = makeHarness()
     const kicks: Array<{ grid: { rows: number; cols: number }; snapshot: { rows: number; cols: number } }> = []

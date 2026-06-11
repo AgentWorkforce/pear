@@ -148,6 +148,7 @@ export function createTerminalReconciler(deps: TerminalReconcilerDeps): Terminal
     const viewport = deps.readViewport()
     if (!viewport) return
     if (plain.rows !== viewport.rows || plain.cols !== viewport.cols) {
+      mismatchStreak = 0
       dimsMismatchStreak += 1
       if (
         dimsMismatchStreak >= RECONCILE_DIMS_MISMATCH_CHECKS &&
