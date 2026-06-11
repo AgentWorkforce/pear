@@ -220,7 +220,11 @@ export function GenericScopePicker({
         <div>
           <div className="text-sm font-medium text-[var(--pear-text)]">{title || `Choose ${resourceNoun}`}</div>
           <div className="mt-0.5 text-xs text-[var(--pear-text-faint)]">
-            {loading ? 'Loading' : resources.length === 0 ? 'All selected' : `${selectedResourceEntries.length} selected`}
+            {loading
+              ? 'Loading'
+              : resources.length === 0
+                ? defaultSelectAll ? 'All selected' : '0 selected'
+                : `${selectedResourceEntries.length} selected`}
           </div>
         </div>
         <button
@@ -244,7 +248,9 @@ export function GenericScopePicker({
       <div className="max-h-64 space-y-2 overflow-y-auto">
         {resources.length === 0 && !loading ? (
           <div className="rounded-md border border-dashed border-[var(--pear-border)] px-3 py-2 text-sm text-[var(--pear-text-faint)]">
-            All {provider} {resourceNoun}
+            {defaultSelectAll
+              ? `All ${provider} ${resourceNoun}`
+              : `No ${provider} ${resourceNoun} available`}
           </div>
         ) : (
           resources.map((resource, index) => {
