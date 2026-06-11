@@ -1,5 +1,3 @@
-import { pear } from '@/lib/ipc'
-
 const REPO_KEYWORDS: Record<string, string[]> = {
   relay: ['relay', 'agent-relay', 'broker', 'mcp', 'workspace', 'webhook', 'mount', 'relayfile'],
   pear: ['pear', 'electron', 'renderer', 'terminal', 'ui', 'inbox', 'sidebar', 'dialog', 'ipc'],
@@ -10,16 +8,20 @@ export function detectRepo(title: string, description: string): string | null {
   const text = `${title} ${description}`.toLowerCase()
   let bestRepo: string | null = null
   let bestScore = 0
+  let tied = false
 
   for (const [repo, keywords] of Object.entries(REPO_KEYWORDS)) {
     const score = keywords.filter((kw) => text.includes(kw)).length
     if (score > bestScore) {
       bestScore = score
       bestRepo = repo
+      tied = false
+    } else if (score > 0 && score === bestScore) {
+      tied = true
     }
   }
 
-  return bestRepo
+  return tied ? null : bestRepo
 }
 
 export function suggestTeamSize(title: string, description: string): 'solo' | 'pair' | 'swarm' {
@@ -33,20 +35,4 @@ export function suggestTeamSize(title: string, description: string): 'solo' | 'p
     return 'solo'
   }
   return 'pair'
-}
-
-export async function labelIssueWithRepo(
-  projectId: string,
-  issueId: string,
-  repo: string
-): Promise<void> {
-  const labelPayload = JSON.stringify({
-    issueId,
-    labels: { add: [`Repo: ${repo}`] }
-  })
-  await pear.integrations.writeRemoteFile(
-    projectId,
-    `/linear/issues/${issueId}/labels.json`,
-    labelPayload
-  )
 }

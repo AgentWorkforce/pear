@@ -1117,7 +1117,7 @@ export class IntegrationsManager {
     }
 
     await this.withIntegrationRemoteHandle(async (handle) => {
-      await handle.client().writeFile(handle.workspaceId, path, content)
+      await handle.client().writeFile({ workspaceId: handle.workspaceId, path, baseRevision: '0', content })
     })
   }
 
