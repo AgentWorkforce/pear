@@ -171,7 +171,17 @@ describe('InternalFleetClient', () => {
     const fleet = new InternalFleetClient({ client: harness })
 
     await fleet.sendMessage({ to: 'ar-1-review', from: 'ar-1-impl', text: 'PR ready', data: { pr: 1 } })
-    await expect(fleet.waitForInjected({ to: 'broker', text: 'done' })).resolves.toEqual({
+    const injected = fleet.waitForInjected({ to: 'broker', text: 'done' }, { timeoutMs: 1000 })
+    await Promise.resolve()
+
+    harness.emit({
+      kind: 'delivery_injected',
+      name: 'broker',
+      delivery_id: 'delivery-2',
+      event_id: 'event-2',
+    })
+
+    await expect(injected).resolves.toEqual({
       eventId: 'event-2',
       targets: ['broker'],
     })
@@ -180,6 +190,32 @@ describe('InternalFleetClient', () => {
       { to: 'ar-1-review', from: 'ar-1-impl', text: 'PR ready', data: { pr: 1 } },
       { to: 'broker', text: 'done', from: undefined, data: undefined },
     ])
+  })
+
+  it('rejects waitForInjected on correlated delivery failure', async () => {
+    const harness = new FakeHarnessDriverClient()
+    const fleet = new InternalFleetClient({ client: harness })
+    const injected = fleet.waitForInjected({ to: 'ar-1-review', text: 'PR ready' }, { timeoutMs: 1000 })
+    await Promise.resolve()
+
+    harness.emit({
+      kind: 'delivery_failed',
+      name: 'ar-1-review',
+      delivery_id: 'delivery-1',
+      event_id: 'event-1',
+      reason: 'recipient unavailable',
+    })
+
+    await expect(injected).rejects.toThrow('recipient unavailable')
+  })
+
+  it('times out waitForInjected when no delivery_injected event arrives', async () => {
+    const harness = new FakeHarnessDriverClient()
+    const fleet = new InternalFleetClient({ client: harness })
+
+    await expect(fleet.waitForInjected({ to: 'broker', text: 'done' }, { timeoutMs: 1 })).rejects.toThrow(
+      'Timed out waiting for delivery_injected for event-1',
+    )
   })
 
   it('surfaces broker delivery failures and agent exits once for duplicate events', () => {

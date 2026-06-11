@@ -30,6 +30,12 @@ export interface InternalFleetClientOptions {
 
 type AgentExitListener = (name: string, reason?: string) => void
 type DeliveryFailedListener = (info: { to: string; msgId?: string; reason?: string }) => void
+type PendingInjectedWait = {
+  targets: string[]
+  timeout: ReturnType<typeof setTimeout>
+  resolve: (result: { eventId: string; targets: string[] }) => void
+  reject: (error: Error) => void
+}
 
 const capabilityCli: Record<Capability, string> = {
   'spawn:claude': 'claude',
@@ -51,6 +57,11 @@ export class InternalFleetClient implements FleetClient {
   readonly #deliveryFailedListeners = new Set<DeliveryFailedListener>()
   readonly #seenEvents: string[] = []
   readonly #seenEventKeys = new Set<string>()
+  readonly #pendingInjected = new Map<string, PendingInjectedWait>()
+  readonly #injectedEventIds: string[] = []
+  readonly #injectedEventIdSet = new Set<string>()
+  readonly #failedDeliveries = new Map<string, Error>()
+  readonly #failedDeliveryIds: string[] = []
   #suppressedDuplicateEvents = 0
   #missingIdentityEvents = 0
   #subscribed = false
@@ -108,9 +119,34 @@ export class InternalFleetClient implements FleetClient {
     await this.#client.sendMessage(messageInputFrom(input))
   }
 
-  async waitForInjected(input: SendInput, _opts?: { timeoutMs?: number }): Promise<{ eventId: string; targets: string[] }> {
+  async waitForInjected(input: SendInput, opts?: { timeoutMs?: number }): Promise<{ eventId: string; targets: string[] }> {
+    this.#ensureEventSubscription()
     const result = await this.#client.sendMessage(messageInputFrom(input))
-    return { eventId: result.event_id, targets: result.targets }
+    const eventId = result.event_id
+
+    if (this.#injectedEventIdSet.has(eventId)) {
+      return { eventId, targets: result.targets }
+    }
+
+    const priorFailure = this.#failedDeliveries.get(eventId)
+    if (priorFailure) {
+      throw priorFailure
+    }
+
+    return await new Promise((resolve, reject) => {
+      const timeoutMs = opts?.timeoutMs ?? 30_000
+      const timeout = setTimeout(() => {
+        this.#pendingInjected.delete(eventId)
+        reject(new Error(`Timed out waiting for delivery_injected for ${eventId}`))
+      }, timeoutMs)
+
+      this.#pendingInjected.set(eventId, {
+        targets: result.targets,
+        timeout,
+        resolve,
+        reject,
+      })
+    })
   }
 
   onDeliveryFailed(listener: DeliveryFailedListener): () => void {
@@ -146,7 +182,13 @@ export class InternalFleetClient implements FleetClient {
   }
 
   #handleBrokerEvent(event: BrokerEvent): void {
+    if (event.kind === 'delivery_injected') {
+      this.#resolveInjected(event.event_id)
+      return
+    }
+
     if (event.kind === 'delivery_failed') {
+      this.#rejectInjected(event.event_id, event.reason)
       this.#emitDeliveryFailed(
         {
           to: event.name,
@@ -159,6 +201,9 @@ export class InternalFleetClient implements FleetClient {
     }
 
     if (event.kind === 'message_delivery_failed') {
+      if (event.event_id) {
+        this.#rejectInjected(event.event_id, event.lastError)
+      }
       this.#emitDeliveryFailed(
         {
           to: event.to,
@@ -178,6 +223,40 @@ export class InternalFleetClient implements FleetClient {
     if (event.kind === 'agent_exited') {
       this.#emitAgentExit(event.name, event.reason ?? exitReason(event), eventIdentity(event))
     }
+  }
+
+  #resolveInjected(eventId: string): void {
+    rememberRecent(eventId, this.#injectedEventIds, this.#injectedEventIdSet)
+
+    const pending = this.#pendingInjected.get(eventId)
+    if (!pending) {
+      return
+    }
+
+    clearTimeout(pending.timeout)
+    this.#pendingInjected.delete(eventId)
+    pending.resolve({ eventId, targets: pending.targets })
+  }
+
+  #rejectInjected(eventId: string, reason?: string): void {
+    const error = new Error(reason ? `Delivery failed for ${eventId}: ${reason}` : `Delivery failed for ${eventId}`)
+    this.#failedDeliveries.set(eventId, error)
+    this.#failedDeliveryIds.push(eventId)
+    if (this.#failedDeliveryIds.length > 500) {
+      const oldest = this.#failedDeliveryIds.shift()
+      if (oldest) {
+        this.#failedDeliveries.delete(oldest)
+      }
+    }
+
+    const pending = this.#pendingInjected.get(eventId)
+    if (!pending) {
+      return
+    }
+
+    clearTimeout(pending.timeout)
+    this.#pendingInjected.delete(eventId)
+    pending.reject(error)
   }
 
   #emitDeliveryFailed(info: { to: string; msgId?: string; reason?: string }, identity: EventIdentity): void {
@@ -260,6 +339,21 @@ function eventIdentity(event: BrokerEvent): EventIdentity {
   return {
     key: `${event.kind}:${stable ?? ''}:${JSON.stringify(event)}`,
     hasStableId: Boolean(stable),
+  }
+}
+
+function rememberRecent(value: string, values: string[], set: Set<string>): void {
+  if (set.has(value)) {
+    return
+  }
+
+  set.add(value)
+  values.push(value)
+  if (values.length > 500) {
+    const oldest = values.shift()
+    if (oldest) {
+      set.delete(oldest)
+    }
   }
 }
 
