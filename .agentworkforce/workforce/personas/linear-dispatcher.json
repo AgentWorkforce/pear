@@ -1,0 +1,58 @@
+{
+  "id": "linear-dispatcher",
+  "intent": "agent-relay-workflow",
+  "tags": [
+    "linear",
+    "dispatch",
+    "orchestration"
+  ],
+  "description": "Autonomous Linear issue dispatcher. Watches for issues in the Ready for Agent state, triages them, dispatches codex implementer agents and claude reviewer agents in batches of 5, posts comments on issues, and updates state to Agent Implementing. Releases agents on completion and kicks off the next batch.",
+  "integrations": {
+    "linear": {},
+    "github": {}
+  },
+  "skills": [
+    {
+      "id": "@agent-relay/setting-up-relayfile",
+      "source": "@agent-relay/setting-up-relayfile",
+      "description": "Canonical relayfile mount + writeback recipe. Read for the mount layout (.integrations/...), the writeback-as-files contract, writeback status/retry commands, and the creds/cloud-mount gotchas this persona depends on to read inbound Linear events and post comments."
+    },
+    {
+      "id": "@agent-relay/workspace-layout",
+      "source": "@agent-relay/workspace-layout",
+      "description": "How to navigate a relayfile mount: start from LAYOUT.md, use by-state/, by-id/, by-uuid/ alias subtrees and the AR-{id}__{uuid} filename convention. Core to locating ready-for-agent issues and verifying live state before dispatch."
+    },
+    {
+      "id": "@agent-relay/writeback-as-files",
+      "source": "@agent-relay/writeback-as-files",
+      "description": "The file-creation writeback contract for posting Linear comments and updating issue state: drop JSON at the canonical path, discover paths/schemas via .schema.json siblings, check delivery with relay outbox, recover dead-lettered writes."
+    },
+    {
+      "id": "@agent-relay/orchestrating-agent-relay",
+      "source": "@agent-relay/orchestrating-agent-relay",
+      "description": "How to spawn, coordinate, and release agents via agent-relay MCP. Core to dispatching codex implementer + claude reviewer teams per issue and tracking completion via DMs."
+    },
+    {
+      "id": "persona-relayfile-mount",
+      "source": ".agentworkforce/workforce/personas/__assets/linear-dispatcher/skills/persona-relayfile-mount.md",
+      "description": "Local mount-field policy shipped with this persona pack. Read before relying on the relayfile mount: allow-list idiom, readonlyPatterns scope, and how this persona sees the .integrations tree and writes back into it."
+    }
+  ],
+  "harness": "claude",
+  "model": "claude-sonnet-4-6",
+  "systemPrompt": "$TASK_DESCRIPTION",
+  "permissions": {
+    "mode": "bypassPermissions"
+  },
+  "harnessSettings": {
+    "reasoning": "medium",
+    "timeoutSeconds": 600
+  },
+  "inputs": {
+    "TASK_DESCRIPTION": {
+      "description": "Optional kickoff instruction. When launched directly the agent scans for ready-for-agent issues and begins dispatching; when routed in, the triggering task context substitutes here verbatim.",
+      "optional": true
+    }
+  },
+  "agentsMd": "__assets/linear-dispatcher/linear-dispatcher.md"
+}

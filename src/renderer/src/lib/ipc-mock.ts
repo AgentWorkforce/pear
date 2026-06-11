@@ -351,6 +351,50 @@ const mockLinearIssues: Array<Record<string, unknown>> = [
     }
   },
   {
+    id: 'lin-pear-160',
+    identifier: 'PEAR-160',
+    title: 'Implement broker webhook retry queue for writeback failures',
+    description: 'Build a relay-side retry queue that re-delivers failed webhook writeback commands after transient broker errors clear.',
+    priority: 2,
+    url: 'https://linear.app/agent-workforce/issue/PEAR-160/writeback-retry-queue',
+    stateId: 'state-ready-for-agent',
+    state: { id: 'state-ready-for-agent', name: 'Ready for Agent', type: 'unstarted', color: '#c9a7ff' },
+    teamId: 'team-pear',
+    team: { id: 'team-pear', key: 'PEAR', name: 'Pear' },
+    projectId: 'project-control-center',
+    project: { id: 'project-control-center', name: 'Issue Control Center' },
+    labels: [
+      { id: 'label-agent', name: 'agent', color: '#6bd4bc' },
+      { id: 'label-ready-for-agent', name: 'ready-for-agent', color: '#c9a7ff' }
+    ],
+    labelIds: ['label-agent', 'label-ready-for-agent'],
+    syncedWith: [],
+    updatedAt: isoMinutesAgo(15),
+    agentSession: {}
+  },
+  {
+    id: 'lin-pear-162',
+    identifier: 'PEAR-162',
+    title: 'Add schema validation for mount writeback payloads',
+    description: 'Validate every writeback payload against the provider schema before queueing, rejecting malformed writes at the edge.',
+    priority: 1,
+    url: 'https://linear.app/agent-workforce/issue/PEAR-162/schema-validation-writeback',
+    stateId: 'state-to-do',
+    state: { id: 'state-to-do', name: 'To do', type: 'unstarted', color: '#94cbef' },
+    teamId: 'team-pear',
+    team: { id: 'team-pear', key: 'PEAR', name: 'Pear' },
+    projectId: 'project-control-center',
+    project: { id: 'project-control-center', name: 'Issue Control Center' },
+    labels: [
+      { id: 'label-agent', name: 'agent', color: '#6bd4bc' },
+      { id: 'label-ready-for-agent', name: 'ready-for-agent', color: '#c9a7ff' }
+    ],
+    labelIds: ['label-agent', 'label-ready-for-agent'],
+    syncedWith: [],
+    updatedAt: isoMinutesAgo(20),
+    agentSession: {}
+  },
+  {
     id: 'lin-pear-148',
     identifier: 'PEAR-148',
     title: 'Build Attention Inbox web prototype',
@@ -561,7 +605,7 @@ const mockGithubRecords: Record<string, Record<string, unknown>> = {
   }
 }
 
-const mockRemoteFiles: Record<string, Record<string, unknown>> = Object.fromEntries([
+const mockRemoteFiles: Record<string, Record<string, unknown> | string> = Object.fromEntries([
   ...mockLinearIssues.map((issue) => [
     `/linear/issues/${String(issue.identifier)}.json`,
     issue
@@ -1055,8 +1099,13 @@ export const pearMock: PearAPI = {
       const normalized = normalizeMockRemotePath(remotePath)
       const record = mockRemoteFiles[normalized]
       if (!record) return { kind: 'missing', content: '', size: 0 }
-      const content = JSON.stringify(record, null, 2)
+      const content = typeof record === 'string' ? record : JSON.stringify(record, null, 2)
       return { kind: 'text', content, size: content.length }
+    },
+    writeRemoteFile: async (_projectId: string, remotePath: string, content: string): Promise<void> => {
+      const normalized = normalizeMockRemotePath(remotePath)
+      console.log('[ipc-mock] writeRemoteFile', normalized, content.length, 'bytes')
+      mockRemoteFiles[normalized] = content
     },
     readMountPreview: async (): Promise<FsReadPreviewResult> => ({ kind: 'missing', content: '', size: 0 }),
     listOptions: async (): Promise<IntegrationOption[]> => [],

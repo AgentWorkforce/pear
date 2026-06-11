@@ -37,6 +37,8 @@ const mock = vi.hoisted(() => {
   }
   let mountReconcilePromise: Promise<void> = Promise.resolve()
   const readFileCalls: Array<{ workspaceId: string; path: string }> = []
+  const writeFileCalls: Array<{ workspaceId: string; path: string; baseRevision: string; content: string }> = []
+  const joinWorkspaceCalls: Array<{ workspaceId: string; options: { agentName: string; scopes: string[] } }> = []
   const relayClient = {
     readFile: vi.fn(async (workspaceId: string, path: string) => {
       readFileCalls.push({ workspaceId, path })
@@ -56,6 +58,10 @@ const mock = vi.hoisted(() => {
         }),
         encoding: 'utf-8'
       }
+    }),
+    writeFile: vi.fn(async (input: { workspaceId: string; path: string; baseRevision: string; content: string }) => {
+      writeFileCalls.push(input)
+      return { opId: 'op-1', status: 'queued' }
     })
   }
   const shellOpenExternal = vi.fn(async () => undefined)
@@ -191,6 +197,8 @@ const mock = vi.hoisted(() => {
       updateMountPaths: vi.fn(async () => undefined)
     },
     readFileCalls,
+    writeFileCalls,
+    joinWorkspaceCalls,
     relayClient,
     relayWorkspaceManager,
     workspaceHandle,
@@ -210,13 +218,14 @@ const mock = vi.hoisted(() => {
   }
 })
 
-// readRemoteFile/listRemoteDirectory now resolve a reader handle via
-// RelayfileSetup.joinWorkspace (integrations.ts getIntegrationRemoteReaderHandle).
+// Remote read/list/write operations resolve scoped handles via
+// RelayfileSetup.joinWorkspace.
 // Mock the SDK so that path returns the in-memory handle instead of doing a
 // real network join.
 vi.mock('@relayfile/sdk', () => ({
   RelayfileSetup: class {
-    async joinWorkspace() {
+    async joinWorkspace(workspaceId: string, options: { agentName: string; scopes: string[] }) {
+      mock.joinWorkspaceCalls.push({ workspaceId, options })
       return mock.workspaceHandle
     }
   }
@@ -322,7 +331,10 @@ describe('IntegrationsManager', () => {
     mock.integrationEventBridge.closeAllExcept.mockClear()
     mock.cloudAgentManager.updateMountPaths.mockClear()
     mock.readFileCalls.splice(0)
+    mock.writeFileCalls.splice(0)
+    mock.joinWorkspaceCalls.splice(0)
     mock.relayClient.readFile.mockClear()
+    mock.relayClient.writeFile.mockClear()
     mock.shellOpenExternal.mockClear()
     mock.workspaceHandle.requestJson.mockReset()
     mock.workspaceHandle.requestJson.mockImplementation(async (_request: { path: string }) => {
@@ -372,6 +384,40 @@ describe('IntegrationsManager', () => {
     expect(mock.fetchCalls.map((call) => new URL(call.url).pathname + new URL(call.url).search)).toContain(
       '/api/v1/workspaces/account-workspace-id/integrations/slack/channels/available?cursor=cursor-2'
     )
+  })
+
+  it('writes remote files through Relayfile using the configured project scope', async () => {
+    const manager = new IntegrationsManager()
+
+    await expect(manager.writeRemoteFile('project-1', '/slack/channels/C123/messages/draft.json', '{"text":"hello"}'))
+      .resolves.toBeUndefined()
+
+    expect(mock.writeFileCalls).toEqual([
+      {
+        workspaceId: 'account-workspace-id',
+        path: '/slack/channels/C123/messages/draft.json',
+        baseRevision: '0',
+        content: '{"text":"hello"}'
+      }
+    ])
+    expect(mock.joinWorkspaceCalls).toEqual([
+      {
+        workspaceId: 'account-workspace-id',
+        options: {
+          agentName: 'pear-integrations-writer',
+          scopes: ['relayfile:fs:write:/**']
+        }
+      }
+    ])
+  })
+
+  it('rejects remote writes outside the configured project scope', async () => {
+    const manager = new IntegrationsManager()
+
+    await expect(manager.writeRemoteFile('project-1', '/github/repos/acme/widgets/issues/1.json', '{}'))
+      .rejects.toThrow('Integration remote file is outside this project integration scope')
+
+    expect(mock.relayClient.writeFile).not.toHaveBeenCalled()
   })
 
   it('returns local settings integrations and sets recovery when signed in before the account workspace exists', async () => {

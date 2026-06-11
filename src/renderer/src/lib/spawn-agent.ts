@@ -119,6 +119,120 @@ export async function listProjectPersonas(project: Project, rootOverride?: Proje
   return pear.broker.listPersonas(project.id, root.path)
 }
 
+export type TeamComposition = {
+  issueId: string
+  issueIdentifier: string
+  issueTitle: string
+  issueDescription: string
+  repo?: string
+}
+
+type TeamAgentResult = {
+  name: string
+  created: boolean
+}
+
+const teamSpawnPromises = new Map<string, Promise<{ implName: string; reviewName: string }>>()
+
+async function getOrSpawnTeamAgent(
+  project: Project,
+  cli: SpawnAgentCli,
+  name: string,
+  rootOverride?: ProjectRoot
+): Promise<TeamAgentResult> {
+  await ensureLocalBroker(project, rootOverride)
+
+  const root = rootOverride ?? useProjectStore.getState().getActiveRoot()
+  if (!root?.pathExists) {
+    throw new Error(`Project root not found: ${root?.path || project.rootPath}`)
+  }
+
+  const existing = (await pear.broker.listAgents(project.id)).find((agent) => agent.name === name)
+  if (existing) {
+    useAgentStore.getState().trackSpawnedAgent(
+      existing.name,
+      project.id,
+      root.id,
+      existing.cli || cli,
+      root.path,
+      {
+        currentState: existing.current_state,
+        terminalMode: existing.inboundDeliveryMode === 'manual_flush' ? 'drive' : 'passthrough',
+        lastActivityAt: existing.last_activity_at,
+        lastActivityMs: existing.last_activity_ms,
+        channels: existing.channels
+      }
+    )
+    useAgentStore.getState().setActiveAgentKey(getAgentKey(project.id, existing.name))
+    useUIStore.getState().openTab({ kind: 'agents', projectId: project.id })
+    return { name: existing.name, created: false }
+  }
+
+  return { name: await spawnProjectAgent(project, cli, name, rootOverride), created: true }
+}
+
+async function releaseCreatedTeamAgents(projectId: string, agents: TeamAgentResult[]): Promise<void> {
+  await Promise.all(
+    agents
+      .filter((agent) => agent.created)
+      .map((agent) => pear.broker.releaseAgent(projectId, agent.name).catch(() => undefined))
+  )
+}
+
+export async function spawnTeamForIssue(
+  project: Project,
+  composition: TeamComposition,
+  rootOverride?: ProjectRoot
+): Promise<{ implName: string; reviewName: string }> {
+  const implRequestedName = `${composition.issueIdentifier}-impl`
+  const reviewRequestedName = `${composition.issueIdentifier}-review`
+  const promiseKey = `${project.id}\0${implRequestedName}\0${reviewRequestedName}`
+  const current = teamSpawnPromises.get(promiseKey)
+  if (current) return current
+
+  const pending = (async (): Promise<{ implName: string; reviewName: string }> => {
+    const spawnedAgents: TeamAgentResult[] = []
+    try {
+      const impl = await getOrSpawnTeamAgent(project, 'codex', implRequestedName, rootOverride)
+      spawnedAgents.push(impl)
+      const review = await getOrSpawnTeamAgent(project, 'claude', reviewRequestedName, rootOverride)
+      spawnedAgents.push(review)
+
+      const implPrompt = [
+        'Implement this issue and open a PR when done.',
+        '',
+        `Issue: ${composition.issueIdentifier} — ${composition.issueTitle}`,
+        composition.issueDescription,
+        composition.repo ? `Repository: ${composition.repo}` : ''
+      ].filter(Boolean).join('\n')
+
+      const reviewPrompt = [
+        `Review the implementation by ${impl.name} for this issue. Watch for correctness, security, and test coverage.`,
+        '',
+        `Issue: ${composition.issueIdentifier} — ${composition.issueTitle}`,
+        composition.issueDescription
+      ].join('\n')
+
+      if (impl.created) await pear.broker.sendMessage(project.id, { to: impl.name, text: implPrompt })
+      if (review.created) await pear.broker.sendMessage(project.id, { to: review.name, text: reviewPrompt })
+
+      return { implName: impl.name, reviewName: review.name }
+    } catch (error) {
+      await releaseCreatedTeamAgents(project.id, spawnedAgents)
+      throw error
+    }
+  })()
+
+  teamSpawnPromises.set(promiseKey, pending)
+  try {
+    return await pending
+  } finally {
+    if (teamSpawnPromises.get(promiseKey) === pending) {
+      teamSpawnPromises.delete(promiseKey)
+    }
+  }
+}
+
 export async function spawnProjectPersona(project: Project, personaId: string, rootOverride?: ProjectRoot): Promise<string> {
   if (rootOverride && !rootOverride.pathExists) {
     throw new Error(`Project root not found: ${rootOverride.path || project.rootPath}`)

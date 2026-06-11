@@ -979,6 +979,7 @@ export interface PearAPI {
     listMountDir: (projectId: string, integrationId: string, dirPath: string) => Promise<FsDirEntry[]>
     listRemoteDir: (projectId: string, remotePath: string) => Promise<FsDirEntry[]>
     readRemoteFile: (projectId: string, remotePath: string) => Promise<FsReadPreviewResult>
+    writeRemoteFile: (projectId: string, remotePath: string, content: string) => Promise<void>
     readMountPreview: (projectId: string, integrationId: string, filePath: string) => Promise<FsReadPreviewResult>
     listOptions: (projectId: string, provider: string, resource: string) => Promise<IntegrationOption[]>
     startConnect: (projectId: string, provider: string) => Promise<IntegrationConnectSession>

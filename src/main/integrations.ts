@@ -806,6 +806,9 @@ export class IntegrationsManager {
   private integrationRemoteReaderHandle: WorkspaceHandle | null = null
   private integrationRemoteReaderKey: string | null = null
   private integrationRemoteReaderPromise: Promise<WorkspaceHandle> | null = null
+  private integrationRemoteWriterHandle: WorkspaceHandle | null = null
+  private integrationRemoteWriterKey: string | null = null
+  private integrationRemoteWriterPromise: Promise<WorkspaceHandle> | null = null
   private listeners = new Set<(event: IntegrationsEvent) => void>()
   private sessions = new Map<string, IntegrationConnectSession>()
   private sessionMetadata = new Map<string, SessionMetadata>()
@@ -1134,6 +1137,24 @@ export class IntegrationsManager {
       }
       throw error
     }
+  }
+
+  async writeRemoteFile(projectId: string, remotePath: string, content: string): Promise<void> {
+    if (!this.findProject(projectId)) throw new Error(`Project not found: ${projectId}`)
+    const path = normalizeRemoteDirectoryPath(remotePath)
+    if (!path || path === '/') throw new Error('Integration remote file path is required')
+    const mountPaths = this.listableRemoteMountPaths(projectId)
+    const allowSlackDms = this.slackDmListingEnabledForProject(projectId)
+    const withinScope =
+      mountPaths.some((mountPath) => isRelayfilePathWithinRoot(mountPath, path)) ||
+      (allowSlackDms && isSlackDmListablePath(path))
+    if (!withinScope) {
+      throw new Error('Integration remote file is outside this project integration scope')
+    }
+
+    await this.withIntegrationRemoteWriterHandle(async (handle) => {
+      await handle.client().writeFile({ workspaceId: handle.workspaceId, path, baseRevision: '0', content })
+    })
   }
 
   async listRemoteDirectory(projectId: string, remotePath: string): Promise<filesystem.ExplorerEntry[]> {
@@ -1541,47 +1562,79 @@ export class IntegrationsManager {
   }
 
   private async getIntegrationRemoteReaderHandle(): Promise<WorkspaceHandle> {
+    return this.getIntegrationRemoteHandle('read')
+  }
+
+  private async getIntegrationRemoteWriterHandle(): Promise<WorkspaceHandle> {
+    return this.getIntegrationRemoteHandle('write')
+  }
+
+  private async getIntegrationRemoteHandle(mode: 'read' | 'write'): Promise<WorkspaceHandle> {
     const auth = await resolveCloudAuth()
     if (!auth) {
-      this.clearIntegrationRemoteReaderHandle()
+      this.clearIntegrationRemoteHandle(mode)
       throw new Error('cloud-auth-required')
     }
 
     const workspaceId = await getAccountWorkspaceId(accountWorkspaceReadyRetryOptions())
     const handleKey = `${auth.apiUrl}\0${auth.accountKey}\0${workspaceId}`
-    if (this.integrationRemoteReaderHandle && this.integrationRemoteReaderKey === handleKey) {
-      return this.integrationRemoteReaderHandle
+    const currentHandle = mode === 'read' ? this.integrationRemoteReaderHandle : this.integrationRemoteWriterHandle
+    const currentKey = mode === 'read' ? this.integrationRemoteReaderKey : this.integrationRemoteWriterKey
+    const currentPromise = mode === 'read' ? this.integrationRemoteReaderPromise : this.integrationRemoteWriterPromise
+    if (currentHandle && currentKey === handleKey) {
+      return currentHandle
     }
 
-    if (this.integrationRemoteReaderPromise && this.integrationRemoteReaderKey === handleKey) {
-      return this.integrationRemoteReaderPromise
+    if (currentPromise && currentKey === handleKey) {
+      return currentPromise
     }
 
-    this.integrationRemoteReaderKey = handleKey
+    if (mode === 'read') this.integrationRemoteReaderKey = handleKey
+    else this.integrationRemoteWriterKey = handleKey
+
     const pending = (async (): Promise<WorkspaceHandle> => {
       const setup = new RelayfileSetup({
         cloudApiUrl: auth.apiUrl,
         accessToken: () => auth.accessToken
       })
       const handle = await setup.joinWorkspace(workspaceId, {
-        agentName: 'pear-integrations-reader',
-        scopes: ['relayfile:fs:read:/**']
+        agentName: mode === 'read' ? 'pear-integrations-reader' : 'pear-integrations-writer',
+        scopes: mode === 'read' ? ['relayfile:fs:read:/**'] : ['relayfile:fs:write:/**']
       })
-      this.integrationRemoteReaderHandle = handle
+      if (mode === 'read') this.integrationRemoteReaderHandle = handle
+      else this.integrationRemoteWriterHandle = handle
       return handle
     })()
 
-    this.integrationRemoteReaderPromise = pending
+    if (mode === 'read') this.integrationRemoteReaderPromise = pending
+    else this.integrationRemoteWriterPromise = pending
+
     try {
       return await pending
     } finally {
-      if (this.integrationRemoteReaderPromise === pending) {
+      if (mode === 'read' && this.integrationRemoteReaderPromise === pending) {
         this.integrationRemoteReaderPromise = null
+      } else if (mode === 'write' && this.integrationRemoteWriterPromise === pending) {
+        this.integrationRemoteWriterPromise = null
       }
     }
   }
 
   private clearIntegrationRemoteReaderHandle(): void {
+    this.clearIntegrationRemoteHandle('read')
+  }
+
+  private clearIntegrationRemoteWriterHandle(): void {
+    this.clearIntegrationRemoteHandle('write')
+  }
+
+  private clearIntegrationRemoteHandle(mode: 'read' | 'write'): void {
+    if (mode === 'write') {
+      this.integrationRemoteWriterHandle = null
+      this.integrationRemoteWriterKey = null
+      this.integrationRemoteWriterPromise = null
+      return
+    }
     this.integrationRemoteReaderHandle = null
     this.integrationRemoteReaderKey = null
     this.integrationRemoteReaderPromise = null
@@ -1600,6 +1653,24 @@ export class IntegrationsManager {
         if (!isHttpStatus(refreshError, 401) && !isHttpStatus(refreshError, 403)) throw refreshError
         this.clearIntegrationRemoteReaderHandle()
         const fresh = await this.getIntegrationRemoteReaderHandle()
+        return fn(fresh)
+      }
+    }
+  }
+
+  private async withIntegrationRemoteWriterHandle<T>(fn: (handle: WorkspaceHandle) => Promise<T>): Promise<T> {
+    const handle = await this.getIntegrationRemoteWriterHandle()
+    try {
+      return await fn(handle)
+    } catch (error) {
+      if (!isHttpStatus(error, 401) && !isHttpStatus(error, 403)) throw error
+      await handle.refreshToken().catch(() => undefined)
+      try {
+        return await fn(handle)
+      } catch (refreshError) {
+        if (!isHttpStatus(refreshError, 401) && !isHttpStatus(refreshError, 403)) throw refreshError
+        this.clearIntegrationRemoteWriterHandle()
+        const fresh = await this.getIntegrationRemoteWriterHandle()
         return fn(fresh)
       }
     }

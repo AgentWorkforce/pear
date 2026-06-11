@@ -1,7 +1,7 @@
 import { create } from 'zustand'
 import { pear, type FsDirEntry, type IntegrationsEvent } from '@/lib/ipc'
 
-export type IssueBand = 'needs-you' | 'in-motion' | 'settled'
+export type IssueBand = 'needs-you' | 'ready-for-agent' | 'in-motion' | 'settled'
 
 export interface IssueGithubLink {
   owner: string
@@ -53,8 +53,9 @@ interface IssuesState {
 const STAGE_ORDER = ['Backlog', 'Planning', 'To do', 'In Progress', 'In review', 'Merged', 'Done']
 const BAND_ORDER: Record<IssueBand, number> = {
   'needs-you': 0,
-  'in-motion': 1,
-  settled: 2
+  'ready-for-agent': 1,
+  'in-motion': 2,
+  settled: 3
 }
 const INTEGRATION_REFRESH_DEBOUNCE_MS = 250
 
@@ -128,14 +129,21 @@ function classifyIssue(
   labels: string[],
   attention: Record<string, unknown>
 ): IssueBand {
-  // Settled: explicit Merged/Done names OR Linear's completed/canceled state types.
   if (stage === 'Merged' || stage === 'Done' || stageType === 'completed' || stageType === 'canceled') {
     return 'settled'
   }
 
   const normalizedLabels = labels.map((label) => label.toLowerCase())
-  // Needs-you: codified attention/labels when present, OR a review-stage name
-  // (the human review gate) derived from the real Linear state.
+
+  if (
+    stage.toLowerCase() === 'ready for agent' ||
+    stage.toLowerCase() === 'ready-for-agent' ||
+    normalizedLabels.includes('ready-for-agent') ||
+    normalizedLabels.includes('ready for agent')
+  ) {
+    return 'ready-for-agent'
+  }
+
   if (
     readString(attention.kind) ||
     normalizedLabels.includes('human') ||

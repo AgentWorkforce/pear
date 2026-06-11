@@ -19,7 +19,9 @@ import {
   ThumbsUp,
   X
 } from 'lucide-react'
+import { detectRepo } from '@/lib/issue-scoping'
 import { jumpToIssueWork } from '@/lib/issue-navigation'
+import { spawnTeamForIssue, type TeamComposition } from '@/lib/spawn-agent'
 import { useAgentStore, type ChatMessage } from '@/stores/agent-store'
 import { useIssuesStore, type IssueBand, type IssueGithubLink, type IssueViewModel } from '@/stores/issues-store'
 import { useProjectStore } from '@/stores/project-store'
@@ -29,12 +31,14 @@ const isWebMock = import.meta.env.VITE_PEAR_MOCK_IPC === 'true'
 
 const BAND_TITLES: Record<IssueBand, string> = {
   'needs-you': 'Needs you',
+  'ready-for-agent': 'Ready for agent',
   'in-motion': 'In motion',
   settled: 'Settled'
 }
 
 const BAND_SUBTITLES: Record<IssueBand, string> = {
   'needs-you': 'Only humans can clear these',
+  'ready-for-agent': 'Waiting for automated agent pickup',
   'in-motion': 'Ambient live agent work',
   settled: 'Recently merged or done'
 }
@@ -53,6 +57,7 @@ function orderStages(stages: string[]): string[] {
 
 function bandIcon(band: IssueBand): React.ReactNode {
   if (band === 'needs-you') return <AlertTriangle size={15} className="text-[var(--pear-red)]" />
+  if (band === 'ready-for-agent') return <Bot size={15} className="text-[var(--pear-purple)]" />
   if (band === 'in-motion') return <CircleDot size={15} className="text-[var(--pear-teal)]" />
   return <CheckCircle2 size={15} className="text-[var(--pear-green)]" />
 }
@@ -155,7 +160,8 @@ function IssueOverviewCard({
   expandedChat,
   narration,
   onOpen,
-  onToggleChat
+  onToggleChat,
+  onSpawnTeam
 }: {
   issue: IssueViewModel
   active: boolean
@@ -163,7 +169,10 @@ function IssueOverviewCard({
   narration: string
   onOpen: () => void
   onToggleChat: () => void
+  onSpawnTeam?: () => void
 }): React.ReactNode {
+  const detectedRepo = issue.band === 'ready-for-agent' ? detectRepo(issue.title, issue.description) : null
+
   function handleKeyDown(event: React.KeyboardEvent<HTMLDivElement>): void {
     if (event.key !== 'Enter' && event.key !== ' ') return
     event.preventDefault()
@@ -188,6 +197,11 @@ function IssueOverviewCard({
             <span className="shrink-0 font-mono text-[11px] font-semibold text-[var(--pear-text-faint)]">
               {issue.identifier}
             </span>
+            {detectedRepo && (
+              <span className="shrink-0 rounded-full border border-[var(--pear-purple)]/35 bg-[var(--pear-purple)]/10 px-2 py-0.5 text-[10px] font-semibold text-[var(--pear-purple)]">
+                {detectedRepo}
+              </span>
+            )}
             <span className="min-w-[180px] flex-1 truncate text-[13px] font-semibold text-[var(--pear-text)]">
               {issue.title}
             </span>
@@ -237,6 +251,23 @@ function IssueOverviewCard({
             <ActionButton label="Fork" icon={GitFork} />
           </div>
         )}
+        {issue.band === 'ready-for-agent' && onSpawnTeam && (
+          <div className="flex shrink-0 items-center gap-1">
+            <button
+              type="button"
+              onClick={(event) => {
+                event.stopPropagation()
+                onSpawnTeam()
+              }}
+              title="Spawn impl + review team"
+              className="flex h-7 items-center gap-1.5 rounded-md border border-[var(--pear-purple)]/35 bg-[var(--pear-purple)]/10 px-2 text-[11px] font-semibold text-[var(--pear-purple)] hover:bg-[var(--pear-purple)]/20"
+              aria-label="Spawn Team"
+            >
+              <Bot size={13} />
+              Spawn Team
+            </button>
+          </div>
+        )}
       </div>
     </div>
   )
@@ -255,7 +286,8 @@ function IssueGroupSection({
   emptyLabel,
   onToggleExpanded,
   onSelectIssue,
-  onToggleChat
+  onToggleChat,
+  onSpawnTeam
 }: {
   title: string
   subtitle?: string
@@ -270,6 +302,7 @@ function IssueGroupSection({
   onToggleExpanded: () => void
   onSelectIssue: (issueId: string) => void
   onToggleChat: (issueId: string) => void
+  onSpawnTeam?: (issue: IssueViewModel) => void
 }): React.ReactNode {
   const Chevron = expanded ? ChevronDown : ChevronRight
 
@@ -314,6 +347,7 @@ function IssueGroupSection({
                 narration={narrations.get(issue.id) || issue.agentNarration || ''}
                 onOpen={() => onSelectIssue(issue.id)}
                 onToggleChat={() => onToggleChat(issue.id)}
+                onSpawnTeam={onSpawnTeam ? () => onSpawnTeam(issue) : undefined}
               />
             ))
           )}
@@ -497,6 +531,7 @@ export function AttentionInbox({
   const subscribe = useIssuesStore((s) => s.subscribe)
   const [expandedBands, setExpandedBands] = useState<Record<IssueBand, boolean>>({
     'needs-you': true,
+    'ready-for-agent': true,
     'in-motion': false,
     settled: false
   })
@@ -543,6 +578,7 @@ export function AttentionInbox({
 
   const selectedIssue = issues.find((issue) => issue.id === selectedIssueId) || null
   const needsYou = issuesByBand(visibleIssues, 'needs-you')
+  const readyForAgent = issuesByBand(visibleIssues, 'ready-for-agent')
   const inMotion = issuesByBand(visibleIssues, 'in-motion')
   const settled = issuesByBand(visibleIssues, 'settled')
   const projectGroups = useMemo(
@@ -577,6 +613,28 @@ export function AttentionInbox({
     setNavNotice(result.message)
   }
 
+  async function handleSpawnTeam(issue: IssueViewModel): Promise<void> {
+    const project = resolvedProjectId ? useProjectStore.getState().projects.find((candidate) => candidate.id === resolvedProjectId) : undefined
+    if (!project) {
+      setNavNotice('Project not found for issue dispatch')
+      return
+    }
+    try {
+      const repo = detectRepo(issue.title, issue.description) ?? undefined
+      const composition: TeamComposition = {
+        issueId: issue.id,
+        issueIdentifier: issue.identifier,
+        issueTitle: issue.title,
+        issueDescription: issue.description,
+        repo
+      }
+      const { implName, reviewName } = await spawnTeamForIssue(project, composition)
+      setNavNotice(`Spawned ${implName} + ${reviewName}`)
+    } catch {
+      setNavNotice('Failed to spawn team')
+    }
+  }
+
   return (
     <div className="relative flex h-full min-h-0 bg-[var(--pear-bg)]/52">
       <main className="flex min-w-0 flex-1 flex-col">
@@ -601,6 +659,8 @@ export function AttentionInbox({
           </div>
           <div className="mt-3 flex flex-wrap items-center gap-2 text-[12px] text-[var(--pear-text-faint)]">
             <span>{needsYou.length} need you</span>
+            <span>·</span>
+            <span>{readyForAgent.length} ready for agent</span>
             <span>·</span>
             <span>{inMotion.length} in motion</span>
             <span>·</span>
@@ -679,6 +739,22 @@ export function AttentionInbox({
                 onToggleExpanded={() => toggleBand('needs-you')}
                 onSelectIssue={setSelectedIssueId}
                 onToggleChat={toggleChat}
+              />
+              <IssueGroupSection
+                title={BAND_TITLES['ready-for-agent']}
+                subtitle={BAND_SUBTITLES['ready-for-agent']}
+                icon={bandIcon('ready-for-agent')}
+                count={readyForAgent.length}
+                issues={readyForAgent}
+                selectedIssueId={selectedIssueId}
+                expanded={expandedBands['ready-for-agent']}
+                expandedChatIds={expandedChatIds}
+                narrations={narrations}
+                emptyLabel="No issues queued for agents."
+                onToggleExpanded={() => toggleBand('ready-for-agent')}
+                onSelectIssue={setSelectedIssueId}
+                onToggleChat={toggleChat}
+                onSpawnTeam={handleSpawnTeam}
               />
               <IssueGroupSection
                 title={BAND_TITLES['in-motion']}

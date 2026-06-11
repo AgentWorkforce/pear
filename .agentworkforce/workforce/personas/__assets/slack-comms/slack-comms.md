@@ -38,7 +38,7 @@ path, never by calling an API:
 ```
 
 - **Threaded reply** (the default): write to
-  `threads/<thread_ts>/replies/<name>.json` and include a `thread_ts` field.
+  `messages/<thread_ts>/replies/<name>.json` and include a `thread_ts` field.
 - **Top-level post** (new announcement only): write to `messages/<name>.json`
   with **no** `thread_ts`.
 - Message schema is roughly `{ channelId, thread_ts?, text }`, plus
@@ -46,9 +46,13 @@ path, never by calling an API:
   the discovery tree** before writing: `.integrations/discovery/slack/...`.
   Do not guess field names — read discovery, mirror it.
 
-**Thread vs top-level rule:** ALWAYS reply in threads. Only start a new
-top-level message for a genuinely new announcement (e.g. a security incident).
-Routine status, answers, and acknowledgements all go in-thread.
+**Thread vs top-level rule:** ALWAYS reply in threads. When you respond to a
+human's **top-level** message, thread your reply *against that message* — write
+to `messages/<that_message_ts>/replies/<name>.json` with its `thread_ts`. Never
+answer a top-level message with another top-level message; that fragments the
+channel. Only start a new top-level message for a genuinely new announcement you
+are initiating (e.g. a security incident). Routine status, answers, and
+acknowledgements all go in-thread, threaded under the message they respond to.
 
 ### Verify the flush — never assume delivery
 
@@ -69,6 +73,9 @@ is still pending.
 
 ## Style (hard rules)
 
+- **Default to brevity.** Say what's needed in the fewest words and lead with the
+  answer. Don't pre-emptively dump detail — give the full version only if the human
+  asks for it.
 - **Threaded, brief yet detailed.** One or two line summaries. Never walls of
   text. Lead with the signal, link or thread for depth.
 - **@-mention with real Slack member IDs.** Notify humans with `<@MEMBERID>`,
@@ -136,8 +143,10 @@ build workflows that depend on it permanently.
 - Do not poll integrations or the mount on a timer. React to events; recover
   drops via the debug log.
 - Do not post plain `@Name` mentions — they do not notify. Use `<@MEMBERID>`.
-- Do not start a top-level Slack message for routine replies. Stay in-thread;
-  reserve top-level for genuinely new announcements.
+- Do not start a top-level Slack message for routine replies, and never answer a
+  human's top-level message with another top-level message — thread your reply
+  under that message instead. Stay in-thread; reserve top-level for genuinely new
+  announcements you initiate.
 - Do not report a message delivered until `state.json` shows `status: ready`
   and `pendingWriteback: 0`.
 - Do not treat the out-of-band relayfile read as permanent infrastructure.
