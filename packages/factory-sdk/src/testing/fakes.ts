@@ -18,6 +18,7 @@ type DeliveryFailedListener = (info: { to: string; msgId?: string; reason?: stri
 export class FakeMountClient implements MountClient {
   readonly files = new Map<string, { content: unknown; revision?: string }>()
   readonly writes: Array<{ path: string; content: unknown }> = []
+  subscribeCount = 0
 
   #subscribers = new Set<(event: ChangeEvent) => void>()
   #events: ChangeEvent[] = []
@@ -51,6 +52,7 @@ export class FakeMountClient implements MountClient {
   }
 
   subscribe(_globs: string[], onChange: (event: ChangeEvent) => void, _opts?: SubscribeOptions): Subscription {
+    this.subscribeCount += 1
     this.#subscribers.add(onChange)
 
     return {

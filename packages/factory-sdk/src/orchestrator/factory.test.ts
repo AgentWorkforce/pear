@@ -1,8 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
 import { FactoryConfigSchema, createFactory, parseLinearIssue, type FactoryConfig, type TriageDecision, type TriageEngine } from '../index'
+import type { ChangeEvent } from '../ports'
 import { FakeFleetClient, FakeMountClient } from '../testing'
 import type { LinearIssue } from '../types'
+import { BatchTracker } from './batch-tracker'
 
 const ready = 'b9bec744-b60c-4745-8022-d90d6ab59ae3'
 const implementing = '39b9881d-1196-4c95-8b80-a20f0c7263f7'
@@ -124,6 +126,95 @@ describe('FactoryLoop', () => {
     expect(factory.status().queued).toEqual([])
   })
 
+  it('start backfills ready issues and dispatches when capacity is available', async () => {
+    const mount = new FakeMountClient({ [issuePath(11)]: issueFile(11) })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
+
+    await factory.start()
+
+    expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-11-impl', 'ar-11-review'])
+    expect(factory.status().inFlight.map((issue) => issue.key)).toEqual(['AR-11'])
+    expect(factory.status().queued).toEqual([])
+    await factory.stop()
+  })
+
+  it('start queues and emits issue-queued when backfill exceeds batch capacity', async () => {
+    const mount = new FakeMountClient({
+      [issuePath(15)]: issueFile(15),
+      [issuePath(16)]: issueFile(16),
+    })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config({ batchSize: 1 }), { mount, fleet, triage: new StaticTriage() })
+    const queued: string[] = []
+    factory.on('issue-queued', (payload) => {
+      if ('issue' in payload && payload.issue) {
+        queued.push(payload.issue.key)
+      }
+    })
+
+    await factory.start()
+
+    expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-15-impl', 'ar-15-review'])
+    expect(factory.status().inFlight.map((issue) => issue.key)).toEqual(['AR-15'])
+    expect(factory.status().queued.map((issue) => issue.key)).toEqual(['AR-16'])
+    expect(queued).toEqual(['AR-16'])
+    await factory.stop()
+  })
+
+  it('coalesces concurrent starts into one subscription and dispatch pass', async () => {
+    const mount = new FakeMountClient({ [issuePath(12)]: issueFile(12) })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
+
+    await Promise.all([factory.start(), factory.start()])
+
+    expect(mount.subscribeCount).toBe(1)
+    expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-12-impl', 'ar-12-review'])
+    await factory.stop()
+  })
+
+  it('dedupes duplicate subscribe events for an already tracked issue', async () => {
+    const mount = new FakeMountClient({ [issuePath(17)]: issueFile(17) })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
+
+    await factory.start()
+    mount.emit(changeEvent(issuePath(17), 'event-duplicate-1'))
+    mount.emit(changeEvent(issuePath(17), 'event-duplicate-2'))
+    await flush()
+
+    expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-17-impl', 'ar-17-review'])
+    expect(factory.status().inFlight.map((issue) => issue.key)).toEqual(['AR-17'])
+    await factory.stop()
+  })
+
+  it('BatchTracker blocks duplicate invocation ids within and across issue records', async () => {
+    const tracker = new BatchTracker(5)
+    const decisionA = await new StaticTriage().triage(parseLinearIssue(issuePath(12), issueFile(12)))
+    const decisionB = await new StaticTriage().triage(parseLinearIssue(issuePath(13), issueFile(13)))
+    const recordA = tracker.start(decisionA, false)
+    const recordB = tracker.start(decisionB, false)
+    const specA = decisionA.implementers[0]
+    const specB = decisionB.implementers[0]
+    const invocationId = 'shared-invocation'
+
+    expect(recordA).toBeDefined()
+    expect(recordB).toBeDefined()
+    expect(tracker.shouldSpawn(recordA!, invocationId)).toBe(true)
+
+    tracker.recordSpawn(recordA!, specA, invocationId, { name: specA.name })
+
+    expect(tracker.shouldSpawn(recordA!, invocationId)).toBe(false)
+    expect(tracker.shouldSpawn(recordB!, invocationId)).toBe(false)
+
+    tracker.complete(decisionA.issue)
+
+    expect(tracker.shouldSpawn(recordB!, invocationId)).toBe(true)
+    tracker.recordSpawn(recordB!, specB, invocationId, { name: specB.name })
+    expect(tracker.shouldSpawn(recordB!, invocationId)).toBe(false)
+  })
+
   it('dedupes repeated dispatch by stable invocation id', async () => {
     const mount = new FakeMountClient({ [issuePath(5)]: issueFile(5) })
     const fleet = new FakeFleetClient()
@@ -135,6 +226,27 @@ describe('FactoryLoop', () => {
 
     expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-5-impl', 'ar-5-review'])
     expect(new Set(fleet.spawns.map((spawn) => spawn.invocationId)).size).toBe(2)
+  })
+
+  it('dedupes dispatch spawns that retry the same invocation id under different agent names', async () => {
+    const mount = new FakeMountClient({ [issuePath(14)]: issueFile(14) })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
+    const decision = await factory.triageIssue(parseLinearIssue(issuePath(14), issueFile(14)))
+    const sharedInvocationId = 'retry-same-invocation'
+    const duplicateDecision: TriageDecision = {
+      ...decision,
+      implementers: [
+        { ...decision.implementers[0], invocationId: sharedInvocationId },
+        { ...decision.implementers[0], name: 'ar-14-impl-retry', invocationId: sharedInvocationId },
+      ],
+      reviewer: { ...decision.reviewer, invocationId: 'reviewer-invocation' },
+    }
+
+    await factory.dispatch(duplicateDecision)
+
+    expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-14-impl', 'ar-14-review'])
+    expect(fleet.spawns.map((spawn) => spawn.invocationId)).toEqual([sharedInvocationId, 'reviewer-invocation'])
   })
 
   it('resumes exited open agents by sessionRef with the original capability', async () => {
@@ -226,3 +338,18 @@ describe('FactoryLoop', () => {
     expect(errors[0]).toMatchObject({ issue: { key: 'AR-9' } })
   })
 })
+
+const changeEvent = (path: string, id: string) => ({
+  id,
+  workspace: 'factory-test',
+  type: 'relayfile.changed',
+  occurredAt: new Date(0).toISOString(),
+  resource: {
+    path,
+    kind: 'file',
+    id: path,
+    provider: 'linear',
+  },
+  summary: {},
+  expand: async () => ({ level: 'summary', path, summary: {} }),
+}) as unknown as ChangeEvent

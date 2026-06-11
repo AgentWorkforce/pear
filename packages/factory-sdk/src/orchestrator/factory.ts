@@ -54,6 +54,7 @@ export class FactoryLoop implements Factory {
   #subscription?: Subscription
   #offAgentExit?: () => void
   #offDeliveryFailed?: () => void
+  #starting?: Promise<void>
   #started = false
 
   constructor(config: FactoryConfig, ports: FactoryPorts) {
@@ -76,6 +77,19 @@ export class FactoryLoop implements Factory {
       return
     }
 
+    if (this.#starting) {
+      return this.#starting
+    }
+
+    this.#starting = this.#start()
+    try {
+      await this.#starting
+    } finally {
+      this.#starting = undefined
+    }
+  }
+
+  async #start(): Promise<void> {
     const ready = await this.#mount.ensureSubRoot(ISSUE_ROOT, { timeoutMs: 90_000 })
     if (ready !== 'ready') {
       this.#error(new Error(`${ISSUE_ROOT} sub-root is not mounted`))
@@ -264,7 +278,9 @@ export class FactoryLoop implements Factory {
         return
       }
 
-      if (!this.#batch.canStart()) {
+      if (this.#batch.canStart()) {
+        await this.dispatch(decision, { dryRun: this.#config.dryRun })
+      } else {
         if (this.#batch.queue(decision, this.#config.dryRun)) {
           this.#emit('issue-queued', { issue: decision.issue })
         }
