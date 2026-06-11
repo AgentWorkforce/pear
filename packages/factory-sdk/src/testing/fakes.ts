@@ -9,6 +9,7 @@ import type {
   SpawnResult,
   SubscribeOptions,
   Subscription,
+  Capability,
 } from '../ports'
 
 type ExitListener = (name: string, reason?: string) => void
@@ -107,7 +108,7 @@ export class FakeMountClient implements MountClient {
 
 export class FakeFleetClient implements FleetClient {
   readonly spawns: SpawnInput[] = []
-  readonly resumes: Array<{ name?: string; sessionRef: string; node?: 'self' | string }> = []
+  readonly resumes: Array<{ name?: string; sessionRef: string; node?: 'self' | string; capability?: Capability }> = []
   readonly releases: Array<{ name: string; reason?: string }> = []
   readonly messages: SendInput[] = []
 
@@ -122,7 +123,7 @@ export class FakeFleetClient implements FleetClient {
     return { name: input.name, sessionRef: this.#sessionRefs.get(input.name) ?? input.sessionRef }
   }
 
-  async resume(input: { name?: string; sessionRef: string; node?: 'self' | string }): Promise<SpawnResult> {
+  async resume(input: { name?: string; sessionRef: string; node?: 'self' | string; capability?: Capability }): Promise<SpawnResult> {
     this.resumes.push(input)
     const name = input.name ?? input.sessionRef
     this.#agents.add(name)
