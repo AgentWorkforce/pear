@@ -136,3 +136,15 @@ export function isSlackDmListablePath(remotePath: string): boolean {
   if (segments[1] === 'channels' && /^D/u.test(segments[2] ?? '')) return true
   return false
 }
+
+// The adapter-linear `states` resource materializes the team's workflow
+// states at /linear/states, but Linear integrations configure mount scopes
+// like /linear/issues — the states subtree is reference data alongside those
+// mounts, not a configurable mount of its own, so the mount-path scope checks
+// above reject it. Recognize exactly that subtree so list/read (never write)
+// can be allowed when a Linear integration is visible, mirroring the Slack DM
+// carve-out.
+export function isLinearStatesListablePath(remotePath: string): boolean {
+  const segments = (remotePath || '').trim().replace(/\/+$/, '').split('/').filter(Boolean)
+  return segments[0] === 'linear' && segments[1] === 'states'
+}
