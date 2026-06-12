@@ -506,6 +506,7 @@ export class FactoryLoop implements Factory {
       this.#increment('dispatched')
       this.#emit('dispatched', { issue: decision.issue, result })
       await this.#ensureSlackDispatchThread(record, result)
+      await this.#sendImplementerTask(record)
       await this.#sendCriticalReviewerMessage(record)
       return result
     } catch (error) {
@@ -972,6 +973,24 @@ export class FactoryLoop implements Factory {
     }
     const ack = await this.#fleet.waitForInjected(input, { timeoutMs: 90_000 })
     this.#criticalMessages.set(ack.eventId, { issue: record.issue, input })
+  }
+
+  async #sendImplementerTask(record: InFlightIssue): Promise<void> {
+    if (!this.#fleet.waitForInjected) {
+      return
+    }
+
+    const implementers = [...record.agents.values()].filter((agent) => agent.spec.role === 'implementer')
+    for (const implementer of implementers) {
+      const input = {
+        to: implementer.result?.name ?? implementer.spec.name,
+        text: implementerTaskMessage(record.issue, implementer.spec.task),
+        from: 'factory',
+        data: { issue: record.issue },
+      }
+      const ack = await this.#fleet.waitForInjected(input, { timeoutMs: 90_000 })
+      this.#criticalMessages.set(ack.eventId, { issue: record.issue, input })
+    }
   }
 
   async #completeIssue(record: InFlightIssue): Promise<void> {
@@ -1488,6 +1507,14 @@ const dispatchComment = (decision: TriageDecision, agents: DispatchResult['agent
   `Factory dispatch for ${decision.issue.key}`,
   `Implementers: ${agents.filter((agent) => agent.role === 'implementer').map((agent) => agent.name).join(', ') || 'none'}`,
   `Reviewer: ${agents.find((agent) => agent.role === 'reviewer')?.name ?? 'none'}`,
+].join('\n')
+
+const implementerTaskMessage = (issue: IssueRef, task: string): string => [
+  task,
+  '',
+  `Issue: ${issue.key}`,
+  'Create a branch, commit the implementation, and open a PR targeting main.',
+  'Report the PR URL when ready.',
 ].join('\n')
 
 const repoMapFromConfig = (config: FactoryConfig) => {

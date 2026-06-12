@@ -1116,6 +1116,69 @@ describe('FactoryLoop', () => {
     await factory.stop()
   })
 
+  it('confirms delivery of the implementer task and reviewer handoff after dispatch', async () => {
+    const mount = new FakeMountClient({ [issuePath(62)]: issueFile(62) })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(62), issueFile(62))))
+
+    expect(fleet.messages).toHaveLength(2)
+    expect(fleet.messages[0]).toMatchObject({
+      to: 'ar-62-impl',
+      from: 'factory',
+      data: { issue: { key: 'AR-62' } },
+    })
+    expect(fleet.messages[0]!.text).toContain('Implement AR-62')
+    expect(fleet.messages[0]!.text).toMatch(/open a PR targeting main/i)
+    expect(fleet.messages[0]!.text).toMatch(/PR URL/i)
+    expect(fleet.messages[1]).toMatchObject({
+      to: 'ar-62-review',
+      from: 'factory',
+      text: 'Review is queued for AR-62. Watch implementer PR handoff and report readiness.',
+    })
+  })
+
+  it('reinjects the confirmed implementer task after delivery_failed', async () => {
+    const mount = new FakeMountClient({ [issuePath(63)]: issueFile(63) })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
+    const errors: unknown[] = []
+    factory.on('error', (payload) => errors.push(payload))
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(63), issueFile(63))))
+    fleet.emitDeliveryFailed({ to: 'ar-63-impl', msgId: 'fake-1', reason: 'dropped' })
+    await flush()
+
+    expect(fleet.messages).toHaveLength(3)
+    expect(fleet.messages[2]).toMatchObject({
+      to: 'ar-63-impl',
+      from: 'factory',
+      data: { issue: { key: 'AR-63' } },
+    })
+    expect(fleet.messages[2]!.text).toContain('Implement AR-63')
+    expect(fleet.messages[2]!.text).toMatch(/open a PR targeting main/i)
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toMatchObject({ issue: { key: 'AR-63' } })
+  })
+
+  it('reinjects the confirmed reviewer handoff after delivery_failed', async () => {
+    const mount = new FakeMountClient({ [issuePath(64)]: issueFile(64) })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(64), issueFile(64))))
+    fleet.emitDeliveryFailed({ to: 'ar-64-review', msgId: 'fake-2', reason: 'dropped' })
+    await flush()
+
+    expect(fleet.messages).toHaveLength(3)
+    expect(fleet.messages[2]).toMatchObject({
+      to: 'ar-64-review',
+      from: 'factory',
+      text: 'Review is queued for AR-64. Watch implementer PR handoff and report readiness.',
+    })
+  })
+
   it('emits error and rejects when writeback verification fails', async () => {
     const mount = new FakeMountClient({ [issuePath(9)]: issueFile(9) })
     mount.setConfirmWrite(issuePath(9), 'failed')
