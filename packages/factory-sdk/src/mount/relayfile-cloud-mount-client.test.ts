@@ -189,7 +189,7 @@ describe('RelayfileCloudMountClient', () => {
     expect(fake.getSyncStatus).toHaveBeenCalledWith('rw_test', { provider: 'slack' })
   })
 
-  it('prefers nested provider freshness over wrapper status metadata', async () => {
+  it('preserves wrapper status while using nested provider freshness', async () => {
     const fake = new FakeRelayFileClient()
     fake.getSyncStatus = vi.fn(async () => ({
       status: 'ready',
@@ -203,7 +203,7 @@ describe('RelayfileCloudMountClient', () => {
 
     await expect(mount.getSyncStatus?.('slack')).resolves.toEqual({
       provider: 'slack',
-      status: undefined,
+      status: 'ready',
       lastEventAt: undefined,
       lastEventAtMs: 1_781_267_200_000,
       watermarkTs: undefined,

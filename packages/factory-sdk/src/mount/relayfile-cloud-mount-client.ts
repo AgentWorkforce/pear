@@ -370,7 +370,7 @@ const normalizeProviderSyncStatus = (value: unknown, provider: string): Provider
   const watermarkTs = stringField(source, 'watermarkTs') ?? stringField(source, 'watermark_ts') ?? lastEventAt
   return {
     provider: stringField(source, 'provider') ?? provider,
-    status: stringField(source, 'status'),
+    status: stringField(record, 'status') ?? stringField(source, 'status'),
     lastEventAt,
     lastEventAtMs: Number.isFinite(lastEventAtMs) ? lastEventAtMs : undefined,
     watermarkTs,
