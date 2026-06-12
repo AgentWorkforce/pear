@@ -271,9 +271,8 @@ async function isAllowedFactoryDraft(
 
   if (path.startsWith('/linear/issues/')) {
     if (isInFactoryScope(scopeIssueFromDraftContent(content), config.safety)) return true
-    const issuePath = path.includes('/comments/') ? path.split('/comments/')[0] ?? path : path
     try {
-      const issue = parseLinearIssue(issuePath, (await mount.readFile(issuePath)).content)
+      const issue = parseLinearIssue(path, (await mount.readFile(path)).content)
       return isInFactoryScope(issue, config.safety)
     } catch {
       return false
@@ -284,7 +283,10 @@ async function isAllowedFactoryDraft(
     const issueKey = path.split('/').at(-1)?.split('__')[0]
     if (!issueKey) return false
     const candidates = await mount.listTree('/linear/issues/')
-    const issuePath = candidates.find((candidate) => candidate.startsWith(`/linear/issues/${issueKey}__`))
+    const issuePath = candidates.find((candidate) =>
+      candidate.startsWith(`/linear/issues/${issueKey}__`) ||
+      candidate === `/linear/issues/${issueKey}.json`
+    )
     if (!issuePath) return false
     try {
       const issue = parseLinearIssue(issuePath, (await mount.readFile(issuePath)).content)

@@ -161,6 +161,35 @@ describe('RelayfileCloudMountClient', () => {
     expect(fake.getOpCalls).toEqual([{ workspaceId: 'rw_test', opId: 'op-1' }])
   })
 
+  it('treats unpollable write confirmations as acked for legacy clients and restarted instances', async () => {
+    const fake = new FakeRelayFileClient()
+    const clientWithoutGetOp: RelayFileClientLike = {
+      readFile: fake.readFile.bind(fake),
+      writeFile: fake.writeFile.bind(fake),
+      listTree: fake.listTree.bind(fake),
+      getEvents: fake.getEvents.bind(fake),
+      getResourceAtEvent: fake.getResourceAtEvent.bind(fake),
+      getToken: fake.getToken.bind(fake),
+      getBaseUrl: fake.getBaseUrl.bind(fake),
+    }
+    const legacyMount = new RelayfileCloudMountClient({
+      workspaceId: 'rw_test',
+      client: clientWithoutGetOp,
+      isAllowedDraft: () => true,
+    })
+    const restartedMount = new RelayfileCloudMountClient({
+      workspaceId: 'rw_test',
+      client: fake,
+      isAllowedDraft: () => true,
+    })
+
+    await legacyMount.writeFile('/linear/issues/new.json', { title: 'new' })
+
+    await expect(legacyMount.confirmWrite('/linear/issues/new.json', { timeoutMs: 5 })).resolves.toBe('acked')
+    await expect(restartedMount.confirmWrite('/linear/issues/new.json', { timeoutMs: 5 })).resolves.toBe('acked')
+    expect(fake.getOpCalls).toEqual([])
+  })
+
   it('refuses provider writeback paths when the draft predicate is unset or rejects', async () => {
     const fake = new FakeRelayFileClient()
     const unset = new RelayfileCloudMountClient({ workspaceId: 'rw_test', client: fake })
