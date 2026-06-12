@@ -654,6 +654,19 @@ describe('FactoryLoop', () => {
         expect.objectContaining({ message: 'release failed for ar-61-impl' }),
       ],
     ])
+
+    fleet.failNames.clear()
+    await factory.stop()
+
+    expect(fleet.releaseAttempts).toEqual([
+      { name: 'ar-61-impl', reason: 'factory-stopped' },
+      { name: 'ar-61-review', reason: 'factory-stopped' },
+      { name: 'ar-61-impl', reason: 'factory-stopped' },
+    ])
+    expect(fleet.releases).toEqual([
+      { name: 'ar-61-review', reason: 'factory-stopped' },
+      { name: 'ar-61-impl', reason: 'factory-stopped' },
+    ])
   })
 
   it('start queues and emits issue-queued when backfill exceeds batch capacity', async () => {

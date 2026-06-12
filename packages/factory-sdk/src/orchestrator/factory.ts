@@ -112,6 +112,7 @@ export class FactoryLoop implements Factory {
   #starting?: Promise<void>
   #started = false
   #stopping = false
+  readonly #stopReleasedAgents = new Set<string>()
 
   constructor(config: FactoryConfig, ports: FactoryPorts) {
     this.#config = config
@@ -721,8 +722,13 @@ export class FactoryLoop implements Factory {
     }
 
     await Promise.all([...agentNames].map(async (agentName) => {
+      if (this.#stopReleasedAgents.has(agentName)) {
+        return
+      }
+
       try {
         await this.#fleet.release(agentName, reason)
+        this.#stopReleasedAgents.add(agentName)
       } catch (error) {
         this.#logger.warn?.(`[factory] failed to release ${agentName} during stop`, error)
       }
