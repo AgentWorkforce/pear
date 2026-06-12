@@ -355,16 +355,9 @@ const normalizeProviderSyncStatus = (value: unknown, provider: string): Provider
   ].filter((candidate): candidate is Record<string, unknown> =>
     candidate !== undefined &&
     (stringField(candidate, 'provider') === undefined || stringField(candidate, 'provider') === provider))
-  const source = candidates.find((candidate) =>
-    stringField(candidate, 'lastEventAt') ||
-    stringField(candidate, 'last_event_at') ||
-    stringField(candidate, 'watermarkAt') ||
-    stringField(candidate, 'watermark_at') ||
-    stringField(candidate, 'watermarkTs') ||
-    stringField(candidate, 'watermark_ts') ||
-    numberField(candidate, 'lastEventAtMs') !== undefined ||
-    numberField(candidate, 'lagSeconds') !== undefined ||
-    stringField(candidate, 'status')) ?? record
+  const source = candidates.find(hasProviderSyncFreshness) ??
+    candidates.find((candidate) =>
+      stringField(candidate, 'status')) ?? record
   const lastEventAt = stringField(source, 'lastEventAt') ??
     stringField(source, 'last_event_at') ??
     stringField(source, 'watermarkAt') ??
@@ -384,6 +377,19 @@ const normalizeProviderSyncStatus = (value: unknown, provider: string): Provider
     lagSeconds: numberField(source, 'lagSeconds') ?? numberField(source, 'lag_seconds'),
   }
 }
+
+const hasProviderSyncFreshness = (candidate: Record<string, unknown>): boolean => Boolean(
+    stringField(candidate, 'lastEventAt') ||
+    stringField(candidate, 'last_event_at') ||
+    stringField(candidate, 'watermarkAt') ||
+    stringField(candidate, 'watermark_at') ||
+    stringField(candidate, 'watermarkTs') ||
+    stringField(candidate, 'watermark_ts') ||
+    numberField(candidate, 'lastEventAtMs') !== undefined ||
+    numberField(candidate, 'last_event_at_ms') !== undefined ||
+    numberField(candidate, 'lagSeconds') !== undefined ||
+    numberField(candidate, 'lag_seconds') !== undefined
+)
 
 const stringField = (record: Record<string, unknown>, key: string): string | undefined =>
   typeof record[key] === 'string' ? record[key] : undefined

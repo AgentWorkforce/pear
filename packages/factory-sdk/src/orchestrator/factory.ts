@@ -1023,7 +1023,6 @@ export class FactoryLoop implements Factory {
       }
     } catch (error) {
       this.#logger.warn?.('[factory] Slack sync freshness check failed; proceeding without degradation', error)
-      return { known: false, degraded: false }
     }
 
     try {

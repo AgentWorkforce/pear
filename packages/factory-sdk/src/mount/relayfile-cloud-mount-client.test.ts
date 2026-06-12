@@ -189,6 +189,28 @@ describe('RelayfileCloudMountClient', () => {
     expect(fake.getSyncStatus).toHaveBeenCalledWith('rw_test', { provider: 'slack' })
   })
 
+  it('prefers nested provider freshness over wrapper status metadata', async () => {
+    const fake = new FakeRelayFileClient()
+    fake.getSyncStatus = vi.fn(async () => ({
+      status: 'ready',
+      connections: [{
+        provider: 'slack',
+        last_event_at_ms: 1_781_267_200_000,
+        lag_seconds: 12,
+      }],
+    }))
+    const mount = new RelayfileCloudMountClient({ workspaceId: 'rw_test', client: fake })
+
+    await expect(mount.getSyncStatus?.('slack')).resolves.toEqual({
+      provider: 'slack',
+      status: undefined,
+      lastEventAt: undefined,
+      lastEventAtMs: 1_781_267_200_000,
+      watermarkTs: undefined,
+      lagSeconds: 12,
+    })
+  })
+
   it('selects the numeric event high-watermark instead of lexicographic max', async () => {
     const fake = new FakeRelayFileClient()
     fake.events = ['7', '8', '9', '10', '11'].map((eventId) => ({

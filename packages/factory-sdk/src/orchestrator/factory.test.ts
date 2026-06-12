@@ -189,6 +189,15 @@ class SlackSyncStatusMount extends FakeMountClient {
   }
 }
 
+class ThrowingSlackSyncStatusMount extends FakeMountClient {
+  async getSyncStatus(provider: string): Promise<ProviderSyncStatus | undefined> {
+    if (provider === 'slack') {
+      throw new Error('sync status unavailable')
+    }
+    return undefined
+  }
+}
+
 class NoWatermarkMount extends FakeMountClient {
   override async getEventHighWatermark(): Promise<string | undefined> {
     return undefined
@@ -1276,6 +1285,38 @@ describe('FactoryLoop', () => {
     expect(slackRoots).toHaveLength(1)
     expect((slackRoots[0]?.content as { text?: string }).text).toContain('AR-47: factory agents dispatched.')
     expect(factory.status().slackDegraded).toBe(false)
+  })
+
+  it('falls back to Slack event freshness when sync status lookup fails', async () => {
+    const mount = new ThrowingSlackSyncStatusMount({ [issuePath(54)]: issueFile(54) })
+    const slackEvent = changeEvent('/slack/channels/C0FACTORY__factory-e2e/messages/1781267200_000000/meta.json', 'slack-54')
+    mount.emit({
+      ...slackEvent,
+      resource: {
+        ...slackEvent.resource,
+        provider: 'slack',
+      },
+    })
+    const fleet = new FakeFleetClient()
+    const warnings: unknown[][] = []
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      logger: {
+        warn: (...args: unknown[]) => warnings.push(args),
+        error: () => undefined,
+      },
+    })
+
+    const report = await factory.runOnce()
+
+    expect(report.dispatched.map((result) => result.issue.key)).toEqual(['AR-54'])
+    expect(report.slackDegraded).toBe(false)
+    expect(mount.writes.filter((write) => isSlackRootWritePath(write.path))).toHaveLength(1)
+    expect(warnings.filter((warning) =>
+      warning[0] === '[factory] Slack sync freshness check failed; proceeding without degradation',
+    )).toHaveLength(1)
   })
 
   it('logs Slack recovery once and resumes writeback after a degraded episode', async () => {
