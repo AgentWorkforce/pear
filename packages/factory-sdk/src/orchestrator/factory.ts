@@ -72,6 +72,8 @@ export class FactoryLoop implements Factory {
   #livePollInFlight = false
   #liveEventCursor?: string
   #liveEventHighWatermark?: string
+  #liveConnectStartedAtMs = 0
+  #liveReplaySkewMarginMs = 0
   readonly #seenLiveEvents = new Set<string>()
   #offAgentExit?: () => void
   #offDeliveryFailed?: () => void
@@ -158,11 +160,14 @@ export class FactoryLoop implements Factory {
 
   async #startLiveSubscription(overrides: Partial<FactoryLiveSubscriptionOptions> = {}): Promise<void> {
     const options = this.#liveOptions(overrides)
+    this.#liveConnectStartedAtMs = this.#clock.now()
+    this.#liveReplaySkewMarginMs = options.replaySkewMarginMs
     this.#liveEventHighWatermark = await this.#currentEventHighWatermark()
     this.#seenLiveEvents.clear()
     this.#logger.info?.('[factory] live subscription starting', {
       transport: options.transport,
       highWatermark: this.#liveEventHighWatermark,
+      replaySkewMarginMs: this.#liveReplaySkewMarginMs,
     })
 
     if (options.transport !== 'poll') {
@@ -182,6 +187,7 @@ export class FactoryLoop implements Factory {
       transport: overrides.transport ?? this.#config.liveSubscription.transport,
       pollIntervalMs: overrides.pollIntervalMs ?? this.#config.liveSubscription.pollIntervalMs,
       eventLimit: overrides.eventLimit ?? this.#config.liveSubscription.eventLimit,
+      replaySkewMarginMs: overrides.replaySkewMarginMs ?? this.#config.liveSubscription.replaySkewMarginMs,
     }
   }
 
@@ -198,6 +204,7 @@ export class FactoryLoop implements Factory {
     try {
       return await this.#mount.getEventHighWatermark?.()
     } catch (error) {
+      this.#increment('liveHighWatermarkUnavailable')
       this.#logger.warn?.('[factory] live subscription high-watermark unavailable', error)
       return undefined
     }
@@ -241,8 +248,22 @@ export class FactoryLoop implements Factory {
       return
     }
 
+    if (isBeforeLiveCutoff(event.occurredAt, this.#liveConnectStartedAtMs, this.#liveReplaySkewMarginMs)) {
+      this.#increment('liveReplayEventsSuppressed')
+      this.#increment('liveReplayEventsSuppressedByTime')
+      this.#logger.debug?.('[factory] suppressed stale live issue event', {
+        id: event.id,
+        path,
+        occurredAt: event.occurredAt,
+        connectStartedAt: new Date(this.#liveConnectStartedAtMs).toISOString(),
+        replaySkewMarginMs: this.#liveReplaySkewMarginMs,
+      })
+      return
+    }
+
     if (isAtOrBeforeHighWatermark(event.id, this.#liveEventHighWatermark)) {
       this.#increment('liveReplayEventsSuppressed')
+      this.#increment('liveReplayEventsSuppressedByWatermark')
       this.#logger.debug?.('[factory] suppressed replayed live issue event', {
         id: event.id,
         highWatermark: this.#liveEventHighWatermark,
@@ -982,6 +1003,16 @@ const liveEventDedupeKey = (event: ChangeEvent): string | undefined => {
     stringValue(resource.revision) ?? '',
     event.digest ?? '',
   ].join('\u001f')
+}
+
+const isBeforeLiveCutoff = (
+  occurredAt: string,
+  connectStartedAtMs: number,
+  skewMarginMs: number,
+): boolean => {
+  const occurredAtMs = Date.parse(occurredAt)
+  if (!Number.isFinite(occurredAtMs)) return false
+  return occurredAtMs < connectStartedAtMs - skewMarginMs
 }
 
 const isAtOrBeforeHighWatermark = (eventId: string | undefined, highWatermark: string | undefined): boolean => {

@@ -40,6 +40,7 @@ export interface FactoryLiveSubscriptionOptions {
   transport: 'subscribe-and-poll' | 'subscribe' | 'poll'
   pollIntervalMs: number
   eventLimit: number
+  replaySkewMarginMs: number
 }
 
 export interface LinearIssue {

@@ -114,6 +114,12 @@ class NoWatermarkMount extends FakeMountClient {
   }
 }
 
+class ThrowingWatermarkMount extends FakeMountClient {
+  override async getEventHighWatermark(): Promise<string | undefined> {
+    throw Object.assign(new Error('Route not found'), { status: 404 })
+  }
+}
+
 describe('FactoryLoop', () => {
   it('parses wrapped Linear issue records', () => {
     expect(parseLinearIssue(issuePath(1), issueFile(1))).toMatchObject({
@@ -455,6 +461,41 @@ describe('FactoryLoop', () => {
     await flush()
 
     expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-35-impl', 'ar-35-review'])
+    await factory.stop()
+  })
+
+  it('live subscription suppresses old replay by time when high-watermark is unavailable', async () => {
+    const replayPath = issuePath(37)
+    const freshPath = issuePath(38)
+    const skewPath = issuePath(39)
+    const mount = new ThrowingWatermarkMount({
+      [replayPath]: realIssueFile(37),
+      [freshPath]: realIssueFile(38),
+      [skewPath]: realIssueFile(39),
+    })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
+
+    await factory.start({ mode: 'live', liveSubscription: { replaySkewMarginMs: 60_000 } })
+
+    mount.emit(changeEvent(replayPath, '201', new Date(Date.now() - 5 * 60_000).toISOString()))
+    await flush()
+
+    expect(fleet.spawns).toEqual([])
+    expect(factory.status().counters.liveReplayEventsSuppressedByTime).toBe(1)
+
+    mount.emit(changeEvent(skewPath, '202', new Date(Date.now() - 1_000).toISOString()))
+    await flush()
+
+    mount.emit(changeEvent(freshPath, '203', new Date(Date.now()).toISOString()))
+    await flush()
+
+    expect(fleet.spawns.map((spawn) => spawn.name)).toEqual([
+      'ar-39-impl',
+      'ar-39-review',
+      'ar-38-impl',
+      'ar-38-review',
+    ])
     await factory.stop()
   })
 
