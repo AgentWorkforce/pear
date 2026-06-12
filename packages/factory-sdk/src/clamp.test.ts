@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { clamp } from './clamp'
+import { clamp } from './index'
 
 describe('clamp', () => {
   it('returns min when n is below min', () => {
