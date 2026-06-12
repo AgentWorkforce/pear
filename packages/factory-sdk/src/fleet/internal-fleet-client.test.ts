@@ -126,7 +126,7 @@ describe('InternalFleetClient', () => {
     harness.agents = [{ name: 'ar-1-impl', pid: 901969 }]
     const fleet = new InternalFleetClient({ client: harness, cwd: '/worktree' })
 
-    await expect(fleet.resolveAgentPid('ar-1-impl')).resolves.toBe(901969)
+    await expect(fleet.resolveAgentPid('ar-1-impl')).resolves.toEqual({ status: 'found', pid: 901969 })
   })
 
   it('retries roster PID lookup when broker spawned-list registration lags spawn ack', async () => {
@@ -143,8 +143,28 @@ describe('InternalFleetClient', () => {
       const resolved = fleet.resolveAgentPid('ar-1-impl')
       await vi.advanceTimersByTimeAsync(75)
 
-      await expect(resolved).resolves.toBe(901969)
+      await expect(resolved).resolves.toEqual({ status: 'found', pid: 901969 })
       expect(listCalls).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('distinguishes absent agents from live agents with no PID', async () => {
+    vi.useFakeTimers()
+    try {
+      const absentHarness = new FakeHarnessDriverClient()
+      const absentFleet = new InternalFleetClient({ client: absentHarness, cwd: '/worktree' })
+      const absent = absentFleet.resolveAgentPid('ar-1-impl')
+      await vi.advanceTimersByTimeAsync(150)
+      await expect(absent).resolves.toEqual({ status: 'missing' })
+
+      const unresolvedHarness = new FakeHarnessDriverClient()
+      unresolvedHarness.agents = [{ name: 'ar-1-impl' }]
+      const unresolvedFleet = new InternalFleetClient({ client: unresolvedHarness, cwd: '/worktree' })
+      const unresolved = unresolvedFleet.resolveAgentPid('ar-1-impl')
+      await vi.advanceTimersByTimeAsync(150)
+      await expect(unresolved).resolves.toEqual({ status: 'unresolved' })
     } finally {
       vi.useRealTimers()
     }

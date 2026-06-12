@@ -4,7 +4,7 @@ import { join } from 'node:path'
 
 import type { BrokerEvent, ListAgent, SendMessageInput, SpawnPtyInput } from '@agent-relay/harness-driver'
 
-import type { Capability, FleetClient, RosterEntry, SendInput, SpawnInput, SpawnResult } from '../ports/fleet'
+import type { AgentPidResolution, Capability, FleetClient, RosterEntry, SendInput, SpawnInput, SpawnResult } from '../ports/fleet'
 import type { Logger } from '../ports/system'
 
 type SpawnedHandleLike = { name: string; sessionId?: string; session_ref?: string; sessionRef?: string; pid?: number }
@@ -143,21 +143,25 @@ export class InternalFleetClient implements FleetClient {
     return [...pids].sort((a, b) => a - b)
   }
 
-  async resolveAgentPid(name: string): Promise<number | undefined> {
+  async resolveAgentPid(name: string): Promise<AgentPidResolution> {
     try {
+      let sawAgent = false
       for (let attempt = 1; attempt <= PID_RESOLVE_ATTEMPTS; attempt += 1) {
         const agent = (await this.#client.listAgents()).find((candidate) => candidate.name === name)
+        if (agent) {
+          sawAgent = true
+        }
         if (typeof agent?.pid === 'number') {
-          return agent.pid
+          return { status: 'found', pid: agent.pid }
         }
         if (attempt < PID_RESOLVE_ATTEMPTS) {
           await sleep(PID_RESOLVE_BACKOFF_MS)
         }
       }
-      return undefined
+      return sawAgent ? { status: 'unresolved' } : { status: 'missing' }
     } catch (error) {
       this.#logger?.warn?.('[factory-sdk] unable to resolve spawned agent pid from roster', error)
-      return undefined
+      return { status: 'unresolved' }
     }
   }
 

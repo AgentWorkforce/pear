@@ -4,7 +4,17 @@ import { dirname } from 'node:path'
 import { FactoryConfigSchema, type FactoryConfig } from '../config/schema'
 import { LINEAR_STATE_IDS, linearByStatePath } from '../constants/linear'
 import { GithubMergeGate, closeProbePr, type GithubMergeGate as GithubMergeGatePort } from '../github'
-import type { AgentSpec, ChangeEvent, FleetClient, LinearWriteback, MountClient, ProviderSyncStatus, SlackWriteback, Subscription } from '../ports'
+import type {
+  AgentPidResolution,
+  AgentSpec,
+  ChangeEvent,
+  FleetClient,
+  LinearWriteback,
+  MountClient,
+  ProviderSyncStatus,
+  SlackWriteback,
+  Subscription,
+} from '../ports'
 import type { Clock, Logger } from '../ports/system'
 import { isInFactoryScope } from '../safety/factory-scope'
 import { renderAgentTask } from '../dispatch/templates'
@@ -33,12 +43,13 @@ import type {
 import { MountGithubRead, MountLinearWriteback, MountSlackWriteback } from '../writeback'
 import { asRecord, parseJsonContent, stableHash, wrappedPayload } from '../writeback/shared'
 import { BatchTracker, type InFlightIssue, issueKey, type TrackedAgent } from './batch-tracker'
-import { readProcessIdentity } from './process-identity'
+import { findAgentProcessByName, readProcessIdentity, type AgentProcessFinder } from './process-identity'
 import { terminatePids } from './reaper'
 
 type FactoryEvent = 'issue-queued' | 'dispatched' | 'issue-done' | 'writeback-verified' | 'error'
 type Listener = (payload: FactoryEventPayload) => void
 type SlackThreadWatcher = { stop(): Promise<void> }
+type TerminationRoots = { pids: number[]; status: AgentPidResolution['status'] }
 type DispatchAttemptState = {
   attempts: number
   inFlight: boolean
@@ -92,6 +103,7 @@ export class FactoryLoop implements Factory {
   readonly #logger: Logger
   readonly #clock: Clock
   readonly #processIdentityReader: typeof readProcessIdentity
+  readonly #processFinder: AgentProcessFinder
   readonly #kill: (pid: number, signal?: NodeJS.Signals | 0) => boolean
   readonly #readChildPids: ((pid: number) => Promise<number[]>) | undefined
   readonly #terminationGraceMs: number | undefined
@@ -141,6 +153,10 @@ export class FactoryLoop implements Factory {
     this.#logger = ports.logger ?? console
     this.#clock = ports.clock ?? realClock
     this.#processIdentityReader = ports.processIdentityReader ?? readProcessIdentity
+    this.#processFinder = ports.processFinder ?? ((agentName, opts) => findAgentProcessByName(agentName, {
+      readProcessIdentity: this.#processIdentityReader,
+      protectedPids: opts?.protectedPids,
+    }))
     this.#kill = ports.kill ?? process.kill
     this.#readChildPids = ports.readChildPids
     this.#terminationGraceMs = ports.terminationGraceMs
@@ -487,6 +503,7 @@ export class FactoryLoop implements Factory {
         const spawned = await this.#spawnAgent(record, spec, dryRun)
         agents.push({ name: spawned.name, role: spec.role })
       }
+      await this.#writeInFlightRegistry()
 
       const comment = dispatchComment(decision, agents)
       if (!dryRun) {
@@ -759,8 +776,8 @@ export class FactoryLoop implements Factory {
   ): Promise<void> {
     const protectedPids = await this.#protectedPids()
     for (const [agentName, tracked] of agents) {
-      const pids = await this.#terminationRoots(agentName, tracked)
-      if (pids.length === 0) {
+      const roots = await this.#terminationRoots(agentName, tracked, protectedPids)
+      if (roots.pids.length === 0 && roots.status === 'unresolved') {
         this.#increment('agentTerminateMissingPid')
         this.#logger.error?.(`[factory] no pid available to terminate ${agentName} during ${context}`, {
           agentName,
@@ -769,8 +786,8 @@ export class FactoryLoop implements Factory {
         })
       }
 
-      if (pids.length > 0) {
-        const report = await terminatePids(pids, {
+      if (roots.pids.length > 0) {
+        const report = await terminatePids(roots.pids, {
           kill: this.#kill,
           readChildPids: this.#readChildPids,
           sleep: this.#clock.sleep,
@@ -792,18 +809,45 @@ export class FactoryLoop implements Factory {
     }
   }
 
-  async #terminationRoots(agentName: string, tracked: TrackedAgent): Promise<number[]> {
+  async #terminationRoots(agentName: string, tracked: TrackedAgent, protectedPids: number[] = []): Promise<TerminationRoots> {
     const pids = pidsFromSpawnResult(tracked.result)
+    if (!this.#fleet.resolveAgentPid) {
+      return pids.length > 0 ? { pids, status: 'found' } : { pids: [], status: 'unresolved' }
+    }
+
+    const scan = await this.#processFinder(agentName, { protectedPids })
+    if (
+      scan.status === 'found' &&
+      Number.isInteger(scan.identity.pid) &&
+      scan.identity.pid > 0 &&
+      scan.identity.cmdline.includes(agentName)
+    ) {
+      return { pids: [scan.identity.pid], status: 'found' }
+    }
+    if (scan.status === 'ambiguous') {
+      this.#logger.warn?.(`[factory] ambiguous process lookup for ${agentName}`)
+      return { pids: [], status: 'unresolved' }
+    }
+
     if (pids.length > 0) {
-      return pids
+      return { pids, status: 'found' }
     }
 
     try {
-      const pid = await this.#fleet.resolveAgentPid?.(agentName)
-      return Number.isInteger(pid) && pid! > 0 ? [pid!] : []
+      const resolution = await this.#fleet.resolveAgentPid?.(agentName)
+      if (!resolution) {
+        return { pids: [], status: 'unresolved' }
+      }
+      if (resolution.status === 'found' && Number.isInteger(resolution.pid) && resolution.pid > 0) {
+        return { pids: [resolution.pid], status: 'found' }
+      }
+      if (resolution.status === 'unresolved' && scan.status === 'missing') {
+        return { pids: [], status: 'missing' }
+      }
+      return { pids: [], status: resolution.status }
     } catch (error) {
       this.#logger.warn?.(`[factory] failed to resolve pid for ${agentName}`, error)
-      return []
+      return { pids: [], status: 'unresolved' }
     }
   }
 
@@ -827,7 +871,7 @@ export class FactoryLoop implements Factory {
       for (const record of this.#batch.inFlight) {
         if (record.dryRun) continue
         for (const [agentName, tracked] of record.agents) {
-          const pids = pidsFromSpawnResult(tracked.result)
+          const { pids } = await this.#terminationRoots(agentName, tracked)
           const processes = []
           for (const pid of pids) {
             const identity = await this.#processIdentityReader(pid)
@@ -856,10 +900,6 @@ export class FactoryLoop implements Factory {
     }
     await mkdir(dirname(path), { recursive: true })
     await writeFile(path, `${JSON.stringify(registry, null, 2)}\n`, 'utf8')
-  }
-
-  #hasInFlightPids(): boolean {
-    return this.#batch.inFlight.some(recordHasPids)
   }
 
   async #spawnAgent(record: InFlightIssue, spec: AgentSpec, dryRun: boolean): Promise<{ name: string }> {
@@ -910,9 +950,6 @@ export class FactoryLoop implements Factory {
       )
     }
     this.#batch.recordSpawn(record, spec, invocationId, result)
-    if (pidsFromSpawnResult(result).length > 0) {
-      await this.#writeInFlightRegistry()
-    }
     return { name: result.name }
   }
 
@@ -1141,14 +1178,11 @@ export class FactoryLoop implements Factory {
       this.#emit('issue-done', { issue: record.issue })
       await this.#stopSlackWatcher(record.issue)
       this.#recordDispatchTerminal(record.issue)
-      const completedHadPids = recordHasPids(record)
       const next = this.#batch.complete(record.issue)
-      if (completedHadPids || this.#hasInFlightPids()) {
-        await this.#writeInFlightRegistry()
-      }
       if (next) {
         await this.dispatch(next.decision, { dryRun: next.dryRun })
       }
+      await this.#writeInFlightRegistry()
     } catch (error) {
       this.#error(error, record.issue)
     }
@@ -1602,9 +1636,6 @@ export function isRealLinearIssue(issue: LinearIssue): boolean {
 }
 
 const issueRef = (issue: LinearIssue): IssueRef => ({ uuid: issue.uuid, key: issue.key, path: issue.path })
-
-const recordHasPids = (record: InFlightIssue): boolean =>
-  [...record.agents.values()].some((agent) => pidsFromSpawnResult(agent.result).length > 0)
 
 const pidsFromSpawnResult = (result: { pid?: number; pids?: number[] } | undefined): number[] => {
   const pids = new Set<number>()

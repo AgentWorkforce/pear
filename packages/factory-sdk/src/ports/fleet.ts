@@ -26,6 +26,11 @@ export interface RosterEntry {
   nodes: Array<{ name: string; capabilities: Capability[]; live: boolean }>
 }
 
+export type AgentPidResolution =
+  | { status: 'found'; pid: number }
+  | { status: 'missing' }
+  | { status: 'unresolved' }
+
 export type SendInput = { to: string; text: string; from?: string; data?: Record<string, unknown> }
 
 export interface FleetClient {
@@ -33,7 +38,7 @@ export interface FleetClient {
   resume(input: { name?: string; sessionRef: string; node?: 'self' | string; capability?: Capability }): Promise<SpawnResult>
   release(name: string, reason?: string): Promise<void>
   roster(): Promise<RosterEntry>
-  resolveAgentPid?(name: string): Promise<number | undefined>
+  resolveAgentPid?(name: string): Promise<AgentPidResolution>
   protectedPids?(): Promise<number[]>
   sendMessage(input: SendInput): Promise<void>
   waitForInjected?(input: SendInput, opts?: { timeoutMs?: number }): Promise<{ eventId: string; targets: string[] }>
