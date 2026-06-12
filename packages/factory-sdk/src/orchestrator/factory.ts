@@ -32,8 +32,9 @@ import type {
 } from '../types'
 import { MountGithubRead, MountLinearWriteback, MountSlackWriteback } from '../writeback'
 import { asRecord, parseJsonContent, stableHash, wrappedPayload } from '../writeback/shared'
-import { BatchTracker, type InFlightIssue, issueKey } from './batch-tracker'
+import { BatchTracker, type InFlightIssue, issueKey, type TrackedAgent } from './batch-tracker'
 import { readProcessIdentity } from './process-identity'
+import { terminatePids } from './reaper'
 
 type FactoryEvent = 'issue-queued' | 'dispatched' | 'issue-done' | 'writeback-verified' | 'error'
 type Listener = (payload: FactoryEventPayload) => void
@@ -91,6 +92,9 @@ export class FactoryLoop implements Factory {
   readonly #logger: Logger
   readonly #clock: Clock
   readonly #processIdentityReader: typeof readProcessIdentity
+  readonly #kill: (pid: number, signal?: NodeJS.Signals | 0) => boolean
+  readonly #readChildPids: ((pid: number) => Promise<number[]>) | undefined
+  readonly #terminationGraceMs: number | undefined
   readonly #batch: BatchTracker
   readonly #listeners = new Map<FactoryEvent, Set<Listener>>()
   readonly #counters: Record<string, number> = {}
@@ -137,6 +141,9 @@ export class FactoryLoop implements Factory {
     this.#logger = ports.logger ?? console
     this.#clock = ports.clock ?? realClock
     this.#processIdentityReader = ports.processIdentityReader ?? readProcessIdentity
+    this.#kill = ports.kill ?? process.kill
+    this.#readChildPids = ports.readChildPids
+    this.#terminationGraceMs = ports.terminationGraceMs
     this.#batch = new BatchTracker(config.batchSize)
     this.#wireFleetEvents()
   }
@@ -731,24 +738,69 @@ export class FactoryLoop implements Factory {
   }
 
   async #releaseInFlightAgents(reason: string): Promise<void> {
-    const agentNames = new Set<string>()
+    const agents = new Map<string, TrackedAgent>()
     for (const record of this.#batch.inFlight) {
       if (record.dryRun) {
         continue
       }
-      for (const agentName of record.agents.keys()) {
-        agentNames.add(agentName)
+      for (const [agentName, tracked] of record.agents) {
+        agents.set(agentName, tracked)
       }
     }
 
-    await Promise.all([...agentNames].map(async (agentName) => {
+    await this.#releaseAndTerminateAgents([...agents], reason, 'stop')
+    await this.#writeInFlightRegistry(undefined, undefined, true)
+  }
+
+  async #releaseAndTerminateAgents(
+    agents: Array<[string, TrackedAgent]>,
+    reason: string,
+    context: 'stop' | 'completion',
+  ): Promise<void> {
+    const protectedPids = await this.#protectedPids()
+    await Promise.all(agents.map(async ([agentName, tracked]) => {
+      const pids = pidsFromSpawnResult(tracked.result)
+      if (pids.length === 0) {
+        this.#increment('agentTerminateMissingPid')
+        this.#logger.error?.(`[factory] no pid available to terminate ${agentName} during ${context}`, {
+          agentName,
+          reason,
+          sessionRef: tracked.sessionRef,
+        })
+      }
+
       try {
         await this.#fleet.release(agentName, reason)
       } catch (error) {
-        this.#logger.warn?.(`[factory] failed to release ${agentName} during stop`, error)
+        this.#logger.warn?.(`[factory] failed to release ${agentName} during ${context}`, error)
+      }
+
+      if (pids.length === 0) {
+        return
+      }
+
+      const report = await terminatePids(pids, {
+        kill: this.#kill,
+        readChildPids: this.#readChildPids,
+        sleep: this.#clock.sleep,
+        termGraceMs: this.#terminationGraceMs,
+        protectedPids,
+      })
+      for (const skipped of report.skipped) {
+        if (skipped.reason !== 'pid not running') {
+          this.#logger.warn?.(`[factory] failed to terminate pid ${skipped.pid} for ${agentName} during ${context}`, skipped.reason)
+        }
       }
     }))
-    await this.#writeInFlightRegistry(undefined, undefined, true)
+  }
+
+  async #protectedPids(): Promise<number[]> {
+    try {
+      return await this.#fleet.protectedPids?.() ?? []
+    } catch (error) {
+      this.#logger.warn?.('[factory] failed to resolve protected fleet pids', error)
+      return []
+    }
   }
 
   async #writeInFlightRegistry(
@@ -1070,9 +1122,7 @@ export class FactoryLoop implements Factory {
         await this.#closeProbeIfRequired(issue)
       }
 
-      for (const agent of record.agents.keys()) {
-        await this.#fleet.release(agent, 'issue-done')
-      }
+      await this.#releaseAndTerminateAgents([...record.agents], 'issue-done', 'completion')
 
       this.#increment('done')
       this.#emit('issue-done', { issue: record.issue })

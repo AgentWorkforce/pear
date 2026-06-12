@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 
 import type { FactoryInFlightRegistry, FactoryLoopHeartbeat } from '../types'
-import { FactoryReaper, reapFactoryOrphansOnce } from './reaper'
+import { FactoryReaper, reapFactoryOrphansOnce, terminatePids } from './reaper'
 
 const writeJson = async (path: string, value: unknown): Promise<void> => {
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
@@ -61,6 +61,7 @@ describe('factory reaper', () => {
       expect(report.reaped).toEqual([{ pid: 111, signals: ['SIGTERM', 'SIGKILL'] }])
       expect(killed).toEqual([
         { pid: 111, signal: 0 },
+        { pid: 111, signal: 0 },
         { pid: 111, signal: 'SIGTERM' },
         { pid: 111, signal: 0 },
         { pid: 111, signal: 'SIGKILL' },
@@ -69,6 +70,65 @@ describe('factory reaper', () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
+  })
+
+  it('terminates a whole process tree before killing the parent root', async () => {
+    const killed: Array<{ pid: number; signal?: NodeJS.Signals | 0 }> = []
+    const brokerParentPid = 68009
+    const live = new Set([brokerParentPid, 901969, 901970, 901971, 901972])
+    const children = new Map<number, number[]>([
+      [901969, [901970, 901971, brokerParentPid]],
+      [901970, [901972]],
+    ])
+
+    const report = await terminatePids([901969], {
+      termGraceMs: 0,
+      protectedPids: [brokerParentPid],
+      readChildPids: async (pid) => children.get(pid) ?? [],
+      kill: (pid, signal) => {
+        killed.push({ pid, signal })
+        if (!live.has(pid)) throw Object.assign(new Error('not running'), { code: 'ESRCH' })
+        if (signal === 'SIGKILL') live.delete(pid)
+        return true
+      },
+    })
+
+    expect(report.terminated.map((entry) => entry.pid)).toEqual([901972, 901970, 901971, 901969])
+    expect(killed.filter((entry) => entry.signal === 'SIGTERM').map((entry) => entry.pid)).toEqual([
+      901972,
+      901970,
+      901971,
+      901969,
+    ])
+    expect(killed.some((entry) => entry.pid === brokerParentPid)).toBe(false)
+    expect(live).toEqual(new Set([brokerParentPid]))
+  })
+
+  it('continues terminating later PIDs when an earlier PID is already gone', async () => {
+    const killed: Array<{ pid: number; signal?: NodeJS.Signals | 0 }> = []
+    const live = new Set([222])
+
+    const report = await terminatePids([111, 222], {
+      termGraceMs: 0,
+      readChildPids: async () => [],
+      kill: (pid, signal) => {
+        killed.push({ pid, signal })
+        if (!live.has(pid)) throw Object.assign(new Error('not running'), { code: 'ESRCH' })
+        if (signal === 'SIGKILL') live.delete(pid)
+        return true
+      },
+    })
+
+    expect(report.skipped).toEqual([{ pid: 111, reason: 'pid not running' }])
+    expect(report.terminated).toEqual([{ pid: 222, signals: ['SIGTERM', 'SIGKILL'] }])
+    expect(killed).toEqual([
+      { pid: 111, signal: 0 },
+      { pid: 222, signal: 0 },
+      { pid: 222, signal: 'SIGTERM' },
+      { pid: 222, signal: 0 },
+      { pid: 222, signal: 'SIGKILL' },
+    ])
+    expect(live).toEqual(new Set())
   })
 
   it('does not kill a recycled PID whose current identity no longer matches the registry', async () => {

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import type { BrokerEvent, SendMessageInput, SpawnPtyInput } from '@agent-relay/harness-driver'
 
 import {
   FactoryConfigSchema,
@@ -19,6 +20,7 @@ import { FakeFleetClient, FakeMountClient } from '../testing'
 import type { CloseProbePrInput, LinearIssue } from '../index'
 import { BatchTracker } from './batch-tracker'
 import { keyFromPath } from './factory'
+import { InternalFleetClient, type HarnessDriverClientLike } from '../fleet/internal-fleet-client'
 
 const ready = 'b9bec744-b60c-4745-8022-d90d6ab59ae3'
 const implementing = '39b9881d-1196-4c95-8b80-a20f0c7263f7'
@@ -182,6 +184,83 @@ class PidFleetClient extends FakeFleetClient {
     this.spawns.push(input)
     const pid = this.nextPid++
     return { name: input.name, sessionRef: `session-${pid}`, pid }
+  }
+}
+
+class CapturedPidFleetClient extends FakeFleetClient {
+  readonly plans: Map<string, SpawnResult>
+
+  constructor(plans: SpawnResult[]) {
+    super()
+    this.plans = new Map(plans.map((plan) => [plan.name, plan]))
+  }
+
+  override async spawn(input: SpawnInput): Promise<SpawnResult> {
+    this.spawns.push(input)
+    const planned = this.plans.get(input.name)
+    return {
+      name: input.name,
+      sessionRef: planned?.sessionRef ?? `session-${input.name}`,
+      pid: planned?.pid,
+      pids: planned?.pids,
+    }
+  }
+}
+
+class RosterPidHarnessClient implements HarnessDriverClientLike {
+  readonly brokerPid = 68009
+  readonly spawned: SpawnPtyInput[] = []
+  readonly releases: Array<{ name: string; reason?: string }> = []
+  readonly sent: SendMessageInput[] = []
+  readonly inputs: Array<{ name: string; data: string }> = []
+  readonly eventListeners = new Set<(event: BrokerEvent) => void>()
+  readonly agents = new Map<string, { name: string; pid?: number }>()
+  readonly pidsByName = new Map<string, number>()
+
+  async spawnPty(input: SpawnPtyInput): Promise<{ name: string; session_ref: string }> {
+    this.spawned.push(input)
+    this.agents.set(input.name, { name: input.name, pid: this.pidsByName.get(input.name) })
+    return { name: input.name, session_ref: `session-${input.name}` }
+  }
+
+  async release(name: string, reason?: string): Promise<{ name: string }> {
+    this.releases.push({ name, reason })
+    this.agents.delete(name)
+    return { name }
+  }
+
+  async listAgents(): Promise<Array<{ name: string; pid?: number }>> {
+    return [...this.agents.values()]
+  }
+
+  async sendMessage(input: SendMessageInput): Promise<{ event_id: string; targets?: string[] }> {
+    this.sent.push(input)
+    const eventId = `event-${this.sent.length}`
+    this.emit({ kind: 'delivery_injected', event_id: eventId, name: input.to } as BrokerEvent)
+    return { event_id: eventId, targets: [input.to] }
+  }
+
+  async sendInput(name: string, data: string): Promise<void> {
+    this.inputs.push({ name, data })
+  }
+
+  connectEvents(): void {}
+
+  onEvent(listener: (event: BrokerEvent) => void): () => void {
+    this.eventListeners.add(listener)
+    return () => {
+      this.eventListeners.delete(listener)
+    }
+  }
+
+  addListener(): () => void {
+    return () => {}
+  }
+
+  emit(event: BrokerEvent): void {
+    for (const listener of this.eventListeners) {
+      listener(event)
+    }
   }
 }
 
@@ -760,8 +839,29 @@ describe('FactoryLoop', () => {
 
   it('stop releases each in-flight factory-dispatched agent', async () => {
     const mount = new FakeMountClient({ [issuePath(60)]: issueFile(60) })
-    const fleet = new FakeFleetClient()
-    const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
+    const fleet = new CapturedPidFleetClient([
+      { name: 'ar-60-impl', sessionRef: 'session-901969', pid: 901969 },
+      { name: 'ar-60-review', sessionRef: 'session-902338', pid: 902338 },
+    ])
+    const children = new Map<number, number[]>([
+      [901969, [901970]],
+      [902338, [902339]],
+    ])
+    const alive = new Set([901969, 901970, 902338, 902339])
+    const killed: Array<{ pid: number; signal?: NodeJS.Signals | 0 }> = []
+    const factory = createFactory(config(), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      terminationGraceMs: 0,
+      readChildPids: async (pid) => children.get(pid) ?? [],
+      kill: (pid, signal) => {
+        killed.push({ pid, signal })
+        if (!alive.has(pid)) throw Object.assign(new Error('not running'), { code: 'ESRCH' })
+        if (signal === 'SIGKILL') alive.delete(pid)
+        return true
+      },
+    })
     await fleet.spawn({ name: 'external-worker', capability: 'spawn:codex', task: 'external', model: 'codex' })
 
     await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(60), issueFile(60))))
@@ -770,6 +870,103 @@ describe('FactoryLoop', () => {
     expect(fleet.releases).toEqual([
       { name: 'ar-60-impl', reason: 'factory-stopped' },
       { name: 'ar-60-review', reason: 'factory-stopped' },
+    ])
+    expect(killed.filter((entry) => entry.signal === 'SIGTERM').map((entry) => entry.pid).sort((a, b) => a - b)).toEqual([
+      901969,
+      901970,
+      902338,
+      902339,
+    ])
+    expect(killed.filter((entry) => entry.signal === 'SIGKILL').map((entry) => entry.pid).sort((a, b) => a - b)).toEqual([
+      901969,
+      901970,
+      902338,
+      902339,
+    ])
+    expect(alive).toEqual(new Set())
+  })
+
+  it('stop terminates trees using roster PID fallback when spawn ack omits pid', async () => {
+    const mount = new FakeMountClient({ [issuePath(63)]: issueFile(63) })
+    const harness = new RosterPidHarnessClient()
+    harness.pidsByName.set('ar-63-impl', 901969)
+    harness.pidsByName.set('ar-63-review', 902338)
+    const fleet = new InternalFleetClient({ client: harness, cwd: '/work/pear' })
+    const brokerParentPid = 68009
+    const children = new Map<number, number[]>([
+      [901969, [901970, brokerParentPid]],
+      [902338, [902339]],
+    ])
+    const alive = new Set([brokerParentPid, 901969, 901970, 902338, 902339])
+    const killed: Array<{ pid: number; signal?: NodeJS.Signals | 0 }> = []
+    const factory = createFactory(config(), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      terminationGraceMs: 0,
+      readChildPids: async (pid) => children.get(pid) ?? [],
+      kill: (pid, signal) => {
+        killed.push({ pid, signal })
+        if (!alive.has(pid)) throw Object.assign(new Error('not running'), { code: 'ESRCH' })
+        if (signal === 'SIGKILL') alive.delete(pid)
+        return true
+      },
+    })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(63), issueFile(63))))
+    await factory.stop()
+
+    expect(harness.spawned).toHaveLength(2)
+    expect(harness.releases).toEqual([
+      { name: 'ar-63-impl', reason: 'factory-stopped' },
+      { name: 'ar-63-review', reason: 'factory-stopped' },
+    ])
+    expect(killed.filter((entry) => entry.signal === 'SIGTERM').map((entry) => entry.pid).sort((a, b) => a - b)).toEqual([
+      901969,
+      901970,
+      902338,
+      902339,
+    ])
+    expect(killed.some((entry) => entry.pid === brokerParentPid)).toBe(false)
+    expect(alive).toEqual(new Set([brokerParentPid]))
+  })
+
+  it('stop reports missing terminate roots instead of silently certifying a no-op', async () => {
+    const mount = new FakeMountClient({ [issuePath(65)]: issueFile(65) })
+    const fleet = new CapturedPidFleetClient([
+      { name: 'ar-65-impl', sessionRef: 'session-ar-65-impl' },
+      { name: 'ar-65-review', sessionRef: 'session-ar-65-review' },
+    ])
+    const errors: unknown[][] = []
+    const killed: Array<{ pid: number; signal?: NodeJS.Signals | 0 }> = []
+    const factory = createFactory(config(), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      terminationGraceMs: 0,
+      readChildPids: async () => [],
+      kill: (pid, signal) => {
+        killed.push({ pid, signal })
+        return true
+      },
+      logger: {
+        error: (...args: unknown[]) => errors.push(args),
+        warn: () => undefined,
+      },
+    })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(65), issueFile(65))))
+    await factory.stop()
+
+    expect(fleet.releases).toEqual([
+      { name: 'ar-65-impl', reason: 'factory-stopped' },
+      { name: 'ar-65-review', reason: 'factory-stopped' },
+    ])
+    expect(killed).toEqual([])
+    expect(factory.status().counters.agentTerminateMissingPid).toBe(2)
+    expect(errors).toEqual([
+      ['[factory] no pid available to terminate ar-65-impl during stop', expect.objectContaining({ agentName: 'ar-65-impl' })],
+      ['[factory] no pid available to terminate ar-65-review during stop', expect.objectContaining({ agentName: 'ar-65-review' })],
     ])
   })
 
@@ -1526,6 +1723,50 @@ describe('FactoryLoop', () => {
       'release:ar-18-impl',
       'release:ar-18-review',
     ])
+  })
+
+  it('completion releases and terminates tracked pair process trees', async () => {
+    const mount = new FakeMountClient({ [issuePath(64)]: issueFile(64) })
+    const fleet = new CapturedPidFleetClient([
+      { name: 'ar-64-impl', sessionRef: 'session-901969', pid: 901969 },
+      { name: 'ar-64-review', sessionRef: 'session-902338', pid: 902338 },
+    ])
+    const children = new Map<number, number[]>([[901969, [901970]]])
+    const alive = new Set([901969, 901970, 902338])
+    const killed: Array<{ pid: number; signal?: NodeJS.Signals | 0 }> = []
+    const factory = createFactory(config(), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      terminationGraceMs: 0,
+      readChildPids: async (pid) => children.get(pid) ?? [],
+      kill: (pid, signal) => {
+        killed.push({ pid, signal })
+        if (!alive.has(pid)) throw Object.assign(new Error('not running'), { code: 'ESRCH' })
+        if (signal === 'SIGKILL') alive.delete(pid)
+        return true
+      },
+    })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(64), issueFile(64))))
+    fleet.emitAgentExit('ar-64-impl', 'issue-done')
+    await vi.waitFor(() => expect(killed.filter((entry) => entry.signal === 'SIGKILL')).toHaveLength(3))
+
+    expect(fleet.releases).toEqual([
+      { name: 'ar-64-impl', reason: 'issue-done' },
+      { name: 'ar-64-review', reason: 'issue-done' },
+    ])
+    expect(killed.filter((entry) => entry.signal === 'SIGTERM').map((entry) => entry.pid).sort((a, b) => a - b)).toEqual([
+      901969,
+      901970,
+      902338,
+    ])
+    expect(killed.filter((entry) => entry.signal === 'SIGKILL').map((entry) => entry.pid).sort((a, b) => a - b)).toEqual([
+      901969,
+      901970,
+      902338,
+    ])
+    expect(alive).toEqual(new Set())
   })
 
   it('does not close probes for non-never merge policies', async () => {

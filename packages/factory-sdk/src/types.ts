@@ -18,6 +18,9 @@ export interface FactoryPorts {
   logger?: Logger
   clock?: Clock
   processIdentityReader?: (pid: number) => Promise<ProcessIdentity | undefined>
+  kill?: (pid: number, signal?: NodeJS.Signals | 0) => boolean
+  readChildPids?: (pid: number) => Promise<number[]>
+  terminationGraceMs?: number
 }
 
 export interface Factory {

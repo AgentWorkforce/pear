@@ -5,6 +5,7 @@ import type { BrokerEvent, SendMessageInput, SpawnPtyInput } from '@agent-relay/
 import { InternalFleetClient, type HarnessDriverClientLike } from './internal-fleet-client'
 
 class FakeHarnessDriverClient implements HarnessDriverClientLike {
+  brokerPid: number | undefined
   readonly spawned: SpawnPtyInput[] = []
   readonly released: Array<{ name: string; reason?: string }> = []
   readonly sent: SendMessageInput[] = []
@@ -14,12 +15,13 @@ class FakeHarnessDriverClient implements HarnessDriverClientLike {
   readonly exitListeners = new Set<(agent: { name: string; sessionId?: string }) => void>()
   connectEventsCalls = 0
 
-  agents: Array<{ name: string }> = []
+  agents: Array<{ name: string; pid?: number }> = []
   nextSessionRef = 'session-1'
+  nextPid: number | undefined
 
-  async spawnPty(input: SpawnPtyInput): Promise<{ name: string; session_ref: string }> {
+  async spawnPty(input: SpawnPtyInput): Promise<{ name: string; session_ref: string; pid?: number }> {
     this.spawned.push(input)
-    this.agents.push({ name: input.name })
+    this.agents.push({ name: input.name, pid: this.nextPid })
     return { name: input.name, session_ref: this.nextSessionRef }
   }
 
@@ -28,7 +30,7 @@ class FakeHarnessDriverClient implements HarnessDriverClientLike {
     return { name }
   }
 
-  async listAgents(): Promise<Array<{ name: string }>> {
+  async listAgents(): Promise<Array<{ name: string; pid?: number }>> {
     return this.agents
   }
 
@@ -117,6 +119,54 @@ describe('InternalFleetClient', () => {
         continueFrom: 'previous-session',
       },
     ])
+  })
+
+  it('falls back to roster PID when the immediate spawn handle omits pid', async () => {
+    const harness = new FakeHarnessDriverClient()
+    harness.nextPid = 901969
+    const fleet = new InternalFleetClient({ client: harness, cwd: '/worktree' })
+
+    await expect(
+      fleet.spawn({
+        name: 'ar-1-impl',
+        capability: 'spawn:codex',
+        node: 'self',
+      }),
+    ).resolves.toEqual({ name: 'ar-1-impl', sessionRef: 'session-1', pid: 901969 })
+  })
+
+  it('retries roster PID lookup when broker spawned-list registration lags spawn ack', async () => {
+    vi.useFakeTimers()
+    try {
+      const harness = new FakeHarnessDriverClient()
+      harness.nextPid = 901969
+      let listCalls = 0
+      harness.listAgents = async () => {
+        listCalls += 1
+        return listCalls === 1 ? [{ name: 'ar-1-impl' }] : harness.agents
+      }
+      const fleet = new InternalFleetClient({ client: harness, cwd: '/worktree' })
+
+      const spawned = fleet.spawn({
+        name: 'ar-1-impl',
+        capability: 'spawn:codex',
+        node: 'self',
+      })
+      await vi.advanceTimersByTimeAsync(75)
+
+      await expect(spawned).resolves.toEqual({ name: 'ar-1-impl', sessionRef: 'session-1', pid: 901969 })
+      expect(listCalls).toBe(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('surfaces the broker pid as protected process state', async () => {
+    const harness = new FakeHarnessDriverClient()
+    harness.brokerPid = 68009
+    const fleet = new InternalFleetClient({ client: harness, cwd: '/worktree' })
+
+    await expect(fleet.protectedPids()).resolves.toEqual([68009])
   })
 
   it('maps claude capability and per-spawn cwd', async () => {
