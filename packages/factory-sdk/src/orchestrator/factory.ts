@@ -759,7 +759,7 @@ export class FactoryLoop implements Factory {
   ): Promise<void> {
     const protectedPids = await this.#protectedPids()
     for (const [agentName, tracked] of agents) {
-      const pids = pidsFromSpawnResult(tracked.result)
+      const pids = await this.#terminationRoots(agentName, tracked)
       if (pids.length === 0) {
         this.#increment('agentTerminateMissingPid')
         this.#logger.error?.(`[factory] no pid available to terminate ${agentName} during ${context}`, {
@@ -789,6 +789,21 @@ export class FactoryLoop implements Factory {
       } catch (error) {
         this.#logger.warn?.(`[factory] failed to release ${agentName} during ${context}`, error)
       }
+    }
+  }
+
+  async #terminationRoots(agentName: string, tracked: TrackedAgent): Promise<number[]> {
+    const pids = pidsFromSpawnResult(tracked.result)
+    if (pids.length > 0) {
+      return pids
+    }
+
+    try {
+      const pid = await this.#fleet.resolveAgentPid?.(agentName)
+      return Number.isInteger(pid) && pid! > 0 ? [pid!] : []
+    } catch (error) {
+      this.#logger.warn?.(`[factory] failed to resolve pid for ${agentName}`, error)
+      return []
     }
   }
 

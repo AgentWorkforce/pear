@@ -121,40 +121,29 @@ describe('InternalFleetClient', () => {
     ])
   })
 
-  it('falls back to roster PID when the immediate spawn handle omits pid', async () => {
+  it('resolves an agent PID from the broker roster', async () => {
     const harness = new FakeHarnessDriverClient()
-    harness.nextPid = 901969
+    harness.agents = [{ name: 'ar-1-impl', pid: 901969 }]
     const fleet = new InternalFleetClient({ client: harness, cwd: '/worktree' })
 
-    await expect(
-      fleet.spawn({
-        name: 'ar-1-impl',
-        capability: 'spawn:codex',
-        node: 'self',
-      }),
-    ).resolves.toEqual({ name: 'ar-1-impl', sessionRef: 'session-1', pid: 901969 })
+    await expect(fleet.resolveAgentPid('ar-1-impl')).resolves.toBe(901969)
   })
 
   it('retries roster PID lookup when broker spawned-list registration lags spawn ack', async () => {
     vi.useFakeTimers()
     try {
       const harness = new FakeHarnessDriverClient()
-      harness.nextPid = 901969
       let listCalls = 0
       harness.listAgents = async () => {
         listCalls += 1
-        return listCalls === 1 ? [{ name: 'ar-1-impl' }] : harness.agents
+        return listCalls === 1 ? [{ name: 'ar-1-impl' }] : [{ name: 'ar-1-impl', pid: 901969 }]
       }
       const fleet = new InternalFleetClient({ client: harness, cwd: '/worktree' })
 
-      const spawned = fleet.spawn({
-        name: 'ar-1-impl',
-        capability: 'spawn:codex',
-        node: 'self',
-      })
+      const resolved = fleet.resolveAgentPid('ar-1-impl')
       await vi.advanceTimersByTimeAsync(75)
 
-      await expect(spawned).resolves.toEqual({ name: 'ar-1-impl', sessionRef: 'session-1', pid: 901969 })
+      await expect(resolved).resolves.toBe(901969)
       expect(listCalls).toBe(2)
     } finally {
       vi.useRealTimers()

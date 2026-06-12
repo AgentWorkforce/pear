@@ -33,6 +33,7 @@ export interface FleetClient {
   resume(input: { name?: string; sessionRef: string; node?: 'self' | string; capability?: Capability }): Promise<SpawnResult>
   release(name: string, reason?: string): Promise<void>
   roster(): Promise<RosterEntry>
+  resolveAgentPid?(name: string): Promise<number | undefined>
   protectedPids?(): Promise<number[]>
   sendMessage(input: SendInput): Promise<void>
   waitForInjected?(input: SendInput, opts?: { timeoutMs?: number }): Promise<{ eventId: string; targets: string[] }>

@@ -100,7 +100,7 @@ export class InternalFleetClient implements FleetClient {
 
     this.#clearAgentExitLatch(handle.name)
 
-    return spawnResultFrom(handle, await this.#pidForAgent(handle))
+    return spawnResultFrom(handle)
   }
 
   async resume(input: { name?: string; sessionRef: string; node?: 'self' | string; capability?: Capability }): Promise<SpawnResult> {
@@ -116,7 +116,7 @@ export class InternalFleetClient implements FleetClient {
 
     this.#clearAgentExitLatch(handle.name)
 
-    return { ...spawnResultFrom(handle, await this.#pidForAgent(handle)), sessionRef: sessionRefFrom(handle) ?? input.sessionRef }
+    return { ...spawnResultFrom(handle), sessionRef: sessionRefFrom(handle) ?? input.sessionRef }
   }
 
   async release(name: string, reason?: string): Promise<void> {
@@ -143,14 +143,10 @@ export class InternalFleetClient implements FleetClient {
     return [...pids].sort((a, b) => a - b)
   }
 
-  async #pidForAgent(handle: SpawnedHandleLike): Promise<number | undefined> {
-    if (typeof handle.pid === 'number') {
-      return handle.pid
-    }
-
+  async resolveAgentPid(name: string): Promise<number | undefined> {
     try {
       for (let attempt = 1; attempt <= PID_RESOLVE_ATTEMPTS; attempt += 1) {
-        const agent = (await this.#client.listAgents()).find((candidate) => candidate.name === handle.name)
+        const agent = (await this.#client.listAgents()).find((candidate) => candidate.name === name)
         if (typeof agent?.pid === 'number') {
           return agent.pid
         }

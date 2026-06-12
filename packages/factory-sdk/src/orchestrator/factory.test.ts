@@ -219,7 +219,7 @@ class RosterPidHarnessClient implements HarnessDriverClientLike {
 
   async spawnPty(input: SpawnPtyInput): Promise<{ name: string; session_ref: string }> {
     this.spawned.push(input)
-    this.agents.set(input.name, { name: input.name, pid: this.pidsByName.get(input.name) })
+    this.agents.set(input.name, { name: input.name })
     return { name: input.name, session_ref: `session-${input.name}` }
   }
 
@@ -230,7 +230,7 @@ class RosterPidHarnessClient implements HarnessDriverClientLike {
   }
 
   async listAgents(): Promise<Array<{ name: string; pid?: number }>> {
-    return [...this.agents.values()]
+    return [...this.agents.values()].map((agent) => ({ ...agent, pid: this.pidsByName.get(agent.name) }))
   }
 
   async sendMessage(input: SendMessageInput): Promise<{ event_id: string; targets?: string[] }> {
@@ -889,8 +889,6 @@ describe('FactoryLoop', () => {
   it('stop terminates trees using roster PID fallback when spawn ack omits pid', async () => {
     const mount = new FakeMountClient({ [issuePath(63)]: issueFile(63) })
     const harness = new RosterPidHarnessClient()
-    harness.pidsByName.set('ar-63-impl', 901969)
-    harness.pidsByName.set('ar-63-review', 902338)
     const fleet = new InternalFleetClient({ client: harness, cwd: '/work/pear' })
     const brokerParentPid = 68009
     const children = new Map<number, number[]>([
@@ -914,6 +912,12 @@ describe('FactoryLoop', () => {
     })
 
     await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(63), issueFile(63))))
+    expect(await harness.listAgents()).toEqual([
+      { name: 'ar-63-impl', pid: undefined },
+      { name: 'ar-63-review', pid: undefined },
+    ])
+    harness.pidsByName.set('ar-63-impl', 901969)
+    harness.pidsByName.set('ar-63-review', 902338)
     await factory.stop()
 
     expect(harness.spawned).toHaveLength(2)
