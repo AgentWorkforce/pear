@@ -1191,6 +1191,33 @@ describe('FactoryLoop', () => {
     expect(errors[0]).toMatchObject({ issue: { key: 'AR-63' } })
   })
 
+  it('does not reinject the same critical task twice for a replayed delivery_failed event', async () => {
+    const mount = new FakeMountClient({ [issuePath(65)]: issueFile(65) })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(65), issueFile(65))))
+    fleet.emitDeliveryFailed({ to: 'ar-65-impl', msgId: 'fake-1', reason: 'dropped' })
+    await flush()
+    fleet.emitDeliveryFailed({ to: 'ar-65-impl', msgId: 'fake-1', reason: 'dropped' })
+    await flush()
+
+    expect(fleet.messages).toHaveLength(3)
+    expect(fleet.inputs).toEqual([
+      { name: 'ar-65-impl', data: '\r' },
+      { name: 'ar-65-review', data: '\r' },
+      { name: 'ar-65-impl', data: '\r' },
+    ])
+    expect(fleet.deliveryEvents).toEqual([
+      { kind: 'injected', to: 'ar-65-impl', eventId: 'fake-1' },
+      { kind: 'input', name: 'ar-65-impl', data: '\r' },
+      { kind: 'injected', to: 'ar-65-review', eventId: 'fake-2' },
+      { kind: 'input', name: 'ar-65-review', data: '\r' },
+      { kind: 'injected', to: 'ar-65-impl', eventId: 'fake-3' },
+      { kind: 'input', name: 'ar-65-impl', data: '\r' },
+    ])
+  })
+
   it('reinjects the confirmed reviewer handoff after delivery_failed', async () => {
     const mount = new FakeMountClient({ [issuePath(64)]: issueFile(64) })
     const fleet = new FakeFleetClient()

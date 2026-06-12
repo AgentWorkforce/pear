@@ -933,6 +933,7 @@ export class FactoryLoop implements Factory {
     this.#error(error, issue)
 
     if (critical && this.#fleet.waitForInjected) {
+      this.#criticalMessages.delete(info.msgId ?? '')
       try {
         const ack = await this.#waitForInjectedAndSubmit(critical.input)
         this.#criticalMessages.set(ack.eventId, critical)
