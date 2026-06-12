@@ -157,10 +157,8 @@ export class FactoryLoop implements Factory {
 
   async #startLiveSubscription(overrides: Partial<FactoryLiveSubscriptionOptions> = {}): Promise<void> {
     const options = this.#liveOptions(overrides)
-    this.#liveEventCursor = await this.#currentEventCursor(options.eventLimit)
     this.#seenLiveEvents.clear()
-    this.#logger.info?.('[factory] live subscription connected from current event cursor', {
-      cursor: this.#liveEventCursor,
+    this.#logger.info?.('[factory] live subscription starting', {
       transport: options.transport,
     })
 
@@ -170,7 +168,8 @@ export class FactoryLoop implements Factory {
       }, { from: 'now', coalesce: 'none' })
     }
 
-    if (options.transport !== 'subscribe') {
+    if (options.transport === 'poll') {
+      this.#liveEventCursor = await this.#currentEventCursor(options.eventLimit)
       this.#scheduleLivePoll(0, options)
     }
   }

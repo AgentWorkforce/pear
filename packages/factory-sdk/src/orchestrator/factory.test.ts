@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import { FactoryConfigSchema, createFactory, parseLinearIssue, type FactoryConfig, type TriageDecision, type TriageEngine } from '../index'
-import type { ChangeEvent, LinearWriteback, SlackWriteback } from '../ports'
+import type { ChangeEvent, EventPage, LinearWriteback, SlackWriteback } from '../ports'
 import { FakeFleetClient, FakeMountClient } from '../testing'
 import type { CloseProbePrInput, LinearIssue } from '../index'
 import { BatchTracker } from './batch-tracker'
@@ -96,6 +96,15 @@ class CountingTriage extends StaticTriage {
   override async triage(issue: LinearIssue): Promise<TriageDecision> {
     this.count += 1
     return super.triage(issue)
+  }
+}
+
+class CountingEventsMount extends FakeMountClient {
+  getEventsCalls = 0
+
+  override async getEvents(opts: { cursor?: string; limit?: number }): Promise<EventPage> {
+    this.getEventsCalls += 1
+    return super.getEvents(opts)
   }
 }
 
@@ -391,6 +400,24 @@ describe('FactoryLoop', () => {
     expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-25-impl', 'ar-25-review'])
     expect(factory.status().counters.liveEvents).toBe(1)
     expect(factory.status().counters.liveArrivalLatencyMsLast).toBeGreaterThanOrEqual(0)
+    await factory.stop()
+  })
+
+  it('live subscription default uses subscribe without draining getEvents at startup', async () => {
+    const path = issuePath(33)
+    const mount = new CountingEventsMount()
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
+
+    await factory.start({ mode: 'live' })
+
+    expect(mount.getEventsCalls).toBe(0)
+
+    mount.files.set(path, { content: realIssueFile(33) })
+    mount.emit(changeEvent(path, 'event-live-default-33'))
+    await flush()
+
+    expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-33-impl', 'ar-33-review'])
     await factory.stop()
   })
 
