@@ -1,5 +1,6 @@
 import type { FactoryConfig } from './config/schema'
 
+export { lerp } from './lerp'
 export type { FactoryConfig } from './config/schema'
 export { FactoryConfigSchema } from './config/schema'
 export {
