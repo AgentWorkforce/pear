@@ -52,6 +52,7 @@ export type RelayFileClientLike =
     deleteFile(input: DeleteFileInput): Promise<WriteQueuedResponse>
     listTree(workspaceId: string, options?: ListTreeOptions): Promise<TreeResponse>
     getEvents(workspaceId: string, options?: GetEventsOptions): Promise<EventFeedResponse>
+    listLastNChanges?(limit: number, context?: { workspaceId: string; token?: string }): Promise<{ events: ChangeEvent[] }>
     getResourceAtEvent(eventId: string, context?: { workspaceId: string; token?: string }): Promise<ResourceAtEventResult>
     getOp?(workspaceId: string, opId: string): Promise<OperationStatusResponse>
     getToken?(): Promise<string> | string
@@ -227,6 +228,15 @@ export class RelayfileCloudMountClient implements MountClient {
       events: response.events as unknown as EventPage['events'],
       nextCursor: response.nextCursor,
     }
+  }
+
+  async getEventHighWatermark(opts: { provider?: string } = {}): Promise<string | undefined> {
+    if (!this.#client.listLastNChanges) return undefined
+    const response = await this.#client.listLastNChanges(10, { workspaceId: this.workspaceId })
+    const events = opts.provider
+      ? response.events.filter((event) => event.resource.provider === opts.provider)
+      : response.events
+    return events.map((event) => event.id).sort().at(-1)
   }
 
   async confirmWrite(

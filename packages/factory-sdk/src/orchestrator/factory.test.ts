@@ -421,6 +421,32 @@ describe('FactoryLoop', () => {
     await factory.stop()
   })
 
+  it('live subscription default suppresses replayed pre-connect ready issues and accepts new arrivals', async () => {
+    const replayPath = issuePath(34)
+    const newPath = issuePath(35)
+    const mount = new CountingEventsMount({ [replayPath]: realIssueFile(34) })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
+    mount.emit(changeEvent(replayPath, '100'))
+
+    await factory.start({ mode: 'live' })
+
+    expect(mount.getEventsCalls).toBe(0)
+
+    mount.emit(changeEvent(replayPath, '100'))
+    await flush()
+
+    expect(fleet.spawns).toEqual([])
+    expect(factory.status().counters.liveReplayEventsSuppressed).toBe(1)
+
+    mount.files.set(newPath, { content: realIssueFile(35) })
+    mount.emit(changeEvent(newPath, '101'))
+    await flush()
+
+    expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-35-impl', 'ar-35-review'])
+    await factory.stop()
+  })
+
   it('live subscription ignores out-of-scope, non-ready, and non-real issue arrivals', async () => {
     const mount = new FakeMountClient()
     const fleet = new FakeFleetClient()

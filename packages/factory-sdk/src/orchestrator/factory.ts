@@ -71,6 +71,7 @@ export class FactoryLoop implements Factory {
   #livePollTimer?: ReturnType<typeof setTimeout>
   #livePollInFlight = false
   #liveEventCursor?: string
+  #liveEventHighWatermark?: string
   readonly #seenLiveEvents = new Set<string>()
   #offAgentExit?: () => void
   #offDeliveryFailed?: () => void
@@ -157,9 +158,11 @@ export class FactoryLoop implements Factory {
 
   async #startLiveSubscription(overrides: Partial<FactoryLiveSubscriptionOptions> = {}): Promise<void> {
     const options = this.#liveOptions(overrides)
+    this.#liveEventHighWatermark = await this.#currentEventHighWatermark()
     this.#seenLiveEvents.clear()
     this.#logger.info?.('[factory] live subscription starting', {
       transport: options.transport,
+      highWatermark: this.#liveEventHighWatermark,
     })
 
     if (options.transport !== 'poll') {
@@ -188,6 +191,15 @@ export class FactoryLoop implements Factory {
       const page = await this.#mount.getEvents({ cursor, limit })
       cursor = eventCursorAfterPage(cursor, page.events, page.nextCursor)
       if (!page.nextCursor) return cursor
+    }
+  }
+
+  async #currentEventHighWatermark(): Promise<string | undefined> {
+    try {
+      return await this.#mount.getEventHighWatermark?.()
+    } catch (error) {
+      this.#logger.warn?.('[factory] live subscription high-watermark unavailable', error)
+      return undefined
     }
   }
 
@@ -226,6 +238,16 @@ export class FactoryLoop implements Factory {
   async #handleLiveChange(event: ChangeEvent): Promise<void> {
     const path = event.resource.path
     if (!isIssueFilePath(path)) {
+      return
+    }
+
+    if (isAtOrBeforeHighWatermark(event.id, this.#liveEventHighWatermark)) {
+      this.#increment('liveReplayEventsSuppressed')
+      this.#logger.debug?.('[factory] suppressed replayed live issue event', {
+        id: event.id,
+        highWatermark: this.#liveEventHighWatermark,
+        path,
+      })
       return
     }
 
@@ -960,6 +982,26 @@ const liveEventDedupeKey = (event: ChangeEvent): string | undefined => {
     stringValue(resource.revision) ?? '',
     event.digest ?? '',
   ].join('\u001f')
+}
+
+const isAtOrBeforeHighWatermark = (eventId: string | undefined, highWatermark: string | undefined): boolean => {
+  if (!eventId || !highWatermark) return false
+  if (eventId === highWatermark) return true
+  const eventSequence = eventSequenceNumber(eventId)
+  const watermarkSequence = eventSequenceNumber(highWatermark)
+  if (eventSequence !== undefined && watermarkSequence !== undefined) {
+    return eventSequence <= watermarkSequence
+  }
+  return false
+}
+
+const eventSequenceNumber = (eventId: string): number | undefined => {
+  const whole = Number(eventId)
+  if (Number.isFinite(whole)) return whole
+  const trailing = eventId.match(/(\d+)$/u)?.[1]
+  if (!trailing) return undefined
+  const parsed = Number(trailing)
+  return Number.isFinite(parsed) ? parsed : undefined
 }
 
 const rememberLiveEvent = (seen: Set<string>, key: string): void => {
