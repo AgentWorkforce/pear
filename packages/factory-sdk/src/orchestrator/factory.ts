@@ -117,6 +117,8 @@ export class FactoryLoop implements Factory {
   #starting?: Promise<void>
   #started = false
   #stopping = false
+  #activeLoopHeartbeatPath: string | undefined
+  #activeLoopRegistryPath: string | undefined
 
   constructor(config: FactoryConfig, ports: FactoryPorts) {
     this.#config = config
@@ -402,6 +404,8 @@ export class FactoryLoop implements Factory {
     const registryPath = opts.registryPath ?? this.#config.loop.registryPath
     const reports: IterationReport[] = []
     let completed = false
+    this.#activeLoopHeartbeatPath = heartbeatPath
+    this.#activeLoopRegistryPath = registryPath
     try {
       for (let iteration = 0; iteration < maxIterations; iteration += 1) {
         await this.#writeLoopHeartbeat(heartbeatPath, registryPath, 'running', iteration, maxIterations)
@@ -413,10 +417,15 @@ export class FactoryLoop implements Factory {
       completed = true
       return reports
     } finally {
-      if (!completed) {
-        await this.#writeLoopHeartbeat(heartbeatPath, registryPath, 'stopping', reports.length, maxIterations)
+      try {
+        if (!completed) {
+          await this.#writeLoopHeartbeat(heartbeatPath, registryPath, 'stopping', reports.length, maxIterations)
+        }
+        await this.stop()
+      } finally {
+        this.#activeLoopHeartbeatPath = undefined
+        this.#activeLoopRegistryPath = undefined
       }
-      await this.stop()
     }
   }
 
@@ -741,8 +750,8 @@ export class FactoryLoop implements Factory {
   }
 
   async #writeInFlightRegistry(
-    path = this.#config.loop.registryPath,
-    heartbeatPath = this.#config.loop.heartbeatPath,
+    path = this.#activeLoopRegistryPath ?? this.#config.loop.registryPath,
+    heartbeatPath = this.#activeLoopHeartbeatPath ?? this.#config.loop.heartbeatPath,
     empty = false,
   ): Promise<void> {
     const updatedAtMs = this.#clock.now()

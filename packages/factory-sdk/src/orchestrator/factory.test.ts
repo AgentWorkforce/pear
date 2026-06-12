@@ -510,6 +510,42 @@ describe('FactoryLoop', () => {
     }
   })
 
+  it('uses runLoop registry path overrides for spawn and cleanup writes', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'factory-loop-registry-override-'))
+    const heartbeatPath = join(root, 'heartbeat.json')
+    const registryPath = join(root, 'registry.json')
+    const defaultRegistryPath = join(root, 'default-registry.json')
+    try {
+      const mount = new FakeMountClient({ [issuePath(63)]: issueFile(63) })
+      const fleet = new PidFleetClient()
+      const factory = createFactory(config({
+        loop: {
+          maxIterations: 1,
+          heartbeatPath: join(root, 'default-heartbeat.json'),
+          registryPath: defaultRegistryPath,
+          heartbeatStaleMs: 10_000,
+        },
+      }), {
+        mount,
+        fleet,
+        triage: new StaticTriage(),
+        processIdentityReader: async (pid) => ({
+          pid,
+          startTime: `start-${pid}`,
+          cmdline: pid === 9_000 ? 'node ar-63-impl worker' : 'node ar-63-review worker',
+        }),
+      })
+
+      await factory.runLoop({ maxIterations: 1, heartbeatPath, registryPath })
+
+      expect((await readFactoryLoopHeartbeat(heartbeatPath))?.registryPath).toBe(registryPath)
+      expect((await readFactoryInFlightRegistry(registryPath))?.agents).toEqual([])
+      expect(await readFactoryInFlightRegistry(defaultRegistryPath)).toBeUndefined()
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('reports missing or stale loop heartbeat as not live', () => {
     expect(checkFactoryLoopLiveness(undefined, { nowMs: 2_000, staleMs: 1_000 })).toMatchObject({
       ok: false,
