@@ -980,12 +980,7 @@ export class FactoryLoop implements Factory {
     }
 
     try {
-      const page = await this.#mount.getEvents({ limit: 100 })
-      const lastSlackEvent = page.events
-        .filter((event) => event.resource.provider === 'slack')
-        .map((event) => Date.parse(event.occurredAt))
-        .filter((time) => Number.isFinite(time))
-        .sort((a, b) => b - a)[0]
+      const lastSlackEvent = await this.#lastSlackEventAtMs()
       if (lastSlackEvent === undefined) {
         return { degraded: false }
       }
@@ -996,6 +991,25 @@ export class FactoryLoop implements Factory {
     } catch (error) {
       this.#logger.warn?.('[factory] Slack event freshness fallback failed; proceeding without degradation', error)
       return { degraded: false }
+    }
+  }
+
+  async #lastSlackEventAtMs(): Promise<number | undefined> {
+    let cursor: string | undefined
+    let lastSlackEvent: number | undefined
+    for (;;) {
+      const page = await this.#mount.getEvents({ cursor, limit: 100 })
+      for (const event of page.events) {
+        if (event.resource.provider !== 'slack') continue
+        const occurredAtMs = Date.parse(event.occurredAt)
+        if (Number.isFinite(occurredAtMs)) {
+          lastSlackEvent = lastSlackEvent === undefined
+            ? occurredAtMs
+            : Math.max(lastSlackEvent, occurredAtMs)
+        }
+      }
+      if (!page.nextCursor || page.nextCursor === cursor) return lastSlackEvent
+      cursor = page.nextCursor
     }
   }
 

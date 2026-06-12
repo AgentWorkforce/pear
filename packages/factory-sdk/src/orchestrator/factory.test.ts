@@ -1234,6 +1234,45 @@ describe('FactoryLoop', () => {
     expect(factory.status().slackDegraded).toBe(false)
   })
 
+  it('checks paginated Slack events when sync status is unavailable', async () => {
+    const clock = new ManualClock()
+    clock.value = Date.parse('2026-06-12T12:00:00.000Z')
+    const mount = new FakeMountClient({ [issuePath(50)]: issueFile(50) })
+    for (let index = 0; index < 100; index += 1) {
+      mount.emit(changeEvent(
+        `/linear/issues/AR-seed-${index}.json`,
+        `linear-${index}`,
+        new Date(clock.now()).toISOString(),
+      ))
+    }
+    mount.emit(changeEvent(
+      '/slack/channels/C0FACTORY__factory-e2e/messages/stale.json',
+      'slack-stale',
+      new Date(clock.now() - 20 * 60_000).toISOString(),
+      'slack',
+    ))
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      clock,
+    })
+
+    const report = await factory.runOnce()
+
+    expect(report.dispatched.map((result) => result.issue.key)).toEqual(['AR-50'])
+    expect(report.slackDegraded).toBe(true)
+    expect(mount.writes.filter((write) => isSlackRootWritePath(write.path))).toEqual([])
+    expect(factory.status()).toMatchObject({
+      slackDegraded: true,
+      counters: {
+        slackDegradedEpisodes: 1,
+        slackWritebacksSkipped: 1,
+      },
+    })
+  })
+
   it('logs Slack recovery once and resumes writeback after a degraded episode', async () => {
     const mount = new SlackSyncStatusMount({
       [issuePath(48)]: issueFile(48),
@@ -1695,7 +1734,12 @@ describe('FactoryLoop', () => {
   })
 })
 
-const changeEvent = (path: string, id: string | number, occurredAt = new Date().toISOString()) => ({
+const changeEvent = (
+  path: string,
+  id: string | number,
+  occurredAt = new Date().toISOString(),
+  provider = 'linear',
+) => ({
   id,
   workspace: 'factory-test',
   type: 'relayfile.changed',
@@ -1704,7 +1748,7 @@ const changeEvent = (path: string, id: string | number, occurredAt = new Date().
     path,
     kind: 'file',
     id: path,
-    provider: 'linear',
+    provider,
   },
   summary: {},
   expand: async () => ({ level: 'summary', path, summary: {} }),
