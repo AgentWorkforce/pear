@@ -1,5 +1,6 @@
 import type { FactoryConfig } from './config/schema'
 
+export { clampInt } from './clamp-int'
 export type { FactoryConfig } from './config/schema'
 export { FactoryConfigSchema } from './config/schema'
 export {
