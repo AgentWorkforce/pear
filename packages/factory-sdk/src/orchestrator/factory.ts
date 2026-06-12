@@ -758,7 +758,7 @@ export class FactoryLoop implements Factory {
     context: 'stop' | 'completion',
   ): Promise<void> {
     const protectedPids = await this.#protectedPids()
-    await Promise.all(agents.map(async ([agentName, tracked]) => {
+    for (const [agentName, tracked] of agents) {
       const pids = pidsFromSpawnResult(tracked.result)
       if (pids.length === 0) {
         this.#increment('agentTerminateMissingPid')
@@ -769,29 +769,27 @@ export class FactoryLoop implements Factory {
         })
       }
 
+      if (pids.length > 0) {
+        const report = await terminatePids(pids, {
+          kill: this.#kill,
+          readChildPids: this.#readChildPids,
+          sleep: this.#clock.sleep,
+          termGraceMs: this.#terminationGraceMs,
+          protectedPids,
+        })
+        for (const skipped of report.skipped) {
+          if (skipped.reason !== 'pid not running') {
+            this.#logger.warn?.(`[factory] failed to terminate pid ${skipped.pid} for ${agentName} during ${context}`, skipped.reason)
+          }
+        }
+      }
+
       try {
         await this.#fleet.release(agentName, reason)
       } catch (error) {
         this.#logger.warn?.(`[factory] failed to release ${agentName} during ${context}`, error)
       }
-
-      if (pids.length === 0) {
-        return
-      }
-
-      const report = await terminatePids(pids, {
-        kill: this.#kill,
-        readChildPids: this.#readChildPids,
-        sleep: this.#clock.sleep,
-        termGraceMs: this.#terminationGraceMs,
-        protectedPids,
-      })
-      for (const skipped of report.skipped) {
-        if (skipped.reason !== 'pid not running') {
-          this.#logger.warn?.(`[factory] failed to terminate pid ${skipped.pid} for ${agentName} during ${context}`, skipped.reason)
-        }
-      }
-    }))
+    }
   }
 
   async #protectedPids(): Promise<number[]> {

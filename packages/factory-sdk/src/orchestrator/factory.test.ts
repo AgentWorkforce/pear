@@ -931,6 +931,57 @@ describe('FactoryLoop', () => {
     expect(alive).toEqual(new Set([brokerParentPid]))
   })
 
+  it('stop discovers child pids before releasing broker sessions', async () => {
+    const mount = new FakeMountClient({ [issuePath(66)]: issueFile(66) })
+    const fleet = new CapturedPidFleetClient([
+      { name: 'ar-66-impl', sessionRef: 'session-901969', pid: 901969 },
+      { name: 'ar-66-review', sessionRef: 'session-902338', pid: 902338 },
+    ])
+    const released = new Set<string>()
+    const originalRelease = fleet.release.bind(fleet)
+    fleet.release = async (name, reason) => {
+      released.add(name)
+      await originalRelease(name, reason)
+    }
+    const children = new Map<number, { agent: string; pids: number[] }>([
+      [901969, { agent: 'ar-66-impl', pids: [901970] }],
+      [902338, { agent: 'ar-66-review', pids: [902339] }],
+    ])
+    const alive = new Set([901969, 901970, 902338, 902339])
+    const killed: Array<{ pid: number; signal?: NodeJS.Signals | 0 }> = []
+    const factory = createFactory(config(), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      terminationGraceMs: 0,
+      readChildPids: async (pid) => {
+        const child = children.get(pid)
+        return child && !released.has(child.agent) ? child.pids : []
+      },
+      kill: (pid, signal) => {
+        killed.push({ pid, signal })
+        if (!alive.has(pid)) throw Object.assign(new Error('not running'), { code: 'ESRCH' })
+        if (signal === 'SIGKILL') alive.delete(pid)
+        return true
+      },
+    })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(66), issueFile(66))))
+    await factory.stop()
+
+    expect(fleet.releases).toEqual([
+      { name: 'ar-66-impl', reason: 'factory-stopped' },
+      { name: 'ar-66-review', reason: 'factory-stopped' },
+    ])
+    expect(killed.filter((entry) => entry.signal === 'SIGTERM').map((entry) => entry.pid).sort((a, b) => a - b)).toEqual([
+      901969,
+      901970,
+      902338,
+      902339,
+    ])
+    expect(alive).toEqual(new Set())
+  })
+
   it('stop reports missing terminate roots instead of silently certifying a no-op', async () => {
     const mount = new FakeMountClient({ [issuePath(65)]: issueFile(65) })
     const fleet = new CapturedPidFleetClient([
