@@ -97,6 +97,7 @@ export class FactoryLoop implements Factory {
   readonly #dispatchAttempts = new Map<string, DispatchAttemptState>()
   #slackDegraded = false
   #slackDegradedReason: string | undefined
+  #slackWritebackFailureDegraded = false
   #subscription?: Subscription
   #livePollTimer?: ReturnType<typeof setTimeout>
   #livePollInFlight = false
@@ -899,6 +900,7 @@ export class FactoryLoop implements Factory {
             text: `${record.issue.key}: factory agents completed.\nStatus: done\nMerge policy: ${this.#config.mergePolicy}`,
           })
           await this.#slack.reply(root.threadId, `${record.issue.key}: Linear state set to done.`)
+          this.#recordSlackWritebackSuccess('completion-thread')
         } catch (error) {
           this.#markSlackWritebackFailure('completion-thread', error)
         }
@@ -946,6 +948,11 @@ export class FactoryLoop implements Factory {
     if (!this.#config.slack) return false
 
     const freshness = await this.#slackFreshness()
+    if (this.#slackWritebackFailureDegraded) {
+      this.#increment('slackWritebacksSkipped')
+      return true
+    }
+
     if (!freshness.degraded && freshness.known) {
       if (this.#slackDegraded) {
         this.#logger.info?.('[factory] Slack sync recovered; resuming Slack writeback', { context })
@@ -980,6 +987,7 @@ export class FactoryLoop implements Factory {
   }
 
   #markSlackWritebackFailure(context: string, error: unknown): void {
+    this.#slackWritebackFailureDegraded = true
     this.#slackDegradedReason = `slack writeback failed: ${describeError(error).errorMessage}`
     if (!this.#slackDegraded) {
       this.#slackDegraded = true
@@ -988,6 +996,18 @@ export class FactoryLoop implements Factory {
         context,
         reason: this.#slackDegradedReason,
       })
+    }
+  }
+
+  #recordSlackWritebackSuccess(context: string): void {
+    if (this.#slackWritebackFailureDegraded) {
+      this.#logger.info?.('[factory] Slack writeback recovered; clearing write-failure degradation', { context })
+      this.#increment('slackRecoveredEpisodes')
+    }
+    this.#slackWritebackFailureDegraded = false
+    if (this.#slackDegraded) {
+      this.#slackDegraded = false
+      this.#slackDegradedReason = undefined
     }
   }
 
@@ -1074,6 +1094,7 @@ export class FactoryLoop implements Factory {
     })
     this.#slackThreadIds.set(issueKey(record.issue), root.threadId)
     await this.#watchSlackThread(record, root.threadId)
+    this.#recordSlackWritebackSuccess('dispatch-thread')
   }
 
   async #watchSlackThread(record: InFlightIssue, threadId: string): Promise<void> {
@@ -1250,6 +1271,7 @@ export class FactoryLoop implements Factory {
         `Agents: ${liveAgents.join(', ') || [...activeAgents].sort().join(', ') || 'none'}`,
         `PR: ${probe ? githubPrUrl(probe.repo, probe.prNumber) : 'not found yet'}`,
       ].join('\n'))
+      this.#recordSlackWritebackSuccess('status-responder')
     } catch (error) {
       this.#markSlackWritebackFailure('status-responder', error)
     }
