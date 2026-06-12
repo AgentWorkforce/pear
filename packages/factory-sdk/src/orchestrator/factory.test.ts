@@ -124,13 +124,24 @@ class RecordingSlack implements SlackWriteback {
   readonly roots: Array<{ channel: string; text: string }> = []
   readonly replies: Array<{ threadId: string; text: string }> = []
   threadId = '1780751612.176219'
+  failPostThread = false
+  failReplies = 0
 
   async postThread(root: { channel: string; text: string }): Promise<{ threadId: string }> {
+    if (this.failPostThread) {
+      throw new Error('slack post failed')
+    }
+
     this.roots.push(root)
     return { threadId: this.threadId }
   }
 
   async reply(threadId: string, text: string): Promise<void> {
+    if (this.failReplies > 0) {
+      this.failReplies -= 1
+      throw new Error('slack reply failed')
+    }
+
     this.replies.push({ threadId, text })
   }
 }
@@ -1051,9 +1062,103 @@ describe('FactoryLoop', () => {
 
     expect(slack.replies).toHaveLength(1)
   })
+
+  it('treats Slack dispatch thread startup as best-effort after agents are dispatched', async () => {
+    const mount = new FakeMountClient({ [issuePath(29)]: issueFile(29) })
+    const fleet = new FakeFleetClient()
+    const slack = new RecordingSlack()
+    slack.failPostThread = true
+    const factory = createFactory(config({ slack: { channel: 'C0FACTORY__factory-e2e', style: 'threaded-summarized' } }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      slack,
+    })
+
+    const result = await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(29), issueFile(29))))
+
+    expect(result.agents.map((agent) => agent.name)).toEqual(['ar-29-impl', 'ar-29-review'])
+    expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-29-impl', 'ar-29-review'])
+  })
+
+  it('continues processing Slack reply events after one response fails', async () => {
+    const mount = new FakeMountClient({ [issuePath(30)]: issueFile(30) })
+    const fleet = new FakeFleetClient()
+    const slack = new RecordingSlack()
+    slack.failReplies = 1
+    const factory = createFactory(config({ slack: { channel: 'C0FACTORY__factory-e2e', style: 'threaded-summarized' } }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      slack,
+    })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(30), issueFile(30))))
+    emitSlackReply(mount, slackReplyFixturePath('C0FACTORY__factory-e2e', slack.threadId, 'human-fails'), 'slack-human-fails', {
+      text: 'status?',
+      user: 'U123',
+      user_is_bot: false,
+    })
+    emitSlackReply(mount, slackReplyFixturePath('C0FACTORY__factory-e2e', slack.threadId, 'human-next'), 'slack-human-next', {
+      text: 'status again?',
+      user: 'U456',
+      user_is_bot: false,
+    })
+    await flush()
+    await flush()
+
+    expect(slack.replies).toHaveLength(1)
+    expect(slack.replies[0]?.text).toContain('AR-30')
+  })
+
+  it('uses numeric Slack reply event ids without dropping fresh low-seq replies', async () => {
+    const mount = new FakeMountClient({ [issuePath(31)]: issueFile(31) })
+    const fleet = new FakeFleetClient()
+    const slack = new RecordingSlack()
+    const warnings: unknown[][] = []
+    const logger = {
+      warn: (...args: unknown[]) => {
+        warnings.push(args)
+      },
+      error: () => undefined,
+      debug: () => undefined,
+    }
+    mount.emit(changeEvent('/slack/channels/C0FACTORY__factory-e2e/messages/other/replies/old.json', 1))
+    const factory = createFactory(config({ slack: { channel: 'C0FACTORY__factory-e2e', style: 'threaded-summarized' } }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      slack,
+      logger,
+    })
+    const replyPath = slackReplyFixturePath('C0FACTORY__factory-e2e', slack.threadId, 'human-numeric')
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(31), issueFile(31))))
+    mount.files.set(replyPath, {
+      content: {
+        provider: 'slack',
+        objectType: 'message',
+        objectId: 'slack-human-numeric',
+        payload: {
+          channel: 'C0FACTORY',
+          thread_ts: slack.threadId,
+          ts: 'slack-human-numeric',
+          text: 'status?',
+          user: 'U123',
+          user_is_bot: false,
+        },
+      },
+    })
+    mount.emit(changeEvent(replyPath, 1))
+    await flush()
+    await flush()
+
+    expect(slack.replies).toHaveLength(1)
+    expect(warnings.flat()).not.toContain('[factory] Slack reply event missing stable identity; falling back to path/content dedupe')
+  })
 })
 
-const changeEvent = (path: string, id: string, occurredAt = new Date().toISOString()) => ({
+const changeEvent = (path: string, id: string | number, occurredAt = new Date().toISOString()) => ({
   id,
   workspace: 'factory-test',
   type: 'relayfile.changed',

@@ -782,7 +782,11 @@ export class FactoryLoop implements Factory {
 
     const key = issueKey(record.issue)
     if (this.#slackThreadIds.has(key) || this.#slackWatcherStarts.has(key)) {
-      await this.#slackWatcherStarts.get(key)
+      try {
+        await this.#slackWatcherStarts.get(key)
+      } catch {
+        // The initiator logs Slack watcher startup failures.
+      }
       return
     }
 
@@ -790,6 +794,8 @@ export class FactoryLoop implements Factory {
     this.#slackWatcherStarts.set(key, start)
     try {
       await start
+    } catch (error) {
+      this.#logger.warn?.(`[factory] failed to establish Slack dispatch thread for ${record.issue.key}`, error)
     } finally {
       this.#slackWatcherStarts.delete(key)
     }
@@ -824,7 +830,6 @@ export class FactoryLoop implements Factory {
 
     const channelDir = this.#config.slack.channel
     const replyPrefix = slackReplyPrefix(channelDir, threadId)
-    const preExistingEvents = new Set<string>()
     const preExistingPaths = new Set<string>()
     const seenReplies = new Set<string>()
     let missingIdentityLogged = false
@@ -836,10 +841,6 @@ export class FactoryLoop implements Factory {
         const page = await this.#mount.getEvents({ limit: SLACK_REPLY_EVENTS_LIMIT })
         cursor = page.nextCursor ?? undefined
         for (const event of page.events) {
-          const eventKey = eventIdentity(event)
-          if (eventKey) {
-            preExistingEvents.add(eventKey)
-          }
           if (event.resource.path.startsWith(replyPrefix)) {
             preExistingPaths.add(event.resource.path)
           }
@@ -850,41 +851,43 @@ export class FactoryLoop implements Factory {
     }
 
     const handle = async (event: ChangeEvent): Promise<void> => {
-      if (stopped || !event.resource.path.startsWith(replyPrefix)) {
-        return
-      }
-
-      const eventKey = eventIdentity(event)
-      if (!eventKey) {
-        if (!missingIdentityLogged) {
-          missingIdentityLogged = true
-          this.#logger.warn?.('[factory] Slack reply event missing stable identity; falling back to path/content dedupe')
+      try {
+        if (stopped || !event.resource.path.startsWith(replyPrefix)) {
+          return
         }
-      } else if (preExistingEvents.has(eventKey)) {
-        return
-      }
 
-      if (preExistingPaths.has(event.resource.path)) {
-        return
-      }
+        const eventKey = eventIdentity(event)
+        if (!eventKey) {
+          if (!missingIdentityLogged) {
+            missingIdentityLogged = true
+            this.#logger.warn?.('[factory] Slack reply event missing stable identity; falling back to path/content dedupe')
+          }
+        }
 
-      const reply = await this.#readSlackReply(event.resource.path)
-      if (!reply || reply.threadTs !== threadId || reply.channelDir !== channelDir) {
-        return
-      }
+        if (preExistingPaths.has(event.resource.path)) {
+          return
+        }
 
-      const replyKey = `${eventKey ?? event.resource.path}:${stableHash(JSON.stringify(reply.raw))}`
-      if (seenReplies.has(replyKey)) {
-        this.#logger.debug?.('[factory] suppressed duplicate Slack reply payload', { issue: record.issue.key, path: event.resource.path })
-        return
-      }
-      seenReplies.add(replyKey)
+        const reply = await this.#readSlackReply(event.resource.path)
+        if (!reply || reply.threadTs !== threadId || reply.channelDir !== channelDir) {
+          return
+        }
 
-      if (reply.isBot) {
-        return
-      }
+        const replyKey = `${eventKey ?? event.resource.path}:${stableHash(JSON.stringify(reply.raw))}`
+        if (seenReplies.has(replyKey)) {
+          this.#logger.debug?.('[factory] suppressed duplicate Slack reply payload', { issue: record.issue.key, path: event.resource.path })
+          return
+        }
+        seenReplies.add(replyKey)
 
-      await this.#respondToSlackStatus(record, threadId)
+        if (reply.isBot) {
+          return
+        }
+
+        await this.#respondToSlackStatus(record, threadId)
+      } catch (error) {
+        this.#logger.error?.('[factory] failed to handle Slack reply event', error)
+      }
     }
 
     await markPreExisting()
@@ -1294,7 +1297,8 @@ const slackReplyPrefix = (channelDir: string, threadId: string): string => {
 
 const eventIdentity = (event: ChangeEvent): string | undefined => {
   const record = event as unknown as Record<string, unknown>
-  const id = stringValue(record.id) ?? stringValue(record.event_id) ?? stringValue(record.seq)
+  const rawId = record.id ?? record.event_id ?? record.seq
+  const id = typeof rawId === 'string' || typeof rawId === 'number' ? String(rawId) : undefined
   return id ? `event:${id}` : undefined
 }
 
