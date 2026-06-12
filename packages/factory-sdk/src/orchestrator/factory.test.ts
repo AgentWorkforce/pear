@@ -108,6 +108,12 @@ class CountingEventsMount extends FakeMountClient {
   }
 }
 
+class NoWatermarkMount extends FakeMountClient {
+  override async getEventHighWatermark(): Promise<string | undefined> {
+    return undefined
+  }
+}
+
 describe('FactoryLoop', () => {
   it('parses wrapped Linear issue records', () => {
     expect(parseLinearIssue(issuePath(1), issueFile(1))).toMatchObject({
@@ -423,24 +429,29 @@ describe('FactoryLoop', () => {
 
   it('live subscription default suppresses replayed pre-connect ready issues and accepts new arrivals', async () => {
     const replayPath = issuePath(34)
+    const tipPath = issuePath(36)
     const newPath = issuePath(35)
-    const mount = new CountingEventsMount({ [replayPath]: realIssueFile(34) })
+    const mount = new CountingEventsMount({
+      [replayPath]: realIssueFile(34),
+      [tipPath]: realIssueFile(36),
+    })
     const fleet = new FakeFleetClient()
     const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
-    mount.emit(changeEvent(replayPath, '100'))
+    mount.emit(changeEvent(replayPath, '9'))
+    mount.emit(changeEvent(tipPath, '10'))
 
     await factory.start({ mode: 'live' })
 
     expect(mount.getEventsCalls).toBe(0)
 
-    mount.emit(changeEvent(replayPath, '100'))
+    mount.emit(changeEvent(replayPath, '9'))
     await flush()
 
     expect(fleet.spawns).toEqual([])
     expect(factory.status().counters.liveReplayEventsSuppressed).toBe(1)
 
     mount.files.set(newPath, { content: realIssueFile(35) })
-    mount.emit(changeEvent(newPath, '101'))
+    mount.emit(changeEvent(newPath, '100'))
     await flush()
 
     expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-35-impl', 'ar-35-review'])
@@ -477,7 +488,7 @@ describe('FactoryLoop', () => {
     try {
       const oldPath = issuePath(30)
       const newPath = issuePath(31)
-      const mount = new FakeMountClient({ [oldPath]: realIssueFile(30) })
+      const mount = new NoWatermarkMount({ [oldPath]: realIssueFile(30) })
       const fleet = new FakeFleetClient()
       const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
       mount.emit(changeEvent(oldPath, 'event-before-start-30', new Date(Date.now() + 1_000).toISOString()))

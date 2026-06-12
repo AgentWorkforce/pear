@@ -236,7 +236,7 @@ export class RelayfileCloudMountClient implements MountClient {
     const events = opts.provider
       ? response.events.filter((event) => event.resource.provider === opts.provider)
       : response.events
-    return events.map((event) => event.id).sort().at(-1)
+    return maxEventId(events.map((event) => event.id))
   }
 
   async confirmWrite(
@@ -356,3 +356,31 @@ const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error)
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+const maxEventId = (ids: string[]): string | undefined => {
+  let max: string | undefined
+  for (const id of ids) {
+    if (!max || compareEventIds(id, max) > 0) {
+      max = id
+    }
+  }
+  return max
+}
+
+const compareEventIds = (left: string, right: string): number => {
+  const leftSequence = eventSequenceNumber(left)
+  const rightSequence = eventSequenceNumber(right)
+  if (leftSequence !== undefined && rightSequence !== undefined) {
+    return leftSequence - rightSequence
+  }
+  return left.localeCompare(right)
+}
+
+const eventSequenceNumber = (eventId: string): number | undefined => {
+  const whole = Number(eventId)
+  if (Number.isFinite(whole)) return whole
+  const trailing = eventId.match(/(\d+)$/u)?.[1]
+  if (!trailing) return undefined
+  const parsed = Number(trailing)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
