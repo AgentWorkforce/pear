@@ -20,7 +20,7 @@ import type {
   TriageDecision,
   TriageEngine,
 } from '../types'
-import { MountGithubRead, MountLinearWriteback, MountSlackWriteback } from '../writeback'
+import { MountLinearWriteback, MountSlackWriteback } from '../writeback'
 import { asRecord, parseJsonContent, wrappedPayload } from '../writeback/shared'
 import { BatchTracker, type InFlightIssue, issueKey } from './batch-tracker'
 
@@ -78,7 +78,6 @@ export class FactoryLoop implements Factory {
       safety: config.safety,
     })
     this.#slack = ports.slack ?? (config.slack ? MountSlackWriteback(mount, config.slack) : undefined)
-    void (ports.github ?? MountGithubRead(mount))
     this.#mergeGate = ports.mergeGate ?? new GithubMergeGate()
     this.#probeCloser = ports.probeCloser ?? closeProbePr
     this.#probePrResolver = ports.probePrResolver ?? ((issue) => resolveProbePrFromMount(this.#mount, this.#config, issue))

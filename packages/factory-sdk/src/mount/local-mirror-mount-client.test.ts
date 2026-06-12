@@ -91,6 +91,26 @@ describe('LocalMirrorMountClient', () => {
       .rejects.toThrow(/pid .* is not alive/)
   })
 
+  it('reports malformed daemon metadata as writeback not ready', async () => {
+    const mirrorDir = await tempMirror()
+    await writeFile(join(mirrorDir, '.relay', 'state.json'), '{')
+    await writeFile(join(mirrorDir, '.relay', 'mount.pid'), String(process.pid))
+    const mount = new LocalMirrorMountClient({ workspaceId: 'rw_test', mirrorDir })
+
+    await expect(mount.assertWritebackReady())
+      .rejects.toThrow(/writeback is not ready: failed to parse .*state\.json/)
+  })
+
+  it('reports malformed daemon pid metadata as writeback not ready', async () => {
+    const mirrorDir = await tempMirror()
+    await writeReadyMetadata(mirrorDir)
+    await writeFile(join(mirrorDir, '.relay', 'mount.pid'), '{')
+    const mount = new LocalMirrorMountClient({ workspaceId: 'rw_test', mirrorDir })
+
+    await expect(mount.assertWritebackReady())
+      .rejects.toThrow(/writeback is not ready: mount\.pid does not contain a live pid/)
+  })
+
   it('accepts numeric daemon pid metadata', async () => {
     const mirrorDir = await tempMirror()
     await writeReadyMetadata(mirrorDir)
@@ -109,6 +129,35 @@ describe('LocalMirrorMountClient', () => {
 
     await expect(readFile(join(mirrorDir, 'linear', 'issues', 'AR-1.json'), 'utf8'))
       .resolves.toBe('{"stateId":"next"}')
+  })
+
+  it('merges Linear issue state updates into existing mirrored payloads', async () => {
+    const mirrorDir = await tempMirror()
+    await writeReadyMetadata(mirrorDir)
+    await mkdir(join(mirrorDir, 'linear', 'issues'), { recursive: true })
+    await writeFile(join(mirrorDir, 'linear', 'issues', 'AR-1.json'), JSON.stringify({
+      provider: 'linear',
+      objectType: 'issue',
+      payload: {
+        identifier: 'AR-1',
+        title: '[factory-e2e] mirror read',
+        stateId: 'ready',
+      },
+    }))
+    const mount = new LocalMirrorMountClient({ workspaceId: 'rw_test', mirrorDir })
+
+    await mount.writeFile('/linear/issues/AR-1.json', { stateId: 'next' })
+
+    await expect(readFile(join(mirrorDir, 'linear', 'issues', 'AR-1.json'), 'utf8'))
+      .resolves.toBe(JSON.stringify({
+        provider: 'linear',
+        objectType: 'issue',
+        payload: {
+          identifier: 'AR-1',
+          title: '[factory-e2e] mirror read',
+          stateId: 'next',
+        },
+      }))
   })
 
   it('lists mirror files under a remote prefix', async () => {
@@ -151,6 +200,20 @@ describe('LocalMirrorMountClient', () => {
     const mount = new LocalMirrorMountClient({ workspaceId: 'rw_test', mirrorDir })
 
     await mount.writeFile('/linear/issues/AR-1.json', { stateId: 'next' })
+    await writeFile(join(mirrorDir, '.relay', 'outbox', 'acked', 'op-1.json'), JSON.stringify({
+      path: '/linear/issues/AR-1.json',
+      status: 'acked',
+    }))
+
+    await expect(mount.confirmWrite('/linear/issues/AR-1.json', { timeoutMs: 10 })).resolves.toBe('acked')
+  })
+
+  it('tracks writes by normalized remote path', async () => {
+    const mirrorDir = await tempMirror()
+    await writeReadyMetadata(mirrorDir)
+    const mount = new LocalMirrorMountClient({ workspaceId: 'rw_test', mirrorDir })
+
+    await mount.writeFile('linear/issues/AR-1.json', { stateId: 'next' })
     await writeFile(join(mirrorDir, '.relay', 'outbox', 'acked', 'op-1.json'), JSON.stringify({
       path: '/linear/issues/AR-1.json',
       status: 'acked',

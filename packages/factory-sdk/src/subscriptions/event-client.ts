@@ -4,7 +4,6 @@ import {
   type Expansion,
   type ExpansionLevel,
   type FilesystemEvent,
-  type FilesystemEventType,
   type RelayFileClient,
   type RelayFileSyncOptions,
   type RelayFileSyncState,
@@ -17,10 +16,8 @@ import { globMatchesPath, relayfileSdkPathFiltersFor } from './globs'
 const REMOTE_STREAM_ERROR_POLLING_FALLBACK_THRESHOLD = 5
 const REMOTE_STREAM_POLL_INTERVAL_MS = 5_000
 
-export type ChangeEvent = Omit<SdkChangeEvent, 'type' | 'expand'> & {
-  type: SdkChangeEvent['type'] | FilesystemEventType | 'relayfile.changed.summary'
+export type ChangeEvent = SdkChangeEvent & {
   origin?: FilesystemEvent['origin']
-  expand: (level?: ExpansionLevel) => Promise<Expansion>
 }
 
 export type TokenProvider = () => string | undefined | Promise<string | undefined>
@@ -166,34 +163,35 @@ export function filesystemEventToChangeEvent(
     summary,
     digest: event.revision ? `revision:${event.revision}` : undefined,
     origin: event.origin,
-    expand: async (level = 'summary') => {
-      if (level === 'summary') {
+    expand: async <L extends ExpansionLevel = 'summary'>(level?: L): Promise<Expansion<L>> => {
+      const requestedLevel = level ?? 'summary'
+      if (requestedLevel === 'summary') {
         return {
-          level,
+          level: requestedLevel,
           path,
           summary,
-        }
+        } as Expansion<L>
       }
-      if (level === 'full') {
+      if (requestedLevel === 'full') {
         if (client && event.eventId) {
           try {
             const resource = await client.getResourceAtEvent(event.eventId, { workspaceId })
             return {
-              level,
+              level: requestedLevel,
               path: resource.path,
               data: resource.data,
-            }
+            } as Expansion<L>
           } catch {
             // Fall through to the local fallback below.
           }
         }
         return {
-          level,
+          level: requestedLevel,
           path,
           data: { path, deleted: event.type === 'file.deleted' },
-        }
+        } as Expansion<L>
       }
-      throw new Error(`ChangeEvent.expand(${JSON.stringify(level)}) is not implemented for integration events`)
+      throw new Error(`ChangeEvent.expand(${JSON.stringify(requestedLevel)}) is not implemented for integration events`)
     },
   } as ChangeEvent
 }

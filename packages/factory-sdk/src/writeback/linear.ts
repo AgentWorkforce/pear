@@ -126,7 +126,7 @@ const confirmWriteback = async (
 }
 
 const verifyAcked = async (mount: MountClient, path: string): Promise<boolean> =>
-  await mount.confirmWrite(path, { timeoutMs: 90_000 }) === 'acked'
+  await mount.confirmWrite(path, { timeoutMs: 0 }) === 'acked'
 
 export const MountLinearWriteback = (
   mount: MountClient,

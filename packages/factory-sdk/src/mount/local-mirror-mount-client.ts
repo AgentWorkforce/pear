@@ -18,6 +18,7 @@ const DEFAULT_WORKSPACE_ID = 'rw_7ccfea89'
 const DEFAULT_MIRROR_DIR = '/tmp/factory-rf-mirror'
 const DEFAULT_DEBOUNCE_MS = 1_000
 const DEFAULT_POLL_INTERVAL_MS = 1_000
+const OUTBOX_MTIME_TOLERANCE_MS = 1_000
 const OUTBOX_STATUSES = ['acked', 'failed', 'pending'] as const
 
 type OutboxStatus = typeof OUTBOX_STATUSES[number]
@@ -83,11 +84,12 @@ export class LocalMirrorMountClient implements MountClient {
   async writeFile(path: string, content: unknown): Promise<void> {
     const metadata = await this.#readReadyMetadata()
     const localPath = this.#localPath(path)
-    const serialized = serializeMirrorContent(content)
+    const normalizedPath = normalizeRemotePath(path)
+    const serialized = serializeMirrorContent(await this.#contentForWrite(localPath, content))
     await mkdir(dirname(localPath), { recursive: true })
     await writeFile(localPath, serialized, 'utf8')
-    this.#lastWriteByPath.set(path, {
-      path: normalizeRemotePath(path),
+    this.#lastWriteByPath.set(normalizedPath, {
+      path: normalizedPath,
       localPath,
       contentHash: hashString(serialized),
       startedAtMs: Date.now(),
@@ -145,7 +147,7 @@ export class LocalMirrorMountClient implements MountClient {
               eventId: `mirror:${this.workspaceId}:${changedPath}:${Date.now()}`,
               revision: String(Date.now()),
               timestamp: new Date().toISOString(),
-            }) as unknown as ChangeEvent)
+            }))
           }
         }).catch(() => {})
       }, this.#debounceMs))
@@ -174,7 +176,9 @@ export class LocalMirrorMountClient implements MountClient {
 
     try {
       watcher = watch(this.mirrorDir, { recursive: true })
-      startPolling()
+      if (!platformHasNativeRecursiveWatch()) {
+        startPolling()
+      }
       void (async () => {
         try {
           for await (const event of watcher) {
@@ -239,7 +243,7 @@ export class LocalMirrorMountClient implements MountClient {
       }),
     ])
 
-    const state = asRecord(JSON.parse(stateRaw)) ?? {}
+    const state = parseMetadataFile(stateRaw, statePath)
     const pidRecord = parsePidFile(pidRaw)
     const pid = pidRecord.pid
     if (!Number.isInteger(pid) || pid <= 0) {
@@ -267,6 +271,13 @@ export class LocalMirrorMountClient implements MountClient {
     return fullPath
   }
 
+  async #contentForWrite(localPath: string, content: unknown): Promise<unknown> {
+    const existing = await readFile(localPath, 'utf8')
+      .then(parseMirrorContent)
+      .catch(() => undefined)
+    return mergedLinearIssueContent(existing, content) ?? content
+  }
+
   async #currentWriteStatus(path: string): Promise<WriteStatus> {
     const normalizedPath = normalizeRemotePath(path)
     const marker = this.#lastWriteByPath.get(path) ?? this.#lastWriteByPath.get(normalizedPath)
@@ -277,6 +288,10 @@ export class LocalMirrorMountClient implements MountClient {
     const state = await readRelayState(this.mirrorDir)
     if (state) {
       if (outboxCount(state, 'failed') > 0) return 'failed'
+      // Best-effort fallback for relay state that only reports aggregate counts:
+      // if readRelayState shows outboxCount('acked') moved past this marker's
+      // baseline and hasPendingWriteback is false, the daemon likely acked our
+      // write. Exact outbox records above take precedence when present.
       if (marker && outboxCount(state, 'acked') > marker.ackedBaseline && !hasPendingWriteback(state)) {
         return 'acked'
       }
@@ -295,6 +310,14 @@ const parseMirrorContent = (raw: string): unknown => {
   }
 }
 
+const parseMetadataFile = (raw: string, path: string): Record<string, unknown> => {
+  try {
+    return asRecord(JSON.parse(raw)) ?? {}
+  } catch (error) {
+    throw new Error(`Relayfile mirror writeback is not ready: failed to parse ${path}: ${errorMessage(error)}`)
+  }
+}
+
 const unwrapMirrorPayload = (content: unknown): unknown => {
   const record = asRecord(content)
   return asRecord(record?.payload) ?? content
@@ -302,6 +325,21 @@ const unwrapMirrorPayload = (content: unknown): unknown => {
 
 const serializeMirrorContent = (content: unknown): string =>
   typeof content === 'string' ? content : JSON.stringify(content)
+
+const mergedLinearIssueContent = (existing: unknown, content: unknown): unknown | undefined => {
+  const existingRecord = asRecord(existing)
+  const payload = asRecord(existingRecord?.payload)
+  const update = asRecord(content)
+  if (!existingRecord || existingRecord.objectType !== 'issue' || !payload || !update) return undefined
+  if (Object.keys(update).some((key) => key !== 'stateId')) return undefined
+  return {
+    ...existingRecord,
+    payload: {
+      ...payload,
+      ...update,
+    },
+  }
+}
 
 const normalizeRemotePath = (path: string): string => {
   const normalized = path.startsWith('/') ? path : `/${path}`
@@ -342,8 +380,12 @@ const walkFiles = async (root: string, visit: (path: string) => Promise<void> | 
 
 const parsePidFile = (raw: string): Record<string, unknown> & { pid: number } => {
   const trimmed = raw.trim()
-  const parsed = trimmed.startsWith('{') ? asRecord(JSON.parse(trimmed)) : { pid: Number(trimmed) }
-  return { ...(parsed ?? {}), pid: Number(parsed?.pid ?? NaN) }
+  try {
+    const parsed = trimmed.startsWith('{') ? asRecord(JSON.parse(trimmed)) : { pid: Number(trimmed) }
+    return { ...(parsed ?? {}), pid: Number(parsed?.pid ?? NaN) }
+  } catch {
+    return { pid: 0 }
+  }
 }
 
 const processIsAlive = (pid: number): boolean => {
@@ -426,6 +468,12 @@ const outboxHasMatch = async (
   })
 
   for (const filePath of files) {
+    if (marker) {
+      const fileStat = await stat(filePath).catch(() => null)
+      if (fileStat && fileStat.mtimeMs < marker.startedAtMs - OUTBOX_MTIME_TOLERANCE_MS) {
+        continue
+      }
+    }
     const raw = await readFile(filePath, 'utf8').catch(() => '')
     if (outboxRecordMatches(raw, path, marker)) return true
   }
@@ -462,3 +510,6 @@ const hashString = (value: string): string => createHash('sha256').update(value)
 const errorMessage = (error: unknown): string => error instanceof Error ? error.message : String(error)
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
+const platformHasNativeRecursiveWatch = (): boolean =>
+  process.platform === 'darwin' || process.platform === 'win32'
