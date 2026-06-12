@@ -85,20 +85,11 @@ describe('MountLinearWriteback', () => {
         path: commentPath,
         content: {
           body,
-          botActor: '',
-          isArtificialAgentSessionRoot: false,
-          issue: {
-            id: issue.uuid,
-            identifier: issue.key,
-            title: issue.title,
-            url: 'https://linear.app/agent-relay/issue/AR-99/reviewer-merge-on-green',
-          },
-          issue_id: issue.uuid,
           issueId: issue.uuid,
         },
       },
     ])
-    expect(commentPath).toContain('/linear/issues/AR-99__04ef067e-35b6-4ec4-81e7-66acc1f2e31f.json/comments/')
+    expect(commentPath).toContain('/linear/comments/AR-99__factory-')
     expect(commentPath).toMatch(/\/comments\/[^/]+\.json$/)
     expect(commentPath.endsWith('.json.json')).toBe(false)
     expect(await linear.verify(issue, { commentName })).toBe(true)
@@ -112,7 +103,7 @@ describe('MountLinearWriteback', () => {
     const linear = MountLinearWriteback(mount)
 
     await expect(linear.setState(issue, 'implementing-state')).rejects.toThrow(/not acked/)
-    expect(await linear.verify(issue, { stateId: 'implementing-state' })).toBe(true)
+    await expect(linear.verify(issue, { stateId: 'implementing-state' })).rejects.toThrow(/not acked/)
   })
 
   it('surfaces stale writebacks instead of swallowing read-back failures', async () => {
@@ -226,7 +217,11 @@ describe('MountLinearWriteback', () => {
       id: 'uuid-new',
       identifier: 'AR-NEW',
       title: '[factory-e2e] synthetic issue',
+      teamId: 'team-ar',
       team: { key: 'AR', name: 'Agent Relay' },
+      stateId: 'ready-state',
+      description: 'Create only with writable fields',
+      url: 'https://linear.invalid/read-only',
     })).resolves.toEqual({
       path: '/linear/issues/AR-NEW__uuid-new.json',
     })
@@ -234,10 +229,10 @@ describe('MountLinearWriteback', () => {
     expect(mount.writes).toEqual([{
       path: '/linear/issues/AR-NEW__uuid-new.json',
       content: {
-        id: 'uuid-new',
-        identifier: 'AR-NEW',
         title: '[factory-e2e] synthetic issue',
-        team: { key: 'AR', name: 'Agent Relay' },
+        teamId: 'team-ar',
+        stateId: 'ready-state',
+        description: 'Create only with writable fields',
       },
     }])
   })
@@ -249,14 +244,13 @@ describe('MountLinearWriteback', () => {
       id: 'uuid-no-team',
       identifier: 'AR-NO-TEAM',
       title: '[factory-e2e] synthetic issue with sparse sync',
+      state: { id: 'read-only-state' },
     })).resolves.toEqual({
       path: '/linear/issues/AR-NO-TEAM__uuid-no-team.json',
     })
     expect(mount.writes).toEqual([{
       path: '/linear/issues/AR-NO-TEAM__uuid-no-team.json',
       content: {
-        id: 'uuid-no-team',
-        identifier: 'AR-NO-TEAM',
         title: '[factory-e2e] synthetic issue with sparse sync',
       },
     }])

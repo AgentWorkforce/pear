@@ -155,6 +155,11 @@ export class FactoryLoop implements Factory {
         continue
       }
 
+      if (!isRealLinearIssue(issue)) {
+        skipped.push({ issue: issueRef(issue), reason: 'not reconciled real Linear issue' })
+        continue
+      }
+
       const decision = await this.triageIssue(issue)
       triaged.push(decision)
       const result = await this.dispatch(decision, { dryRun })
@@ -180,6 +185,12 @@ export class FactoryLoop implements Factory {
     const liveIssue = await this.#readIssue(decision.issue.path)
     if (!liveIssue || !isInFactoryScope(liveIssue, this.#config.safety)) {
       const error = new Error(`Refusing to dispatch ${decision.issue.key}: not factory-e2e scope`)
+      this.#error(error, decision.issue)
+      throw error
+    }
+
+    if (!isRealLinearIssue(liveIssue)) {
+      const error = new Error(`Refusing to dispatch ${decision.issue.key}: not reconciled real Linear issue`)
       this.#error(error, decision.issue)
       throw error
     }
@@ -214,7 +225,11 @@ export class FactoryLoop implements Factory {
         if (!issue || issue.stateId !== this.#config.stateIds.readyForAgent) {
           throw new Error(`Live state changed before writeback for ${decision.issue.key}`)
         }
-        await this.#linear.postComment(issue, comment)
+        try {
+          await this.#linear.postComment(issue, comment)
+        } catch (error) {
+          this.#logger.warn?.('[factory] comment writeback skipped', error)
+        }
         await this.#linear.setState(issue, this.#config.stateIds.agentImplementing)
         this.#emit('writeback-verified', { issue: decision.issue, path: issue.path })
       }
@@ -291,6 +306,10 @@ export class FactoryLoop implements Factory {
       }
 
       if (!isInFactoryScope(issue, this.#config.safety)) {
+        return
+      }
+
+      if (!isRealLinearIssue(issue)) {
         return
       }
 
@@ -602,6 +621,15 @@ export function parseLinearIssue(path: string, content: unknown): LinearIssue {
 }
 
 const issueRef = (issue: LinearIssue): IssueRef => ({ uuid: issue.uuid, key: issue.key, path: issue.path })
+
+const isRealLinearIssue = (issue: LinearIssue): boolean => {
+  const payload = wrappedPayload(issue.raw)
+  const identifier = stringValue(payload.identifier) ?? issue.key
+  return identifier === issue.key &&
+    /^[A-Z]+-\d+$/u.test(identifier) &&
+    typeof payload.url === 'string' &&
+    payload.url.length > 0
+}
 
 const dispatchComment = (decision: TriageDecision, agents: DispatchResult['agents']): string => [
   `Factory dispatch for ${decision.issue.key}`,

@@ -28,6 +28,7 @@ const issuePayload = (n: number, stateId = ready) => ({
   title: `[factory-e2e] Fix factory issue ${n}`,
   description: 'Implement the requested fix in packages/factory-sdk/src/orchestrator/factory.ts and verify it with tests.',
   stateId,
+  url: `https://linear.app/agent-relay/issue/AR-${n}/factory-issue-${n}`,
   labels: undefined,
   labelIds: ['label-id-not-used-by-parser'],
   team: { key: 'AR', name: 'Agent Relay' },
@@ -185,6 +186,55 @@ describe('FactoryLoop', () => {
     expect(report.triaged).toEqual([])
     expect(report.dispatched).toEqual([])
     expect(triage.count).toBe(0)
+    expect(fleet.spawns).toEqual([])
+    expect(mount.writes).toEqual([])
+  })
+
+  it('skips factory-marked draft issues that are not reconciled provider records', async () => {
+    const draftPath = '/linear/issues/AR-E2ECANARY.json'
+    const mount = new FakeMountClient({
+      [draftPath]: {
+        provider: 'linear',
+        objectType: 'issue',
+        payload: {
+          id: 'draft-id',
+          identifier: 'AR-E2ECANARY',
+          title: '[factory-e2e] Draft should not dispatch',
+          description: 'Synthetic draft',
+          stateId: ready,
+          team: { key: 'AR', name: 'Agent Relay' },
+        },
+      },
+    })
+    const fleet = new FakeFleetClient()
+    const triage = new CountingTriage()
+    const factory = createFactory(config(), { mount, fleet, triage })
+
+    const report = await factory.runOnce()
+
+    expect(report.skipped).toContainEqual({
+      issue: { uuid: 'draft-id', key: 'AR-E2ECANARY', path: draftPath },
+      reason: 'not reconciled real Linear issue',
+    })
+    expect(triage.count).toBe(0)
+    expect(fleet.spawns).toEqual([])
+    expect(mount.writes).toEqual([])
+  })
+
+  it('refuses explicit dispatch for factory-marked issues without a provider URL', async () => {
+    const draft = {
+      ...issueFile(24),
+      payload: {
+        ...issuePayload(24),
+        url: undefined,
+      },
+    }
+    const mount = new FakeMountClient({ [issuePath(24)]: draft })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
+    const decision = await factory.triageIssue(parseLinearIssue(issuePath(24), draft))
+
+    await expect(factory.dispatch(decision)).rejects.toThrow(/not reconciled real Linear issue/)
     expect(fleet.spawns).toEqual([])
     expect(mount.writes).toEqual([])
   })
@@ -418,6 +468,47 @@ describe('FactoryLoop', () => {
     await expect(factory.dispatch(decision)).rejects.toThrow('Writeback not acked')
     expect(errors).toHaveLength(1)
     expect(errors[0]).toMatchObject({ issue: { key: 'AR-9' } })
+  })
+
+  it('logs and continues when best-effort dispatch comment writeback fails', async () => {
+    const mount = new FakeMountClient({ [issuePath(25)]: issueFile(25) })
+    const fleet = new FakeFleetClient()
+    const warnings: unknown[] = []
+    const linear: LinearWriteback = {
+      async postComment() {
+        throw new Error('unsupported Linear writeback path')
+      },
+      async setState(issue, stateId) {
+        await mount.writeFile(issue.path, { stateId })
+      },
+      async createIssue() {
+        throw new Error('not used')
+      },
+      async verify() {
+        return true
+      },
+    }
+    const factory = createFactory(config(), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      linear,
+      logger: {
+        warn: (...args: unknown[]) => warnings.push(args),
+        error: () => {},
+      },
+    })
+    const decision = await factory.triageIssue(parseLinearIssue(issuePath(25), issueFile(25)))
+
+    await expect(factory.dispatch(decision)).resolves.toMatchObject({
+      issue: { key: 'AR-25' },
+      stateId: implementing,
+    })
+    expect(warnings[0]).toEqual([
+      '[factory] comment writeback skipped',
+      expect.objectContaining({ message: 'unsupported Linear writeback path' }),
+    ])
+    expect(mount.writes).toContainEqual({ path: issuePath(25), content: { stateId: implementing } })
   })
 
   it('closes a synthetic probe PR after done writebacks and before release when mergePolicy is never', async () => {
