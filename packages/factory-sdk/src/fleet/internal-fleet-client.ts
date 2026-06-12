@@ -16,7 +16,7 @@ export interface HarnessDriverClientLike {
   readonly brokerPid?: number
   spawnPty(input: SpawnPtyInput): Promise<SpawnedHandleLike>
   release(name: string, reason?: string): Promise<{ name: string }>
-  listAgents(): Promise<Array<Pick<ListAgent, 'name' | 'pid'>>>
+  listAgents(): Promise<Array<Pick<ListAgent, 'name'> & { pid?: number }>>
   sendMessage(input: SendMessageInput): Promise<{ event_id: string; targets?: string[] }>
   sendInput(name: string, data: string): Promise<unknown>
   connectEvents?(sinceSeq?: number): void
