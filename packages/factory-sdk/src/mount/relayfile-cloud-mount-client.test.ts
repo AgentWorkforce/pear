@@ -161,7 +161,7 @@ describe('RelayfileCloudMountClient', () => {
     expect(fake.getOpCalls).toEqual([{ workspaceId: 'rw_test', opId: 'op-1' }])
   })
 
-  it('treats unpollable write confirmations as acked for legacy clients and restarted instances', async () => {
+  it('fails closed on unpollable write confirmations for legacy clients and restarted instances', async () => {
     const fake = new FakeRelayFileClient()
     const clientWithoutGetOp: RelayFileClientLike = {
       readFile: fake.readFile.bind(fake),
@@ -185,8 +185,8 @@ describe('RelayfileCloudMountClient', () => {
 
     await legacyMount.writeFile('/linear/issues/new.json', { title: 'new' })
 
-    await expect(legacyMount.confirmWrite('/linear/issues/new.json', { timeoutMs: 5 })).resolves.toBe('acked')
-    await expect(restartedMount.confirmWrite('/linear/issues/new.json', { timeoutMs: 5 })).resolves.toBe('acked')
+    await expect(legacyMount.confirmWrite('/linear/issues/new.json', { timeoutMs: 5 })).resolves.toBe('timeout')
+    await expect(restartedMount.confirmWrite('/linear/issues/new.json', { timeoutMs: 5 })).resolves.toBe('timeout')
     expect(fake.getOpCalls).toEqual([])
   })
 

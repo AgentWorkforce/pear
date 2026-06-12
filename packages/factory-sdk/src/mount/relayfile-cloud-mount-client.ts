@@ -185,7 +185,7 @@ export class RelayfileCloudMountClient implements MountClient {
     opts: { timeoutMs?: number } = {},
   ): Promise<'acked' | 'pending' | 'failed' | 'timeout'> {
     const opId = this.#lastOpByPath.get(path)
-    if (!opId || !this.#client.getOp) return 'acked'
+    if (!opId || !this.#client.getOp) return 'timeout'
 
     const deadline = Date.now() + (opts.timeoutMs ?? 90_000)
     for (;;) {
