@@ -445,10 +445,8 @@ export class FactoryLoop implements Factory {
       return { issue: decision.issue, agents: [], dryRun }
     }
 
-    this.#recordDispatchAttempt(decision.issue)
     const record = this.#batch.start(decision, dryRun)
     if (!record) {
-      this.#clearDispatchInFlight(decision.issue)
       this.#increment('queued')
       this.#emit('issue-queued', { issue: decision.issue })
       return { issue: decision.issue, agents: [], dryRun }
@@ -458,6 +456,7 @@ export class FactoryLoop implements Factory {
       return record.result
     }
 
+    this.#recordDispatchAttempt(decision.issue)
     try {
       const agents: DispatchResult['agents'] = []
       for (const spec of [...decision.implementers, decision.reviewer]) {

@@ -365,6 +365,39 @@ describe('FactoryLoop', () => {
     expect(factory.status().queued).toEqual([])
   })
 
+  it('does not spend dispatch retry budget while an issue is only queued', async () => {
+    const mount = new FakeMountClient({
+      [issuePath(44)]: issueFile(44),
+      [issuePath(45)]: issueFile(45),
+    })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config({
+      batchSize: 1,
+      dispatch: { errorCooldownMs: 1_000, maxAttempts: 1 },
+    }), { mount, fleet, triage: new StaticTriage() })
+
+    const report = await factory.runOnce()
+
+    expect(report.dispatched.map((result) => result.issue.key)).toEqual(['AR-44'])
+    expect(report.skipped).toContainEqual({
+      issue: { uuid: 'uuid-45', key: 'AR-45', path: issuePath(45) },
+      reason: 'queued or escalated',
+    })
+    expect(factory.status().queued.map((issue) => issue.key)).toEqual(['AR-45'])
+
+    fleet.emitAgentExit('ar-44-impl', 'issue-done')
+    await flush()
+
+    expect(fleet.spawns.map((spawn) => spawn.name)).toEqual([
+      'ar-44-impl',
+      'ar-44-review',
+      'ar-45-impl',
+      'ar-45-review',
+    ])
+    expect(factory.status().inFlight.map((issue) => issue.key)).toEqual(['AR-45'])
+    expect(factory.status().queued).toEqual([])
+  })
+
   it('runLoop stops at the configured iteration cap, preserves the batch cap, and advances heartbeat liveness', async () => {
     const root = await mkdtemp(join(tmpdir(), 'factory-loop-heartbeat-'))
     const heartbeatPath = join(root, 'heartbeat.json')
