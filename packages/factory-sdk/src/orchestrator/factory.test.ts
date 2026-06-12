@@ -1139,6 +1139,16 @@ describe('FactoryLoop', () => {
     })
   })
 
+  it('does not inject implementer or reviewer messages during dry-run dispatch', async () => {
+    const mount = new FakeMountClient({ [issuePath(65)]: issueFile(65) })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(65), issueFile(65))), { dryRun: true })
+
+    expect(fleet.messages).toEqual([])
+  })
+
   it('reinjects the confirmed implementer task after delivery_failed', async () => {
     const mount = new FakeMountClient({ [issuePath(63)]: issueFile(63) })
     const fleet = new FakeFleetClient()

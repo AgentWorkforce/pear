@@ -956,7 +956,7 @@ export class FactoryLoop implements Factory {
   }
 
   async #sendCriticalReviewerMessage(record: InFlightIssue): Promise<void> {
-    if (!this.#fleet.waitForInjected) {
+    if (record.dryRun || !this.#fleet.waitForInjected) {
       return
     }
 
@@ -976,7 +976,7 @@ export class FactoryLoop implements Factory {
   }
 
   async #sendImplementerTask(record: InFlightIssue): Promise<void> {
-    if (!this.#fleet.waitForInjected) {
+    if (record.dryRun || !this.#fleet.waitForInjected) {
       return
     }
 
