@@ -23,6 +23,7 @@ export interface MountLinearWritebackConfig {
 
 export interface LinearCreateIssuePayload extends Record<string, unknown> {
   id?: string
+  clientId?: string
   identifier?: string
   title?: string
   teamId?: string
@@ -82,6 +83,8 @@ interface CachedIssuePayload {
 const createIssuePath = (payload: LinearCreateIssuePayload): string => {
   const id = typeof payload.id === 'string' && payload.id ? payload.id : undefined
   if (id) return `/linear/issues/factory-create-${safePathSegment(id)}.json`
+  const clientId = typeof payload.clientId === 'string' && payload.clientId ? payload.clientId : undefined
+  if (clientId) return `/linear/issues/factory-create-${safePathSegment(clientId)}.json`
   const identifier = typeof payload.identifier === 'string' && payload.identifier ? payload.identifier : undefined
   if (identifier && !looksLikeProviderIssueIdentifier(identifier)) {
     return `/linear/issues/${safePathSegment(identifier)}.json`

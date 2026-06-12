@@ -427,6 +427,26 @@ describe('MountLinearWriteback', () => {
     })
   })
 
+  it('keys createIssue drafts by clientId when id is absent', async () => {
+    const mount = new FakeMountClient()
+
+    await MountLinearWriteback(mount).createIssue({
+      clientId: 'factory-e2e-clampv2',
+      identifier: 'AR-CLAMPV2',
+      title: '[factory-e2e] add clamp(n, min, max) util to factory-sdk',
+      teamId: 'team-ar',
+      team: { key: 'AR', name: 'Agent Relay' },
+    })
+
+    expect(mount.writes).toHaveLength(1)
+    expect(mount.writes[0]?.path).toBe('/linear/issues/factory-create-factory-e2e-clampv2.json')
+    expect(mount.writes[0]?.path).not.toContain('AR-CLAMPV2')
+    expect(mount.writes[0]?.content).toEqual({
+      title: '[factory-e2e] add clamp(n, min, max) util to factory-sdk',
+      teamId: 'team-ar',
+    })
+  })
+
   it('refuses identifier-only createIssue drafts that look like provider issue keys', async () => {
     const mount = new FakeMountClient()
 
