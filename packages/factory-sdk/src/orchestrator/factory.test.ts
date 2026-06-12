@@ -125,6 +125,29 @@ describe('FactoryLoop', () => {
     })
   })
 
+  it('maps state_name-only Ready for Agent records to the configured ready state id', () => {
+    expect(parseLinearIssue(issuePath(26), {
+      provider: 'linear',
+      objectType: 'issue',
+      objectId: 'uuid-26',
+      payload: {
+        id: 'uuid-26',
+        identifier: 'AR-26',
+        title: '[factory-e2e] State name only',
+        description: 'Factory-created issue synced without stateId',
+        url: 'https://linear.app/agent-relay/issue/AR-26/state-name-only',
+        state_name: 'Ready for Agent',
+        labels: undefined,
+        team: { key: 'AR', name: 'Agent Relay' },
+      },
+    })).toMatchObject({
+      uuid: 'uuid-26',
+      key: 'AR-26',
+      stateId: ready,
+      state: { name: 'Ready for Agent' },
+    })
+  })
+
   it('runOnce caps active issues, skips stale state, and pulls queued work after completion', async () => {
     const mount = new FakeMountClient({
       [issuePath(1)]: issueFile(1),
@@ -237,6 +260,30 @@ describe('FactoryLoop', () => {
     await expect(factory.dispatch(decision)).rejects.toThrow(/not reconciled real Linear issue/)
     expect(fleet.spawns).toEqual([])
     expect(mount.writes).toEqual([])
+  })
+
+  it('dispatches factory-scoped real issues that only carry state_name for readiness', async () => {
+    const path = issuePath(27)
+    const stateNameOnly = {
+      provider: 'linear',
+      objectType: 'issue',
+      objectId: 'uuid-27',
+      payload: {
+        ...issuePayload(27),
+        stateId: undefined,
+        state: undefined,
+        state_name: 'Ready for Agent',
+      },
+    }
+    const mount = new FakeMountClient({ [path]: stateNameOnly })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
+
+    const report = await factory.runOnce()
+
+    expect(report.dispatched.map((result) => result.issue.key)).toEqual(['AR-27'])
+    expect(report.skipped).toEqual([])
+    expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-27-impl', 'ar-27-review'])
   })
 
   it('refuses explicit dispatch for issues outside factory-e2e scope before spawning', async () => {

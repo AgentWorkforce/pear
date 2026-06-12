@@ -1,5 +1,5 @@
 import { FactoryConfigSchema, type FactoryConfig } from '../config/schema'
-import { linearByStatePath } from '../constants/linear'
+import { LINEAR_STATE_IDS, linearByStatePath } from '../constants/linear'
 import { GithubMergeGate, closeProbePr, type GithubMergeGate as GithubMergeGatePort } from '../github'
 import type { AgentSpec, FleetClient, LinearWriteback, MountClient, SlackWriteback, Subscription } from '../ports'
 import type { Clock, Logger } from '../ports/system'
@@ -28,6 +28,13 @@ type Listener = (payload: FactoryEventPayload) => void
 
 const ISSUE_ROOT = '/linear/issues'
 const READY_EVENTS_LIMIT = 100
+const STATE_NAME_TO_ID: Record<string, string> = {
+  'Ready for Agent': LINEAR_STATE_IDS.readyForAgent,
+  'Agent Implementing': LINEAR_STATE_IDS.agentImplementing,
+  Implementing: LINEAR_STATE_IDS.agentImplementing,
+  Done: LINEAR_STATE_IDS.done,
+  'In Planning': LINEAR_STATE_IDS.inPlanning,
+}
 
 const realClock: Clock = {
   now: () => Date.now(),
@@ -601,8 +608,8 @@ export function parseLinearIssue(path: string, content: unknown): LinearIssue {
   const assignee = recordName(payload.assignee)
   const key = stringValue(payload.identifier) ?? keyFromPath(path)
   const uuid = stringValue(payload.id) ?? stringValue(wrapper.objectId) ?? uuidFromPath(path) ?? key
-  const stateId = stringValue(payload.stateId) ?? stringValue(state?.id) ?? ''
   const stateName = stringValue(state?.name) ?? stringValue(payload.state_name)
+  const stateId = stringValue(payload.stateId) ?? stringValue(state?.id) ?? stateNameToId(stateName) ?? ''
 
   return {
     uuid,
@@ -731,6 +738,9 @@ const keyFromPath = (path: string): string => path.split('/').at(-1)?.split('__'
 const uuidFromPath = (path: string): string | undefined => path.split('__')[1]?.replace(/\.json$/, '')
 
 const stringValue = (value: unknown): string | undefined => typeof value === 'string' ? value : undefined
+
+const stateNameToId = (name: string | undefined): string | undefined =>
+  name ? STATE_NAME_TO_ID[name] : undefined
 
 const recordName = (value: unknown): string | undefined => {
   if (typeof value === 'string') {
