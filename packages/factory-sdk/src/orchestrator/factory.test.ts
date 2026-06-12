@@ -120,6 +120,21 @@ class ThrowingWatermarkMount extends FakeMountClient {
   }
 }
 
+class RecordingSlack implements SlackWriteback {
+  readonly roots: Array<{ channel: string; text: string }> = []
+  readonly replies: Array<{ threadId: string; text: string }> = []
+  threadId = '1780751612.176219'
+
+  async postThread(root: { channel: string; text: string }): Promise<{ threadId: string }> {
+    this.roots.push(root)
+    return { threadId: this.threadId }
+  }
+
+  async reply(threadId: string, text: string): Promise<void> {
+    this.replies.push({ threadId, text })
+  }
+}
+
 describe('FactoryLoop', () => {
   it('parses wrapped Linear issue records', () => {
     expect(parseLinearIssue(issuePath(1), issueFile(1))).toMatchObject({
@@ -893,6 +908,149 @@ describe('FactoryLoop', () => {
     expect(closeInputs).toEqual([])
     expect(fleet.releases.map((release) => release.name)).toEqual(['ar-23-impl', 'ar-23-review'])
   })
+
+  it('watches the in-flight factory Slack thread and replies to a human status request with live state, roster, and PR', async () => {
+    const mount = new FakeMountClient({ [issuePath(24)]: issueFile(24) })
+    const fleet = new FakeFleetClient()
+    const slack = new RecordingSlack()
+    const factory = createFactory(config({ slack: { channel: 'C0FACTORY__factory-e2e', style: 'threaded-summarized' } }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      slack,
+      probePrResolver: async () => ({ repo: 'AgentWorkforce/pear', prNumber: 240 }),
+    })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(24), issueFile(24))))
+    emitSlackReply(mount, slackReplyFixturePath('C0FACTORY__factory-e2e', slack.threadId, 'human-1'), 'slack-human-1', {
+      text: 'status?',
+      user: 'U123',
+      user_name: 'human',
+      user_is_bot: false,
+    })
+    await flush()
+    await flush()
+
+    expect(slack.replies).toHaveLength(1)
+    expect(slack.replies[0]).toMatchObject({ threadId: slack.threadId })
+    expect(slack.replies[0]?.text).toContain('AR-24')
+    expect(slack.replies[0]?.text).toContain(implementing)
+    expect(slack.replies[0]?.text).toContain('ar-24-impl')
+    expect(slack.replies[0]?.text).toContain('ar-24-review')
+    expect(slack.replies[0]?.text).toContain('https://github.com/AgentWorkforce/pear/pull/240')
+  })
+
+  it('ignores the factory bot own Slack replies to avoid self-response loops', async () => {
+    const mount = new FakeMountClient({ [issuePath(25)]: issueFile(25) })
+    const fleet = new FakeFleetClient()
+    const slack = new RecordingSlack()
+    const factory = createFactory(config({ slack: { channel: 'C0FACTORY__factory-e2e', style: 'threaded-summarized' } }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      slack,
+    })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(25), issueFile(25))))
+    emitSlackReply(mount, slackReplyFixturePath('C0FACTORY__factory-e2e', slack.threadId, 'bot-1'), 'slack-bot-1', {
+      text: 'AR-25: Ready for Agent',
+      user: 'BFACTORY',
+      user_name: 'file_by_agent_relay',
+      user_is_bot: true,
+      bot_id: 'BFACTORY',
+    })
+    await flush()
+    await flush()
+
+    expect(slack.replies).toEqual([])
+  })
+
+  it('does not respond to Slack replies outside the watched factory-e2e issue thread', async () => {
+    const mount = new FakeMountClient({ [issuePath(26)]: issueFile(26) })
+    const fleet = new FakeFleetClient()
+    const slack = new RecordingSlack()
+    const factory = createFactory(config({ slack: { channel: 'C0FACTORY__factory-e2e', style: 'threaded-summarized' } }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      slack,
+    })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(26), issueFile(26))))
+    emitSlackReply(mount, slackReplyFixturePath('C0PRODUCT__general', slack.threadId, 'human-product'), 'slack-product-1', {
+      text: 'status?',
+      user: 'U123',
+      user_is_bot: false,
+    })
+    emitSlackReply(mount, slackReplyFixturePath('C0FACTORY__factory-e2e', '1780751613.000001', 'human-other-thread'), 'slack-other-thread-1', {
+      text: 'status?',
+      user: 'U123',
+      user_is_bot: false,
+    })
+    await flush()
+    await flush()
+
+    expect(slack.replies).toEqual([])
+  })
+
+  it('connects Slack reply watchers from now and does not reprocess pre-existing thread replies', async () => {
+    const mount = new FakeMountClient({ [issuePath(27)]: issueFile(27) })
+    const fleet = new FakeFleetClient()
+    const slack = new RecordingSlack()
+    const oldPath = slackReplyFixturePath('C0FACTORY__factory-e2e', slack.threadId, 'old-human')
+    emitSlackReply(mount, oldPath, 'slack-old-human', {
+      text: 'old status?',
+      user: 'U123',
+      user_is_bot: false,
+    })
+    const factory = createFactory(config({ slack: { channel: 'C0FACTORY__factory-e2e', style: 'threaded-summarized' } }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      slack,
+    })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(27), issueFile(27))))
+    await flush()
+    await flush()
+
+    expect(slack.replies).toEqual([])
+
+    emitSlackReply(mount, slackReplyFixturePath('C0FACTORY__factory-e2e', slack.threadId, 'new-human'), 'slack-new-human', {
+      text: 'new status?',
+      user: 'U456',
+      user_is_bot: false,
+    })
+    await flush()
+    await flush()
+
+    expect(slack.replies).toHaveLength(1)
+  })
+
+  it('dedupes duplicate inbound Slack reply delivery by event identity and content', async () => {
+    const mount = new FakeMountClient({ [issuePath(28)]: issueFile(28) })
+    const fleet = new FakeFleetClient()
+    const slack = new RecordingSlack()
+    const factory = createFactory(config({ slack: { channel: 'C0FACTORY__factory-e2e', style: 'threaded-summarized' } }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      slack,
+    })
+    const replyPath = slackReplyFixturePath('C0FACTORY__factory-e2e', slack.threadId, 'human-duplicate')
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(28), issueFile(28))))
+    emitSlackReply(mount, replyPath, 'slack-duplicate-human', {
+      text: 'status?',
+      user: 'U123',
+      user_is_bot: false,
+    })
+    mount.emit(changeEvent(replyPath, 'slack-duplicate-human'))
+    await flush()
+    await flush()
+
+    expect(slack.replies).toHaveLength(1)
+  })
 })
 
 const changeEvent = (path: string, id: string, occurredAt = new Date().toISOString()) => ({
@@ -909,3 +1067,30 @@ const changeEvent = (path: string, id: string, occurredAt = new Date().toISOStri
   summary: {},
   expand: async () => ({ level: 'summary', path, summary: {} }),
 }) as unknown as ChangeEvent
+
+const slackReplyFixturePath = (channelDir: string, threadId: string, replyId: string): string =>
+  `/slack/channels/${channelDir}/messages/${threadId.replace(/\./g, '_')}/replies/${replyId}.json`
+
+const emitSlackReply = (
+  mount: FakeMountClient,
+  path: string,
+  id: string,
+  payload: Record<string, unknown>,
+): void => {
+  const threadTs = path.match(/\/messages\/([^/]+)\/replies\//u)?.[1]?.replace(/_/g, '.')
+  const channel = path.match(/^\/slack\/channels\/([^/]+)\//u)?.[1]?.split('__')[0]
+  mount.files.set(path, {
+    content: {
+      provider: 'slack',
+      objectType: 'message',
+      objectId: id,
+      payload: {
+        channel,
+        thread_ts: threadTs,
+        ts: id,
+        ...payload,
+      },
+    },
+  })
+  mount.emit(changeEvent(path, id))
+}
