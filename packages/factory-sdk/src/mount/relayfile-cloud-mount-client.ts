@@ -13,14 +13,13 @@ import {
   type RelayfileCloudTokenSet,
   type ResourceAtEventResult,
   type OperationStatusResponse,
-  type SubscribeOptions,
   type Subscription,
   type TreeResponse,
   type WriteFileInput,
   type WriteQueuedResponse,
 } from '@relayfile/sdk'
 
-import type { EventPage, MountClient } from '../ports'
+import type { EventPage, MountClient, SubscribeOptions } from '../ports'
 import {
   createWorkspaceScopedEventClient,
   type RelayfileEventClient,

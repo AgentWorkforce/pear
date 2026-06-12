@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { FactoryConfigSchema, createFactory, parseLinearIssue, type FactoryConfig, type TriageDecision, type TriageEngine } from '../index'
 import type { ChangeEvent, LinearWriteback, SlackWriteback } from '../ports'
@@ -41,6 +41,15 @@ const issueFile = (n: number, stateId = ready) => ({
   objectType: 'issue',
   objectId: `uuid-${n}`,
   payload: issuePayload(n, stateId),
+})
+
+const realIssueFile = (n: number, stateId = ready, overrides: Record<string, unknown> = {}) => ({
+  ...issueFile(n, stateId),
+  payload: {
+    ...issuePayload(n, stateId),
+    url: `https://linear.app/agent-relay/issue/AR-${n}/factory-issue-${n}`,
+    ...overrides,
+  },
 })
 
 const flush = async () => {
@@ -368,6 +377,95 @@ describe('FactoryLoop', () => {
     await factory.stop()
   })
 
+  it('live subscription dispatches a newly-arrived in-scope ready issue from subscribe events', async () => {
+    const path = issuePath(25)
+    const mount = new FakeMountClient()
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
+
+    await factory.start({ mode: 'live', liveSubscription: { transport: 'subscribe' } })
+    mount.files.set(path, { content: realIssueFile(25) })
+    mount.emit(changeEvent(path, 'event-live-25'))
+    await flush()
+
+    expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-25-impl', 'ar-25-review'])
+    expect(factory.status().counters.liveEvents).toBe(1)
+    expect(factory.status().counters.liveArrivalLatencyMsLast).toBeGreaterThanOrEqual(0)
+    await factory.stop()
+  })
+
+  it('live subscription ignores out-of-scope, non-ready, and non-real issue arrivals', async () => {
+    const mount = new FakeMountClient()
+    const fleet = new FakeFleetClient()
+    const triage = new CountingTriage()
+    const factory = createFactory(config(), { mount, fleet, triage })
+    const cases = [
+      { n: 26, content: realIssueFile(26, ready, { team: { key: 'OTHER', name: 'Other' } }) },
+      { n: 27, content: realIssueFile(27, ready, { title: 'Real AR issue without synthetic marker' }) },
+      { n: 28, content: realIssueFile(28, implementing) },
+      { n: 29, content: realIssueFile(29, ready, { url: undefined }) },
+    ]
+
+    await factory.start({ mode: 'live', liveSubscription: { transport: 'subscribe' } })
+    for (const entry of cases) {
+      const path = issuePath(entry.n)
+      mount.files.set(path, { content: entry.content })
+      mount.emit(changeEvent(path, `event-live-${entry.n}`))
+    }
+    await flush()
+
+    expect(triage.count).toBe(0)
+    expect(fleet.spawns).toEqual([])
+    await factory.stop()
+  })
+
+  it('live subscription starts from the current event cursor and does not replay pre-start history', async () => {
+    vi.useFakeTimers()
+    try {
+      const oldPath = issuePath(30)
+      const newPath = issuePath(31)
+      const mount = new FakeMountClient({ [oldPath]: realIssueFile(30) })
+      const fleet = new FakeFleetClient()
+      const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
+      mount.emit(changeEvent(oldPath, 'event-before-start-30', new Date(Date.now() + 1_000).toISOString()))
+
+      await factory.start({ mode: 'live', liveSubscription: { transport: 'poll', pollIntervalMs: 10 } })
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(fleet.spawns).toEqual([])
+
+      mount.files.set(newPath, { content: realIssueFile(31) })
+      mount.emit(changeEvent(newPath, 'event-after-start-31'))
+      await vi.advanceTimersByTimeAsync(10)
+
+      expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-31-impl', 'ar-31-review'])
+      await factory.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('live subscription dispatches a newly-arrived in-scope ready issue from getEvents polling', async () => {
+    vi.useFakeTimers()
+    try {
+      const path = issuePath(32)
+      const mount = new FakeMountClient()
+      const fleet = new FakeFleetClient()
+      const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
+
+      await factory.start({ mode: 'live', liveSubscription: { transport: 'poll', pollIntervalMs: 10 } })
+      await vi.advanceTimersByTimeAsync(0)
+      mount.files.set(path, { content: realIssueFile(32) })
+      mount.emit(changeEvent(path, 'event-live-poll-32'))
+      await vi.advanceTimersByTimeAsync(10)
+
+      expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-32-impl', 'ar-32-review'])
+      await factory.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('BatchTracker blocks duplicate invocation ids within and across issue records', async () => {
     const tracker = new BatchTracker(5)
     const decisionA = await new StaticTriage().triage(parseLinearIssue(issuePath(12), issueFile(12)))
@@ -692,11 +790,11 @@ describe('FactoryLoop', () => {
   })
 })
 
-const changeEvent = (path: string, id: string) => ({
+const changeEvent = (path: string, id: string, occurredAt = new Date().toISOString()) => ({
   id,
   workspace: 'factory-test',
   type: 'relayfile.changed',
-  occurredAt: new Date(0).toISOString(),
+  occurredAt,
   resource: {
     path,
     kind: 'file',

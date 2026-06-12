@@ -1,12 +1,18 @@
 import type {
   ChangeEvent as RelayFileChangeEvent,
-  SubscribeOptions as RelayFileSubscribeOptions,
   Subscription as RelayFileSubscription,
 } from '@relayfile/sdk'
 
 export type ChangeEvent = RelayFileChangeEvent
-export type SubscribeOptions = RelayFileSubscribeOptions
 export type Subscription = RelayFileSubscription
+export type SubscribeOptions = {
+  coalesce?: 'none' | 'fire-once'
+  coalesceMs?: number
+  pathScope?: string[]
+  from?: 'now' | 'legacy'
+  onCoalesced?: () => void
+  onQueueDepth?: (depth: number) => void
+}
 
 export interface EventPage {
   events: ChangeEvent[]
