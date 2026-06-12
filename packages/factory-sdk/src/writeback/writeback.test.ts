@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { FactoryConfigSchema } from '../config/schema'
 import { linearCommentPath } from '../constants/linear'
@@ -284,6 +284,31 @@ describe('MountLinearWriteback', () => {
       expect.stringMatching(/^\[factory-sdk\] Linear writeback read-back verification failed for \/linear\/comments\/AR-99__factory-/u),
       '[factory-sdk] Linear writeback read-back verification failed for /linear/issues/factory-create-uuid-stale-create.json; treating getOp ack as success',
     ])
+  })
+
+  it('falls back to console logging when legacy stateIds contain a logger state name', async () => {
+    class StaleMountClient extends FakeMountClient {
+      override async writeFile(path: string, content: unknown): Promise<void> {
+        await super.writeFile(path, content)
+        this.files.set(path, { content: { stateId: 'old-state' } })
+      }
+    }
+
+    const mount = new StaleMountClient({
+      [issuePath]: wrappedIssueRecord(),
+    })
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    try {
+      await expect(MountLinearWriteback(mount, {
+        logger: 'legacy-state-id',
+      }).setState(issue, 'implementing-state')).resolves.toBeUndefined()
+      expect(warn).toHaveBeenCalledWith(
+        `[factory-sdk] Linear writeback read-back verification failed for ${issuePath}; treating getOp ack as success`,
+      )
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('refuses setState and postComment on an issue without factory-e2e before writing', async () => {

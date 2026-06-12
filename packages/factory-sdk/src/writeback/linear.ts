@@ -125,7 +125,7 @@ export const MountLinearWriteback = (
   configOrStateIds?: LinearStateIds | MountLinearWritebackConfig,
 ) => {
   const safety = safetyFromConfig(configOrStateIds)
-  const logger = (asRecord(configOrStateIds)?.logger as Pick<Logger, 'warn'> | undefined) ?? console
+  const logger = (asRecord(asRecord(configOrStateIds)?.logger) as Pick<Logger, 'warn'> | undefined) ?? console
   const canonicalByPath = new Map<string, CachedIssuePayload>()
 
   const seedCanonical = (

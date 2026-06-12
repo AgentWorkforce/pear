@@ -114,16 +114,17 @@ export class FactoryLoop implements Factory {
     installFactoryDraftPredicate(this.#mount, config)
     this.#fleet = ports.fleet
     this.#triage = ports.triage ?? new TieredTriage(new HeuristicTriage())
+    this.#logger = ports.logger ?? console
     this.#linear = ports.linear ?? MountLinearWriteback(ports.mount, {
       stateIds: config.stateIds,
       safety: config.safety,
+      logger: this.#logger,
     })
     this.#slack = config.slack ? MountSlackWriteback(ports.mount, config.slack) : ports.slack
     void (ports.github ?? MountGithubRead(ports.mount))
     this.#mergeGate = ports.mergeGate ?? new GithubMergeGate()
     this.#probeCloser = ports.probeCloser ?? closeProbePr
     this.#probePrResolver = ports.probePrResolver ?? ((issue) => resolveProbePrFromMount(this.#mount, this.#config, issue))
-    this.#logger = ports.logger ?? console
     this.#clock = ports.clock ?? realClock
     this.#batch = new BatchTracker(config.batchSize)
     this.#wireFleetEvents()

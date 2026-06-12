@@ -1032,6 +1032,39 @@ describe('FactoryLoop', () => {
     expect(mount.writes).toContainEqual({ path: issuePath(25), content: { stateId: implementing } })
   })
 
+  it('routes default Linear writeback advisory warnings through the factory logger', async () => {
+    class StaleLinearMountClient extends FakeMountClient {
+      override async writeFile(path: string, content: unknown, opts?: { guarded?: boolean }): Promise<void> {
+        await super.writeFile(path, content, opts)
+        if (path.startsWith('/linear/issues/')) {
+          this.files.set(path, { content: { stateId: 'old-state' } })
+        }
+      }
+    }
+
+    const mount = new StaleLinearMountClient({ [issuePath(26)]: issueFile(26) })
+    const fleet = new FakeFleetClient()
+    const warnings: unknown[][] = []
+    const factory = createFactory(config(), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      logger: {
+        warn: (...args: unknown[]) => warnings.push(args),
+        error: () => undefined,
+      },
+    })
+    const decision = await factory.triageIssue(parseLinearIssue(issuePath(26), issueFile(26)))
+
+    await expect(factory.dispatch(decision)).resolves.toMatchObject({
+      issue: { key: 'AR-26' },
+      stateId: implementing,
+    })
+    expect(warnings).toContainEqual([
+      `[factory-sdk] Linear writeback read-back verification failed for ${issuePath(26)}; treating getOp ack as success`,
+    ])
+  })
+
   it('closes a synthetic probe PR after done writebacks and before release when mergePolicy is never', async () => {
     const order: string[] = []
     class OrderedSlackMountClient extends CloudWritebackFakeMountClient {
