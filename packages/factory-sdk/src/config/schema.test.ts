@@ -23,6 +23,9 @@ describe('FactoryConfigSchema', () => {
       labels: [],
       assignees: [],
     })
+    expect(parsed.mount).toEqual({
+      backend: 'relayfile-cloud',
+    })
     expect(parsed.repos.byProject).toEqual({})
     expect(parsed.repos.keywordRules).toEqual([])
     expect(parsed.repos.clonePaths).toEqual({})
@@ -54,5 +57,25 @@ describe('FactoryConfigSchema', () => {
       },
       batchSize: 6,
     })).toThrow()
+  })
+
+  it('parses the relayfile mirror mount backend', () => {
+    const parsed = FactoryConfigSchema.parse({
+      workspaceId: 'rw_123',
+      mount: {
+        backend: 'relayfile-mirror',
+        mirrorDir: '/tmp/factory-rf-mirror',
+      },
+      repos: {
+        byLabel: {
+          pear: 'AgentWorkforce/pear',
+        },
+      },
+    })
+
+    expect(parsed.mount).toEqual({
+      backend: 'relayfile-mirror',
+      mirrorDir: '/tmp/factory-rf-mirror',
+    })
   })
 })

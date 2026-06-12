@@ -1,6 +1,7 @@
 import { FactoryConfigSchema, type FactoryConfig } from '../config/schema'
 import { linearByStatePath } from '../constants/linear'
 import { GithubMergeGate, closeProbePr, type GithubMergeGate as GithubMergeGatePort } from '../github'
+import { createMount } from '../mount/create-mount'
 import type { AgentSpec, FleetClient, LinearWriteback, MountClient, SlackWriteback, Subscription } from '../ports'
 import type { Clock, Logger } from '../ports/system'
 import { isInFactoryScope } from '../safety/factory-scope'
@@ -63,16 +64,21 @@ export class FactoryLoop implements Factory {
   #started = false
 
   constructor(config: FactoryConfig, ports: FactoryPorts) {
+    const mount = ports.mount ?? createMount({
+      ...config.mount,
+      workspaceId: config.mount.workspaceId ?? config.workspaceId,
+    })
+
     this.#config = config
-    this.#mount = ports.mount
+    this.#mount = mount
     this.#fleet = ports.fleet
     this.#triage = ports.triage ?? new TieredTriage(new HeuristicTriage())
-    this.#linear = ports.linear ?? MountLinearWriteback(ports.mount, {
+    this.#linear = ports.linear ?? MountLinearWriteback(mount, {
       stateIds: config.stateIds,
       safety: config.safety,
     })
-    this.#slack = ports.slack ?? (config.slack ? MountSlackWriteback(ports.mount, config.slack) : undefined)
-    void (ports.github ?? MountGithubRead(ports.mount))
+    this.#slack = ports.slack ?? (config.slack ? MountSlackWriteback(mount, config.slack) : undefined)
+    void (ports.github ?? MountGithubRead(mount))
     this.#mergeGate = ports.mergeGate ?? new GithubMergeGate()
     this.#probeCloser = ports.probeCloser ?? closeProbePr
     this.#probePrResolver = ports.probePrResolver ?? ((issue) => resolveProbePrFromMount(this.#mount, this.#config, issue))

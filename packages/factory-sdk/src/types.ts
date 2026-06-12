@@ -5,7 +5,7 @@ import type { CloseProbePrInput, CloseProbePrResult } from './github/probe-close
 import type { GithubMergeGate } from './github/merge-gate'
 
 export interface FactoryPorts {
-  mount: MountClient
+  mount?: MountClient
   fleet: FleetClient
   triage?: TriageEngine
   linear?: LinearWriteback

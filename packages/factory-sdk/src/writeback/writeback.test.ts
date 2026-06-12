@@ -112,7 +112,17 @@ describe('MountLinearWriteback', () => {
     const linear = MountLinearWriteback(mount)
 
     await expect(linear.setState(issue, 'implementing-state')).rejects.toThrow(/not acked/)
-    expect(await linear.verify(issue, { stateId: 'implementing-state' })).toBe(true)
+    expect(await linear.verify(issue, { stateId: 'implementing-state' })).toBe(false)
+  })
+
+  it('does not verify queued state writebacks as done even when local read-back matches', async () => {
+    const mount = new FakeMountClient({
+      [issuePath]: wrappedIssueRecord({ stateId: 'implementing-state' }),
+    })
+    mount.setConfirmWrite(issuePath, 'pending')
+    const linear = MountLinearWriteback(mount)
+
+    await expect(linear.verify(issue, { stateId: 'implementing-state' })).resolves.toBe(false)
   })
 
   it('surfaces stale writebacks instead of swallowing read-back failures', async () => {
@@ -452,6 +462,21 @@ describe('createFactory writeback defaults', () => {
 
     expect(() => createFactory(config, {
       mount: new FakeMountClient(),
+      fleet: new FakeFleetClient(),
+    })).not.toThrow()
+  })
+
+  it('constructs a mirror mount from config when the mount port is omitted', () => {
+    const config = FactoryConfigSchema.parse({
+      workspaceId: 'rw_test',
+      mount: {
+        backend: 'relayfile-mirror',
+        mirrorDir: '/tmp/factory-rf-mirror',
+      },
+      repos: { byLabel: { factory: 'AgentWorkforce/pear' } },
+    })
+
+    expect(() => createFactory(config, {
       fleet: new FakeFleetClient(),
     })).not.toThrow()
   })

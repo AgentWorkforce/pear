@@ -34,6 +34,17 @@ export type {
   InternalFleetClientOptions,
 } from './fleet/internal-fleet-client'
 export { RelayFleetClient } from './fleet/relay-fleet-client'
+export { createMount } from './mount/create-mount'
+export type {
+  CreateMountConfig,
+  MountBackend,
+} from './mount/create-mount'
+export {
+  LocalMirrorMountClient,
+} from './mount/local-mirror-mount-client'
+export type {
+  LocalMirrorMountClientConfig,
+} from './mount/local-mirror-mount-client'
 export {
   RelayfileCloudMountClient,
 } from './mount/relayfile-cloud-mount-client'

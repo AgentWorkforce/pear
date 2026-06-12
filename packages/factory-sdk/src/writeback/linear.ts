@@ -125,6 +125,9 @@ const confirmWriteback = async (
   }
 }
 
+const verifyAcked = async (mount: MountClient, path: string): Promise<boolean> =>
+  await mount.confirmWrite(path, { timeoutMs: 90_000 }) === 'acked'
+
 export const MountLinearWriteback = (
   mount: MountClient,
   configOrStateIds?: LinearStateIds | MountLinearWritebackConfig,
@@ -169,13 +172,16 @@ export const MountLinearWriteback = (
     ): Promise<boolean> {
       try {
         if (expect.stateId) {
+          if (!await verifyAcked(mount, issuePath(issue))) return false
           const { content } = await mount.readFile(issuePath(issue))
           const payload = wrappedPayload(content)
           return payload.stateId === expect.stateId
         }
 
         if (expect.commentName) {
-          const { content } = await mount.readFile(linearCommentPath(issuePath(issue), expect.commentName))
+          const path = linearCommentPath(issuePath(issue), expect.commentName)
+          if (!await verifyAcked(mount, path)) return false
+          const { content } = await mount.readFile(path)
           const payload = wrappedPayload(content)
           return payload.issue_id === issue.uuid && payload.issueId === issue.uuid
         }

@@ -4,6 +4,11 @@ import { LINEAR_STATE_IDS } from '../constants/linear'
 
 export const FactoryConfigSchema = z.object({
   workspaceId: z.string(),
+  mount: z.object({
+    backend: z.enum(['relayfile-cloud', 'relayfile-mirror']).default('relayfile-cloud'),
+    workspaceId: z.string().optional(),
+    mirrorDir: z.string().optional(),
+  }).default({}),
   subscription: z.object({
     teams: z.array(z.string()).default([]),
     projects: z.array(z.string()).default([]),
