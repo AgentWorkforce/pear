@@ -16,6 +16,9 @@ export interface EventPage {
 export interface MountClient {
   readFile(path: string): Promise<{ content: unknown; revision?: string }>
   writeFile(path: string, content: unknown, opts?: { guarded?: boolean }): Promise<void>
+  setDefaultAllowedDraftPredicate?(
+    predicate: (path: string, content: unknown, opts?: { guarded?: boolean }) => boolean | Promise<boolean>,
+  ): void
   listTree(prefix: string): Promise<string[]>
   subscribe(globs: string[], onChange: (event: ChangeEvent) => void, opts?: SubscribeOptions): Subscription
   getEvents(opts: { cursor?: string; limit?: number }): Promise<EventPage>

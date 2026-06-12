@@ -63,7 +63,7 @@ export class RelayfileCloudMountClient implements MountClient {
   readonly #tokenProvider: TokenProvider
   readonly #baseUrl?: string
   readonly #eventClient?: RelayfileEventClient
-  readonly #isAllowedDraft?: (path: string, content: unknown, opts?: { guarded?: boolean }) => boolean | Promise<boolean>
+  #isAllowedDraft?: (path: string, content: unknown, opts?: { guarded?: boolean }) => boolean | Promise<boolean>
   readonly #lastOpByPath = new Map<string, string>()
 
   constructor(config: RelayfileCloudMountClientConfig = {}) {
@@ -77,6 +77,12 @@ export class RelayfileCloudMountClient implements MountClient {
     this.#baseUrl = config.baseUrl ?? this.#client.getBaseUrl?.()
     this.#eventClient = config.eventClient
     this.#isAllowedDraft = config.isAllowedDraft
+  }
+
+  setDefaultAllowedDraftPredicate(
+    predicate: (path: string, content: unknown, opts?: { guarded?: boolean }) => boolean | Promise<boolean>,
+  ): void {
+    this.#isAllowedDraft ??= predicate
   }
 
   static async fromConfig(config: RelayfileCloudMountClientConfig = {}): Promise<RelayfileCloudMountClient> {

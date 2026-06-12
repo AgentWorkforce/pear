@@ -74,6 +74,11 @@ const readIssuePayloadForGuard = async (
   }
 }
 
+interface CachedIssuePayload {
+  payload: Record<string, unknown>
+  writable: Record<string, unknown>
+}
+
 const createIssuePath = (payload: LinearCreateIssuePayload): string => {
   const identifier = typeof payload.identifier === 'string' && payload.identifier ? payload.identifier : undefined
   const id = typeof payload.id === 'string' && payload.id ? payload.id : undefined
@@ -109,16 +114,87 @@ export const MountLinearWriteback = (
   configOrStateIds?: LinearStateIds | MountLinearWritebackConfig,
 ) => {
   const safety = safetyFromConfig(configOrStateIds)
+  const canonicalByPath = new Map<string, CachedIssuePayload>()
+
+  const seedCanonical = (
+    path: string,
+    payload: Record<string, unknown>,
+  ): CachedIssuePayload | undefined => {
+    if (!payloadInFactoryScope(payload, safety)) return undefined
+    const canonical = {
+      payload: { ...payload },
+      writable: createIssueWritePayload(payload),
+    }
+    canonicalByPath.set(path, canonical)
+    return canonical
+  }
+
+  const rawIssuePayload = (issue: LinearIssue): Record<string, unknown> =>
+    wrappedPayload(issue.raw)
+
+  const canonicalForIssue = async (issue: LinearIssue): Promise<CachedIssuePayload> => {
+    const path = issuePath(issue)
+    const rawPayload = rawIssuePayload(issue)
+    let canonical = canonicalByPath.get(path)
+    if (payloadInFactoryScope(rawPayload, safety)) {
+      canonical = seedCanonical(path, rawPayload)
+    } else if (!canonical) {
+      throw new Error(`Refusing Linear writeback for ${issue.key}: missing title-bearing canonical issue payload`)
+    }
+    if (!canonical) {
+      throw new Error(`Refusing Linear writeback for ${issue.key}: missing title-bearing canonical issue payload`)
+    }
+
+    const livePayload = await readIssuePayloadForGuard(mount, issue)
+    if (payloadInFactoryScope(livePayload, safety)) {
+      seedCanonical(path, livePayload)
+      return canonical
+    }
+
+    if (isStateOnlyDraft(livePayload)) {
+      const cached = canonicalByPath.get(path)
+      if (cached) return cached
+      throw new Error(`Refusing Linear writeback for ${issue.key}: missing title-bearing canonical issue payload`)
+    }
+
+    assertInFactoryScope(scopeIssueFromPayload(livePayload, issue.key), safety)
+    throw new Error(`Refusing Linear writeback for ${issue.key}: missing title-bearing canonical issue payload`)
+  }
+
+  const updateCanonicalState = (
+    path: string,
+    issue: LinearIssue,
+    canonical: CachedIssuePayload,
+    stateId: string,
+  ): void => {
+    const payload = { ...canonical.payload, stateId }
+    canonicalByPath.set(path, {
+      payload,
+      writable: { ...canonical.writable, stateId },
+    })
+    issue.stateId = stateId
+    const rawPayload = asRecord(issue.raw.payload)
+    issue.raw = rawPayload
+      ? { ...issue.raw, payload: { ...rawPayload, stateId } }
+      : { ...issue.raw, stateId }
+  }
+
   const adapter = {
     async setState(issue: LinearIssue, stateId: string): Promise<void> {
-      assertInFactoryScope(scopeIssueFromPayload(await readIssuePayloadForGuard(mount, issue), issue.key), safety)
       const path = issuePath(issue)
-      await mount.writeFile(path, { stateId }, { guarded: true })
+      const canonical = await canonicalForIssue(issue)
+      assertInFactoryScope(scopeIssueFromPayload(canonical.payload, issue.key), safety)
+      await mount.writeFile(path, {
+        ...canonical.writable,
+        stateId,
+      }, { guarded: true })
+      updateCanonicalState(path, issue, canonical, stateId)
       await confirmWriteback(mount, path, () => verifyStateReadback(mount, issue, stateId))
     },
 
     async postComment(issue: LinearIssue, body: string): Promise<void> {
-      assertInFactoryScope(scopeIssueFromPayload(await readIssuePayloadForGuard(mount, issue), issue.key), safety)
+      const canonical = await canonicalForIssue(issue)
+      assertInFactoryScope(scopeIssueFromPayload(canonical.payload, issue.key), safety)
       const name = linearCommentName(issue, body)
       const path = linearCommentPath(issuePath(issue), name)
       await mount.writeFile(path, linearCommentPayload(issue, body), { guarded: true })
@@ -128,6 +204,7 @@ export const MountLinearWriteback = (
     async createIssue(payload: LinearCreateIssuePayload): Promise<{ path: string }> {
       assertInFactoryScope(scopeIssueFromPayload(payload, 'createIssue payload'), safety, 'createIssue payload')
       const path = createIssuePath(payload)
+      seedCanonical(path, payload)
       await mount.writeFile(path, createIssueWritePayload(payload), { guarded: true })
       await confirmWriteback(mount, path, async () => {
         try {
@@ -161,6 +238,11 @@ export const MountLinearWriteback = (
   }
 
   return adapter
+}
+
+const isStateOnlyDraft = (payload: Record<string, unknown>): boolean => {
+  const keys = Object.keys(payload)
+  return keys.length === 1 && keys[0] === 'stateId' && typeof payload.stateId === 'string'
 }
 
 const verifyStateReadback = async (

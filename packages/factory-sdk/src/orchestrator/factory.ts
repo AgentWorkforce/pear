@@ -72,6 +72,7 @@ export class FactoryLoop implements Factory {
   constructor(config: FactoryConfig, ports: FactoryPorts) {
     this.#config = config
     this.#mount = ports.mount
+    installFactoryDraftPredicate(this.#mount, config)
     this.#fleet = ports.fleet
     this.#triage = ports.triage ?? new TieredTriage(new HeuristicTriage())
     this.#linear = ports.linear ?? MountLinearWriteback(ports.mount, {
@@ -189,6 +190,11 @@ export class FactoryLoop implements Factory {
 
   async dispatch(decision: TriageDecision, opts: { dryRun?: boolean } = {}): Promise<DispatchResult> {
     const dryRun = opts.dryRun ?? this.#config.dryRun
+    const existingRecord = this.#batch.getIssue(decision.issue)
+    if (existingRecord?.result) {
+      return existingRecord.result
+    }
+
     const liveIssue = await this.#readIssue(decision.issue.path)
     if (!liveIssue || !isInFactoryScope(liveIssue, this.#config.safety)) {
       const error = new Error(`Refusing to dispatch ${decision.issue.key}: not factory-e2e scope`)
@@ -741,6 +747,60 @@ const stringValue = (value: unknown): string | undefined => typeof value === 'st
 
 const stateNameToId = (name: string | undefined): string | undefined =>
   name ? STATE_NAME_TO_ID[name] : undefined
+
+const installFactoryDraftPredicate = (mount: MountClient, config: FactoryConfig): void => {
+  mount.setDefaultAllowedDraftPredicate?.((path, content, opts) =>
+    isAllowedFactoryDraft(path, content, opts, mount, config))
+}
+
+const isAllowedFactoryDraft = async (
+  path: string,
+  content: unknown,
+  opts: { guarded?: boolean } | undefined,
+  mount: MountClient,
+  config: FactoryConfig,
+): Promise<boolean> => {
+  if (!opts?.guarded) return false
+
+  if (path.startsWith('/linear/issues/')) {
+    if (isInFactoryScope(scopeIssueFromDraftContent(content), config.safety)) return true
+    return isIssuePathInFactoryScope(mount, path, config)
+  }
+
+  if (path.startsWith('/linear/comments/')) {
+    const issueKey = path.split('/').at(-1)?.split('__')[0]
+    if (!issueKey) return false
+    const candidates = await mount.listTree('/linear/issues/')
+    const issuePath = candidates.find((candidate) => candidate.startsWith(`/linear/issues/${issueKey}__`))
+    return issuePath ? isIssuePathInFactoryScope(mount, issuePath, config) : false
+  }
+
+  if (/^\/slack\/channels\/[^/]+\/messages\/.+/u.test(path)) {
+    return true
+  }
+
+  return false
+}
+
+const isIssuePathInFactoryScope = async (
+  mount: MountClient,
+  path: string,
+  config: FactoryConfig,
+): Promise<boolean> => {
+  try {
+    return isInFactoryScope(parseLinearIssue(path, (await mount.readFile(path)).content), config.safety)
+  } catch {
+    return false
+  }
+}
+
+const scopeIssueFromDraftContent = (content: unknown) => ({
+  title: typeof asRecord(content)?.title === 'string' ? asRecord(content)?.title as string : '',
+  team: typeof asRecord(asRecord(content)?.team)?.key === 'string'
+    ? asRecord(asRecord(content)?.team)?.key as string
+    : undefined,
+  raw: asRecord(content) ?? {},
+})
 
 const recordName = (value: unknown): string | undefined => {
   if (typeof value === 'string') {
