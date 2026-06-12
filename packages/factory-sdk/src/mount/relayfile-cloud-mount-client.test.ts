@@ -20,6 +20,7 @@ class FakeRelayFileClient implements RelayFileClientLike {
   readonly listTreeCalls: Array<{ workspaceId: string; options?: { path?: string; depth?: number; cursor?: string } }> = []
   readonly getEventsCalls: Array<{ workspaceId: string; opts?: { cursor?: string; limit?: number } }> = []
   readonly getOpCalls: Array<{ workspaceId: string; opId: string }> = []
+  getSyncStatus?: RelayFileClientLike['getSyncStatus']
 
   files = new Map<string, { revision: string; content: string; contentType: string }>()
   ops = new Map<string, OperationStatusResponse>()
@@ -162,6 +163,30 @@ describe('RelayfileCloudMountClient', () => {
       options: { path: '/linear/issues', cursor: undefined },
     })
     expect(fake.getEventsCalls[0]).toEqual({ workspaceId: 'rw_test', opts: { cursor: 'evt-0', limit: 10 } })
+  })
+
+  it('normalizes nested provider sync freshness from integration metadata', async () => {
+    const fake = new FakeRelayFileClient()
+    fake.getSyncStatus = vi.fn(async () => ({
+      provider: 'slack',
+      connections: [{
+        provider: 'slack',
+        status: 'ready',
+        lastEventAt: '2026-06-12T10:00:00.000Z',
+        lagSeconds: 42,
+      }],
+    }))
+    const mount = new RelayfileCloudMountClient({ workspaceId: 'rw_test', client: fake })
+
+    await expect(mount.getSyncStatus?.('slack')).resolves.toEqual({
+      provider: 'slack',
+      status: 'ready',
+      lastEventAt: '2026-06-12T10:00:00.000Z',
+      lastEventAtMs: Date.parse('2026-06-12T10:00:00.000Z'),
+      watermarkTs: '2026-06-12T10:00:00.000Z',
+      lagSeconds: 42,
+    })
+    expect(fake.getSyncStatus).toHaveBeenCalledWith('rw_test', { provider: 'slack' })
   })
 
   it('selects the numeric event high-watermark instead of lexicographic max', async () => {

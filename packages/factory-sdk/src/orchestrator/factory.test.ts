@@ -1214,9 +1214,47 @@ describe('FactoryLoop', () => {
     expect(warnings.filter((warning) => warning[0] === '[factory] Slack sync degraded; skipping Slack writeback')).toHaveLength(1)
   })
 
+  it('treats live-shaped bare Slack sync status with zero Slack events as degraded', async () => {
+    const mount = new SlackSyncStatusMount({
+      [issuePath(50)]: issueFile(50),
+      [issuePath(51)]: issueFile(51),
+    })
+    mount.slackStatus = { provider: 'slack' }
+    const fleet = new FakeFleetClient()
+    const warnings: unknown[][] = []
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      logger: {
+        warn: (...args: unknown[]) => warnings.push(args),
+        error: () => undefined,
+      },
+    })
+
+    const report = await factory.runOnce()
+
+    expect(report.dispatched.map((result) => result.issue.key)).toEqual(['AR-50', 'AR-51'])
+    expect(mount.writes.filter((write) => isSlackRootWritePath(write.path))).toEqual([])
+    expect(mount.writes.filter((write) =>
+      write.path.startsWith('/linear/issues/') &&
+      (write.content as { stateId?: string }).stateId === implementing,
+    )).toHaveLength(2)
+    expect(factory.status()).toMatchObject({
+      slackDegraded: true,
+      slackDegradedReason: 'slack sync has no recent event watermark',
+      counters: {
+        dispatched: 2,
+        slackDegradedEpisodes: 1,
+        slackWritebacksSkipped: 2,
+      },
+    })
+    expect(warnings.filter((warning) => warning[0] === '[factory] Slack sync degraded; skipping Slack writeback')).toHaveLength(1)
+  })
+
   it('does not skip Slack writeback when sync is healthy', async () => {
     const mount = new SlackSyncStatusMount({ [issuePath(47)]: issueFile(47) })
-    mount.slackStatus = { provider: 'slack', status: 'healthy', lastEventAtMs: Date.now() }
+    mount.slackStatus = { provider: 'slack', lastEventAt: new Date().toISOString() }
     const fleet = new FakeFleetClient()
     const factory = createFactory(config({ slack: slackConfig() }), {
       mount,
@@ -1270,6 +1308,47 @@ describe('FactoryLoop', () => {
     })
     expect(warnings.filter((warning) => warning[0] === '[factory] Slack sync degraded; skipping Slack writeback')).toHaveLength(1)
     expect(infos.filter((info) => info[0] === '[factory] Slack sync recovered; resuming Slack writeback')).toHaveLength(1)
+  })
+
+  it('marks Slack degraded after one writeback failure and skips the next cycle without retrying', async () => {
+    const mount = new FailSlackRootMountClient({
+      [issuePath(52)]: issueFile(52),
+      [issuePath(53)]: issueFile(53),
+    })
+    const fleet = new FakeFleetClient()
+    const warnings: unknown[][] = []
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      logger: {
+        warn: (...args: unknown[]) => warnings.push(args),
+        error: () => undefined,
+      },
+    })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(52), issueFile(52))))
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(53), issueFile(53))))
+
+    const slackRoots = mount.writes.filter((write) => isSlackRootWritePath(write.path))
+    expect(slackRoots).toHaveLength(1)
+    expect((slackRoots[0]?.content as { text?: string }).text).toContain('AR-52: factory agents dispatched.')
+    expect(mount.writes.filter((write) =>
+      write.path.startsWith('/linear/issues/') &&
+      (write.content as { stateId?: string }).stateId === implementing,
+    )).toHaveLength(2)
+    expect(factory.status()).toMatchObject({
+      slackDegraded: true,
+      counters: {
+        dispatched: 2,
+        slackDegradedEpisodes: 1,
+        slackWritebacksSkipped: 1,
+      },
+    })
+    expect(factory.status().slackDegradedReason).toMatch(/slack writeback failed/)
+    expect(warnings.filter((warning) =>
+      warning[0] === '[factory] Slack writeback failed; marking Slack degraded',
+    )).toHaveLength(1)
   })
 
   it('watches the in-flight factory Slack thread and replies to a human status request with live state, roster, and PR', async () => {
