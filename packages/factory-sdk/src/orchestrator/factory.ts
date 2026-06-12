@@ -4,7 +4,7 @@ import { dirname } from 'node:path'
 import { FactoryConfigSchema, type FactoryConfig } from '../config/schema'
 import { LINEAR_STATE_IDS, linearByStatePath } from '../constants/linear'
 import { GithubMergeGate, closeProbePr, type GithubMergeGate as GithubMergeGatePort } from '../github'
-import type { AgentSpec, ChangeEvent, FleetClient, LinearWriteback, MountClient, ProviderSyncStatus, SlackWriteback, Subscription } from '../ports'
+import type { AgentSpec, ChangeEvent, FleetClient, LinearWriteback, MountClient, ProviderSyncStatus, SlackWriteback, SpawnInput, Subscription } from '../ports'
 import type { Clock, Logger } from '../ports/system'
 import { isInFactoryScope } from '../safety/factory-scope'
 import { renderAgentTask } from '../dispatch/templates'
@@ -815,20 +815,24 @@ export class FactoryLoop implements Factory {
       return { name: spec.name }
     }
 
+    const spawnInput: SpawnInput = {
+      name: spec.name,
+      capability: spec.capability,
+      node: spec.node ?? 'self',
+      task: spec.task,
+      cwd: spec.clonePath,
+      sessionRef: spec.sessionRef,
+      invocationId,
+      restartPolicy: spec.restartPolicy ?? defaultRestartPolicy(spec),
+      channel: spec.channel,
+    }
+    if (spec.model !== undefined) {
+      spawnInput.model = spec.model
+    }
+
     let result
     try {
-      result = await this.#fleet.spawn({
-        name: spec.name,
-        capability: spec.capability,
-        node: spec.node ?? 'self',
-        task: spec.task,
-        model: spec.model,
-        cwd: spec.clonePath,
-        sessionRef: spec.sessionRef,
-        invocationId,
-        restartPolicy: spec.restartPolicy ?? defaultRestartPolicy(spec),
-        channel: spec.channel,
-      })
+      result = await this.#fleet.spawn(spawnInput)
     } catch (error) {
       throw contextualError(
         `Dispatch spawn failed for ${record.issue.key}/${spec.name} (${spec.capability}) cwd=${spec.clonePath ?? 'default'}`,
@@ -885,18 +889,22 @@ export class FactoryLoop implements Factory {
         }
       } else {
         const invocationId = `${this.#batch.invocationIdFor(record.issue, tracked.spec)}:restart:${this.#clock.now()}`
-        const result = await this.#fleet.spawn({
+        const spawnInput: SpawnInput = {
           name: tracked.spec.name,
           capability: tracked.spec.capability,
           node: tracked.spec.node ?? 'self',
           task: tracked.spec.task,
-          model: tracked.spec.model,
           cwd: tracked.spec.clonePath,
           sessionRef: tracked.spec.sessionRef,
           invocationId,
           restartPolicy: defaultRestartPolicy(tracked.spec),
           channel: tracked.spec.channel,
-        })
+        }
+        if (tracked.spec.model !== undefined) {
+          spawnInput.model = tracked.spec.model
+        }
+
+        const result = await this.#fleet.spawn(spawnInput)
         this.#batch.recordSpawn(record, tracked.spec, invocationId, result)
       }
     } catch (error) {

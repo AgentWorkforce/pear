@@ -1016,11 +1016,13 @@ describe('FactoryLoop', () => {
       capability: 'spawn:codex',
     })
     expect(fleet.spawns[0]!.model).toBeUndefined()
+    expect(fleet.spawns[0]).not.toHaveProperty('model')
     expect(fleet.spawns[1]).toMatchObject({
       name: 'ar-66-review',
       capability: 'spawn:claude',
     })
     expect(fleet.spawns[1]!.model).toBeUndefined()
+    expect(fleet.spawns[1]).not.toHaveProperty('model')
   })
 
   it('backs off dispatch errors and enforces a retry gap before the bounded terminal attempt', async () => {

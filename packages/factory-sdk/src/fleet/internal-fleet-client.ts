@@ -80,16 +80,20 @@ export class InternalFleetClient implements FleetClient {
   async spawn(input: SpawnInput): Promise<SpawnResult> {
     assertSelfNode(input.node)
 
-    const handle = await this.#client.spawnPty({
+    const spawnInput: SpawnPtyInput = {
       name: input.name,
       cli: capabilityCli[input.capability],
       channels: input.channel ? [input.channel] : undefined,
       task: input.task,
-      model: input.model,
       cwd: input.cwd ?? this.#cwd,
       restartPolicy: input.restartPolicy,
       continueFrom: input.sessionRef,
-    })
+    }
+    if (input.model !== undefined) {
+      spawnInput.model = input.model
+    }
+
+    const handle = await this.#client.spawnPty(spawnInput)
 
     this.#clearAgentExitLatch(handle.name)
 

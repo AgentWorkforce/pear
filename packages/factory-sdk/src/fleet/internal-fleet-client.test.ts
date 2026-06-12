@@ -136,6 +136,25 @@ describe('InternalFleetClient', () => {
     })
   })
 
+  it('omits model from harness spawn input when no model is configured', async () => {
+    const harness = new FakeHarnessDriverClient()
+    const fleet = new InternalFleetClient({ client: harness, cwd: '/default' })
+
+    await fleet.spawn({
+      name: 'ar-1-impl',
+      capability: 'spawn:codex',
+      task: 'do work',
+    })
+
+    expect(harness.spawned[0]).toMatchObject({
+      name: 'ar-1-impl',
+      cli: 'codex',
+      task: 'do work',
+      cwd: '/default',
+    })
+    expect(harness.spawned[0]).not.toHaveProperty('model')
+  })
+
   it('resumes by passing continueFrom to spawnPty', async () => {
     const harness = new FakeHarnessDriverClient()
     harness.nextSessionRef = 'resumed-session'
