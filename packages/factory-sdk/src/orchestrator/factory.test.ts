@@ -152,6 +152,59 @@ class RecordingSlack implements SlackWriteback {
   }
 }
 
+class CloudWritebackFakeMountClient extends FakeMountClient {
+  constructor(initialFiles: Record<string, unknown> = {}, readonly threadTs = '1780751612.176219') {
+    super(initialFiles)
+  }
+
+  override async writeFile(path: string, content: unknown, opts?: { guarded?: boolean }): Promise<void> {
+    await super.writeFile(path, content, opts)
+    if (isSlackRootWritePath(path)) {
+      this.files.set(path, {
+        content: {
+          provider: 'slack',
+          objectType: 'message',
+          payload: {
+            ...record(content),
+            ts: this.threadTs,
+            thread_ts: this.threadTs,
+          },
+        },
+      })
+    }
+  }
+}
+
+class ConfirmRecordingSlackMountClient extends CloudWritebackFakeMountClient {
+  readonly confirmedPaths: string[] = []
+
+  override async confirmWrite(path: string, opts?: { timeoutMs?: number }): Promise<'acked' | 'pending' | 'failed' | 'timeout'> {
+    this.confirmedPaths.push(path)
+    return super.confirmWrite(path, opts)
+  }
+}
+
+class FailFirstSlackReplyMountClient extends CloudWritebackFakeMountClient {
+  failedReply = false
+
+  override async confirmWrite(path: string, opts?: { timeoutMs?: number }): Promise<'acked' | 'pending' | 'failed' | 'timeout'> {
+    if (!this.failedReply && path.includes('/replies/')) {
+      this.failedReply = true
+      return 'failed'
+    }
+    return super.confirmWrite(path, opts)
+  }
+}
+
+class FailSlackRootMountClient extends CloudWritebackFakeMountClient {
+  override async confirmWrite(path: string, opts?: { timeoutMs?: number }): Promise<'acked' | 'pending' | 'failed' | 'timeout'> {
+    if (isSlackRootWritePath(path)) {
+      return 'failed'
+    }
+    return super.confirmWrite(path, opts)
+  }
+}
+
 describe('FactoryLoop', () => {
   it('parses wrapped Linear issue records', () => {
     expect(parseLinearIssue(issuePath(1), issueFile(1))).toMatchObject({
@@ -795,7 +848,17 @@ describe('FactoryLoop', () => {
 
   it('closes a synthetic probe PR after done writebacks and before release when mergePolicy is never', async () => {
     const order: string[] = []
-    const mount = new FakeMountClient({
+    class OrderedSlackMountClient extends CloudWritebackFakeMountClient {
+      override async writeFile(path: string, content: unknown, opts?: { guarded?: boolean }): Promise<void> {
+        if (isSlackRootWritePath(path)) {
+          order.push('slack-root')
+        } else if (path.includes('/replies/')) {
+          order.push('slack-reply')
+        }
+        await super.writeFile(path, content, opts)
+      }
+    }
+    const mount = new OrderedSlackMountClient({
       [issuePath(18)]: issueFile(18),
       '/github/repos/AgentWorkforce__pear/pulls/by-id/18.json': {
         provider: 'github',
@@ -830,22 +893,12 @@ describe('FactoryLoop', () => {
         return true
       },
     }
-    const slack: SlackWriteback = {
-      async postThread() {
-        order.push('slack-root')
-        return { threadId: 'thread-1' }
-      },
-      async reply() {
-        order.push('slack-reply')
-      },
-    }
     const closeInputs: Array<Pick<CloseProbePrInput, 'repo' | 'prNumber' | 'expectedIssueKey'>> = []
     const factory = createFactory(config({ slack: slackConfig('C0FACTORY') }), {
       mount,
       fleet,
       triage: new StaticTriage(),
       linear,
-      slack,
       probeCloser: async (input) => {
         order.push('probe-close')
         closeInputs.push(input)
@@ -927,7 +980,7 @@ describe('FactoryLoop', () => {
   })
 
   it('watches the in-flight factory Slack thread and replies to a human status request with live state, roster, and PR', async () => {
-    const mount = new FakeMountClient({ [issuePath(24)]: issueFile(24) })
+    const mount = new ConfirmRecordingSlackMountClient({ [issuePath(24)]: issueFile(24) })
     const fleet = new FakeFleetClient()
     const slack = new RecordingSlack()
     const factory = createFactory(config({ slack: slackConfig() }), {
@@ -948,17 +1001,20 @@ describe('FactoryLoop', () => {
     await flush()
     await flush()
 
-    expect(slack.replies).toHaveLength(1)
-    expect(slack.replies[0]).toMatchObject({ threadId: slack.threadId })
-    expect(slack.replies[0]?.text).toContain('AR-24')
-    expect(slack.replies[0]?.text).toContain(implementing)
-    expect(slack.replies[0]?.text).toContain('ar-24-impl')
-    expect(slack.replies[0]?.text).toContain('ar-24-review')
-    expect(slack.replies[0]?.text).toContain('https://github.com/AgentWorkforce/pear/pull/240')
+    const replies = slackReplyWrites(mount)
+    expect(slack.replies).toEqual([])
+    expect(replies).toHaveLength(1)
+    expect(replies[0]?.content.thread_ts).toBe(slack.threadId)
+    expect(replies[0]?.content.text).toContain('AR-24')
+    expect(replies[0]?.content.text).toContain(implementing)
+    expect(replies[0]?.content.text).toContain('ar-24-impl')
+    expect(replies[0]?.content.text).toContain('ar-24-review')
+    expect(replies[0]?.content.text).toContain('https://github.com/AgentWorkforce/pear/pull/240')
+    expect(mount.confirmedPaths.filter((path) => path.includes('/replies/'))).toEqual([replies[0]?.path])
   })
 
   it('watches top-level inbound Slack thread replies keyed by real reply ts', async () => {
-    const mount = new FakeMountClient({ [issuePath(32)]: issueFile(32) })
+    const mount = new CloudWritebackFakeMountClient({ [issuePath(32)]: issueFile(32) })
     const fleet = new FakeFleetClient()
     const slack = new RecordingSlack()
     const factory = createFactory(config({ slack: slackConfig() }), {
@@ -978,15 +1034,17 @@ describe('FactoryLoop', () => {
     await flush()
     await flush()
 
-    expect(slack.replies).toHaveLength(1)
-    expect(slack.replies[0]).toMatchObject({ threadId: slack.threadId })
+    const replies = slackReplyWrites(mount)
+    expect(slack.replies).toEqual([])
+    expect(replies).toHaveLength(1)
+    expect(replies[0]?.content.thread_ts).toBe(slack.threadId)
   })
 
   it.each([
     ['user_is_bot marker', { user: 'U-BOT-MIRROR', user_is_bot: true }],
     ['configured bot user id', { user: 'U0B2596R7EZ', user_is_bot: false }],
   ])('degraded self-ignore: inbound %s is ignored', async (_name, marker) => {
-    const mount = new FakeMountClient({ [issuePath(33)]: issueFile(33) })
+    const mount = new CloudWritebackFakeMountClient({ [issuePath(33)]: issueFile(33) })
     const fleet = new FakeFleetClient()
     const slack = new RecordingSlack()
     const factory = createFactory(config({ slack: slackConfig() }), {
@@ -1005,11 +1063,11 @@ describe('FactoryLoop', () => {
     await flush()
     await flush()
 
-    expect(slack.replies).toEqual([])
+    expect(slackReplyWrites(mount)).toEqual([])
   })
 
   it('degraded thread/channel guard: off-thread, mismatched-thread, and wrong-channel replies are skipped', async () => {
-    const mount = new FakeMountClient({ [issuePath(34)]: issueFile(34) })
+    const mount = new CloudWritebackFakeMountClient({ [issuePath(34)]: issueFile(34) })
     const fleet = new FakeFleetClient()
     const slack = new RecordingSlack()
     const factory = createFactory(config({ slack: slackConfig() }), {
@@ -1040,11 +1098,11 @@ describe('FactoryLoop', () => {
     await flush()
     await flush()
 
-    expect(slack.replies).toEqual([])
+    expect(slackReplyWrites(mount)).toEqual([])
   })
 
   it('degraded positive control: genuine human reply in the watched thread is answered', async () => {
-    const mount = new FakeMountClient({ [issuePath(35)]: issueFile(35) })
+    const mount = new CloudWritebackFakeMountClient({ [issuePath(35)]: issueFile(35) })
     const fleet = new FakeFleetClient()
     const slack = new RecordingSlack()
     const factory = createFactory(config({ slack: slackConfig() }), {
@@ -1064,12 +1122,13 @@ describe('FactoryLoop', () => {
     await flush()
     await flush()
 
-    expect(slack.replies).toHaveLength(1)
-    expect(slack.replies[0]?.text).toContain('AR-35')
+    const replies = slackReplyWrites(mount)
+    expect(replies).toHaveLength(1)
+    expect(replies[0]?.content.text).toContain('AR-35')
   })
 
   it('ignores the factory bot own Slack replies to avoid self-response loops', async () => {
-    const mount = new FakeMountClient({ [issuePath(25)]: issueFile(25) })
+    const mount = new CloudWritebackFakeMountClient({ [issuePath(25)]: issueFile(25) })
     const fleet = new FakeFleetClient()
     const slack = new RecordingSlack()
     const factory = createFactory(config({ slack: slackConfig() }), {
@@ -1089,11 +1148,11 @@ describe('FactoryLoop', () => {
     await flush()
     await flush()
 
-    expect(slack.replies).toEqual([])
+    expect(slackReplyWrites(mount)).toEqual([])
   })
 
   it('does not respond to Slack replies outside the watched factory-e2e issue thread', async () => {
-    const mount = new FakeMountClient({ [issuePath(26)]: issueFile(26) })
+    const mount = new CloudWritebackFakeMountClient({ [issuePath(26)]: issueFile(26) })
     const fleet = new FakeFleetClient()
     const slack = new RecordingSlack()
     const factory = createFactory(config({ slack: slackConfig() }), {
@@ -1123,11 +1182,11 @@ describe('FactoryLoop', () => {
     await flush()
     await flush()
 
-    expect(slack.replies).toEqual([])
+    expect(slackReplyWrites(mount)).toEqual([])
   })
 
   it('connects Slack reply watchers from now and does not reprocess pre-existing thread replies', async () => {
-    const mount = new FakeMountClient({ [issuePath(27)]: issueFile(27) })
+    const mount = new CloudWritebackFakeMountClient({ [issuePath(27)]: issueFile(27) })
     const fleet = new FakeFleetClient()
     const slack = new RecordingSlack()
     const oldPath = slackReplyFixturePath('C0FACTORY__factory-e2e', slack.threadId, 'old-human')
@@ -1147,7 +1206,7 @@ describe('FactoryLoop', () => {
     await flush()
     await flush()
 
-    expect(slack.replies).toEqual([])
+    expect(slackReplyWrites(mount)).toEqual([])
 
     emitSlackReply(mount, slackReplyFixturePath('C0FACTORY__factory-e2e', slack.threadId, 'new-human'), 'slack-new-human', {
       text: 'new status?',
@@ -1157,11 +1216,11 @@ describe('FactoryLoop', () => {
     await flush()
     await flush()
 
-    expect(slack.replies).toHaveLength(1)
+    expect(slackReplyWrites(mount)).toHaveLength(1)
   })
 
   it('dedupes duplicate inbound Slack reply delivery by event identity and content', async () => {
-    const mount = new FakeMountClient({ [issuePath(28)]: issueFile(28) })
+    const mount = new CloudWritebackFakeMountClient({ [issuePath(28)]: issueFile(28) })
     const fleet = new FakeFleetClient()
     const slack = new RecordingSlack()
     const factory = createFactory(config({ slack: slackConfig() }), {
@@ -1182,19 +1241,16 @@ describe('FactoryLoop', () => {
     await flush()
     await flush()
 
-    expect(slack.replies).toHaveLength(1)
+    expect(slackReplyWrites(mount)).toHaveLength(1)
   })
 
   it('treats Slack dispatch thread startup as best-effort after agents are dispatched', async () => {
-    const mount = new FakeMountClient({ [issuePath(29)]: issueFile(29) })
+    const mount = new FailSlackRootMountClient({ [issuePath(29)]: issueFile(29) })
     const fleet = new FakeFleetClient()
-    const slack = new RecordingSlack()
-    slack.failPostThread = true
     const factory = createFactory(config({ slack: slackConfig() }), {
       mount,
       fleet,
       triage: new StaticTriage(),
-      slack,
     })
 
     const result = await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(29), issueFile(29))))
@@ -1204,10 +1260,9 @@ describe('FactoryLoop', () => {
   })
 
   it('continues processing Slack reply events after one response fails', async () => {
-    const mount = new FakeMountClient({ [issuePath(30)]: issueFile(30) })
+    const mount = new FailFirstSlackReplyMountClient({ [issuePath(30)]: issueFile(30) })
     const fleet = new FakeFleetClient()
     const slack = new RecordingSlack()
-    slack.failReplies = 1
     const factory = createFactory(config({ slack: slackConfig() }), {
       mount,
       fleet,
@@ -1229,12 +1284,13 @@ describe('FactoryLoop', () => {
     await flush()
     await flush()
 
-    expect(slack.replies).toHaveLength(1)
-    expect(slack.replies[0]?.text).toContain('AR-30')
+    const replies = slackReplyWrites(mount)
+    expect(replies).toHaveLength(2)
+    expect(replies[1]?.content.text).toContain('AR-30')
   })
 
   it('uses numeric Slack reply event ids without dropping fresh low-seq replies', async () => {
-    const mount = new FakeMountClient({ [issuePath(31)]: issueFile(31) })
+    const mount = new CloudWritebackFakeMountClient({ [issuePath(31)]: issueFile(31) })
     const fleet = new FakeFleetClient()
     const slack = new RecordingSlack()
     const warnings: unknown[][] = []
@@ -1275,7 +1331,7 @@ describe('FactoryLoop', () => {
     await flush()
     await flush()
 
-    expect(slack.replies).toHaveLength(1)
+    expect(slackReplyWrites(mount)).toHaveLength(1)
     expect(warnings.flat()).not.toContain('[factory] Slack reply event missing stable identity; falling back to path/content dedupe')
   })
 })
@@ -1348,3 +1404,14 @@ const emitSlackReply = (
   })
   mount.emit(changeEvent(path, id))
 }
+
+const isSlackRootWritePath = (path: string): boolean =>
+  /^\/slack\/channels\/[^/]+\/messages\/[^/]+\.json$/u.test(path)
+
+const slackReplyWrites = (mount: FakeMountClient): Array<{ path: string; content: { text?: string; thread_ts?: string } }> =>
+  mount.writes
+    .filter((write) => write.path.includes('/replies/'))
+    .map((write) => ({ path: write.path, content: record(write.content) as { text?: string; thread_ts?: string } }))
+
+const record = (value: unknown): Record<string, unknown> =>
+  value !== null && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {}

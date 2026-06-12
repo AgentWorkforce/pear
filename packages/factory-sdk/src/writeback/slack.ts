@@ -86,9 +86,15 @@ export const MountSlackWriteback = (
 ) => {
   const threads = new Map<string, ThreadRef>()
   const prefix = slackCfg.clientIdPrefix ?? 'factory'
+  const assertCloudWriteback = (): void => {
+    if (mount.writebackTransport !== 'relayfile-cloud' && mount.writebackTransport !== 'test') {
+      throw new Error('Slack writeback requires RelayfileCloudMountClient cloud writeback transport')
+    }
+  }
 
   return {
     async postThread(root: { channel: string; text: string }): Promise<{ threadId: string }> {
+      assertCloudWriteback()
       const channelDir = slackCfg.channelDir ?? root.channel ?? slackCfg.channel
       assertSlackChannelAllowed(slackCfg.channel, root.channel, 'postThread')
       assertSlackChannelAllowed(slackCfg.channel, channelDir, 'postThread path')
@@ -110,6 +116,7 @@ export const MountSlackWriteback = (
     },
 
     async reply(threadId: string, text: string): Promise<void> {
+      assertCloudWriteback()
       const fallbackChannelDir = slackCfg.channelDir ?? slackCfg.channel
       assertSlackChannelAllowed(slackCfg.channel, fallbackChannelDir, 'reply')
       const ref = threads.get(threadId) ?? (
