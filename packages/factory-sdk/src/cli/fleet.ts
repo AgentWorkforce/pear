@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises'
 
 import {
   FactoryConfigSchema,
+  LocalMirrorMountClient,
   RelayfileCloudMountClient,
   closeProbePr,
   createFactory,
@@ -251,7 +252,14 @@ async function buildFleet(globals: GlobalOptions, loaded: LoadedConfig | undefin
 async function buildMount(loaded: LoadedConfig, deps: FleetCliDeps): Promise<MountClient> {
   if (deps.mount) return deps.mount
   if (loaded.fixtureFiles) return new FakeMountClient(loaded.fixtureFiles)
-  return RelayfileCloudMountClient.fromConfig({ workspaceId: loaded.config.workspaceId })
+  const workspaceId = loaded.config.mount.workspaceId ?? loaded.config.workspaceId
+  if (loaded.config.mount.backend === 'relayfile-mirror') {
+    return new LocalMirrorMountClient({
+      workspaceId,
+      mirrorDir: loaded.config.mount.mirrorDir,
+    })
+  }
+  return RelayfileCloudMountClient.fromConfig({ workspaceId })
 }
 
 async function readIssueArg(mount: MountClient, issueArg: string) {

@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
+import { afterEach, describe, expect, it } from 'vitest'
 
 import { LINEAR_STATE_IDS } from '../constants/linear'
 import type { CloseProbePrInput } from '../index'
@@ -6,6 +10,7 @@ import { FakeFleetClient, FakeMountClient } from '../testing'
 import { parseFleetCommand, parseGlobalOptions, runFleetCli } from './fleet'
 
 const issuePath = '/linear/issues/AR-77__uuid-77.json'
+const tempDirs: string[] = []
 
 const config = {
   workspaceId: 'factory-cli-test',
@@ -32,6 +37,10 @@ const issueFile = {
     state: { id: LINEAR_STATE_IDS.readyForAgent, name: 'Ready for Agent' },
   },
 }
+
+afterEach(async () => {
+  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })))
+})
 
 describe('fleet CLI parsing', () => {
   it('parses spawn flags into a FleetClient spawn input shape', () => {
@@ -136,6 +145,40 @@ describe('fleet CLI runtime', () => {
 
     expect(code).toBe(1)
     expect(errors.text()).toContain('RelayFleetClient not implemented')
+  })
+
+  it('uses the configured local mirror mount for factory commands', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'factory-cli-config-'))
+    tempDirs.push(dir)
+    const configPath = join(dir, 'factory.config.json')
+    await writeFile(configPath, JSON.stringify({
+      ...config,
+      mount: {
+        backend: 'relayfile-mirror',
+        mirrorDir: join(dir, 'mirror'),
+      },
+    }))
+    const output = buffer()
+    const errors = buffer()
+
+    const code = await runFleetCli([
+      'factory',
+      'status',
+      '--config',
+      configPath,
+    ], {
+      fleet: new FakeFleetClient(),
+      stdout: output,
+      stderr: errors,
+    })
+
+    expect(code).toBe(0)
+    expect(JSON.parse(output.text())).toEqual({
+      inFlight: [],
+      queued: [],
+      counters: {},
+    })
+    expect(errors.text()).toBe('')
   })
 
   it('refuses targeted factory dispatch for an issue outside factory-e2e scope', async () => {

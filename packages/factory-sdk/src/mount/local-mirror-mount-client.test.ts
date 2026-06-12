@@ -91,6 +91,15 @@ describe('LocalMirrorMountClient', () => {
       .rejects.toThrow(/pid .* is not alive/)
   })
 
+  it('accepts numeric daemon pid metadata', async () => {
+    const mirrorDir = await tempMirror()
+    await writeReadyMetadata(mirrorDir)
+    await writeFile(join(mirrorDir, '.relay', 'mount.pid'), String(process.pid))
+    const mount = new LocalMirrorMountClient({ workspaceId: 'rw_test', mirrorDir })
+
+    await expect(mount.assertWritebackReady()).resolves.toBeUndefined()
+  })
+
   it('writes to the local mirror only after writeback readiness passes', async () => {
     const mirrorDir = await tempMirror()
     await writeReadyMetadata(mirrorDir)
@@ -123,6 +132,7 @@ describe('LocalMirrorMountClient', () => {
     const mount = new LocalMirrorMountClient({
       workspaceId: 'rw_test',
       mirrorDir,
+      debounceMs: 25,
       pollIntervalMs: 50,
     })
     const event = new Promise<string>((resolve) => {

@@ -57,7 +57,7 @@ export class LocalMirrorMountClient implements MountClient {
   constructor(config: LocalMirrorMountClientConfig = {}) {
     this.workspaceId = config.workspaceId ?? DEFAULT_WORKSPACE_ID
     this.mirrorDir = resolve(config.mirrorDir ?? DEFAULT_MIRROR_DIR)
-    this.#debounceMs = Math.max(DEFAULT_DEBOUNCE_MS, Math.floor(config.debounceMs ?? DEFAULT_DEBOUNCE_MS))
+    this.#debounceMs = Math.max(0, Math.floor(config.debounceMs ?? DEFAULT_DEBOUNCE_MS))
     this.#pollIntervalMs = Math.max(25, Math.floor(config.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS))
     this.#maxStateAgeMs = config.maxStateAgeMs
   }
@@ -343,7 +343,7 @@ const walkFiles = async (root: string, visit: (path: string) => Promise<void> | 
 const parsePidFile = (raw: string): Record<string, unknown> & { pid: number } => {
   const trimmed = raw.trim()
   const parsed = trimmed.startsWith('{') ? asRecord(JSON.parse(trimmed)) : { pid: Number(trimmed) }
-  return { ...(parsed ?? {}), pid: Number(parsed?.pid) }
+  return { ...(parsed ?? {}), pid: Number(parsed?.pid ?? NaN) }
 }
 
 const processIsAlive = (pid: number): boolean => {
