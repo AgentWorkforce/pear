@@ -98,6 +98,7 @@ export class FactoryLoop implements Factory {
   #slackDegraded = false
   #slackDegradedReason: string | undefined
   #slackWritebackFailureDegraded = false
+  #slackWritebackFailureBackoffUntilMs = 0
   #subscription?: Subscription
   #livePollTimer?: ReturnType<typeof setTimeout>
   #livePollInFlight = false
@@ -949,8 +950,11 @@ export class FactoryLoop implements Factory {
 
     const freshness = await this.#slackFreshness()
     if (this.#slackWritebackFailureDegraded) {
-      this.#increment('slackWritebacksSkipped')
-      return true
+      if (this.#slackWritebackFailureBackoffUntilMs > this.#clock.now()) {
+        this.#increment('slackWritebacksSkipped')
+        return true
+      }
+      return false
     }
 
     if (!freshness.degraded && freshness.known) {
@@ -988,6 +992,7 @@ export class FactoryLoop implements Factory {
 
   #markSlackWritebackFailure(context: string, error: unknown): void {
     this.#slackWritebackFailureDegraded = true
+    this.#slackWritebackFailureBackoffUntilMs = this.#clock.now() + (this.#config.slack?.staleAfterMs ?? 10 * 60_000)
     this.#slackDegradedReason = `slack writeback failed: ${describeError(error).errorMessage}`
     if (!this.#slackDegraded) {
       this.#slackDegraded = true
@@ -1005,6 +1010,7 @@ export class FactoryLoop implements Factory {
       this.#increment('slackRecoveredEpisodes')
     }
     this.#slackWritebackFailureDegraded = false
+    this.#slackWritebackFailureBackoffUntilMs = 0
     if (this.#slackDegraded) {
       this.#slackDegraded = false
       this.#slackDegradedReason = undefined
