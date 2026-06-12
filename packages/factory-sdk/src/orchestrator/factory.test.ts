@@ -982,6 +982,92 @@ describe('FactoryLoop', () => {
     expect(slack.replies[0]).toMatchObject({ threadId: slack.threadId })
   })
 
+  it.each([
+    ['user_is_bot marker', { user: 'U-BOT-MIRROR', user_is_bot: true }],
+    ['configured bot user id', { user: 'U0B2596R7EZ', user_is_bot: false }],
+  ])('degraded self-ignore: inbound %s is ignored', async (_name, marker) => {
+    const mount = new FakeMountClient({ [issuePath(33)]: issueFile(33) })
+    const fleet = new FakeFleetClient()
+    const slack = new RecordingSlack()
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      slack,
+    })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(33), issueFile(33))))
+    emitSlackTopLevelMessage(mount, 'C0FACTORY__factory-e2e', `1780751620.${marker.user === 'U0B2596R7EZ' ? '000002' : '000001'}`, `slack-self-${marker.user}`, {
+      text: 'status?',
+      thread_ts: slack.threadId,
+      ...marker,
+    })
+    await flush()
+    await flush()
+
+    expect(slack.replies).toEqual([])
+  })
+
+  it('degraded thread/channel guard: off-thread, mismatched-thread, and wrong-channel replies are skipped', async () => {
+    const mount = new FakeMountClient({ [issuePath(34)]: issueFile(34) })
+    const fleet = new FakeFleetClient()
+    const slack = new RecordingSlack()
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      slack,
+    })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(34), issueFile(34))))
+    emitSlackTopLevelMessage(mount, 'C0FACTORY__factory-e2e', '1780751621.000001', 'slack-mismatched-thread', {
+      text: 'wrong parent',
+      thread_ts: '1780759999.000001',
+      user: 'U123',
+      user_is_bot: false,
+    })
+    emitSlackReply(mount, slackReplyFixturePath('C0FACTORY__factory-e2e', '1780759999.000001', 'human-off-thread'), 'slack-off-thread', {
+      text: 'wrong nested parent',
+      user: 'U123',
+      user_is_bot: false,
+    })
+    emitSlackTopLevelMessage(mount, 'C0PRODUCT__general', '1780751621.000002', 'slack-wrong-channel', {
+      text: 'right parent wrong channel',
+      thread_ts: slack.threadId,
+      user: 'U123',
+      user_is_bot: false,
+    })
+    await flush()
+    await flush()
+
+    expect(slack.replies).toEqual([])
+  })
+
+  it('degraded positive control: genuine human reply in the watched thread is answered', async () => {
+    const mount = new FakeMountClient({ [issuePath(35)]: issueFile(35) })
+    const fleet = new FakeFleetClient()
+    const slack = new RecordingSlack()
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      slack,
+    })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(35), issueFile(35))))
+    emitSlackTopLevelMessage(mount, 'C0FACTORY__factory-e2e', '1780751622.000001', 'slack-human-positive', {
+      text: 'status?',
+      thread_ts: slack.threadId,
+      user: 'U-HUMAN',
+      user_is_bot: false,
+    })
+    await flush()
+    await flush()
+
+    expect(slack.replies).toHaveLength(1)
+    expect(slack.replies[0]?.text).toContain('AR-35')
+  })
+
   it('ignores the factory bot own Slack replies to avoid self-response loops', async () => {
     const mount = new FakeMountClient({ [issuePath(25)]: issueFile(25) })
     const fleet = new FakeFleetClient()
