@@ -1,6 +1,6 @@
 import { slackMessagePath, slackReplyPath } from '../constants/slack'
 import type { MountClient } from '../ports'
-import { safePathSegment, stableHash, trimToLines } from './shared'
+import { safePathSegment, stableHash, trimToLines, wrappedPayload } from './shared'
 
 export interface MountSlackWritebackConfig {
   channel?: string
@@ -65,13 +65,19 @@ const rootClientId = (prefix: string, channelDir: string, text: string): string 
 const replyClientId = (prefix: string, threadId: string, text: string): string =>
   `${safePathSegment(prefix)}-reply-${safePathSegment(threadId)}-${stableHash(text)}`
 
-const confirmPath = async (mount: MountClient, path: string): Promise<void> => {
+const confirmPath = async (mount: MountClient, path: string): Promise<unknown> => {
   const confirmation = await mount.confirmWrite(path, { timeoutMs: 90_000 })
   if (confirmation !== 'acked') {
     throw new Error(`Writeback not acked for ${path}: ${confirmation}`)
   }
 
-  await mount.readFile(path)
+  return (await mount.readFile(path)).content
+}
+
+const slackTsFromContent = (content: unknown): string | undefined => {
+  const payload = wrappedPayload(content)
+  const ts = stringValue(payload.ts) ?? stringValue(payload.thread_ts)
+  return ts && /^\d+\.\d+$/u.test(ts) ? ts : undefined
 }
 
 export const MountSlackWriteback = (
@@ -93,10 +99,14 @@ export const MountSlackWriteback = (
       const path = slackMessagePath(channelDir, clientId)
 
       await mount.writeFile(path, { channelId, text }, { guarded: true })
-      await confirmPath(mount, path)
+      const content = await confirmPath(mount, path)
+      const threadTs = slackTsFromContent(content) ?? clientId
 
-      threads.set(clientId, { channelDir, channelId, threadTs: clientId })
-      return { threadId: clientId }
+      threads.set(threadTs, { channelDir, channelId, threadTs })
+      if (threadTs !== clientId) {
+        threads.set(clientId, { channelDir, channelId, threadTs })
+      }
+      return { threadId: threadTs }
     },
 
     async reply(threadId: string, text: string): Promise<void> {
@@ -125,3 +135,5 @@ export const MountSlackWriteback = (
     },
   }
 }
+
+const stringValue = (value: unknown): string | undefined => typeof value === 'string' ? value : undefined

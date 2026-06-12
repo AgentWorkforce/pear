@@ -1,6 +1,5 @@
 import { FactoryConfigSchema, type FactoryConfig } from '../config/schema'
 import { LINEAR_STATE_IDS, linearByStatePath } from '../constants/linear'
-import { slackReplyPath } from '../constants/slack'
 import { GithubMergeGate, closeProbePr, type GithubMergeGate as GithubMergeGatePort } from '../github'
 import type { AgentSpec, ChangeEvent, FleetClient, LinearWriteback, MountClient, SlackWriteback, Subscription } from '../ports'
 import type { Clock, Logger } from '../ports/system'
@@ -32,6 +31,8 @@ type SlackThreadWatcher = { stop(): Promise<void> }
 type SlackReply = {
   channelDir: string
   threadTs: string
+  messageTs: string
+  isThreadReply: boolean
   isBot: boolean
   raw: Record<string, unknown>
 }
@@ -829,7 +830,7 @@ export class FactoryLoop implements Factory {
     }
 
     const channelDir = this.#config.slack.channel
-    const replyPrefix = slackReplyPrefix(channelDir, threadId)
+    const messagesPrefix = slackChannelMessagesPrefix(channelDir)
     const preExistingPaths = new Set<string>()
     const seenReplies = new Set<string>()
     let missingIdentityLogged = false
@@ -841,7 +842,7 @@ export class FactoryLoop implements Factory {
         const page = await this.#mount.getEvents({ limit: SLACK_REPLY_EVENTS_LIMIT })
         cursor = page.nextCursor ?? undefined
         for (const event of page.events) {
-          if (event.resource.path.startsWith(replyPrefix)) {
+          if (event.resource.path.startsWith(messagesPrefix)) {
             preExistingPaths.add(event.resource.path)
           }
         }
@@ -852,7 +853,7 @@ export class FactoryLoop implements Factory {
 
     const handle = async (event: ChangeEvent): Promise<void> => {
       try {
-        if (stopped || !event.resource.path.startsWith(replyPrefix)) {
+        if (stopped || !event.resource.path.startsWith(messagesPrefix)) {
           return
         }
 
@@ -869,7 +870,7 @@ export class FactoryLoop implements Factory {
         }
 
         const reply = await this.#readSlackReply(event.resource.path)
-        if (!reply || reply.threadTs !== threadId || reply.channelDir !== channelDir) {
+        if (!reply || !reply.isThreadReply || reply.threadTs !== threadId || reply.channelDir !== channelDir) {
           return
         }
 
@@ -894,7 +895,7 @@ export class FactoryLoop implements Factory {
 
     let subscription: Subscription | undefined
     try {
-      subscription = this.#mount.subscribe([`${replyPrefix}**`], (event) => {
+      subscription = this.#mount.subscribe([`${messagesPrefix}**`], (event) => {
         void handle(event)
       })
     } catch (error) {
@@ -936,7 +937,7 @@ export class FactoryLoop implements Factory {
   async #readSlackReply(path: string): Promise<SlackReply | undefined> {
     try {
       const { content } = await this.#mount.readFile(path)
-      return parseSlackReply(path, content)
+      return parseSlackReply(path, content, this.#config.slack?.botUserId ?? 'U0B2596R7EZ')
     } catch (error) {
       this.#logger.warn?.(`Unable to read Slack reply ${path}`, error)
       return undefined
@@ -1286,14 +1287,9 @@ const isCompletionReason = (reason?: string): boolean =>
 const defaultRestartPolicy = (spec: AgentSpec): AgentSpec['restartPolicy'] | undefined =>
   spec.role === 'implementer' ? { maxRestarts: 3, strategy: 'resume' } as AgentSpec['restartPolicy'] : spec.restartPolicy
 
-const slackPathTs = (threadTs: string): string => threadTs.replace(/\./g, '_')
-
 const slackPayloadTs = (threadId: string): string => threadId.replace(/_/g, '.')
 
-const slackReplyPrefix = (channelDir: string, threadId: string): string => {
-  const marker = '__reply_watcher_marker__'
-  return slackReplyPath(channelDir, slackPathTs(threadId), marker).replace(`${marker}.json`, '')
-}
+const slackChannelMessagesPrefix = (channelDir: string): string => `/slack/channels/${channelDir}/messages/`
 
 const eventIdentity = (event: ChangeEvent): string | undefined => {
   const record = event as unknown as Record<string, unknown>
@@ -1302,29 +1298,32 @@ const eventIdentity = (event: ChangeEvent): string | undefined => {
   return id ? `event:${id}` : undefined
 }
 
-const parseSlackReply = (path: string, content: unknown): SlackReply | undefined => {
+const parseSlackReply = (path: string, content: unknown, botUserId: string): SlackReply | undefined => {
   const raw = asRecord(parseJsonContent(content)) ?? {}
   const payload = wrappedPayload(raw)
   const channelDir = path.match(/^\/slack\/channels\/([^/]+)\//u)?.[1] ?? ''
-  const threadFromPath = path.match(/^\/slack\/channels\/[^/]+\/messages\/([^/]+)\/replies\//u)?.[1] ?? ''
-  const threadTs = stringValue(payload.thread_ts) ?? slackPayloadTs(threadFromPath)
-  if (!channelDir || !threadTs) {
+  const pathMatch = path.match(/^\/slack\/channels\/[^/]+\/messages\/([^/]+)(?:\/replies\/([^/]+))?/u)
+  const parentFromPath = pathMatch?.[2] ? slackPayloadTs(pathMatch[1]) : undefined
+  const messageFromPath = slackPayloadTs(pathMatch?.[2] ?? pathMatch?.[1] ?? '')
+  const messageTs = stringValue(payload.ts) ?? messageFromPath
+  const threadTs = stringValue(payload.thread_ts) ?? parentFromPath
+  if (!channelDir || !threadTs || !messageTs) {
     return undefined
   }
 
   return {
     channelDir,
     threadTs,
-    isBot: isOwnSlackBotReply(payload),
+    messageTs,
+    isThreadReply: Boolean(parentFromPath) || threadTs !== messageTs,
+    isBot: isOwnSlackBotReply(payload, botUserId),
     raw,
   }
 }
 
-const isOwnSlackBotReply = (payload: Record<string, unknown>): boolean =>
+const isOwnSlackBotReply = (payload: Record<string, unknown>, botUserId: string): boolean =>
   payload.user_is_bot === true ||
-  Boolean(stringValue(payload.bot_id)) ||
-  stringValue(payload.subtype) === 'bot_message' ||
-  /agent[-_\s]?relay|relayfile|factory/u.test(stringValue(payload.user_name)?.toLowerCase() ?? '')
+  stringValue(payload.user) === botUserId
 
 const issueStateLabel = (issue: LinearIssue): string => {
   const name = issue.state?.name?.trim()

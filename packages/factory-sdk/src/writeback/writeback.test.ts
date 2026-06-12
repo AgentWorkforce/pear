@@ -448,6 +448,45 @@ describe('MountSlackWriteback', () => {
     })
   })
 
+  it('returns the real Slack parent ts from the acked thread root when available', async () => {
+    class AckedSlackMountClient extends FakeMountClient {
+      override async writeFile(path: string, content: unknown, opts?: { guarded?: boolean }): Promise<void> {
+        await super.writeFile(path, content, opts)
+        this.files.set(path, {
+          content: {
+            provider: 'slack',
+            objectType: 'message',
+            payload: {
+              channel: 'C0FACTORY',
+              ts: '1780751612.176219',
+              text: 'Factory update',
+            },
+          },
+        })
+      }
+    }
+    const mount = new AckedSlackMountClient()
+    const slack = MountSlackWriteback(mount, {
+      channel: 'C0FACTORY__factory-e2e',
+      channelDir: 'C0FACTORY__factory-e2e',
+      clientIdPrefix: 'factory-e2e',
+    })
+
+    const root = await slack.postThread({
+      channel: 'C0FACTORY__factory-e2e',
+      text: 'Factory update',
+    })
+    await slack.reply(root.threadId, 'Factory reply')
+
+    expect(root.threadId).toBe('1780751612.176219')
+    expect(mount.writes[1]?.path).toContain('/slack/channels/C0FACTORY__factory-e2e/messages/1780751612_176219/replies/')
+    expect(mount.writes[1]?.content).toMatchObject({
+      channelId: 'C0FACTORY',
+      thread_ts: '1780751612.176219',
+      text: 'Factory reply',
+    })
+  })
+
   it('surfaces non-acked thread writes even when local read-back succeeds', async () => {
     class TimeoutAfterWriteMountClient extends FakeMountClient {
       override async confirmWrite(
