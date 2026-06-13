@@ -8,6 +8,7 @@ export {
   linearCommentPath,
   linearIssuePath,
 } from './constants/linear'
+export { isPositive } from './is-positive'
 export {
   slackMessagePath,
   slackReplyPath,

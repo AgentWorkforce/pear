@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { isPositive as exportedIsPositive } from '.'
 import { isPositive } from './is-positive'
 
 describe('isPositive', () => {
@@ -13,5 +14,9 @@ describe('isPositive', () => {
 
   it('returns false for zero', () => {
     expect(isPositive(0)).toBe(false)
+  })
+
+  it('is exported from the public SDK entry point', () => {
+    expect(exportedIsPositive(1)).toBe(true)
   })
 })
