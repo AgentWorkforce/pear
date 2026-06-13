@@ -12,6 +12,7 @@ export {
   slackMessagePath,
   slackReplyPath,
 } from './constants/slack'
+export { isOdd } from './is-odd'
 export {
   agentSpecWithRenderedTask,
   mergePolicyLine,
