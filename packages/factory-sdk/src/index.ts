@@ -1,5 +1,6 @@
 import type { FactoryConfig } from './config/schema'
 
+export { isPositive } from './is-positive'
 export type { FactoryConfig } from './config/schema'
 export { FactoryConfigSchema } from './config/schema'
 export {
