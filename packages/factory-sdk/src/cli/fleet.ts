@@ -479,10 +479,12 @@ export function installFactoryStopSignalHandlers(
   factory: Factory,
   opts: {
     exit?: (code: number) => void
+    error?: (...args: unknown[]) => void
     processLike?: Pick<NodeJS.Process, 'once' | 'off'>
   } = {},
 ): () => void {
   const exit = opts.exit ?? ((code: number) => process.exit(code))
+  const error = opts.error ?? console.error
   const processLike = opts.processLike ?? process
   let stopping: Promise<void> | undefined
   let installed = true
@@ -499,8 +501,9 @@ export function installFactoryStopSignalHandlers(
     void stopping.then(() => {
       remove()
       exit(0)
-    }, () => {
+    }, (stopError: unknown) => {
       remove()
+      error('Factory stop failed:', stopError)
       exit(1)
     })
   }

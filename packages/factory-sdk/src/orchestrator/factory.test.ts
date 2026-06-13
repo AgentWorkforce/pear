@@ -1045,7 +1045,7 @@ describe('FactoryLoop', () => {
           if (signal === 'SIGKILL') alive.delete(pid)
           return true
         },
-        terminationGraceMs: 0,
+        terminationGraceMs: 1,
       })
 
       const reports = await factory.runLoop()

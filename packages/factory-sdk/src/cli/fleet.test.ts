@@ -640,9 +640,13 @@ describe('fleet CLI runtime', () => {
       }),
     } as unknown as Factory
     const exits: number[] = []
+    const errors: unknown[][] = []
 
     installFactoryStopSignalHandlers(factory, {
       processLike: processLike as unknown as Pick<NodeJS.Process, 'once' | 'off'>,
+      error: (...args: unknown[]) => {
+        errors.push(args)
+      },
       exit: (code) => {
         calls.push('exit')
         exits.push(code)
@@ -653,6 +657,9 @@ describe('fleet CLI runtime', () => {
 
     expect(factory.stop).toHaveBeenCalledTimes(1)
     expect(calls).toEqual(['stop', 'exit'])
+    expect(errors).toEqual([
+      ['Factory stop failed:', expect.objectContaining({ message: 'dispose failed' })],
+    ])
     expect(exits).toEqual([1])
     expect(listeners.size).toBe(0)
   })

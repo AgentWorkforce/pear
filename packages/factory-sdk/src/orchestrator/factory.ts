@@ -819,7 +819,7 @@ export class FactoryLoop implements Factory {
           const report = await terminatePids(roots.pids, {
             kill: this.#kill,
             readChildPids: this.#readChildPids,
-            sleep: this.#clock.sleep,
+            sleep: (ms) => this.#clock.sleep(ms),
             termGraceMs: this.#terminationGraceMs,
             protectedPids,
           })
@@ -931,7 +931,7 @@ export class FactoryLoop implements Factory {
         const report = await terminatePids(roots.pids, {
           kill: this.#kill,
           readChildPids: this.#readChildPids,
-          sleep: this.#clock.sleep,
+          sleep: (ms) => this.#clock.sleep(ms),
           termGraceMs: this.#terminationGraceMs,
           protectedPids,
         })
