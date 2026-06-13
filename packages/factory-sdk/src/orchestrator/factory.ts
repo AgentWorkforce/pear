@@ -244,6 +244,7 @@ export class FactoryLoop implements Factory {
       void this.#handleChange(event.resource.path)
     })
     this.#started = true
+    this.#scheduleCompletionSweep(0)
   }
 
   async stop(): Promise<void> {

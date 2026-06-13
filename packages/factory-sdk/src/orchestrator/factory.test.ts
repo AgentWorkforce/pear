@@ -3202,6 +3202,47 @@ describe('FactoryLoop', () => {
     }
   })
 
+  it('backfill-and-subscribe mode runs the PR-state completion sweep timer', async () => {
+    vi.useFakeTimers()
+    try {
+      const mount = new FakeMountClient({
+        [issuePath(243)]: issueFile(243),
+        '/github/repos/AgentWorkforce__pear/pulls/by-id/243.json': prFile(243, {
+          title: 'Add default start completion sweep coverage',
+          body: '',
+          head_ref: 'ar-243-default-completion-sweep',
+        }),
+      })
+      const fleet = new FakeFleetClient()
+      const closeInputs: unknown[] = []
+      const factory = createFactory(config(), {
+        mount,
+        fleet,
+        triage: new StaticTriage(),
+        probeCloser: async (input) => {
+          closeInputs.push(input)
+          return { repo: input.repo, prNumber: input.prNumber, state: 'CLOSED' }
+        },
+      })
+
+      await factory.start()
+      expect(factory.status().inFlight.map((issue) => issue.key)).toEqual(['AR-243'])
+
+      await vi.advanceTimersByTimeAsync(0)
+
+      expect(closeInputs).toEqual([{
+        repo: 'AgentWorkforce/pear',
+        prNumber: 243,
+        expectedIssueKey: 'AR-243',
+        requireTitleMarker: false,
+      }])
+      expect(factory.status().inFlight).toEqual([])
+      await factory.stop()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
   it('coalesces concurrent PR sweep and agent-exit completion triggers', async () => {
     const mount = new FakeMountClient({
       [issuePath(354)]: issueFile(354),
@@ -3357,6 +3398,7 @@ describe('FactoryLoop', () => {
     expect(fleet.releases.filter((release) => release.reason === 'issue-done')).toEqual([])
     expect(factory.status().inFlight.map((issue) => issue.key)).toEqual(['AR-250', 'AR-251'])
     expect(factory.status().counters.completionSweepCompleted).toBeUndefined()
+    expect(factory.status().counters.completionSweepMissingPr).toBe(1)
     expect(factory.status().counters.completionSweepDraftPr).toBe(1)
   })
 
