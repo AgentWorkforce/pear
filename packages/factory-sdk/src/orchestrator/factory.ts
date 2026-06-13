@@ -44,7 +44,7 @@ import { MountGithubRead, MountLinearWriteback, MountSlackWriteback } from '../w
 import { asRecord, parseJsonContent, stableHash, wrappedPayload } from '../writeback/shared'
 import { BatchTracker, type InFlightIssue, issueKey, type TrackedAgent } from './batch-tracker'
 import { findAgentProcessByName, readProcessIdentity, type AgentProcessFinder } from './process-identity'
-import { reapFactoryOrphansOnce, terminatePids } from './reaper'
+import { terminatePids } from './reaper'
 
 type FactoryEvent = 'issue-queued' | 'dispatched' | 'issue-done' | 'writeback-verified' | 'error'
 type Listener = (payload: FactoryEventPayload) => void
@@ -772,29 +772,54 @@ export class FactoryLoop implements Factory {
     }
 
     try {
-      const report = await reapFactoryOrphansOnce({
-        heartbeatPath,
-        registryPath,
-        staleMs: 0,
-        nowMs: this.#clock.now() + 1,
-        termGraceMs: this.#terminationGraceMs,
-        fleet: this.#fleet,
-        processFinder: this.#processFinder,
-        readProcessIdentity: this.#processIdentityReader,
-        readChildPids: this.#readChildPids,
-        kill: this.#kill,
-        clock: this.#clock,
-        logger: this.#logger,
-      })
-      if (report.reaped.length > 0) {
-        this.#increment('loopDispatchFailureHandoffsReaped')
+      const protectedPids = await this.#protectedPids()
+      let registryChanged = false
+      for (const [key, handoff] of [...this.#dispatchFailureReaperHandoffs]) {
+        const roots = await this.#terminationRoots(handoff.name, handoff.tracked, protectedPids)
+        if (roots.pids.length === 0 && roots.status === 'unresolved') {
+          this.#increment('agentTerminateMissingPid')
+          this.#logger.error?.('[factory] no pid available to reap dispatch-failed handoff during loop catch', {
+            agentName: handoff.name,
+            issue: handoff.issue,
+            sessionRef: handoff.tracked.sessionRef,
+          })
+          continue
+        }
+
+        let blockingSkip = false
+        if (roots.pids.length > 0) {
+          const report = await terminatePids(roots.pids, {
+            kill: this.#kill,
+            readChildPids: this.#readChildPids,
+            sleep: this.#clock.sleep,
+            termGraceMs: this.#terminationGraceMs,
+            protectedPids,
+          })
+          if (report.terminated.length > 0) {
+            this.#increment('loopDispatchFailureHandoffsReaped')
+          }
+          for (const skipped of report.skipped) {
+            if (skipped.reason !== 'pid not running') {
+              blockingSkip = true
+              this.#logger.warn?.('[factory] dispatch-failure handoff reap skipped during loop catch', {
+                ...skipped,
+                agentName: handoff.name,
+              })
+            }
+          }
+        }
+
+        if (!blockingSkip) {
+          this.#dispatchFailureReaperHandoffs.delete(key)
+          registryChanged = true
+          try {
+            await this.#fleet.release(handoff.name, 'dispatch failed')
+          } catch (error) {
+            this.#logger.warn?.(`[factory] failed to release ${handoff.name} after dispatch-failure reap`, error)
+          }
+        }
       }
-      const blockingSkips = report.skipped.filter((skipped) => skipped.reason !== 'pid not running')
-      for (const skipped of blockingSkips) {
-        this.#logger.warn?.('[factory] dispatch-failure handoff reap skipped during loop catch', skipped)
-      }
-      if (this.#dispatchFailureReaperHandoffs.size > 0 && report.reaped.length > 0 && blockingSkips.length === 0) {
-        this.#dispatchFailureReaperHandoffs.clear()
+      if (registryChanged) {
         await this.#writeInFlightRegistry(registryPath, heartbeatPath)
       }
     } catch (error) {
