@@ -260,6 +260,9 @@ export class InternalFleetClient implements FleetClient {
   }
 
   #ensureEventSubscription(): void {
+    if (this.#disposed) {
+      throw new Error('InternalFleetClient disposed')
+    }
     if (this.#subscribed) {
       return
     }

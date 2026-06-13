@@ -204,6 +204,23 @@ describe('fleet CLI runtime', () => {
     }
   })
 
+  it('keeps the command exit code numeric when fleet disposal fails', async () => {
+    const fleet = new FakeFleetClient()
+    vi.spyOn(fleet, 'dispose').mockRejectedValue(new Error('dispose failed'))
+    const output = buffer()
+    const stderr = buffer()
+
+    const code = await runFleetCli(['roster'], {
+      fleet,
+      stdout: output,
+      stderr,
+    })
+
+    expect(code).toBe(0)
+    expect(JSON.parse(output.text())).toMatchObject({ nodes: [{ name: 'self' }] })
+    expect(stderr.text()).toContain('dispose failed')
+  })
+
   it('disposes a one-shot fleet when event subscription setup throws during factory construction', async () => {
     const root = await mkdtemp(join(tmpdir(), 'fleet-cli-connect-throw-'))
     try {

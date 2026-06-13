@@ -130,7 +130,13 @@ export async function runFleetCli(argv: string[], deps: FleetCliDeps = {}): Prom
     err.write(`${error instanceof Error ? error.message : String(error)}\n`)
     return 1
   } finally {
-    await fleet?.dispose()
+    if (fleet) {
+      try {
+        await fleet.dispose()
+      } catch (error) {
+        err.write(`${error instanceof Error ? error.message : String(error)}\n`)
+      }
+    }
   }
 }
 

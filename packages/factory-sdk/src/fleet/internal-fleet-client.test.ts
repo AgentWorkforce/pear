@@ -380,6 +380,21 @@ describe('InternalFleetClient', () => {
     expect(harness.disconnectCalls).toBe(1)
   })
 
+  it('rejects event subscription attempts after disposal', async () => {
+    const harness = new FakeHarnessDriverClient()
+    const fleet = new InternalFleetClient({ client: harness })
+
+    await fleet.dispose()
+
+    expect(() => fleet.onAgentExit(() => {})).toThrow('InternalFleetClient disposed')
+    expect(() => fleet.onDeliveryFailed(() => {})).toThrow('InternalFleetClient disposed')
+    await expect(fleet.waitForInjected({ to: 'broker', text: 'done' })).rejects.toThrow('InternalFleetClient disposed')
+    expect(harness.connectEventsCalls).toBe(0)
+    expect(harness.eventListeners.size).toBe(0)
+    expect(harness.deliveryListeners.size).toBe(0)
+    expect(harness.exitListeners.size).toBe(0)
+  })
+
   it('disposes safely after a broker event stream throws during partial connect', async () => {
     const harness = new FakeHarnessDriverClient()
     harness.throwOnConnect = true
