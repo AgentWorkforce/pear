@@ -362,13 +362,19 @@ export class FactoryLoop implements Factory {
   }
 
   async #writeLiveHeartbeat(status: FactoryLoopHeartbeat['status']): Promise<void> {
-    await this.#writeLoopHeartbeat(
-      this.#config.loop.heartbeatPath,
-      this.#config.loop.registryPath,
+    const path = this.#config.loop.heartbeatPath
+    const updatedAtMs = this.#clock.now()
+    const heartbeat: FactoryLoopHeartbeat = {
+      pid: process.pid,
       status,
-      0,
-      0,
-    )
+      iteration: 0,
+      maxIterations: 0,
+      updatedAt: new Date(updatedAtMs).toISOString(),
+      updatedAtMs,
+      registryPath: this.#config.loop.registryPath,
+    }
+    await mkdir(dirname(path), { recursive: true })
+    await writeFile(path, `${JSON.stringify(heartbeat, null, 2)}\n`, 'utf8')
   }
 
   #liveOptions(overrides: Partial<FactoryLiveSubscriptionOptions>): FactoryLiveSubscriptionOptions {

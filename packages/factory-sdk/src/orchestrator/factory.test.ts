@@ -936,6 +936,48 @@ describe('FactoryLoop', () => {
     }
   })
 
+  it('refreshes live heartbeat without rewriting the in-flight registry', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'factory-live-heartbeat-registry-'))
+    const heartbeatPath = join(root, 'heartbeat.json')
+    const registryPath = join(root, 'registry.json')
+    let factory: ReturnType<typeof createFactory> | undefined
+    try {
+      const clock = new ManualClock()
+      const mount = new FakeMountClient({ [issuePath(63)]: issueFile(63) })
+      let processLookupCount = 0
+      factory = createFactory(config({
+        loop: { maxIterations: 1, heartbeatPath, registryPath, heartbeatStaleMs: 1_000 },
+      }), {
+        mount,
+        fleet: new UnresolvedPidFleetClient(),
+        triage: new StaticTriage(),
+        clock,
+        processFinder: async () => {
+          processLookupCount += 1
+          return { status: 'missing' }
+        },
+      })
+
+      await factory.start({ mode: 'live', liveSubscription: { transport: 'subscribe' } })
+      await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(63), issueFile(63))))
+      expect(processLookupCount).toBe(2)
+      const registryBeforeRefresh = await readFactoryInFlightRegistry(registryPath)
+
+      clock.advance(500)
+      await new Promise((resolve) => setTimeout(resolve, 650))
+
+      expect(processLookupCount).toBe(2)
+      expect(await readFactoryInFlightRegistry(registryPath)).toEqual(registryBeforeRefresh)
+      expect(await readFactoryLoopHeartbeat(heartbeatPath)).toMatchObject({
+        status: 'running',
+        updatedAtMs: 500,
+      })
+    } finally {
+      await factory?.stop()
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('start live marks the heartbeat stopping before releasing in-flight agents', async () => {
     const root = await mkdtemp(join(tmpdir(), 'factory-live-heartbeat-stop-order-'))
     const heartbeatPath = join(root, 'heartbeat.json')
