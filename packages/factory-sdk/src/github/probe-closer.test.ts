@@ -118,6 +118,30 @@ describe('closeProbePr', () => {
     ])
   })
 
+  it('refuses markerless PRs when the issue key is only loosely mentioned in the body', async () => {
+    const calls: string[][] = []
+    const runner: GhRunner = async (args) => {
+      calls.push(args)
+      return {
+        stdout: JSON.stringify({
+          state: 'OPEN',
+          headRefName: 'feature/docs-cleanup',
+          title: 'Unrelated documentation change',
+          body: 'This merely mentions AR-229 in passing.',
+        }),
+      }
+    }
+
+    await expect(closeProbePr({
+      repo: 'AgentWorkforce/pear',
+      prNumber: 991,
+      expectedIssueKey: 'AR-229',
+      requireTitleMarker: false,
+      runner,
+    })).rejects.toThrow(/missing issue key AR-229/)
+    expect(calls).toHaveLength(1)
+  })
+
   it('refuses a probe that is not tied to the expected issue key before closing', async () => {
     const calls: string[][] = []
     const runner: GhRunner = async (args) => {

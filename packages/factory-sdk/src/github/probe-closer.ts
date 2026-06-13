@@ -1,7 +1,7 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 
-import { containsIssueKey } from '../issue-key-match'
+import { containsExplicitIssueReference, containsIssueKey } from '../issue-key-match'
 import type { GhRunner } from './merge-gate'
 
 const execFileAsync = promisify(execFile)
@@ -62,11 +62,16 @@ const assertOpenProbe = (live: Record<string, unknown>, input: CloseProbePrInput
   const title = stringValue(live.title) ?? ''
   const body = stringValue(live.body) ?? ''
   const headRefName = stringValue(live.headRefName) ?? ''
-  const haystack = `${title}\n${body}\n${headRefName}`
-  if (!containsIssueKey(haystack, input.expectedIssueKey)) {
+  const requireTitleMarker = input.requireTitleMarker ?? true
+  const hasExpectedIssue = requireTitleMarker
+    ? containsIssueKey(`${title}\n${body}\n${headRefName}`, input.expectedIssueKey)
+    : containsIssueKey(headRefName, input.expectedIssueKey) ||
+      containsIssueKey(title, input.expectedIssueKey) ||
+      containsExplicitIssueReference(body, input.expectedIssueKey)
+  if (!hasExpectedIssue) {
     throw new Error(`Refusing to close probe PR #${input.prNumber}: missing issue key ${input.expectedIssueKey}`)
   }
-  if ((input.requireTitleMarker ?? true) && !hasFactoryE2eMarker(title)) {
+  if (requireTitleMarker && !hasFactoryE2eMarker(title)) {
     throw new Error(`Refusing to close probe PR #${input.prNumber}: missing ${FACTORY_E2E_MARKER} probe marker`)
   }
 }
