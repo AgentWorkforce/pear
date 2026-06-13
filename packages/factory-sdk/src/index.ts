@@ -2,6 +2,7 @@ import type { FactoryConfig } from './config/schema'
 
 export type { FactoryConfig } from './config/schema'
 export { FactoryConfigSchema } from './config/schema'
+export { isOdd } from './is-odd'
 export {
   LINEAR_STATE_IDS,
   linearByStatePath,
