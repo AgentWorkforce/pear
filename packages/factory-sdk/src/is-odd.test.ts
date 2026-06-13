@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { isOdd } from './is-odd'
+import { isOdd } from '.'
 
 describe('isOdd', () => {
   it('returns true for odd numbers', () => {
