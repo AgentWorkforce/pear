@@ -11,7 +11,7 @@ export const containsIssueKey = (value: string, issueKey: string): boolean => {
 
   const prefix = escapeRegex(parts[1] ?? '')
   const number = escapeRegex(parts[2] ?? '')
-  return new RegExp(`(^|[^A-Za-z0-9])${prefix}-${number}(?=$|[^A-Za-z0-9]|-(?!\\d))`, 'i').test(value)
+  return new RegExp(`(^|[^A-Za-z0-9])${prefix}-${number}(?=$|[^A-Za-z0-9-]|-(?!\\d))`, 'i').test(value)
 }
 
 export const containsExplicitIssueReference = (value: string, issueKey: string): boolean => {
@@ -20,6 +20,6 @@ export const containsExplicitIssueReference = (value: string, issueKey: string):
 
   const prefix = escapeRegex(parts[1] ?? '')
   const number = escapeRegex(parts[2] ?? '')
-  const issue = `${prefix}-${number}(?=$|[^A-Za-z0-9]|-(?!\\d))`
+  const issue = `${prefix}-${number}(?=$|[^A-Za-z0-9-]|-(?!\\d))`
   return new RegExp(`(^|\\n)\\s*(?:linear|issue|closes|fixes|resolves)\\b[^\\n]*${issue}`, 'i').test(value)
 }

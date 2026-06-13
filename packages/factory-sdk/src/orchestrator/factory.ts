@@ -117,7 +117,6 @@ export class FactoryLoop implements Factory {
   readonly #mergeGate: GithubMergeGatePort
   readonly #probeCloser: ProbeCloser
   readonly #probePrResolver: ProbePrResolver
-  readonly #customProbeCloser: boolean
   readonly #customProbePrResolver: boolean
   readonly #logger: Logger
   readonly #clock: Clock
@@ -173,7 +172,6 @@ export class FactoryLoop implements Factory {
     void (ports.github ?? MountGithubRead(ports.mount))
     this.#mergeGate = ports.mergeGate ?? new GithubMergeGate()
     this.#probeCloser = ports.probeCloser ?? closeProbePr
-    this.#customProbeCloser = Boolean(ports.probeCloser)
     this.#customProbePrResolver = Boolean(ports.probePrResolver)
     this.#probePrResolver = ports.probePrResolver ?? ((issue) => resolveIssuePrFromMount(this.#mount, this.#config, issue))
     this.#logger = ports.logger ?? console
@@ -1932,7 +1930,7 @@ export class FactoryLoop implements Factory {
       repo: probe.repo,
       prNumber: probe.prNumber,
       expectedIssueKey: issue.key,
-      ...(!this.#customProbeCloser ? { requireTitleMarker: false } : {}),
+      requireTitleMarker: false,
     })
     this.#increment('mergeGateSyntheticClosed')
   }

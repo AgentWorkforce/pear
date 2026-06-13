@@ -2916,7 +2916,7 @@ describe('FactoryLoop', () => {
         return true
       },
     }
-    const closeInputs: Array<Pick<CloseProbePrInput, 'repo' | 'prNumber' | 'expectedIssueKey'>> = []
+    const closeInputs: Array<Pick<CloseProbePrInput, 'repo' | 'prNumber' | 'expectedIssueKey' | 'requireTitleMarker'>> = []
     const factory = createFactory(config({ slack: slackConfig('C0FACTORY') }), {
       mount,
       fleet,
@@ -2935,7 +2935,12 @@ describe('FactoryLoop', () => {
     fleet.emitAgentExit('ar-18-impl', 'issue-done')
     await flush()
 
-    expect(closeInputs).toEqual([{ repo: 'AgentWorkforce/pear', prNumber: 18, expectedIssueKey: 'AR-18' }])
+    expect(closeInputs).toEqual([{
+      repo: 'AgentWorkforce/pear',
+      prNumber: 18,
+      expectedIssueKey: 'AR-18',
+      requireTitleMarker: false,
+    }])
     expect(order).toEqual([
       'linear-done',
       'slack-root',
@@ -3009,7 +3014,12 @@ describe('FactoryLoop', () => {
     await markedFactory.dispatch(await markedFactory.triageIssue(parseLinearIssue(issuePath(19), issueFile(19))))
     markedFleet.emitAgentExit('ar-19-impl', 'issue-done')
     await flush()
-    expect(markedCalls).toEqual([{ repo: 'AgentWorkforce/pear', prNumber: 19, expectedIssueKey: 'AR-19' }])
+    expect(markedCalls).toEqual([{
+      repo: 'AgentWorkforce/pear',
+      prNumber: 19,
+      expectedIssueKey: 'AR-19',
+      requireTitleMarker: false,
+    }])
     expect(gate.checks).toEqual([])
     expect(gate.merges).toEqual([])
   })
@@ -3164,6 +3174,7 @@ describe('FactoryLoop', () => {
         repo: 'AgentWorkforce/pear',
         prNumber: entry.pr.number,
         expectedIssueKey: `AR-${entry.n}`,
+        requireTitleMarker: false,
       }])
     }
   })
@@ -3218,6 +3229,28 @@ describe('FactoryLoop', () => {
           head_ref: 'feature/docs-cleanup',
         },
       },
+      '/github/repos/AgentWorkforce__pear/pulls/by-id/993.json': {
+        provider: 'github',
+        objectType: 'pull_request',
+        objectId: '993',
+        payload: {
+          number: 993,
+          title: 'AR-229: title match but not branch match',
+          body: '',
+          head_ref: 'feature/title-match',
+        },
+      },
+      '/github/repos/AgentWorkforce__pear/pulls/by-id/994.json': {
+        provider: 'github',
+        objectType: 'pull_request',
+        objectId: '994',
+        payload: {
+          number: 994,
+          title: 'Body-only match',
+          body: 'Linear: AR-229',
+          head_ref: 'feature/body-match',
+        },
+      },
       '/github/repos/AgentWorkforce__pear/pulls/by-id/992.json': {
         provider: 'github',
         objectType: 'pull_request',
@@ -3258,7 +3291,12 @@ describe('FactoryLoop', () => {
     fleet.emitAgentExit('ar-229-impl', 'issue-done')
     await flush()
 
-    expect(closeInputs).toEqual([{ repo: 'AgentWorkforce/pear', prNumber: 279, expectedIssueKey: 'AR-229' }])
+    expect(closeInputs).toEqual([{
+      repo: 'AgentWorkforce/pear',
+      prNumber: 279,
+      expectedIssueKey: 'AR-229',
+      requireTitleMarker: false,
+    }])
     expect(fleet.releases.map((release) => release.name)).toEqual(['ar-229-impl', 'ar-229-review'])
   })
 
