@@ -3554,6 +3554,47 @@ describe('FactoryLoop', () => {
     expect(factory.status().counters.done).toBeUndefined()
   })
 
+  it('gh PR fallback backs off repeated not-found lookups', async () => {
+    const clock = new ManualClock()
+    const mount = new FakeMountClient({ [issuePath(361)]: issueFile(361) })
+    const fleet = new FakeFleetClient()
+    const ghCalls: string[][] = []
+    const factory = createFactory(config(), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      clock,
+      probePrGhRunner: async (args) => {
+        ghCalls.push(args)
+        return {
+          stdout: JSON.stringify([
+            ghPr(871, {
+              title: 'Unrelated factory fix',
+              body: 'Mentions AR-361 in a loose sentence only.',
+              headRefName: 'factory-sdk-pr-state-completion-sb-impl3',
+              state: 'OPEN',
+            }),
+          ]),
+        }
+      },
+    })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(361), issueFile(361))))
+    await factory.runLoop({ maxIterations: 1 })
+    await factory.runLoop({ maxIterations: 1 })
+
+    expect(ghCalls).toHaveLength(1)
+    expect(factory.status().counters.probePrGhBackoffSkips).toBe(1)
+    expect(factory.status().counters.completionSweepMissingPr).toBe(2)
+
+    clock.advance(60_000)
+    await factory.runLoop({ maxIterations: 1 })
+
+    expect(ghCalls).toHaveLength(2)
+    expect(factory.status().inFlight.map((issue) => issue.key)).toEqual(['AR-361'])
+    expect(factory.status().counters.done).toBeUndefined()
+  })
+
   it('gh PR fallback skips draft PRs and backs off repeated unresolved lookups', async () => {
     const clock = new ManualClock()
     const mount = new FakeMountClient({ [issuePath(359)]: issueFile(359) })
