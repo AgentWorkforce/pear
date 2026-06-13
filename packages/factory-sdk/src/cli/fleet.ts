@@ -20,6 +20,7 @@ import {
   type FleetClient,
   type MountClient,
   type ProbeCloser,
+  type RelayfileCloudMountClientConfig,
 } from '../index'
 import { FakeFleetClient, FakeMountClient } from '../testing'
 
@@ -27,7 +28,7 @@ interface FleetCliDeps {
   fleet?: FleetClient
   mount?: MountClient
   createFleet?: typeof createFleet
-  cloudMountFromConfig?: typeof RelayfileCloudMountClient.fromConfig
+  cloudMountFromConfig?: (config?: RelayfileCloudMountClientConfig) => Promise<MountClient>
   stdout?: Pick<NodeJS.WriteStream, 'write'>
   stderr?: Pick<NodeJS.WriteStream, 'write'>
   probeCloser?: ProbeCloser
