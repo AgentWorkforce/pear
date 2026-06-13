@@ -213,14 +213,20 @@ async function runFactoryCommand(
   if (command.kind === 'factory') {
     if (command.action === 'start') {
       const waiter = createStopSignalWaiter()
-      const removeSignalHandlers = installFactoryStopSignalHandlers(factory, { exit: waiter.resolve })
+      let stoppedBySignal = false
+      const removeSignalHandlers = installFactoryStopSignalHandlers(factory, {
+        exit: (code) => {
+          stoppedBySignal = true
+          waiter.resolve(code)
+        },
+      })
       try {
         await factory.start({ mode: command.mode })
         const code = await (deps.waitForStopSignal?.() ?? waiter.promise)
         return typeof code === 'number' ? code : 0
       } finally {
         removeSignalHandlers()
-        await factory.stop()
+        if (!stoppedBySignal) await factory.stop()
       }
     }
     if (command.action === 'run-once') {

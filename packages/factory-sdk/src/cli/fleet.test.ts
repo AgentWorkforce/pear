@@ -437,6 +437,49 @@ describe('fleet CLI runtime', () => {
     }
   })
 
+  it('does not stop the factory twice when a start command receives a signal', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fleet-cli-start-signal-'))
+    try {
+      const configPath = await writeConfig(root)
+      const factory = {
+        start: vi.fn(async () => {}),
+        stop: vi.fn(async () => {}),
+        runLoop: vi.fn(async () => []),
+        runOnce: vi.fn(),
+        status: vi.fn(),
+        triageIssue: vi.fn(),
+        dispatch: vi.fn(),
+        on: vi.fn(),
+        dispose: vi.fn(),
+      } as unknown as Factory
+
+      const code = await runFleetCli([
+        'factory',
+        'start',
+        '--mode',
+        'live',
+        '--config',
+        configPath,
+      ], {
+        fleet: new FakeFleetClient(),
+        mount: new FakeMountClient(),
+        createFactory: vi.fn(() => factory),
+        waitForStopSignal: async () => {
+          process.emit('SIGTERM', 'SIGTERM')
+          await flush()
+          return 143
+        },
+        stdout: buffer(),
+        stderr: buffer(),
+      })
+
+      expect(code).toBe(143)
+      expect(factory.stop).toHaveBeenCalledTimes(1)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('factory kill-loop sends SIGTERM to the heartbeat pid', async () => {
     const root = await mkdtemp(join(tmpdir(), 'fleet-cli-kill-'))
     const originalKill = process.kill
