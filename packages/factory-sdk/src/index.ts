@@ -18,6 +18,7 @@ export {
   mergePolicyLine,
   renderAgentTask,
 } from './dispatch/templates'
+export { isOdd } from './is-odd'
 export type {
   RenderAgentTaskInput,
   TemplateIssue,
