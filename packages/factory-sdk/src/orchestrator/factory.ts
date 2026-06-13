@@ -232,11 +232,14 @@ export class FactoryLoop implements Factory {
     this.#offDeliveryFailed?.()
     this.#offAgentExit = undefined
     this.#offDeliveryFailed = undefined
-    await this.#fleet.dispose()
   }
 
   async dispose(): Promise<void> {
-    await this.stop()
+    try {
+      await this.stop()
+    } finally {
+      await this.#fleet.dispose()
+    }
   }
 
   async #startLiveSubscription(overrides: Partial<FactoryLiveSubscriptionOptions> = {}): Promise<void> {

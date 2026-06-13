@@ -228,6 +228,8 @@ class RosterPidHarnessClient implements HarnessDriverClientLike {
   readonly eventListeners = new Set<(event: BrokerEvent) => void>()
   readonly agents = new Map<string, { name: string; pid?: number }>()
   readonly pidsByName = new Map<string, number>()
+  connectEventsCalls = 0
+  disconnectCalls = 0
 
   async spawnPty(input: SpawnPtyInput): Promise<{ name: string; session_ref: string }> {
     this.spawned.push(input)
@@ -256,7 +258,13 @@ class RosterPidHarnessClient implements HarnessDriverClientLike {
     this.inputs.push({ name, data })
   }
 
-  connectEvents(): void {}
+  connectEvents(): void {
+    this.connectEventsCalls += 1
+  }
+
+  disconnect(): void {
+    this.disconnectCalls += 1
+  }
 
   onEvent(listener: (event: BrokerEvent) => void): () => void {
     this.eventListeners.add(listener)
@@ -1640,6 +1648,27 @@ describe('FactoryLoop', () => {
     expect(mount.subscribeCount).toBe(1)
     expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-12-impl', 'ar-12-review'])
     await factory.stop()
+  })
+
+  it('keeps an internal fleet reusable across stop/start and disconnects it on dispose', async () => {
+    const mount = new FakeMountClient({ [issuePath(18)]: issueFile(18) })
+    const harness = new RosterPidHarnessClient()
+    const fleet = new InternalFleetClient({ client: harness, cwd: '/worktree' })
+    const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
+
+    await factory.start()
+    await factory.stop()
+    await factory.start()
+
+    expect(harness.connectEventsCalls).toBe(1)
+    expect(harness.disconnectCalls).toBe(0)
+    expect(harness.spawned.map((spawn) => spawn.name)).toEqual([
+      'ar-18-impl',
+      'ar-18-review',
+    ])
+
+    await factory.dispose()
+    expect(harness.disconnectCalls).toBe(1)
   })
 
   it('dedupes duplicate subscribe events for an already tracked issue', async () => {
