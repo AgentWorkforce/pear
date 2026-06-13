@@ -22,6 +22,7 @@ export type {
   TemplateIssue,
   TemplateRoute,
 } from './dispatch/templates'
+export { isOdd } from './is-odd'
 export { createFleet } from './fleet/create-fleet'
 export type {
   CreateFleetDeps,

@@ -14,4 +14,14 @@ describe('isOdd', () => {
   it('returns false for zero', () => {
     expect(isOdd(0)).toBe(false)
   })
+
+  it('returns false for non-integer numbers', () => {
+    expect(isOdd(1.5)).toBe(false)
+  })
+
+  it('returns false for non-finite numbers', () => {
+    expect(isOdd(NaN)).toBe(false)
+    expect(isOdd(Infinity)).toBe(false)
+    expect(isOdd(-Infinity)).toBe(false)
+  })
 })
