@@ -1,6 +1,7 @@
 import type { FactoryConfig } from './config/schema'
 
 export type { FactoryConfig } from './config/schema'
+export { square } from './square'
 export { FactoryConfigSchema } from './config/schema'
 export {
   LINEAR_STATE_IDS,
