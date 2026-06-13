@@ -107,6 +107,7 @@ export type {
   FactoryScopeSafety,
   NormalizedFactoryScopeSafety,
 } from './safety/factory-scope'
+export { square } from './square'
 export {
   canonicalMountPaths,
   createWorkspaceScopedEventClient,
