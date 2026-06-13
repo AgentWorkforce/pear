@@ -3,7 +3,7 @@ import { dirname } from 'node:path'
 
 import { FactoryConfigSchema, type FactoryConfig } from '../config/schema'
 import { LINEAR_STATE_IDS, linearByStatePath } from '../constants/linear'
-import { GithubMergeGate, closeProbePr, type GithubMergeGate as GithubMergeGatePort } from '../github'
+import { GithubMergeGate, closeProbePr, type GhRunner, type GithubMergeGate as GithubMergeGatePort } from '../github'
 import type {
   AgentPidResolution,
   AgentSpec,
@@ -80,6 +80,8 @@ const LIVE_DEDUPE_LIMIT = 5_000
 const LIVE_EVENT_DRAIN_BATCH_SIZE = 5
 const COMPLETION_SWEEP_INTERVAL_MS = 15_000
 const COMPLETION_SWEEP_BATCH_SIZE = 2
+const PROBE_PR_GH_BACKOFF_MS = 60_000
+const PROBE_PR_GH_CANDIDATE_LIMIT = 200
 const STATE_NAME_TO_ID: Record<string, string> = {
   'Ready for Agent': LINEAR_STATE_IDS.readyForAgent,
   'Agent Implementing': LINEAR_STATE_IDS.agentImplementing,
@@ -106,7 +108,6 @@ const realClock: Clock = {
   now: () => Date.now(),
   sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }
-
 export function createFactory(config: FactoryConfig, ports: FactoryPorts): Factory {
   return new FactoryLoop(FactoryConfigSchema.parse(config), ports)
 }
@@ -122,6 +123,7 @@ export class FactoryLoop implements Factory {
   readonly #probeCloser: ProbeCloser
   readonly #probePrResolver: ProbePrResolver
   readonly #customProbePrResolver: boolean
+  readonly #probePrGhRunner: GhRunner
   readonly #logger: Logger
   readonly #clock: Clock
   readonly #processIdentityReader: typeof readProcessIdentity
@@ -162,6 +164,8 @@ export class FactoryLoop implements Factory {
   #completionSweepTimer?: ReturnType<typeof setTimeout>
   #completionSweepActive = false
   readonly #completionInFlight = new Set<string>()
+  readonly #probePrGhBackoffUntilMs = new Map<string, number>()
+  readonly #probePrResolvedCache = new Map<string, { pr: ResolvedIssuePr; expiresAtMs: number }>()
   readonly #seenLiveEvents = new Set<string>()
   #offAgentExit?: () => void
   #offDeliveryFailed?: () => void
@@ -184,7 +188,8 @@ export class FactoryLoop implements Factory {
     this.#mergeGate = ports.mergeGate ?? new GithubMergeGate()
     this.#probeCloser = ports.probeCloser ?? closeProbePr
     this.#customProbePrResolver = Boolean(ports.probePrResolver)
-    this.#probePrResolver = ports.probePrResolver ?? ((issue) => resolveIssuePrFromMount(this.#mount, this.#config, issue))
+    this.#probePrGhRunner = ports.probePrGhRunner ?? failClosedGhRunner
+    this.#probePrResolver = ports.probePrResolver ?? ((issue) => this.#resolveIssuePr(issue))
     this.#logger = ports.logger ?? console
     this.#clock = ports.clock ?? realClock
     this.#processIdentityReader = ports.processIdentityReader ?? readProcessIdentity
@@ -607,6 +612,7 @@ export class FactoryLoop implements Factory {
             }
             if (pr.draft) {
               this.#increment('completionSweepDraftPr')
+              this.#probePrGhBackoffUntilMs.set(issue.key, this.#clock.now() + PROBE_PR_GH_BACKOFF_MS)
               return undefined
             }
             return { record, pr }
@@ -643,9 +649,46 @@ export class FactoryLoop implements Factory {
     if (this.#customProbePrResolver) {
       return this.#probePrResolver(issue)
     }
-    return resolveIssuePrFromMount(this.#mount, this.#config, issue, {
+    return this.#resolveIssuePr(issue, {
       titleMarker: FACTORY_E2E_MARKER,
     })
+  }
+
+  async #resolveIssuePr(
+    issue: LinearIssue,
+    opts: { requireTitleMarker?: boolean; titleMarker?: string } = {},
+  ): Promise<ResolvedIssuePr | undefined> {
+    const key = issue.key
+    const now = this.#clock.now()
+    const cached = this.#probePrResolvedCache.get(key)
+    if (cached && cached.expiresAtMs > now) {
+      return cached.pr
+    }
+
+    const mountPr = await resolveIssuePrFromMount(this.#mount, this.#config, issue, opts)
+    if (mountPr) {
+      return mountPr
+    }
+
+    const backoffUntil = this.#probePrGhBackoffUntilMs.get(key) ?? 0
+    if (backoffUntil > now) {
+      this.#increment('probePrGhBackoffSkips')
+      return undefined
+    }
+
+    const ghPr = await resolveIssuePrFromGh(this.#probePrGhRunner, this.#config, issue, opts, this.#logger)
+    this.#increment('probePrGhResolveAttempts')
+    if (ghPr) {
+      this.#probePrGhBackoffUntilMs.delete(key)
+      if (!ghPr.draft) {
+        this.#probePrResolvedCache.set(key, { pr: ghPr, expiresAtMs: now + PROBE_PR_GH_BACKOFF_MS })
+      }
+      this.#increment('probePrGhResolveHits')
+      return ghPr
+    }
+
+    this.#probePrGhBackoffUntilMs.set(key, now + PROBE_PR_GH_BACKOFF_MS)
+    return undefined
   }
 
   async runOnce(opts: { dryRun?: boolean } = {}): Promise<IterationReport> {
@@ -1678,6 +1721,8 @@ export class FactoryLoop implements Factory {
       this.#error(error, record.issue)
     } finally {
       this.#completionInFlight.delete(completionKey)
+      this.#probePrGhBackoffUntilMs.delete(completionKey)
+      this.#probePrResolvedCache.delete(completionKey)
     }
   }
 
@@ -2093,7 +2138,7 @@ export class FactoryLoop implements Factory {
   async #closeSyntheticProbeIfPresent(issue: LinearIssue): Promise<void> {
     const probe = this.#customProbePrResolver
       ? await this.#probePrResolver(issue)
-      : await resolveIssuePrFromMount(this.#mount, this.#config, issue, {
+      : await this.#resolveIssuePr(issue, {
         titleMarker: FACTORY_E2E_MARKER,
       })
     if (!probe) {
@@ -2283,6 +2328,69 @@ const resolveIssuePrFromMount = async (
   return candidates.sort((a, b) => b.score - a.score || b.prNumber - a.prNumber)[0]
 }
 
+const resolveIssuePrFromGh = async (
+  run: GhRunner,
+  config: FactoryConfig,
+  issue: LinearIssue,
+  opts: { requireTitleMarker?: boolean; titleMarker?: string } = {},
+  logger?: Logger,
+): Promise<ResolvedIssuePr | undefined> => {
+  const candidates: Array<ResolvedIssuePr & { score: number; open: boolean }> = []
+  for (const repo of reposFromConfig(config)) {
+    let payload: unknown
+    try {
+      const result = await run([
+        'pr',
+        'list',
+        '--repo',
+        repo,
+        '--state',
+        'all',
+        '--json',
+        'number,title,body,headRefName,isDraft,state',
+        '--limit',
+        String(PROBE_PR_GH_CANDIDATE_LIMIT),
+      ])
+      if (!result.stdout.trim()) {
+        logger?.warn?.('[factory] gh PR resolver returned empty output', { issue: issue.key, repo })
+        continue
+      }
+      payload = parseJsonContent(result.stdout)
+    } catch (error) {
+      logger?.warn?.('[factory] gh PR resolver failed', { issue: issue.key, repo, error })
+      continue
+    }
+
+    if (!Array.isArray(payload)) {
+      logger?.warn?.('[factory] gh PR resolver returned non-array payload', { issue: issue.key, repo })
+      continue
+    }
+    if (payload.length >= PROBE_PR_GH_CANDIDATE_LIMIT) {
+      logger?.warn?.('[factory] gh PR resolver hit candidate limit', { issue: issue.key, repo, limit: PROBE_PR_GH_CANDIDATE_LIMIT })
+    }
+
+    for (const entry of payload) {
+      const pr = ghProbePrCandidate(entry)
+      if (!pr || !containsIssueKey(pr.headRef, issue.key)) continue
+      const score = issuePrMatchScore(pr, issue, opts.titleMarker ?? config.safety.requireTitlePrefix, opts)
+      if (score <= 0) continue
+      candidates.push({
+        repo,
+        prNumber: pr.number,
+        draft: pr.draft,
+        score,
+        open: normalizePrState(pr.state) === 'OPEN',
+      })
+    }
+  }
+
+  return candidates.sort((a, b) =>
+    b.score - a.score ||
+    Number(b.open) - Number(a.open) ||
+    b.prNumber - a.prNumber
+  )[0]
+}
+
 const reposFromConfig = (config: FactoryConfig): string[] => {
   const repos = new Set([
     ...Object.values(config.repos.byLabel),
@@ -2320,6 +2428,23 @@ const readProbePrCandidate = async (
   }
 }
 
+const ghProbePrCandidate = (
+  value: unknown,
+): { number: number; title: string; body: string; headRef: string; draft?: boolean; state?: string } | undefined => {
+  const payload = asRecord(value)
+  if (!payload) return undefined
+  const number = numberValue(payload.number)
+  if (typeof number !== 'number' || !Number.isInteger(number) || number <= 0) return undefined
+  return {
+    number,
+    title: stringValue(payload.title) ?? '',
+    body: stringValue(payload.body) ?? '',
+    headRef: stringValue(payload.headRefName) ?? '',
+    draft: booleanValue(payload.isDraft),
+    state: stringValue(payload.state),
+  }
+}
+
 const issuePrMatchScore = (
   pr: { title: string; body: string; headRef: string },
   issue: LinearIssue,
@@ -2336,6 +2461,10 @@ const issuePrMatchScore = (
 
 const hasTitlePrefix = (title: string, marker: string): boolean =>
   title === marker || title.startsWith(`${marker} `)
+
+const normalizePrState = (state?: string): string | undefined => state?.toUpperCase()
+
+const failClosedGhRunner: GhRunner = async () => ({ stdout: '[]' })
 
 const ISSUE_KEY_PATTERN = /^[A-Z]+-\d+$/u
 
@@ -2375,6 +2504,7 @@ const uuidFromPath = (path: string): string | undefined => path.split('__')[1]?.
 
 const stringValue = (value: unknown): string | undefined => typeof value === 'string' ? value : undefined
 const booleanValue = (value: unknown): boolean | undefined => typeof value === 'boolean' ? value : undefined
+const numberValue = (value: unknown): number | undefined => typeof value === 'number' ? value : undefined
 
 const stateNameToId = (name: string | undefined): string | undefined =>
   name ? STATE_NAME_TO_ID[name] : undefined
