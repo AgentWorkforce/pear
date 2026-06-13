@@ -2766,8 +2766,41 @@ describe('FactoryLoop', () => {
     fleet.emitAgentExit('ar-20-impl', 'issue-done')
 
     await vi.waitFor(() => expect(fleet.releases.map((release) => release.name)).toEqual(['ar-20-impl', 'ar-20-review']))
-    expect(gate.checks).toHaveLength(12)
+    expect(gate.checks).toHaveLength(60)
     expect(gate.merges).toEqual([])
+  })
+
+  it('keeps completion cleanup running when merge gate resolution throws', async () => {
+    const mount = new FakeMountClient({ [issuePath(24)]: realMergeIssueFile(24) })
+    const fleet = new FakeFleetClient()
+    const errors: unknown[][] = []
+    const factory = createFactory(config({
+      mergePolicy: 'on-green-with-review',
+      safety: { requireTitlePrefix: 'Real', requireTeamKey: 'AR' },
+    }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      linear: stateOnlyLinear(mount),
+      logger: {
+        error: (...args: unknown[]) => errors.push(args),
+      },
+      probePrResolver: async () => {
+        throw new Error('mount unavailable')
+      },
+    })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(24), realMergeIssueFile(24))))
+    fleet.emitAgentExit('ar-24-impl', 'issue-done')
+
+    await vi.waitFor(() => expect(fleet.releases.map((release) => release.name)).toEqual(['ar-24-impl', 'ar-24-review']))
+    expect(factory.status().counters.mergeGateError).toBe(1)
+    expect(factory.status().counters.done).toBe(1)
+    expect(factory.status().inFlight).toEqual([])
+    expect(errors[0]).toEqual([
+      '[factory] merge gate completion failed with unhandled error',
+      expect.any(Error),
+    ])
   })
 
   it('aborts a real PR merge when the guarded head commit has drifted', async () => {

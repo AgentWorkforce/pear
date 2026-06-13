@@ -139,6 +139,15 @@ describe('GithubMergeGate', () => {
     })
   })
 
+  it('reports a missing review decision as a review gate refusal', () => {
+    expect(evaluateGithubMergeGate(input, live({ reviewDecision: null }))).toMatchObject({
+      verdict: 'REFUSE',
+      ready: false,
+      reason: expect.stringMatching(/review decision/),
+      live: { reviewDecision: undefined },
+    })
+  })
+
   it('merges through gh with squash, delete-branch, and match-head-commit', async () => {
     const calls: string[][] = []
     const gate = new GhCliGithubMergeGate(async (args) => {

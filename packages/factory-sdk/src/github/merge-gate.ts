@@ -119,7 +119,7 @@ export function evaluateGithubMergeGate(
   const statusCheckRollup = Array.isArray(record.statusCheckRollup) ? record.statusCheckRollup : undefined
   const checkStates = statusCheckRollup ? checkStatesFromRollup(statusCheckRollup) : []
 
-  if (!mergeable || !mergeStateStatus || !headRefOid || !reviewDecision || !statusCheckRollup) {
+  if (!mergeable || !mergeStateStatus || !headRefOid || !statusCheckRollup) {
     return refuse('missing required live GitHub merge fields', {
       mergeable,
       mergeStateStatus,

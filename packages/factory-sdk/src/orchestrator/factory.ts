@@ -89,7 +89,7 @@ const INJECTION_RETRY_DELAY_MS = 1_000
 const INJECTION_RETRY_ATTEMPT_TIMEOUT_MS = 15_000
 const INJECTION_MAX_ATTEMPTS = 6
 const STOP_TEARDOWN_TIMEOUT_MS = 2_500
-const MERGE_GATE_MAX_ATTEMPTS = 12
+const MERGE_GATE_MAX_ATTEMPTS = 60
 const MERGE_GATE_POLL_DELAY_MS = 10_000
 export const DEFAULT_FACTORY_LOOP_HEARTBEAT_PATH = '/tmp/factory-run/factory-loop-heartbeat.json'
 export const DEFAULT_FACTORY_LOOP_REGISTRY_PATH = '/tmp/factory-run/factory-loop-registry.json'
@@ -1767,59 +1767,64 @@ export class FactoryLoop implements Factory {
   }
 
   async #runCompletionMergeGate(issue: LinearIssue): Promise<void> {
-    if (this.#isSyntheticProbeIssue(issue)) {
-      await this.#closeSyntheticProbeIfPresent(issue)
-      return
-    }
+    try {
+      if (this.#isSyntheticProbeIssue(issue)) {
+        await this.#closeSyntheticProbeIfPresent(issue)
+        return
+      }
 
-    if (!isRealLinearIssue(issue)) {
-      this.#logger.warn?.('[factory] merge gate skipped non-real Linear issue', { issue: issue.key })
-      this.#increment('mergeGateSkippedNonReal')
-      return
-    }
+      if (!isRealLinearIssue(issue)) {
+        this.#logger.warn?.('[factory] merge gate skipped non-real Linear issue', { issue: issue.key })
+        this.#increment('mergeGateSkippedNonReal')
+        return
+      }
 
-    if (this.#config.mergePolicy !== 'on-green-with-review') {
-      return
-    }
+      if (this.#config.mergePolicy !== 'on-green-with-review') {
+        return
+      }
 
-    const pr = await this.#probePrResolver(issue)
-    if (!pr) {
-      this.#logger.warn?.('[factory] merge gate found no PR for real issue', { issue: issue.key })
-      this.#increment('mergeGateMissingPr')
-      return
-    }
+      const pr = await this.#probePrResolver(issue)
+      if (!pr) {
+        this.#logger.warn?.('[factory] merge gate found no PR for real issue', { issue: issue.key })
+        this.#increment('mergeGateMissingPr')
+        return
+      }
 
-    const ready = await this.#waitForMergeReady(pr)
-    const headSha = ready?.live.headRefOid
-    if (!ready || !headSha) {
-      this.#increment('mergeGateNotMerged')
-      return
-    }
+      const ready = await this.#waitForMergeReady(pr)
+      const headSha = ready?.live.headRefOid
+      if (!ready || !headSha) {
+        this.#increment('mergeGateNotMerged')
+        return
+      }
 
-    const result = await this.#mergeGate.merge({
-      repo: pr.repo,
-      number: pr.prNumber,
-      expectedHeadSha: headSha,
-    })
-    if (!result.merged) {
-      this.#logger.warn?.('[factory] merge gate aborted guarded merge', {
+      const result = await this.#mergeGate.merge({
+        repo: pr.repo,
+        number: pr.prNumber,
+        expectedHeadSha: headSha,
+      })
+      if (!result.merged) {
+        this.#logger.warn?.('[factory] merge gate aborted guarded merge', {
+          issue: issue.key,
+          repo: pr.repo,
+          prNumber: pr.prNumber,
+          headSha,
+          reason: result.reason,
+        })
+        this.#increment('mergeGateMergeAborted')
+        return
+      }
+
+      this.#logger.info?.('[factory] merge gate merged PR', {
         issue: issue.key,
         repo: pr.repo,
         prNumber: pr.prNumber,
         headSha,
-        reason: result.reason,
       })
-      this.#increment('mergeGateMergeAborted')
-      return
+      this.#increment('mergeGateMerged')
+    } catch (error) {
+      this.#logger.error?.('[factory] merge gate completion failed with unhandled error', error)
+      this.#increment('mergeGateError')
     }
-
-    this.#logger.info?.('[factory] merge gate merged PR', {
-      issue: issue.key,
-      repo: pr.repo,
-      prNumber: pr.prNumber,
-      headSha,
-    })
-    this.#increment('mergeGateMerged')
   }
 
   async #closeSyntheticProbeIfPresent(issue: LinearIssue): Promise<void> {
