@@ -2428,14 +2428,12 @@ describe('FactoryLoop', () => {
     await flush()
 
     mount.emit(changeEvent(freshPath, '203', new Date(Date.now()).toISOString()))
-    await flush()
-
-    expect(fleet.spawns.map((spawn) => spawn.name)).toEqual([
+    await vi.waitFor(() => expect(fleet.spawns.map((spawn) => spawn.name)).toEqual([
       'ar-39-impl',
       'ar-39-review',
       'ar-38-impl',
       'ar-38-review',
-    ])
+    ]))
     await factory.stop()
   })
 
