@@ -3,6 +3,7 @@ import type { FactoryConfig } from './config/schema'
 export { square } from './square'
 export type { FactoryConfig } from './config/schema'
 export { FactoryConfigSchema } from './config/schema'
+export { square } from './square'
 export {
   LINEAR_STATE_IDS,
   linearByStatePath,
