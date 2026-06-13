@@ -24,6 +24,8 @@ import {
 } from '../index'
 import { FakeFleetClient, FakeMountClient } from '../testing'
 
+const DAEMON_OUTPUT_FLUSH_TIMEOUT_MS = 200
+
 interface FleetCliDeps {
   fleet?: FleetClient
   mount?: MountClient
@@ -220,6 +222,8 @@ async function runFactoryCommand(
       const flushAndExit = async (code: number): Promise<void> => {
         try {
           await (deps.flushDaemonOutput ?? flushProcessOutput)()
+        } catch {
+          // Shutdown must continue even if the stream flush fails.
         } finally {
           const daemonExit = deps.daemonExit ?? ((exitCode: number) => process.exit(exitCode))
           daemonExit(code)
@@ -479,10 +483,17 @@ function writeJson(out: Pick<NodeJS.WriteStream, 'write'>, value: unknown): void
 }
 
 async function flushProcessOutput(): Promise<void> {
-  await Promise.all([
+  let timeout: NodeJS.Timeout | undefined
+  const flushed = Promise.all([
     flushWritable(process.stdout),
     flushWritable(process.stderr),
   ])
+  const timedOut = new Promise<void>((resolve) => {
+    timeout = setTimeout(resolve, DAEMON_OUTPUT_FLUSH_TIMEOUT_MS)
+  })
+
+  await Promise.race([flushed, timedOut])
+  if (timeout) clearTimeout(timeout)
 }
 
 function flushWritable(stream: NodeJS.WriteStream): Promise<void> {
@@ -491,7 +502,11 @@ function flushWritable(stream: NodeJS.WriteStream): Promise<void> {
   }
 
   return new Promise((resolve) => {
-    stream.write('', () => resolve())
+    try {
+      stream.write('', () => resolve())
+    } catch {
+      resolve()
+    }
   })
 }
 

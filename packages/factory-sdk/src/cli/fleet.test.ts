@@ -508,6 +508,69 @@ describe('fleet CLI runtime', () => {
     }
   })
 
+  it('factory start still exits when daemon output flushing rejects', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'fleet-cli-start-flush-reject-'))
+    try {
+      const configPath = await writeConfig(root)
+      const listeners = new Map<string, () => void>()
+      const processLike = {
+        once(signal: string, listener: () => void) {
+          listeners.set(signal, listener)
+          return processLike
+        },
+        off(signal: string, listener: () => void) {
+          if (listeners.get(signal) === listener) listeners.delete(signal)
+          return processLike
+        },
+      }
+      const factory = {
+        start: vi.fn(async () => {}),
+        stop: vi.fn(async () => {}),
+        runLoop: vi.fn(async () => []),
+        runOnce: vi.fn(),
+        status: vi.fn(),
+        triageIssue: vi.fn(),
+        dispatch: vi.fn(),
+        on: vi.fn(),
+        dispose: vi.fn(),
+      } as unknown as Factory
+      const daemonExits: number[] = []
+
+      const run = runFleetCli([
+        'factory',
+        'start',
+        '--mode',
+        'live',
+        '--config',
+        configPath,
+      ], {
+        fleet: new FakeFleetClient(),
+        mount: new FakeMountClient(),
+        createFactory: () => factory,
+        stopSignalProcessLike: processLike as unknown as Pick<NodeJS.Process, 'once' | 'off'>,
+        flushDaemonOutput: async () => {
+          throw new Error('flush failed')
+        },
+        daemonExit: (code) => {
+          daemonExits.push(code)
+        },
+        stdout: buffer(),
+        stderr: buffer(),
+      })
+      await vi.waitFor(() => {
+        expect(listeners.has('SIGTERM')).toBe(true)
+      })
+      listeners.get('SIGTERM')?.()
+
+      await expect(run).resolves.toBe(0)
+      expect(factory.stop).toHaveBeenCalledTimes(1)
+      expect(daemonExits).toEqual([0])
+      expect(listeners.size).toBe(0)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('does not force process exit for one-shot factory commands', async () => {
     const root = await mkdtemp(join(tmpdir(), 'fleet-cli-one-shot-no-force-exit-'))
     try {
