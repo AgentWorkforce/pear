@@ -1,13 +1,16 @@
 import { execFile } from 'node:child_process'
+import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { promisify } from 'node:util'
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, symlink, unlink, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
 const launcherPath = join(import.meta.dirname, '..', '..', 'bin', 'fleet.mjs')
-const repoRoot = join(import.meta.dirname, '..', '..', '..', '..')
+const require = createRequire(import.meta.url)
+const esbuildRoot = dirname(require.resolve('esbuild/package.json'))
+const esbuildPlatformRoot = join(dirname(dirname(esbuildRoot)), '@esbuild')
 const execFileAsync = promisify(execFile)
 
 describe('fleet.mjs launcher', () => {
@@ -19,7 +22,7 @@ describe('fleet.mjs launcher', () => {
     expect(source).toContain('const launcher = fileURLToPath(import.meta.url)')
     expect(source).toContain('metafile: true')
     expect(source).toContain('metafileBuild.metafile.inputs')
-    expect(source).toContain('readFileSync(inputPath)')
+    expect(source).toContain('readMemoizedOutfile()')
   })
 
   it('rebundles when a non-entry transitive source changes', async () => {
@@ -50,6 +53,19 @@ describe('fleet.mjs launcher', () => {
       await rm(fixture.root, { recursive: true, force: true })
     }
   })
+
+  it('does not require esbuild when the memoized cache is valid', async () => {
+    const fixture = await createLauncherFixture('cached')
+    const esbuildLink = join(fixture.repoRoot, 'node_modules', 'esbuild')
+    try {
+      expect(await runFixtureFleet(fixture.repoRoot)).toBe('cached')
+      await unlink(esbuildLink)
+
+      expect(await runFixtureFleet(fixture.repoRoot)).toBe('cached')
+    } finally {
+      await rm(fixture.root, { recursive: true, force: true })
+    }
+  })
 })
 
 async function createLauncherFixture(marker: string): Promise<{ root: string; repoRoot: string; packageRoot: string }> {
@@ -60,8 +76,8 @@ async function createLauncherFixture(marker: string): Promise<{ root: string; re
   await mkdir(join(packageRoot, 'src', 'cli'), { recursive: true })
   await mkdir(join(packageRoot, 'src', 'orchestrator'), { recursive: true })
   await mkdir(join(fixtureRepoRoot, 'node_modules'), { recursive: true })
-  await symlink(join(repoRoot, 'node_modules', 'esbuild'), join(fixtureRepoRoot, 'node_modules', 'esbuild'), 'dir')
-  await symlink(join(repoRoot, 'node_modules', '@esbuild'), join(fixtureRepoRoot, 'node_modules', '@esbuild'), 'dir')
+  await symlink(esbuildRoot, join(fixtureRepoRoot, 'node_modules', 'esbuild'), 'dir')
+  await symlink(esbuildPlatformRoot, join(fixtureRepoRoot, 'node_modules', '@esbuild'), 'dir')
   await copyFile(launcherPath, join(packageRoot, 'bin', 'fleet.mjs'))
   await writeFile(join(packageRoot, 'src', 'cli', 'fleet.ts'), [
     "import { marker } from '../orchestrator/factory'",
