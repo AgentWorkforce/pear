@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { square } from './square'
+import { square } from './index'
 
 describe('square', () => {
   it('squares positive numbers', () => {
