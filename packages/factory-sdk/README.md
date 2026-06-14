@@ -101,8 +101,18 @@ The factory runs as **two** coordinated processes (see issue #321 §4):
 
 ## Configuration
 
-Pass a JSON file via `--config`. The schema lives in
-[`src/config/schema.ts`](src/config/schema.ts). Minimal config:
+Pass a JSON file via `--config`. The full schema (with every default) lives in
+[`src/config/schema.ts`](src/config/schema.ts), validated by Zod at load time —
+an invalid config fails fast with a field-level error.
+
+The file is either a bare config object, or a `{ "factoryConfig": { … } }`
+wrapper (the wrapper form also allows a sibling `fixtureFiles` map — see
+[Fixture mode](#fixture-mode-offline-testing)).
+
+### Minimal config
+
+Only two fields are required — `workspaceId` and `repos.byLabel`. Everything else
+has a default:
 
 ```json
 {
@@ -114,20 +124,102 @@ Pass a JSON file via `--config`. The schema lives in
 }
 ```
 
-Notable fields (all optional unless noted, defaults in parentheses):
+### Complete annotated config
 
-- `workspaceId` *(required)* — relayfile cloud mount workspace.
-- `repos.byLabel` *(required)* — map Linear label → `owner/repo`. Also
-  `repos.byProject`, `repos.keywordRules`, `repos.clonePaths`, `repos.default`.
+A realistic live config, showing the fields you'll actually want to set (comments
+are illustrative — strip them; JSON has no comments):
+
+```jsonc
+{
+  // relayfile cloud mount workspace id — the workspace whose /linear and /slack
+  // trees the factory reads. Same id the Pear app uses for this workspace.
+  "workspaceId": "ws_abc123",
+
+  // Which Linear issues to pull. Empty arrays = no filter on that dimension.
+  // Values are Linear team keys / project names / label names / assignee ids.
+  "subscription": {
+    "teams": ["AR"],
+    "labels": ["pear"],
+    "projects": [],
+    "assignees": []
+  },
+
+  // Issue → repo routing. Precedence (first match wins):
+  //   byLabel  →  byProject  →  keywordRules (regex on title/desc)  →  default
+  // No match and no default → the issue is escalated, never dispatched.
+  "repos": {
+    "byLabel":  { "pear": "AgentWorkforce/pear", "cloud": "AgentWorkforce/cloud" },
+    "byProject": { "Pear": "AgentWorkforce/pear" },
+    "keywordRules": [{ "pattern": "relayfile|mount", "repo": "AgentWorkforce/relayfile" }],
+    // Where each repo is checked out locally for the agent to work in.
+    "clonePaths": { "AgentWorkforce/pear": "/Users/you/Projects/pear" },
+    "default": "AgentWorkforce/pear"
+  },
+
+  // SAFETY GATE — an issue is only dispatched if BOTH hold (see below):
+  "safety": {
+    "requireTitlePrefix": "[factory-e2e]",
+    "requireTeamKey": "AR"
+  },
+
+  "batchSize": 5,                       // max issues dispatched per cycle
+  "dispatch": { "maxAttempts": 2, "errorCooldownMs": 60000 },
+  "mergePolicy": "never",               // see mergePolicy note below
+  "models": {                           // optional per-role model overrides
+    "implementer": "claude-opus-4-8",
+    "reviewer": "claude-opus-4-8",
+    "triage": "claude-haiku-4-5-20251001"
+  },
+  "slack": { "channel": "C0B902XR6PN" },   // optional threaded status updates
+  "loop": {
+    "heartbeatPath": "/tmp/factory-run/factory-loop-heartbeat.json",
+    "registryPath":  "/tmp/factory-run/factory-loop-registry.json",
+    "heartbeatStaleMs": 60000
+  }
+}
+```
+
+### Where the values come from
+
+- **`workspaceId`** *(required)* — the relayfile cloud mount workspace id for this
+  workspace (the same one the Pear app mounts `/linear` and `/slack` under).
+- **`repos.byLabel`** *(required)* — map a Linear label → `owner/repo`. The other
+  routing maps are optional; **precedence is `byLabel` → `byProject` →
+  `keywordRules` → `default`**, else the issue is escalated (never dispatched).
+- **`repos.clonePaths`** — `owner/repo` → local working-tree path. Without an entry
+  the agent has nowhere to apply changes for that repo, so set it for every repo
+  you actually dispatch to.
+- **`stateIds`** — the Linear workflow-state UUIDs for `readyForAgent`,
+  `agentImplementing`, `done`, `inPlanning`. Defaults are the **AR team's** states
+  (see [`src/constants/linear.ts`](src/constants/linear.ts)). If you run against a
+  different Linear team, override all four with that team's state UUIDs (read them
+  from the Linear API / the issue JSON's `state.id`).
+- **`safety`** — the scope gate (below). Defaults `[factory-e2e]` + team `AR`.
+
+### The safety gate (what actually gets dispatched)
+
+`isInFactoryScope` ([`src/safety/factory-scope.ts`](src/safety/factory-scope.ts))
+dispatches an issue only when **both** are true:
+
+1. The issue **title starts with `safety.requireTitlePrefix`** — exactly
+   `[factory-e2e]`, or `[factory-e2e] <rest>`. Anything else is out of scope.
+2. The issue's **team key equals `safety.requireTeamKey`** (`AR`).
+
+This is why `factory run-once` may pull issues but dispatch none — they're real
+issues that fall outside the gate. Loosen the gate deliberately; it's the primary
+guardrail against the factory acting on issues it shouldn't.
+
+### Other notable fields (defaults in parentheses)
+
 - `mergePolicy` (`never`) — `never` keeps PRs open; `on-green-with-review` enables
   autonomous merge on green + approved review. **Stays `never` until the flip is
   thrown** (issue #321 §6).
-- `safety.requireTitlePrefix` (`[factory-e2e]`) + `safety.requireTeamKey` (`AR`) —
-  the scope gate. Issues outside scope are never dispatched.
-- `loop.heartbeatPath` (`/tmp/factory-run/factory-loop-heartbeat.json`),
-  `loop.registryPath`, `loop.heartbeatStaleMs` (`60000`) — daemon/reaper coupling.
-- `batchSize` (`5`), `dispatch.maxAttempts` (`2`), `models.{implementer,reviewer,triage}`,
-  `slack.channel`, `subscription.*`, `liveSubscription.*`.
+- `loop.heartbeatPath` / `loop.registryPath` / `loop.heartbeatStaleMs` (`60000`) —
+  daemon/reaper coupling (the reaper must point at the same paths via the same
+  `--config`).
+- `batchSize` (`5`), `dispatch.maxAttempts` (`2`), `dispatch.errorCooldownMs`
+  (`60000`), `models.{implementer,reviewer,triage}`, `slack.channel`,
+  `subscription.*`, `liveSubscription.*`, `stateIds.*`.
 
 ### Fixture mode (offline testing)
 
