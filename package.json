@@ -38,7 +38,7 @@
     "lint": "eslint ."
   },
   "dependencies": {
-    "@agent-relay/cloud": "^8.3.7",
+    "@agent-relay/cloud": "^8.7.2",
     "@agent-relay/harness-driver": "^8.3.7",
     "@agent-relay/sdk": "^8.3.7",
     "@agentworkforce/deploy": "^4.0.2",
