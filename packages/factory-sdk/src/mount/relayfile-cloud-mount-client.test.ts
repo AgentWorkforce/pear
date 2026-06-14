@@ -24,6 +24,15 @@ const cloudSession = (auth: StoredAuth): CloudSession => ({
   client: {} as CloudSession['client'],
 })
 
+const factoryReadScopeCovers = (path: string): boolean =>
+  FACTORY_RELAYFILE_SCOPES.some((scope) => {
+    const prefix = 'relayfile:fs:read:'
+    if (!scope.startsWith(prefix)) return false
+    const scopePath = scope.slice(prefix.length)
+    if (scopePath.endsWith('/**')) return path.startsWith(scopePath.slice(0, -3))
+    return path === scopePath
+  })
+
 class FakeRelayFileClient implements RelayFileClientLike {
   readonly readFileCalls: Array<{ workspaceId: string; path: string }> = []
   readonly writeFileCalls: Array<{
@@ -200,6 +209,7 @@ describe('RelayfileCloudMountClient', () => {
     expect(joinOptions.scopes).not.toContain('relayfile:fs:read:/**')
     expect(joinOptions.scopes).not.toContain('relayfile:fs:write:/**')
     expect(joinOptions.scopes).toContain('relayfile:fs:read:/slack/users/**')
+    expect(factoryReadScopeCovers('/slack/users/U123/messages/1781267200_000000/meta.json')).toBe(true)
     expect(capturedTokenProvider).toBeDefined()
     await expect(capturedTokenProvider?.()).resolves.toBe('cld_at_shared')
   })
