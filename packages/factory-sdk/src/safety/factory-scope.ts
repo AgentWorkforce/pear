@@ -18,7 +18,7 @@ export function isInFactoryScope(
   const expected = normalizeSafety(safety)
   const payload = wrappedPayload(issue.raw)
   const title = stringValue(payload.title) ?? issue.title
-  if (!titleHasFactoryMarker(title, expected.titlePrefix)) {
+  if (!titleHasAcceptedFactoryMarker(title, expected.titlePrefix)) {
     return false
   }
 
@@ -52,7 +52,7 @@ function factoryScopeFailureReason(
   const expected = normalizeSafety(safety)
   const payload = wrappedPayload(issue.raw)
   const title = stringValue(payload.title) ?? issue.title
-  if (!titleHasFactoryMarker(title, expected.titlePrefix)) {
+  if (!titleHasAcceptedFactoryMarker(title, expected.titlePrefix)) {
     return `title must start with ${expected.titlePrefix} boundary`
   }
 
@@ -74,6 +74,9 @@ const normalizeSafety = (safety: FactoryScopeSafety = {}): NormalizedFactoryScop
 
 const titleHasFactoryMarker = (title: string, marker: string): boolean =>
   title === marker || title.startsWith(`${marker} `)
+
+const titleHasAcceptedFactoryMarker = (title: string, configuredMarker: string): boolean =>
+  titleHasFactoryMarker(title, configuredMarker) || titleHasFactoryMarker(title, '[factory]')
 
 const wrappedPayload = (value: unknown): Record<string, unknown> => {
   const record = asRecord(value)

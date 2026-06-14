@@ -29,6 +29,8 @@ export interface LinearCreateIssuePayload extends Record<string, unknown> {
   title?: string
   teamId?: string
   team?: unknown
+  labels?: unknown
+  source?: unknown
 }
 
 const issuePath = (issue: LinearIssue): string =>
@@ -295,6 +297,8 @@ const createIssueWritePayload = (payload: LinearCreateIssuePayload): Record<stri
     'priority',
     'assigneeId',
     'labelIds',
+    'labels',
+    'source',
     'parentId',
     'projectId',
     'estimate',
