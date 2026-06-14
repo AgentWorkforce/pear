@@ -248,7 +248,10 @@ describe('InternalFleetClient', () => {
       task: 'do work',
     })
 
-    const args = harness.spawned[0]!.harnessConfig?.args ?? []
+    const config = harness.spawned[0]!.harnessConfig
+    expect(config?.runtime).toBe('pty')
+    if (config?.runtime !== 'pty') throw new Error('expected pty harness config')
+    const args = config.args
     expect(args).toContain(`mcp_servers.agent-relay.command=${JSON.stringify(process.execPath)}`)
     expect(args.join('\n')).toContain('node_modules/agent-relay/dist/cli/index.js')
     expect(args.join('\n')).toContain('"mcp"')
