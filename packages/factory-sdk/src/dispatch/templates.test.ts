@@ -34,6 +34,7 @@ describe('renderAgentTask', () => {
     expect(task).toContain('Open a PR targeting `main` when done.')
     expect(task).toContain('Use `gh pr create --base main` and report the PR URL.')
     expect(task).toContain('DM the reviewer `ar-123-review` when the PR is ready.')
+    expect(task).toContain('DM `broker` with `FACTORY_NEEDS_INPUT`, `Issue: <key>`, and `Question: <your question>`')
     expect(task).toContain('DM `broker` when fully done.')
     expect(task).toContain('Do NOT auto-merge.')
     expect(task).toContain('Merge policy: never')

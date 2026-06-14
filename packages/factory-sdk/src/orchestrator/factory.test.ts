@@ -5100,6 +5100,161 @@ describe('FactoryLoop', () => {
     expect(mount.confirmedPaths.filter((path) => path.includes('/replies/'))).toEqual([])
   })
 
+  it('routes a mid-task agent question to the Slack dispatch thread and returns the human answer via sendInput', async () => {
+    const mount = new ConfirmRecordingSlackMountClient({ [issuePath(36)]: issueFile(36) })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+    })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(36), issueFile(36))))
+    fleet.emitAgentMessage({
+      from: 'ar-36-impl',
+      target: 'broker',
+      body: 'FACTORY_NEEDS_INPUT\nIssue: AR-36\nQuestion: Which retry helper should I use?',
+      eventId: 'agent-question-36',
+    })
+    await flush()
+    await flush()
+
+    expect(slackReplyWrites(mount)).toEqual([
+      expect.objectContaining({
+        content: expect.objectContaining({
+          thread_ts: mount.threadTs,
+          text: 'AR-36: ar-36-impl needs input.\nQuestion: Which retry helper should I use?',
+        }),
+      }),
+    ])
+    expect(factory.status().counters.agentQuestionsPostedToSlack).toBe(1)
+    expect(slackAnswerInputs(fleet)).toEqual([])
+
+    emitSlackReply(mount, slackReplyFixturePath('C0FACTORY__factory-e2e', mount.threadTs, 'bot-question-echo'), 'bot-question-echo', {
+      text: 'AR-36: ar-36-impl needs input.\nQuestion: Which retry helper should I use?',
+      user: 'U0B2596R7EZ',
+      user_is_bot: false,
+    })
+    await flush()
+    await flush()
+    expect(slackAnswerInputs(fleet)).toEqual([])
+
+    emitSlackReply(mount, slackReplyFixturePath('C0FACTORY__factory-e2e', mount.threadTs, 'human-answer-36'), 'human-answer-36', {
+      text: 'Use the shared retry helper in factory.ts.',
+      user: 'U123',
+      user_is_bot: false,
+    })
+    await flush()
+    await flush()
+
+    expect(slackAnswerInputs(fleet)).toEqual([
+      { name: 'ar-36-impl', data: 'Slack reply for AR-36:\nUse the shared retry helper in factory.ts.\r' },
+    ])
+    expect(fleet.messages).toHaveLength(2)
+  })
+
+  it('ignores marked agent questions that are not addressed to the factory', async () => {
+    const mount = new ConfirmRecordingSlackMountClient({ [issuePath(37)]: issueFile(37) })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+    })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(37), issueFile(37))))
+    fleet.emitAgentMessage({
+      from: 'ar-37-impl',
+      target: 'ar-37-review',
+      body: 'FACTORY_NEEDS_INPUT\nIssue: AR-37\nQuestion: should not bridge',
+      eventId: 'agent-question-37',
+    })
+    await flush()
+    await flush()
+
+    expect(slackReplyWrites(mount)).toEqual([])
+    expect(factory.status().counters.agentQuestionsPostedToSlack).toBeUndefined()
+  })
+
+  it('treats agent questions as no-ops when Slack is unconfigured without regressing dispatch', async () => {
+    const mount = new CloudWritebackFakeMountClient({ [issuePath(38)]: issueFile(38) })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config(), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+    })
+
+    const result = await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(38), issueFile(38))))
+    fleet.emitAgentMessage({
+      from: 'ar-38-impl',
+      target: 'broker',
+      body: 'FACTORY_NEEDS_INPUT\nIssue: AR-38\nQuestion: can anyone clarify?',
+      eventId: 'agent-question-38',
+    })
+    await flush()
+    await flush()
+
+    expect(result.agents.map((agent) => agent.name)).toEqual(['ar-38-impl', 'ar-38-review'])
+    expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-38-impl', 'ar-38-review'])
+    expect(slackReplyWrites(mount)).toEqual([])
+    expect(factory.status().counters.agentQuestionsSkippedNoSlack).toBe(1)
+  })
+
+  it('treats agent questions as no-ops while Slack sync is degraded without regressing dispatch', async () => {
+    const mount = new SlackSyncStatusMount({ [issuePath(39)]: issueFile(39) })
+    mount.slackStatus = { provider: 'slack', status: 'stale' }
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+    })
+
+    const result = await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(39), issueFile(39))))
+    fleet.emitAgentMessage({
+      from: 'ar-39-impl',
+      target: 'factory',
+      body: '[factory-needs-input] Can anyone clarify the expected retry behavior?',
+      eventId: 'agent-question-39',
+    })
+    await flush()
+    await flush()
+
+    expect(result.agents.map((agent) => agent.name)).toEqual(['ar-39-impl', 'ar-39-review'])
+    expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-39-impl', 'ar-39-review'])
+    expect(mount.writes.filter((write) => isSlackRootWritePath(write.path) || write.path.includes('/replies/'))).toEqual([])
+    expect(factory.status().counters.agentQuestionsSkippedSlackDegraded).toBe(1)
+  })
+
+  it('dedupes duplicate agent question events before posting to Slack', async () => {
+    const mount = new ConfirmRecordingSlackMountClient({ [issuePath(40)]: issueFile(40) })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+    })
+    const question = {
+      from: 'ar-40-impl',
+      target: 'factory',
+      body: 'FACTORY_NEEDS_INPUT\nIssue: AR-40\nQuestion: Is this duplicate-safe?',
+      eventId: 'agent-question-40',
+    }
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(40), issueFile(40))))
+    fleet.emitAgentMessage(question)
+    fleet.emitAgentMessage(question)
+    await flush()
+    await flush()
+
+    expect(slackReplyWrites(mount).map((write) => write.content.text)).toEqual([
+      'AR-40: ar-40-impl needs input.\nQuestion: Is this duplicate-safe?',
+    ])
+    expect(factory.status().counters.agentQuestionsPostedToSlack).toBe(1)
+    expect(factory.status().counters.agentQuestionDuplicatesSuppressed).toBe(1)
+  })
+
   it('watches top-level inbound Slack thread replies keyed by real reply ts', async () => {
     const mount = new CloudWritebackFakeMountClient({ [issuePath(32)]: issueFile(32) })
     const fleet = new FakeFleetClient()

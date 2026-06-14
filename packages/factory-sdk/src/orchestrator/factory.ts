@@ -5,6 +5,7 @@ import { FactoryConfigSchema, type FactoryConfig } from '../config/schema'
 import { LINEAR_STATE_IDS, linearByStatePath } from '../constants/linear'
 import { GithubMergeGate, closeProbePr, type GhRunner, type GithubMergeGate as GithubMergeGatePort } from '../github'
 import type {
+  AgentMessage,
   AgentPidResolution,
   AgentSpec,
   ChangeEvent,
@@ -74,6 +75,12 @@ type SlackReply = {
   isBot: boolean
   raw: Record<string, unknown>
 }
+type AgentQuestion = {
+  agentName: string
+  issueKey?: string
+  question: string
+  eventId?: string
+}
 type GithubIssueSource = {
   owner: string
   repoName: string
@@ -108,6 +115,9 @@ const STATE_NAME_TO_ID: Record<string, string> = {
 }
 const SLACK_REPLY_EVENTS_LIMIT = 100
 const SLACK_REPLY_POLL_INTERVAL_MS = 5_000
+const AGENT_QUESTION_DEDUPE_LIMIT = 500
+const AGENT_NEEDS_INPUT_MARKER = '[factory-needs-input]'
+const LEGACY_AGENT_NEEDS_INPUT_MARKER = 'FACTORY_NEEDS_INPUT'
 const FACTORY_E2E_MARKER = '[factory-e2e]'
 const INJECTION_CONFIRMATION_TIMEOUT_MS = 90_000
 const INJECTION_RETRY_DELAY_MS = 1_000
@@ -160,6 +170,8 @@ export class FactoryLoop implements Factory {
   readonly #slackThreadIds = new Map<string, string>()
   readonly #slackWatchers = new Map<string, SlackThreadWatcher>()
   readonly #slackWatcherStarts = new Map<string, Promise<void>>()
+  readonly #seenAgentQuestionKeys = new Set<string>()
+  readonly #seenAgentQuestionOrder: string[] = []
   readonly #dispatchAttempts = new Map<string, DispatchAttemptState>()
   readonly #canonicalIssueStates = new Map<string, string>()
   readonly #dispatchFailureReaperHandoffs = new Map<string, RegistryHandoffAgent>()
@@ -195,6 +207,7 @@ export class FactoryLoop implements Factory {
   readonly #seenLiveEvents = new Set<string>()
   #offAgentExit?: () => void
   #offDeliveryFailed?: () => void
+  #offAgentMessage?: () => void
   #starting?: Promise<void>
   #started = false
   #stopping = false
@@ -308,8 +321,10 @@ export class FactoryLoop implements Factory {
       this.#slackWatcherStarts.clear()
       this.#offAgentExit?.()
       this.#offDeliveryFailed?.()
+      this.#offAgentMessage?.()
       this.#offAgentExit = undefined
       this.#offDeliveryFailed = undefined
+      this.#offAgentMessage = undefined
       await this.#fleet.dispose()
     } finally {
       this.#stoppingHeartbeatRefreshActive = false
@@ -1068,6 +1083,11 @@ export class FactoryLoop implements Factory {
     if (!this.#offDeliveryFailed) {
       this.#offDeliveryFailed = this.#fleet.onDeliveryFailed?.((info) => {
         void this.#handleDeliveryFailed(info)
+      })
+    }
+    if (!this.#offAgentMessage) {
+      this.#offAgentMessage = this.#fleet.onAgentMessage?.((message) => {
+        void this.#handleAgentMessage(message)
       })
     }
   }
@@ -1850,6 +1870,104 @@ export class FactoryLoop implements Factory {
     }
   }
 
+  async #handleAgentMessage(message: AgentMessage): Promise<void> {
+    const question = parseAgentQuestion(message)
+    if (!question || !isFactoryQuestionTarget(message.target)) {
+      return
+    }
+
+    const record = this.#batch.getIssueByAgent(question.agentName)
+    if (!record || record.dryRun) {
+      this.#increment('agentQuestionsIgnoredNoInFlight')
+      return
+    }
+
+    if (question.issueKey && question.issueKey !== record.issue.key) {
+      this.#increment('agentQuestionsIgnoredIssueMismatch')
+      this.#logger.warn?.('[factory] ignored agent question for mismatched issue', {
+        from: question.agentName,
+        requestedIssue: question.issueKey,
+        activeIssue: record.issue.key,
+      })
+      return
+    }
+
+    const dedupeKey = agentQuestionDedupeKey(record.issue, question)
+    if (this.#seenAgentQuestionKeys.has(dedupeKey)) {
+      this.#increment('agentQuestionDuplicatesSuppressed')
+      this.#logger.debug?.('[factory] suppressed duplicate agent question', {
+        from: question.agentName,
+        issue: record.issue.key,
+      })
+      return
+    }
+    this.#rememberAgentQuestion(dedupeKey)
+
+    if (!question.eventId) {
+      this.#increment('agentQuestionsMissingIdentity')
+      this.#logger.warn?.('[factory] agent question event missing stable identity; falling back to sender/content dedupe', {
+        from: question.agentName,
+        issue: record.issue.key,
+      })
+    }
+
+    await this.#postAgentQuestionToSlack(record, question)
+  }
+
+  async #postAgentQuestionToSlack(record: InFlightIssue, question: AgentQuestion): Promise<void> {
+    if (!this.#slack || !this.#config.slack) {
+      this.#increment('agentQuestionsSkippedNoSlack')
+      this.#logger.warn?.('[factory] agent question has no Slack channel configured', {
+        issue: record.issue,
+        from: question.agentName,
+      })
+      return
+    }
+
+    if (await this.#shouldSkipSlackWriteback('agent-question')) {
+      this.#increment('agentQuestionsSkippedSlackDegraded')
+      return
+    }
+
+    const key = issueKey(record.issue)
+    try {
+      await this.#slackWatcherStarts.get(key)
+    } catch {
+      // The initiator logs Slack watcher startup failures.
+    }
+
+    const threadId = this.#slackThreadIds.get(key)
+    if (!threadId) {
+      this.#increment('agentQuestionsSkippedMissingThread')
+      this.#logger.warn?.('[factory] agent question has no Slack dispatch thread', {
+        issue: record.issue,
+        from: question.agentName,
+      })
+      return
+    }
+
+    try {
+      await this.#slack.reply(threadId, agentQuestionSlackText(record.issue, question))
+      this.#increment('agentQuestionsPostedToSlack')
+      this.#recordSlackWritebackSuccess('agent-question')
+    } catch (error) {
+      this.#markSlackWritebackFailure('agent-question', error)
+      this.#logger.warn?.(`[factory] failed to post agent question for ${record.issue.key}`, error)
+    }
+  }
+
+  #rememberAgentQuestion(key: string): void {
+    if (this.#seenAgentQuestionKeys.has(key)) {
+      return
+    }
+    this.#seenAgentQuestionKeys.add(key)
+    this.#seenAgentQuestionOrder.push(key)
+    while (this.#seenAgentQuestionOrder.length > AGENT_QUESTION_DEDUPE_LIMIT) {
+      const oldest = this.#seenAgentQuestionOrder.shift()
+      if (oldest) this.#seenAgentQuestionKeys.delete(oldest)
+    }
+  }
+
   #recordArrivalLatency(event: ChangeEvent): void {
     const occurredAt = Date.parse(event.occurredAt)
     if (!Number.isFinite(occurredAt)) return
@@ -1908,6 +2026,7 @@ export class FactoryLoop implements Factory {
           config: { mergePolicy: this.#config.mergePolicy },
           reviewerName,
           implementerNames,
+          slackDispatchThread: this.#slackDispatchThreadFor(record),
         }),
         from: 'factory',
         data: { issue: record.issue },
@@ -2446,6 +2565,15 @@ export class FactoryLoop implements Factory {
       await this.#fleet.sendInput(implementer, input)
       this.#increment('slackAnswersInjected')
     }
+  }
+
+  #slackDispatchThreadFor(record: InFlightIssue): { channel: string; threadId: string } | undefined {
+    if (!this.#config.slack) {
+      return undefined
+    }
+
+    const threadId = this.#slackThreadIds.get(issueKey(record.issue))
+    return threadId ? { channel: this.#config.slack.channel, threadId } : undefined
   }
 
   async #runCompletionMergeGate(issue: LinearIssue): Promise<void> {
@@ -3298,6 +3426,61 @@ const triageEscalationReason = (decision: TriageDecision): string | undefined =>
 
 const slackAnswerInput = (issue: IssueRef, text: string): string =>
   `Slack reply for ${issue.key}:\n${text}\r`
+
+const isFactoryQuestionTarget = (target: string): boolean => {
+  const normalized = target.trim().replace(/^@/u, '').toLowerCase()
+  return normalized === 'broker' || normalized === 'factory'
+}
+
+const parseAgentQuestion = (message: AgentMessage): AgentQuestion | undefined => {
+  const markerPattern = new RegExp(
+    `(^|\\n)\\s*(?:${escapeRegExp(AGENT_NEEDS_INPUT_MARKER)}|${escapeRegExp(LEGACY_AGENT_NEEDS_INPUT_MARKER)})\\s*(?::\\s*)?`,
+    'iu',
+  )
+  const match = markerPattern.exec(message.body)
+  if (!match || !message.from.trim()) {
+    return undefined
+  }
+
+  const markerEnd = match.index + match[0].length
+  const bodyAfterMarker = message.body.slice(markerEnd).trim()
+  const issueKey = message.body.match(/(?:^|\n)\s*Issue:\s*([A-Z]+-\d+)\s*(?:\n|$)/iu)?.[1]?.toUpperCase()
+  const question = extractQuestionText(bodyAfterMarker)
+  if (!question) {
+    return undefined
+  }
+
+  return {
+    agentName: message.from.trim(),
+    issueKey,
+    question,
+    eventId: message.eventId,
+  }
+}
+
+const extractQuestionText = (bodyAfterMarker: string): string => {
+  const questionMatch = bodyAfterMarker.match(/(?:^|\n)\s*Question:\s*([\s\S]+)$/iu)
+  const raw = questionMatch?.[1] ?? bodyAfterMarker
+  return raw
+    .split(/\r?\n/u)
+    .filter((line) => !/^\s*Issue:\s*[A-Z]+-\d+\s*$/iu.test(line))
+    .join('\n')
+    .trim()
+}
+
+const agentQuestionDedupeKey = (issue: IssueRef, question: AgentQuestion): string =>
+  `${question.eventId ?? 'missing'}:${stableHash(JSON.stringify({
+    issue: issue.key,
+    from: question.agentName,
+    question: question.question,
+  }))}`
+
+const agentQuestionSlackText = (issue: IssueRef, question: AgentQuestion): string => [
+  `${issue.key}: ${question.agentName} needs input.`,
+  `Question: ${question.question}`,
+].join('\n')
+
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
 
 const isOwnSlackBotReply = (payload: Record<string, unknown>, botUserId: string): boolean =>
   payload.user_is_bot === true ||

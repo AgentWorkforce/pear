@@ -4,7 +4,7 @@ import { join } from 'node:path'
 
 import type { BrokerEvent, ListAgent, SendMessageInput, SpawnPtyInput } from '@agent-relay/harness-driver'
 
-import type { AgentPidResolution, Capability, FleetClient, RosterEntry, SendInput, SpawnInput, SpawnResult } from '../ports/fleet'
+import type { AgentMessage, AgentPidResolution, Capability, FleetClient, RosterEntry, SendInput, SpawnInput, SpawnResult } from '../ports/fleet'
 import type { Logger } from '../ports/system'
 
 type SpawnedHandleLike = { name: string; sessionId?: string; session_ref?: string; sessionRef?: string; pid?: number }
@@ -36,6 +36,7 @@ export interface InternalFleetClientOptions {
 
 type AgentExitListener = (name: string, reason?: string) => void
 type DeliveryFailedListener = (info: { to: string; msgId?: string; reason?: string }) => void
+type AgentMessageListener = (message: AgentMessage) => void
 type PendingInjectedWait = {
   targets: string[]
   timeout: ReturnType<typeof setTimeout>
@@ -64,6 +65,7 @@ export class InternalFleetClient implements FleetClient {
   readonly #logger?: Logger
   readonly #agentExitListeners = new Set<AgentExitListener>()
   readonly #deliveryFailedListeners = new Set<DeliveryFailedListener>()
+  readonly #agentMessageListeners = new Set<AgentMessageListener>()
   readonly #eventUnsubscribers: Array<() => void> = []
   readonly #seenEvents: string[] = []
   readonly #seenEventKeys = new Set<string>()
@@ -227,6 +229,14 @@ export class InternalFleetClient implements FleetClient {
     }
   }
 
+  onAgentMessage(listener: AgentMessageListener): () => void {
+    this.#ensureEventSubscription()
+    this.#agentMessageListeners.add(listener)
+    return () => {
+      this.#agentMessageListeners.delete(listener)
+    }
+  }
+
   onAgentExit(listener: AgentExitListener): () => void {
     this.#ensureEventSubscription()
     this.#agentExitListeners.add(listener)
@@ -253,6 +263,7 @@ export class InternalFleetClient implements FleetClient {
     }
     this.#agentExitListeners.clear()
     this.#deliveryFailedListeners.clear()
+    this.#agentMessageListeners.clear()
     this.#failedDeliveries.clear()
     this.#failedDeliveryIds.length = 0
     this.#client.disconnect?.()
@@ -313,6 +324,17 @@ export class InternalFleetClient implements FleetClient {
       return
     }
 
+    if (event.kind === 'relay_inbound') {
+      this.#emitAgentMessage({
+        from: event.from,
+        target: event.target,
+        body: event.body,
+        threadId: event.thread_id,
+        eventId: event.event_id,
+      }, eventIdentity(event))
+      return
+    }
+
     if (event.kind === 'agent_exit') {
       this.#emitAgentExit(event.name, event.reason, eventIdentity(event))
       return
@@ -364,6 +386,16 @@ export class InternalFleetClient implements FleetClient {
 
     for (const listener of this.#deliveryFailedListeners) {
       listener(info)
+    }
+  }
+
+  #emitAgentMessage(message: AgentMessage, identity: EventIdentity): void {
+    if (this.#rememberEvent(identity)) {
+      return
+    }
+
+    for (const listener of this.#agentMessageListeners) {
+      listener(message)
     }
   }
 
