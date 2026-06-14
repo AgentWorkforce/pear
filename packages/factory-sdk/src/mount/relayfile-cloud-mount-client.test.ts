@@ -287,6 +287,16 @@ describe('RelayfileCloudMountClient', () => {
       .rejects.toThrow(/no longer accepts credsPath/)
   })
 
+  it('rejects legacy credential paths even when a client is injected', async () => {
+    const config = {
+      client: new FakeRelayFileClient(),
+      credsPath: '/tmp/legacy-cloud-credentials.json',
+    } as unknown as RelayfileCloudMountClientConfig
+
+    await expect(RelayfileCloudMountClient.fromConfig(config))
+      .rejects.toThrow(/no longer accepts credsPath/)
+  })
+
   it('surfaces a cloud login action when no shared session exists', async () => {
     const cloudSessionProvider = vi.fn(async () => {
       throw new CloudAuthError(
