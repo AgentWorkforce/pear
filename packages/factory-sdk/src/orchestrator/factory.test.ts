@@ -3058,6 +3058,74 @@ describe('FactoryLoop', () => {
     expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-6-impl', 'ar-6-review'])
   })
 
+  it('completes an implementer exit without resuming when a PR already exists', async () => {
+    const issue = realIssueFile(254, ready, { title: 'Real implementer PR exit terminal' })
+    const mount = new FakeMountClient({ [issuePath(254)]: issue })
+    const fleet = new FakeFleetClient()
+    fleet.setSessionRef('ar-254-impl', 'session-impl-254')
+    const probedIssues: string[] = []
+    const factory = createFactory(config({
+      safety: { requireTitlePrefix: 'Real', requireTeamKey: 'AR' },
+    }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      probePrResolver: async (issue) => {
+        probedIssues.push(issue.key)
+        return { repo: 'AgentWorkforce/pear', prNumber: 254 }
+      },
+    })
+    const decision = await factory.triageIssue(parseLinearIssue(issuePath(254), issue))
+
+    await factory.dispatch(decision)
+    fleet.emitAgentExit('ar-254-impl', 'worker_exited')
+
+    await vi.waitFor(() => expect(factory.status().counters.done).toBe(1))
+
+    expect(probedIssues).toEqual(['AR-254'])
+    expect(fleet.resumes).toEqual([])
+    expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-254-impl', 'ar-254-review'])
+    expect(fleet.releases).toEqual([
+      { name: 'ar-254-impl', reason: 'issue-done' },
+      { name: 'ar-254-review', reason: 'issue-done' },
+    ])
+    expect(factory.status().inFlight).toEqual([])
+  })
+
+  it('still resumes an abnormally exited implementer when no PR exists yet', async () => {
+    const issue = realIssueFile(255, ready, { title: 'Real implementer crash resumes' })
+    const mount = new FakeMountClient({ [issuePath(255)]: issue })
+    const fleet = new FakeFleetClient()
+    fleet.setSessionRef('ar-255-impl', 'session-impl-255')
+    const probedIssues: string[] = []
+    const factory = createFactory(config({
+      safety: { requireTitlePrefix: 'Real', requireTeamKey: 'AR' },
+    }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      probePrResolver: async (issue) => {
+        probedIssues.push(issue.key)
+        return undefined
+      },
+    })
+    const decision = await factory.triageIssue(parseLinearIssue(issuePath(255), issue))
+
+    await factory.dispatch(decision)
+    fleet.emitAgentExit('ar-255-impl', 'crash')
+    await flush()
+
+    expect(probedIssues).toEqual(['AR-255'])
+    expect(fleet.resumes).toEqual([{
+      name: 'ar-255-impl',
+      sessionRef: 'session-impl-255',
+      node: 'self',
+      capability: 'spawn:codex',
+    }])
+    expect(fleet.releases).toEqual([])
+    expect(factory.status().counters.done).toBeUndefined()
+  })
+
   it('coalesces duplicate exit callbacks for the same open issue, agent, and sessionRef', async () => {
     const mount = new FakeMountClient({ [issuePath(10)]: issueFile(10) })
     const fleet = new FakeFleetClient()
@@ -3509,12 +3577,10 @@ describe('FactoryLoop', () => {
     expect(factory.status().queued.map((issue) => issue.key)).toEqual(['AR-353'])
 
     for (const n of [351, 352]) {
-      for (const role of ['impl', 'review']) {
-        fleet.emitAgentExit(`ar-${n}-${role}`, 'worker_exited')
-        await flush()
-        fleet.emitAgentExit(`ar-${n}-${role}`, 'worker_exited')
-        await flush()
-      }
+      fleet.emitAgentExit(`ar-${n}-review`, 'worker_exited')
+      await flush()
+      fleet.emitAgentExit(`ar-${n}-review`, 'worker_exited')
+      await flush()
     }
 
     expect(factory.status().inFlight.map((issue) => issue.key)).toEqual(['AR-351', 'AR-352'])
