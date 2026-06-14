@@ -199,6 +199,7 @@ describe('RelayfileCloudMountClient', () => {
     const joinOptions = joinCalls[0][1]
     expect(joinOptions.scopes).not.toContain('relayfile:fs:read:/**')
     expect(joinOptions.scopes).not.toContain('relayfile:fs:write:/**')
+    expect(joinOptions.scopes).toContain('relayfile:fs:read:/slack/users/**')
     expect(capturedTokenProvider).toBeDefined()
     await expect(capturedTokenProvider?.()).resolves.toBe('cld_at_shared')
   })

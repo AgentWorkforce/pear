@@ -36,6 +36,7 @@ export const FACTORY_RELAYFILE_SCOPES = [
   'relayfile:fs:read:/github/repos/**',
   'relayfile:fs:read:/slack/channels/**',
   'relayfile:fs:write:/slack/channels/**',
+  'relayfile:fs:read:/slack/users/**',
 ] as const
 
 export type CloudSessionProvider = (options?: CloudSessionOptions) => Promise<CloudSession>
