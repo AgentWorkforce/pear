@@ -192,6 +192,9 @@ export class FactoryLoop implements Factory {
   readonly #completionInFlight = new Set<string>()
   readonly #probePrGhBackoffUntilMs = new Map<string, number>()
   readonly #probePrResolvedCache = new Map<string, { pr: ResolvedIssuePr; expiresAtMs: number }>()
+  // GitHub issue mirror-id -> resolved Linear mirror path, so repeat ingestion
+  // cycles read the mirror directly instead of re-scanning all Linear issues.
+  readonly #githubMirrorPathCache = new Map<string, string>()
   readonly #seenLiveEvents = new Set<string>()
   #offAgentExit?: () => void
   #offDeliveryFailed?: () => void
@@ -1173,7 +1176,15 @@ export class FactoryLoop implements Factory {
         const mirror = await this.#findGithubIssueMirror(ghIssue)
         if (mirror && mirror.stateId !== this.#config.stateIds.done) {
           if (!opts.dryRun) {
-            await this.#linear.setState(mirror, this.#config.stateIds.done)
+            const record = this.#batch.getIssue(mirror)
+            if (record) {
+              // Agents are actively working this mirror — terminate them
+              // (release + mark done) so a GitHub issue closed out from under us
+              // doesn't leave the dispatched agents running.
+              await this.#completeIssue(record)
+            } else {
+              await this.#linear.setState(mirror, this.#config.stateIds.done)
+            }
           }
           this.#increment('githubIssueMirrorsClosed')
         }
@@ -1234,12 +1245,26 @@ export class FactoryLoop implements Factory {
       // source metadata on existing Linear issues for restart/replay dedupe.
     }
 
+    // Cached resolved mirror path: skip the full ISSUE_ROOT scan for mirrors we
+    // already located on an earlier cycle. Re-validate the cached path (the
+    // mirror could have been deleted/renamed) and fall back to a scan if stale.
+    const cacheKey = githubIssueMirrorId(ghIssue)
+    const cachedPath = this.#githubMirrorPathCache.get(cacheKey)
+    if (cachedPath) {
+      const cached = await this.#readIssue(cachedPath)
+      if (cached && linearIssueMirrorsGithubIssue(cached, ghIssue)) {
+        return cached
+      }
+      this.#githubMirrorPathCache.delete(cacheKey)
+    }
+
     for (const path of await this.#mount.listTree(ISSUE_ROOT)) {
       if (!isLinearIssueMirrorCandidatePath(path)) {
         continue
       }
       const issue = await this.#readIssue(path)
       if (issue && linearIssueMirrorsGithubIssue(issue, ghIssue)) {
+        this.#githubMirrorPathCache.set(cacheKey, path)
         return issue
       }
     }
