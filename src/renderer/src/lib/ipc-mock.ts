@@ -968,6 +968,49 @@ export const pearMock: PearAPI = {
       noopUnsubscribe(state.ptyChunkListeners, callback),
     onStatus: (callback: (status: BrokerStatusEvent) => void) => noopUnsubscribe(state.brokerStatusListeners, callback)
   },
+  factory: {
+    status: async () => ({
+      running: false,
+      configPath: 'factory.config.json',
+      logs: [],
+      agents: []
+    }),
+    start: async (configPath?: string) => ({
+      running: true,
+      pid: 4242,
+      configPath: configPath || 'factory.config.json',
+      logs: [{ ts: Date.now(), stream: 'info' as const, text: 'mock factory started' }],
+      agents: []
+    }),
+    stop: async () => ({
+      running: false,
+      configPath: 'factory.config.json',
+      logs: [{ ts: Date.now(), stream: 'info' as const, text: 'mock factory stopped' }],
+      agents: []
+    }),
+    readConfig: async (configPath?: string) => ({
+      configPath: configPath || 'factory.config.json',
+      exists: true,
+      config: {
+        workspaceId: 'mock',
+        subscription: { teams: [], labels: [], projects: [], assignees: [] },
+        repos: { byLabel: {}, clonePaths: {}, keywordRules: [], default: 'AgentWorkforce/pear' },
+        triage: { maxImplementers: 2 },
+        batchSize: 1,
+        mergePolicy: 'never',
+        models: {},
+        safety: { requireTitlePrefix: '[factory-e2e]', requireLabel: 'factory', requireTeamKey: 'AR' }
+      },
+      errors: []
+    }),
+    saveConfig: async (config: unknown, configPath?: string) => ({
+      configPath: configPath || 'factory.config.json',
+      exists: true,
+      config,
+      errors: []
+    }),
+    onEvent: () => () => undefined
+  },
   burn: {
     listAgentSummaries: async (agents: BurnAgentInput[]) => agents.map(emptyBurnSummary),
     getAgentBreakdown: async (agent: BurnAgentInput): Promise<BurnAgentBreakdown> => ({ ...emptyBurnSummary(agent), byModel: [], byTool: [] }),

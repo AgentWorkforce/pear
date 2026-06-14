@@ -6,6 +6,7 @@ import { AccountSettings } from '@/components/settings/AccountSettings'
 import { TerminalPane } from '@/components/terminal/TerminalPane'
 import { ChatView } from '@/components/chat/ChatView'
 import { BrokerDetailsPage } from '@/components/broker/BrokerDetailsPage'
+import { FactoryPage } from '@/components/factory/FactoryPage'
 import { BurnSessionPage } from '@/components/burn/BurnSessionPage'
 import { BurnProjectPage } from '@/components/burn/BurnProjectPage'
 import { BurnSessionDetailPage } from '@/components/burn/BurnSessionDetailPage'
@@ -103,6 +104,8 @@ export default function App(): React.ReactNode {
       ? <AccountSettings />
     : activeTab?.kind === 'broker-details'
       ? <BrokerDetailsPage />
+    : activeTab?.kind === 'factory'
+      ? <FactoryPage />
     : activeTab?.kind === 'source-control'
       ? <DiffPane />
     : activeTab?.kind === 'issues'

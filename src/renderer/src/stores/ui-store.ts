@@ -7,14 +7,14 @@ import {
 } from '@/lib/direct-messages'
 import type { BurnAgentInput } from '@/lib/ipc'
 
-export type ViewMode = 'terminal' | 'chat' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'issues' | 'ai-hist' | 'burn-session' | 'burn-project' | 'burn-session-detail'
+export type ViewMode = 'terminal' | 'chat' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'issues' | 'ai-hist' | 'burn-session' | 'burn-project' | 'burn-session-detail' | 'factory'
 export type DialogType = 'add-project' | 'spawn-agent' | 'spawn-local-agent' | 'cloud-agent' | 'add-channel' | 'command-menu' | null
 const ThemeSchema = z.enum(['dark', 'light'])
 const TerminalLayoutSchema = z.enum(['tabs', 'horizontal-split'])
 const BooleanPreferenceSchema = z.enum(['true', 'false']).transform((value) => value === 'true')
 export type Theme = z.infer<typeof ThemeSchema>
 export type TerminalLayout = z.infer<typeof TerminalLayoutSchema>
-export type AppTabKind = 'agents' | 'channel' | 'dm' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'issues' | 'ai-hist' | 'burn-session' | 'burn-project' | 'burn-session-detail'
+export type AppTabKind = 'agents' | 'channel' | 'dm' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'issues' | 'ai-hist' | 'burn-session' | 'burn-project' | 'burn-session-detail' | 'factory'
 
 export interface AppTab {
   id: string
@@ -125,6 +125,8 @@ function getTabId(tab: AppTabInput): string {
       return `issues:${tab.projectId || 'global'}`
     case 'ai-hist':
       return `ai-hist:${tab.projectId || 'global'}`
+    case 'factory':
+      return `factory:${tab.projectId || 'global'}`
     case 'burn-session':
       return `burn-session:${tab.burnAgent?.projectId || tab.projectId || 'unknown'}:${tab.burnAgent?.name || 'agent'}`
     case 'burn-project':
@@ -156,6 +158,8 @@ function getTabTitle(tab: AppTabInput): string {
       return 'Issues'
     case 'ai-hist':
       return 'Conversations'
+    case 'factory':
+      return 'Factory'
     case 'burn-session':
       return tab.burnAgent?.name ? `${tab.burnAgent.name} burn` : 'Burn'
     case 'burn-project':
@@ -201,6 +205,8 @@ function viewModeForTab(tab: AppTab): ViewMode {
       return 'issues'
     case 'ai-hist':
       return 'ai-hist'
+    case 'factory':
+      return 'factory'
     case 'burn-session':
       return 'burn-session'
     case 'burn-project':
@@ -226,6 +232,8 @@ function tabInputForViewMode(mode: ViewMode): AppTabInput {
       return { kind: 'issues' }
     case 'ai-hist':
       return { kind: 'ai-hist' }
+    case 'factory':
+      return { kind: 'factory' }
     case 'burn-session':
       return { kind: 'agents' }
     case 'burn-project':

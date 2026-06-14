@@ -42,6 +42,9 @@ import type {
   CloudAgentStatus,
   ConnectedIntegration,
   CreateCloudAgentInput,
+  FactoryConfigReadResult,
+  FactoryEvent,
+  FactoryStatus,
   FsDirEntry,
   FsReadPreviewResult,
   GitBranchInfo,
@@ -127,6 +130,9 @@ export type {
   CloudAgentSyncMode,
   ConnectedIntegration,
   CreateCloudAgentInput,
+  FactoryConfigReadResult,
+  FactoryEvent,
+  FactoryStatus,
   FsDirEntry,
   FsReadPreviewResult,
   GitBranchInfo,
@@ -292,6 +298,18 @@ const api = {
     },
     onStatus: (callback: (status: BrokerStatusEvent) => void) =>
       subscribe<BrokerStatusEvent>('broker:status', callback)
+  },
+  factory: {
+    status: () => invoke<FactoryStatus>('factory:status'),
+    start: (configPath?: string, projectRoot?: string) =>
+      invoke<FactoryStatus>('factory:start', configPath, projectRoot),
+    stop: () => invoke<FactoryStatus>('factory:stop'),
+    readConfig: (configPath?: string, projectRoot?: string) =>
+      invoke<FactoryConfigReadResult>('factory:read-config', configPath, projectRoot),
+    saveConfig: (config: unknown, configPath?: string, projectRoot?: string) =>
+      invoke<FactoryConfigReadResult>('factory:save-config', config, configPath, projectRoot),
+    onEvent: (callback: (event: FactoryEvent) => void) =>
+      subscribe<FactoryEvent>('factory:event', callback)
   },
   burn: {
     listAgentSummaries: (agents: BurnAgentInput[]) =>

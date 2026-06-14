@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Bot,
   Columns2,
+  Factory,
   FolderPlus,
   Monitor,
   MoonStar,
@@ -101,6 +102,19 @@ export function CommandMenu(): React.ReactNode {
           projectId: activeProject?.id,
           title: activeProject ? `${activeProject.name} Relay` : undefined
         })
+        closeDialog()
+      }
+    },
+    {
+      id: 'factory',
+      label: 'Factory',
+      description: activeProject
+        ? 'Start, stop, and configure the issue factory'
+        : 'Add a project, then configure the issue factory',
+      keywords: ['factory', 'linear', 'issues', 'automation', 'settings'],
+      Icon: Factory,
+      run: () => {
+        openTab({ kind: 'factory', projectId: activeProject?.id })
         closeDialog()
       }
     },

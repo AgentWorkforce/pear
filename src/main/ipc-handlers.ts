@@ -27,6 +27,7 @@ import { integrationsManager } from './integrations'
 import { getIntegrationEventTelemetrySnapshot, integrationEventBridge } from './integration-event-bridge'
 import { aiHistManager } from './ai-hist'
 import { burnManager, type BurnAgentInput, type BurnProjectInput, type BurnSessionBreakdownInput, type BurnFingerprintInput } from './burn'
+import { factoryManager } from './factory-manager'
 import { resetRelayWorkspaceManager } from './relay-workspace'
 import { isDirectory } from './path-utils'
 import { findProjectForPath, projectContainsPath } from './cli'
@@ -77,6 +78,12 @@ export function registerIpcHandlers(): void {
     }
   })
 
+  factoryManager.onEvent((factoryEvent) => {
+    for (const win of BrowserWindow.getAllWindows()) {
+      win.webContents.send('factory:event', factoryEvent)
+    }
+  })
+
   // --- App ---
   ipcMain.handle('app:confirm-quit', async (event) => {
     const win = BrowserWindow.fromWebContents(event.sender)
@@ -95,6 +102,7 @@ export function registerIpcHandlers(): void {
 
     if (result.response !== 0) return false
 
+    await factoryManager.stop()
     await brokerManager.shutdown()
     app.quit()
     return true
@@ -388,6 +396,27 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('broker:shutdown', async () => {
     await brokerManager.shutdown()
+  })
+
+  // --- Factory ---
+  ipcMain.handle('factory:status', async () => {
+    return factoryManager.status()
+  })
+
+  ipcMain.handle('factory:start', async (_, configPath?: string, projectRoot?: string) => {
+    return factoryManager.start(configPath, projectRoot)
+  })
+
+  ipcMain.handle('factory:stop', async () => {
+    return factoryManager.stop()
+  })
+
+  ipcMain.handle('factory:read-config', async (_, configPath?: string, projectRoot?: string) => {
+    return factoryManager.readConfig(configPath, projectRoot)
+  })
+
+  ipcMain.handle('factory:save-config', async (_, config: unknown, configPath?: string, projectRoot?: string) => {
+    return factoryManager.saveConfig(config, configPath, projectRoot)
   })
 
   // --- Burn ---

@@ -4,6 +4,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock3,
+  Factory,
   Flame,
   GitPullRequest,
   Hash,
@@ -30,6 +31,8 @@ function TabIcon({ tab, className = '' }: { tab: AppTab; className?: string }): 
       return <Settings size={14} className={iconClassName} />
     case 'broker-details':
       return <Server size={14} className={iconClassName} />
+    case 'factory':
+      return <Factory size={14} className={iconClassName} />
     case 'source-control':
       return <GitPullRequest size={14} className={iconClassName} />
     case 'ai-hist':
@@ -57,6 +60,8 @@ function tabSubtitle(tab: AppTab, projectNameById: Map<string, string>): string 
       return projectName ? `${projectName} settings` : 'Settings'
     case 'broker-details':
       return projectName ? `${projectName} relay` : 'Connection status'
+    case 'factory':
+      return projectName ? `${projectName} factory` : 'Factory'
     case 'source-control':
       return projectName ? `${projectName} changes` : 'File changes'
     case 'ai-hist':
@@ -76,6 +81,7 @@ function tabSubtitle(tab: AppTab, projectNameById: Map<string, string>): string 
 export function AppTopBar(): React.ReactNode {
   const [historyOpen, setHistoryOpen] = useState(false)
   const projects = useProjectStore((s) => s.projects)
+  const activeProjectId = useProjectStore((s) => s.activeProjectId)
   const tabs = useUIStore((s) => s.tabs)
   const activeTabId = useUIStore((s) => s.activeTabId)
   const history = useUIStore((s) => s.history)
@@ -96,6 +102,7 @@ export function AppTopBar(): React.ReactNode {
     () => new Map(projects.map((project) => [project.id, project.name])),
     [projects]
   )
+  const factoryActive = tabs.some((tab) => tab.id === activeTabId && tab.kind === 'factory')
 
   return (
     <div className="titlebar-drag relative z-40 flex h-11 shrink-0 items-center border-b border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] pl-[138px] pr-3 text-[var(--pear-text)]">
@@ -186,6 +193,21 @@ export function AppTopBar(): React.ReactNode {
           <ChevronRight size={17} />
         </button>
       </div>
+
+      <button
+        type="button"
+        onClick={() => openTab({ kind: 'factory', projectId: activeProjectId ?? undefined })}
+        className={`titlebar-nodrag ml-3 flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-[13px] font-medium transition-colors ${
+          factoryActive
+            ? 'bg-[var(--pear-bg-surface)] text-[var(--pear-text)]'
+            : 'text-[var(--pear-text-faint)] hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text)]'
+        }`}
+        title="Open factory"
+        aria-label="Open factory"
+      >
+        <Factory size={15} className={factoryActive ? 'text-[var(--pear-accent-bright)]' : ''} />
+        <span>Factory</span>
+      </button>
 
       <div className="ml-4 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
         {tabs.map((tab) => {
