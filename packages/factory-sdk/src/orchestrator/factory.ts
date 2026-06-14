@@ -5,6 +5,7 @@ import { FactoryConfigSchema, type FactoryConfig } from '../config/schema'
 import { LINEAR_STATE_IDS, linearByStatePath } from '../constants/linear'
 import { GithubMergeGate, closeProbePr, type GhRunner, type GithubMergeGate as GithubMergeGatePort } from '../github'
 import type {
+  AgentMessage,
   AgentPidResolution,
   AgentSpec,
   ChangeEvent,
@@ -74,6 +75,12 @@ type SlackReply = {
   isBot: boolean
   raw: Record<string, unknown>
 }
+type AgentQuestion = {
+  agentName: string
+  issueKey?: string
+  question: string
+  eventId?: string
+}
 type GithubIssueSource = {
   owner: string
   repoName: string
@@ -88,11 +95,21 @@ type GithubIssueSource = {
   raw: Record<string, unknown>
 }
 
+// Memoizes the existing Linear mirror candidates for one GitHub ingestion pass
+// so dedupe lookups reuse a single ISSUE_ROOT scan.
+type MirrorCandidateCache = {
+  load: () => Promise<LinearIssue[]>
+}
+
 const ISSUE_ROOT = '/linear/issues'
 const GITHUB_ISSUE_ROOT = '/github/repos'
 const READY_EVENTS_LIMIT = 100
 const LIVE_ISSUE_GLOB = `${ISSUE_ROOT}/**`
-const LIVE_GITHUB_ISSUE_GLOB = `${GITHUB_ISSUE_ROOT}/**/issues/by-id/*.json`
+// Matches both /github/repos/<owner>/<repo>/issues/<n>.json (the shape live
+// relayfile mounts emit) and the nested .../issues/by-id/<n>.json variant.
+// isGithubIssueFilePath() re-validates the exact shape, so a broad subscription
+// glob is safe.
+const LIVE_GITHUB_ISSUE_GLOB = `${GITHUB_ISSUE_ROOT}/**/issues/**/*.json`
 const LIVE_DEDUPE_LIMIT = 5_000
 const LIVE_EVENT_DRAIN_BATCH_SIZE = 5
 const COMPLETION_SWEEP_INTERVAL_MS = 15_000
@@ -108,6 +125,9 @@ const STATE_NAME_TO_ID: Record<string, string> = {
 }
 const SLACK_REPLY_EVENTS_LIMIT = 100
 const SLACK_REPLY_POLL_INTERVAL_MS = 5_000
+const AGENT_QUESTION_DEDUPE_LIMIT = 500
+const AGENT_NEEDS_INPUT_MARKER = '[factory-needs-input]'
+const LEGACY_AGENT_NEEDS_INPUT_MARKER = 'FACTORY_NEEDS_INPUT'
 const FACTORY_E2E_MARKER = '[factory-e2e]'
 const INJECTION_CONFIRMATION_TIMEOUT_MS = 90_000
 const INJECTION_RETRY_DELAY_MS = 1_000
@@ -160,6 +180,8 @@ export class FactoryLoop implements Factory {
   readonly #slackThreadIds = new Map<string, string>()
   readonly #slackWatchers = new Map<string, SlackThreadWatcher>()
   readonly #slackWatcherStarts = new Map<string, Promise<void>>()
+  readonly #seenAgentQuestionKeys = new Set<string>()
+  readonly #seenAgentQuestionOrder: string[] = []
   readonly #dispatchAttempts = new Map<string, DispatchAttemptState>()
   readonly #canonicalIssueStates = new Map<string, string>()
   readonly #dispatchFailureReaperHandoffs = new Map<string, RegistryHandoffAgent>()
@@ -198,6 +220,10 @@ export class FactoryLoop implements Factory {
   readonly #seenLiveEvents = new Set<string>()
   #offAgentExit?: () => void
   #offDeliveryFailed?: () => void
+  #offAgentMessage?: () => void
+  // undefined = readiness not yet probed; resolved lazily so the standalone
+  // runOnce() path (which skips #start) still ingests when the mount is present.
+  #githubIngestionEnabled?: boolean
   #starting?: Promise<void>
   #started = false
   #stopping = false
@@ -257,10 +283,7 @@ export class FactoryLoop implements Factory {
       this.#error(new Error(`${ISSUE_ROOT} sub-root is not mounted`))
       return
     }
-    const githubReady = await this.#mount.ensureSubRoot(GITHUB_ISSUE_ROOT, { timeoutMs: 90_000 })
-    if (githubReady !== 'ready') {
-      this.#logger.warn?.(`[factory] ${GITHUB_ISSUE_ROOT} sub-root is not mounted; GitHub issue ingestion disabled`)
-    }
+    await this.#ensureGithubIngestionReady()
 
     this.#wireFleetEvents()
 
@@ -311,8 +334,10 @@ export class FactoryLoop implements Factory {
       this.#slackWatcherStarts.clear()
       this.#offAgentExit?.()
       this.#offDeliveryFailed?.()
+      this.#offAgentMessage?.()
       this.#offAgentExit = undefined
       this.#offDeliveryFailed = undefined
+      this.#offAgentMessage = undefined
       await this.#fleet.dispose()
     } finally {
       this.#stoppingHeartbeatRefreshActive = false
@@ -1073,6 +1098,11 @@ export class FactoryLoop implements Factory {
         void this.#handleDeliveryFailed(info)
       })
     }
+    if (!this.#offAgentMessage) {
+      this.#offAgentMessage = this.#fleet.onAgentMessage?.((message) => {
+        void this.#handleAgentMessage(message)
+      })
+    }
   }
 
   async #backfillReadyIssues(): Promise<void> {
@@ -1143,10 +1173,59 @@ export class FactoryLoop implements Factory {
     }
   }
 
-  async #ingestGithubIssues(opts: { dryRun?: boolean } = {}): Promise<void> {
-    for (const path of await this.#githubIssuePaths()) {
-      await this.#handleGithubIssueChange(path, opts)
+  // Probes the GitHub issue sub-root at most once and caches the verdict so
+  // repeated iterations skip listTree calls when the mount is absent.
+  async #ensureGithubIngestionReady(): Promise<boolean> {
+    if (this.#githubIngestionEnabled !== undefined) {
+      return this.#githubIngestionEnabled
     }
+    const githubReady = await this.#mount.ensureSubRoot(GITHUB_ISSUE_ROOT, { timeoutMs: 90_000 })
+    this.#githubIngestionEnabled = githubReady === 'ready'
+    if (!this.#githubIngestionEnabled) {
+      this.#logger.warn?.(`[factory] ${GITHUB_ISSUE_ROOT} sub-root is not mounted; GitHub issue ingestion disabled`)
+    }
+    return this.#githubIngestionEnabled
+  }
+
+  async #ingestGithubIssues(opts: { dryRun?: boolean } = {}): Promise<void> {
+    if (!await this.#ensureGithubIngestionReady()) {
+      return
+    }
+    // Load the existing Linear mirror candidates once for the whole pass so
+    // dedupe stays O(N + M) reads instead of re-scanning ISSUE_ROOT for every
+    // GitHub issue (gemini perf finding on #findGithubIssueMirror).
+    const candidates = this.#newMirrorCandidateCache()
+    for (const path of await this.#githubIssuePaths()) {
+      await this.#handleGithubIssueChange(path, { ...opts, candidates })
+    }
+  }
+
+  // Lazily lists+reads ISSUE_ROOT mirror candidates at most once, then memoizes
+  // them for reuse across every GitHub issue handled in the same pass.
+  #newMirrorCandidateCache(): MirrorCandidateCache {
+    let loaded: Promise<LinearIssue[]> | undefined
+    return {
+      load: () => {
+        if (!loaded) {
+          loaded = this.#loadLinearMirrorCandidates()
+        }
+        return loaded
+      },
+    }
+  }
+
+  async #loadLinearMirrorCandidates(): Promise<LinearIssue[]> {
+    const candidates: LinearIssue[] = []
+    for (const path of await this.#mount.listTree(ISSUE_ROOT)) {
+      if (!isLinearIssueMirrorCandidatePath(path)) {
+        continue
+      }
+      const issue = await this.#readIssue(path)
+      if (issue) {
+        candidates.push(issue)
+      }
+    }
+    return candidates
   }
 
   async #githubIssuePaths(): Promise<string[]> {
@@ -1161,8 +1240,11 @@ export class FactoryLoop implements Factory {
     }
   }
 
-  async #handleGithubIssueChange(path: string, opts: { dryRun?: boolean } = {}): Promise<void> {
-    if (!isGithubIssueFilePath(path)) {
+  async #handleGithubIssueChange(
+    path: string,
+    opts: { dryRun?: boolean; candidates?: MirrorCandidateCache } = {},
+  ): Promise<void> {
+    if (this.#githubIngestionEnabled === false || !isGithubIssueFilePath(path)) {
       return
     }
 
@@ -1173,14 +1255,11 @@ export class FactoryLoop implements Factory {
       }
 
       if (githubIssueIsClosed(ghIssue)) {
-        const mirror = await this.#findGithubIssueMirror(ghIssue)
+        const mirror = await this.#findGithubIssueMirror(ghIssue, opts.candidates)
         if (mirror && mirror.stateId !== this.#config.stateIds.done) {
           if (!opts.dryRun) {
             const record = this.#batch.getIssue(mirror)
             if (record) {
-              // Agents are actively working this mirror — terminate them
-              // (release + mark done) so a GitHub issue closed out from under us
-              // doesn't leave the dispatched agents running.
               await this.#completeIssue(record)
             } else {
               await this.#linear.setState(mirror, this.#config.stateIds.done)
@@ -1195,7 +1274,7 @@ export class FactoryLoop implements Factory {
         return
       }
 
-      const mirror = await this.#findGithubIssueMirror(ghIssue)
+      const mirror = await this.#findGithubIssueMirror(ghIssue, opts.candidates)
       if (mirror) {
         this.#increment('githubIssueMirrorsDeduped')
         return
@@ -1235,7 +1314,10 @@ export class FactoryLoop implements Factory {
     }
   }
 
-  async #findGithubIssueMirror(ghIssue: GithubIssueSource): Promise<LinearIssue | undefined> {
+  async #findGithubIssueMirror(
+    ghIssue: GithubIssueSource,
+    candidates?: MirrorCandidateCache,
+  ): Promise<LinearIssue | undefined> {
     const draftPath = githubIssueMirrorDraftPath(ghIssue)
     try {
       return parseLinearIssue(draftPath, (await this.#mount.readFile(draftPath)).content)
@@ -1246,8 +1328,8 @@ export class FactoryLoop implements Factory {
     }
 
     // Cached resolved mirror path: skip the full ISSUE_ROOT scan for mirrors we
-    // already located on an earlier cycle. Re-validate the cached path (the
-    // mirror could have been deleted/renamed) and fall back to a scan if stale.
+    // already located on an earlier cycle. Re-validate the cached path and fall
+    // back to a scan if the mirror was deleted or renamed.
     const cacheKey = githubIssueMirrorId(ghIssue)
     const cachedPath = this.#githubMirrorPathCache.get(cacheKey)
     if (cachedPath) {
@@ -1258,22 +1340,29 @@ export class FactoryLoop implements Factory {
       this.#githubMirrorPathCache.delete(cacheKey)
     }
 
-    for (const path of await this.#mount.listTree(ISSUE_ROOT)) {
-      if (!isLinearIssueMirrorCandidatePath(path)) {
-        continue
-      }
-      const issue = await this.#readIssue(path)
-      if (issue && linearIssueMirrorsGithubIssue(issue, ghIssue)) {
-        this.#githubMirrorPathCache.set(cacheKey, path)
-        return issue
-      }
+    // During a full ingestion pass the candidate list is loaded once and shared
+    // across every GitHub issue; the live single-event path passes none and
+    // loads on demand.
+    const mirrorCandidates = candidates
+      ? await candidates.load()
+      : await this.#loadLinearMirrorCandidates()
+    const mirror = mirrorCandidates.find((issue) => linearIssueMirrorsGithubIssue(issue, ghIssue))
+    if (mirror) {
+      this.#githubMirrorPathCache.set(cacheKey, mirror.path)
     }
-    return undefined
+    return mirror
   }
 
   #repoLabelForGithubIssue(ghIssue: GithubIssueSource): string | undefined {
+    const fullName = ghIssue.repo.toLowerCase()
+    const bareName = ghIssue.repoName.toLowerCase()
     const entry = Object.entries(this.#config.repos.byLabel)
-      .find(([, repo]) => repo.toLowerCase() === ghIssue.repo.toLowerCase())
+      .find(([, repo]) => {
+        const configured = repo.toLowerCase()
+        // ghIssue.repo is always owner/name, so byLabel entries configured with
+        // just the bare repo name still match via repoName.
+        return configured === fullName || configured === bareName
+      })
     return entry?.[0]
   }
 
@@ -1791,6 +1880,24 @@ export class FactoryLoop implements Factory {
         try {
           await resume
           this.#resumedExitKeys.add(resumeKey)
+        } catch (error) {
+          if (isAgentAlreadyExistsError(error)) {
+            // The broker never released this agent's name on exit
+            // (relay#1116-family), so re-registering collides with the stuck
+            // name. The error is marked retryable but isn't — retrying just
+            // re-collides forever. Treat it as terminal for this name: record
+            // the resume key so subsequent exit events short-circuit, count it,
+            // and warn once instead of spamming a 500 stack trace. The external
+            // reaper / a broker restart reclaims the leaked name.
+            this.#resumedExitKeys.add(resumeKey)
+            this.#increment('resumeNameCollisions')
+            this.#logger.warn?.('[factory] resume skipped: broker still holds agent name (relay#1116); not retrying', {
+              issue: record.issue.key,
+              name,
+            })
+          } else {
+            throw error
+          }
         } finally {
           this.#resumeInFlight.delete(resumeKey)
         }
@@ -1875,6 +1982,104 @@ export class FactoryLoop implements Factory {
     }
   }
 
+  async #handleAgentMessage(message: AgentMessage): Promise<void> {
+    const question = parseAgentQuestion(message)
+    if (!question || !isFactoryQuestionTarget(message.target)) {
+      return
+    }
+
+    const record = this.#batch.getIssueByAgent(question.agentName)
+    if (!record || record.dryRun) {
+      this.#increment('agentQuestionsIgnoredNoInFlight')
+      return
+    }
+
+    if (question.issueKey && question.issueKey !== record.issue.key) {
+      this.#increment('agentQuestionsIgnoredIssueMismatch')
+      this.#logger.warn?.('[factory] ignored agent question for mismatched issue', {
+        from: question.agentName,
+        requestedIssue: question.issueKey,
+        activeIssue: record.issue.key,
+      })
+      return
+    }
+
+    const dedupeKey = agentQuestionDedupeKey(record.issue, question)
+    if (this.#seenAgentQuestionKeys.has(dedupeKey)) {
+      this.#increment('agentQuestionDuplicatesSuppressed')
+      this.#logger.debug?.('[factory] suppressed duplicate agent question', {
+        from: question.agentName,
+        issue: record.issue.key,
+      })
+      return
+    }
+    this.#rememberAgentQuestion(dedupeKey)
+
+    if (!question.eventId) {
+      this.#increment('agentQuestionsMissingIdentity')
+      this.#logger.warn?.('[factory] agent question event missing stable identity; falling back to sender/content dedupe', {
+        from: question.agentName,
+        issue: record.issue.key,
+      })
+    }
+
+    await this.#postAgentQuestionToSlack(record, question)
+  }
+
+  async #postAgentQuestionToSlack(record: InFlightIssue, question: AgentQuestion): Promise<void> {
+    if (!this.#slack || !this.#config.slack) {
+      this.#increment('agentQuestionsSkippedNoSlack')
+      this.#logger.warn?.('[factory] agent question has no Slack channel configured', {
+        issue: record.issue,
+        from: question.agentName,
+      })
+      return
+    }
+
+    if (await this.#shouldSkipSlackWriteback('agent-question')) {
+      this.#increment('agentQuestionsSkippedSlackDegraded')
+      return
+    }
+
+    const key = issueKey(record.issue)
+    try {
+      await this.#slackWatcherStarts.get(key)
+    } catch {
+      // The initiator logs Slack watcher startup failures.
+    }
+
+    const threadId = this.#slackThreadIds.get(key)
+    if (!threadId) {
+      this.#increment('agentQuestionsSkippedMissingThread')
+      this.#logger.warn?.('[factory] agent question has no Slack dispatch thread', {
+        issue: record.issue,
+        from: question.agentName,
+      })
+      return
+    }
+
+    try {
+      await this.#slack.reply(threadId, agentQuestionSlackText(record.issue, question))
+      this.#increment('agentQuestionsPostedToSlack')
+      this.#recordSlackWritebackSuccess('agent-question')
+    } catch (error) {
+      this.#markSlackWritebackFailure('agent-question', error)
+      this.#logger.warn?.(`[factory] failed to post agent question for ${record.issue.key}`, error)
+    }
+  }
+
+  #rememberAgentQuestion(key: string): void {
+    if (this.#seenAgentQuestionKeys.has(key)) {
+      return
+    }
+    this.#seenAgentQuestionKeys.add(key)
+    this.#seenAgentQuestionOrder.push(key)
+    while (this.#seenAgentQuestionOrder.length > AGENT_QUESTION_DEDUPE_LIMIT) {
+      const oldest = this.#seenAgentQuestionOrder.shift()
+      if (oldest) this.#seenAgentQuestionKeys.delete(oldest)
+    }
+  }
+
   #recordArrivalLatency(event: ChangeEvent): void {
     const occurredAt = Date.parse(event.occurredAt)
     if (!Number.isFinite(occurredAt)) return
@@ -1933,6 +2138,7 @@ export class FactoryLoop implements Factory {
           config: { mergePolicy: this.#config.mergePolicy },
           reviewerName,
           implementerNames,
+          slackDispatchThread: this.#slackDispatchThreadFor(record),
         }),
         from: 'factory',
         data: { issue: record.issue },
@@ -2473,6 +2679,15 @@ export class FactoryLoop implements Factory {
     }
   }
 
+  #slackDispatchThreadFor(record: InFlightIssue): { channel: string; threadId: string } | undefined {
+    if (!this.#config.slack) {
+      return undefined
+    }
+
+    const threadId = this.#slackThreadIds.get(issueKey(record.issue))
+    return threadId ? { channel: this.#config.slack.channel, threadId } : undefined
+  }
+
   async #runCompletionMergeGate(issue: LinearIssue): Promise<void> {
     if (this.#isSyntheticProbeIssue(issue)) {
       await this.#closeSyntheticProbeIfPresent(issue)
@@ -2731,7 +2946,11 @@ const repoMapFromConfig = (config: FactoryConfig) => {
 }
 
 const githubIssuePathParts = (path: string): { owner: string; repo: string; number: number } | undefined => {
-  const match = path.match(/^\/github\/repos\/([^/]+)\/([^/]+)\/issues\/by-id\/(\d+)\.json$/u)
+  // Live relayfile mounts expose GitHub issues as
+  // /github/repos/<owner>/<repo>/issues/<number>.json (see the renderer
+  // issues-store mount reader). Some mount shapes nest them under an extra
+  // by-id/ segment, so accept either to stay robust across mount versions.
+  const match = path.match(/^\/github\/repos\/([^/]+)\/([^/]+)\/issues\/(?:by-id\/)?(\d+)\.json$/u)
   if (!match) return undefined
   return {
     owner: match[1]!,
@@ -3207,6 +3426,17 @@ const labelName = (value: unknown): string | undefined => {
 const isCompletionReason = (reason?: string): boolean =>
   reason === 'issue-done' || reason === 'done' || reason === 'completed'
 
+// The broker rejects re-registering a name it never released on exit
+// (relay#1116-family) with a 500 "agent '<name>' already exists". Detect it from
+// the structured payload or the message so resume can treat it as terminal
+// rather than retrying the (falsely) "retryable" error forever.
+const isAgentAlreadyExistsError = (error: unknown): boolean => {
+  const record = asRecord(error)
+  const data = asRecord(record?.data)
+  const message = stringValue(data?.error) ?? (error instanceof Error ? error.message : '')
+  return /already exists/iu.test(message)
+}
+
 const defaultRestartPolicy = (spec: AgentSpec): AgentSpec['restartPolicy'] | undefined =>
   spec.role === 'implementer' ? { maxRestarts: 3, strategy: 'resume' } as AgentSpec['restartPolicy'] : spec.restartPolicy
 
@@ -3323,6 +3553,61 @@ const triageEscalationReason = (decision: TriageDecision): string | undefined =>
 
 const slackAnswerInput = (issue: IssueRef, text: string): string =>
   `Slack reply for ${issue.key}:\n${text}\r`
+
+const isFactoryQuestionTarget = (target: string): boolean => {
+  const normalized = target.trim().replace(/^@/u, '').toLowerCase()
+  return normalized === 'broker' || normalized === 'factory'
+}
+
+const parseAgentQuestion = (message: AgentMessage): AgentQuestion | undefined => {
+  const markerPattern = new RegExp(
+    `(^|\\n)\\s*(?:${escapeRegExp(AGENT_NEEDS_INPUT_MARKER)}|${escapeRegExp(LEGACY_AGENT_NEEDS_INPUT_MARKER)})\\s*(?::\\s*)?`,
+    'iu',
+  )
+  const match = markerPattern.exec(message.body)
+  if (!match || !message.from.trim()) {
+    return undefined
+  }
+
+  const markerEnd = match.index + match[0].length
+  const bodyAfterMarker = message.body.slice(markerEnd).trim()
+  const issueKey = message.body.match(/(?:^|\n)\s*Issue:\s*([A-Z]+-\d+)\s*(?:\n|$)/iu)?.[1]?.toUpperCase()
+  const question = extractQuestionText(bodyAfterMarker)
+  if (!question) {
+    return undefined
+  }
+
+  return {
+    agentName: message.from.trim(),
+    issueKey,
+    question,
+    eventId: message.eventId,
+  }
+}
+
+const extractQuestionText = (bodyAfterMarker: string): string => {
+  const questionMatch = bodyAfterMarker.match(/(?:^|\n)\s*Question:\s*([\s\S]+)$/iu)
+  const raw = questionMatch?.[1] ?? bodyAfterMarker
+  return raw
+    .split(/\r?\n/u)
+    .filter((line) => !/^\s*Issue:\s*[A-Z]+-\d+\s*$/iu.test(line))
+    .join('\n')
+    .trim()
+}
+
+const agentQuestionDedupeKey = (issue: IssueRef, question: AgentQuestion): string =>
+  `${question.eventId ?? 'missing'}:${stableHash(JSON.stringify({
+    issue: issue.key,
+    from: question.agentName,
+    question: question.question,
+  }))}`
+
+const agentQuestionSlackText = (issue: IssueRef, question: AgentQuestion): string => [
+  `${issue.key}: ${question.agentName} needs input.`,
+  `Question: ${question.question}`,
+].join('\n')
+
+const escapeRegExp = (value: string): string => value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')
 
 const isOwnSlackBotReply = (payload: Record<string, unknown>, botUserId: string): boolean =>
   payload.user_is_bot === true ||

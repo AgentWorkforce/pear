@@ -10,6 +10,7 @@ import {
   checkFactoryLoopLiveness,
   closeProbePr,
   createFactory,
+  isInFactoryScope,
   parseLinearIssue,
   readFactoryInFlightRegistry,
   readFactoryLoopHeartbeat,
@@ -235,6 +236,21 @@ class SpawnFailingFleetClient extends FakeFleetClient {
   override async spawn(input: SpawnInput): Promise<SpawnResult> {
     this.spawns.push(input)
     throw new Error('spawnPty failed: cwd does not exist')
+  }
+}
+
+// Mimics the broker rejecting a resume because it never released the agent's
+// name on exit (relay#1116-family): http 500 "agent '<name>' already exists".
+class ResumeNameCollisionFleetClient extends FakeFleetClient {
+  override async resume(input: Parameters<FakeFleetClient['resume']>[0]): Promise<SpawnResult> {
+    this.resumes.push(input)
+    const name = input.name ?? input.sessionRef
+    throw Object.assign(new Error(`agent '${name}' already exists`), {
+      code: 'http_500',
+      status: 500,
+      retryable: true,
+      data: { error: `agent '${name}' already exists`, name, success: false },
+    })
   }
 }
 
@@ -920,6 +936,7 @@ describe('FactoryLoop', () => {
       stateId: ready,
       description: 'Use the synced GitHub mount, not the GitHub API.\n\nSource: https://github.com/AgentWorkforce/pear/issues/1116',
       labels: [{ name: 'pear' }],
+      team: { key: 'AR' },
       source: {
         provider: 'github',
         owner: 'AgentWorkforce',
@@ -1002,8 +1019,6 @@ describe('FactoryLoop', () => {
     }
     const mount = new CountingIssueListMount({
       [ghPath]: githubIssueFile(1116, { url: ghUrl }),
-      // Reconciled canonical mirror (no draft path) in `done` so it dedupes
-      // without dispatching — exercising the scan→cache path in #findGithubIssueMirror.
       [issuePath(258)]: realIssueFile(258, done, {
         title: '[factory] GitHub mirror',
         description: `Mirrored from GitHub.\n\nSource: ${ghUrl}`,
@@ -1020,8 +1035,6 @@ describe('FactoryLoop', () => {
     await factory.runOnce()
     const secondCycleScans = mount.issueRootListCalls - afterFirst
 
-    // First cycle scans ISSUE_ROOT to resolve + cache the mirror; the second
-    // serves it from cache, so it does strictly fewer ISSUE_ROOT scans.
     expect(secondCycleScans).toBeLessThan(afterFirst)
     expect(factory.status().counters.githubIssueMirrorsDeduped).toBe(2)
   })
@@ -1030,7 +1043,7 @@ describe('FactoryLoop', () => {
     const ghUrl = 'https://github.com/AgentWorkforce/pear/issues/1116'
     const ghPath = githubIssuePath('AgentWorkforce', 'pear', 1116)
     const mount = new FakeMountClient({
-      [ghPath]: githubIssueFile(1116, { url: ghUrl }), // open + factory-labeled
+      [ghPath]: githubIssueFile(1116, { url: ghUrl }),
       [issuePath(258)]: realIssueFile(258, ready, {
         title: '[factory] GitHub mirror',
         description: `Mirrored from GitHub.\n\nSource: ${ghUrl}`,
@@ -1042,15 +1055,12 @@ describe('FactoryLoop', () => {
       safety: { requireTitlePrefix: '[factory]', requireTeamKey: 'AR' },
     }), { mount, fleet, triage: new StaticTriage() })
 
-    // First cycle: mirror exists (deduped) and is dispatched via the Linear path.
     await factory.runOnce()
     expect(factory.status().inFlight.map((issue) => issue.key)).toContain('AR-258')
 
-    // GitHub issue closes out from under the in-flight mirror.
     mount.files.set(ghPath, { content: githubIssueFile(1116, { state: 'closed', url: ghUrl }) })
     await factory.runOnce()
 
-    // Completed via ingestion — agents released, not left running.
     expect(fleet.releases.map((release) => release.name)).toEqual(
       expect.arrayContaining(['ar-258-impl', 'ar-258-review']),
     )
@@ -1149,6 +1159,7 @@ describe('FactoryLoop', () => {
       stateId: ready,
       description: 'Implement the relay fix.\n\nAcceptance: add tests.\n\nSource: https://github.com/AgentWorkforce/pear/issues/1116',
       labels: [{ name: 'pear' }],
+      team: { key: 'AR' },
       source: {
         provider: 'github',
         owner: 'AgentWorkforce',
@@ -1230,6 +1241,106 @@ describe('FactoryLoop', () => {
     })
     expect(factory.status().counters.githubIssueMirrorsClosed).toBe(1)
     expect(parseLinearIssue(issuePath(259), (await mount.readFile(issuePath(259))).content).stateId).toBe(done)
+  })
+
+  it('mirrors a GitHub issue exposed under the live issues/<n>.json mount shape (no by-id segment)', async () => {
+    const ghPath = '/github/repos/AgentWorkforce/pear/issues/1116.json'
+    const mount = new FakeMountClient({
+      [ghPath]: githubIssueFile(1116, {
+        title: 'Live mount shape issue',
+        body: 'Body for the live-shape issue.',
+      }),
+    })
+    const factory = createFactory(config(), {
+      mount,
+      fleet: new FakeFleetClient(),
+      triage: new StaticTriage(),
+    })
+
+    await factory.runOnce()
+
+    expect(mount.writes).toHaveLength(1)
+    expect(mount.writes[0]?.path).toMatch(/^\/linear\/issues\/factory-create-github-[a-z0-9]+\.json$/u)
+    expect(mount.writes[0]?.content).toMatchObject({
+      title: '[factory] Live mount shape issue',
+      source: expect.objectContaining({ provider: 'github', path: ghPath, number: 1116 }),
+    })
+    expect(factory.status().counters.githubIssueMirrorsCreated).toBe(1)
+  })
+
+  it('routes a GitHub mirror when repos.byLabel is configured with only the bare repo name', async () => {
+    const ghPath = githubIssuePath('AgentWorkforce', 'pear', 1119)
+    const mount = new FakeMountClient({
+      [ghPath]: githubIssueFile(1119, { title: 'Bare label route' }),
+    })
+    const factory = createFactory(config({
+      repos: {
+        // Configured with just "pear", not "AgentWorkforce/pear".
+        byLabel: { pear: 'pear' },
+        byProject: {},
+        keywordRules: [],
+        clonePaths: { 'AgentWorkforce/pear': '/work/pear' },
+        default: 'AgentWorkforce/pear',
+      },
+    }), {
+      mount,
+      fleet: new FakeFleetClient(),
+      triage: new StaticTriage(),
+    })
+
+    await factory.runOnce()
+
+    expect(mount.writes).toHaveLength(1)
+    expect(mount.writes[0]?.content).toMatchObject({ labels: [{ name: 'pear' }] })
+    expect(factory.status().counters.githubIssueMirrorsCreated).toBe(1)
+    expect(factory.status().counters.githubIssueMirrorsSkippedUnroutable ?? 0).toBe(0)
+  })
+
+  it('skips GitHub issue ingestion entirely when the GitHub sub-root is not mounted', async () => {
+    const ghPath = githubIssuePath('AgentWorkforce', 'pear', 1116)
+    const mount = new FakeMountClient({
+      [ghPath]: githubIssueFile(1116),
+    })
+    mount.setSubRoot('/github/repos', 'absent')
+    let listedGithub = false
+    const originalListTree = mount.listTree.bind(mount)
+    mount.listTree = async (prefix: string) => {
+      if (prefix === '/github/repos') listedGithub = true
+      return originalListTree(prefix)
+    }
+    const factory = createFactory(config(), {
+      mount,
+      fleet: new FakeFleetClient(),
+      triage: new StaticTriage(),
+    })
+
+    await factory.runOnce()
+
+    expect(listedGithub).toBe(false)
+    expect(mount.writes).toEqual([])
+    expect(factory.status().counters.githubIssueMirrorsCreated ?? 0).toBe(0)
+  })
+
+  it('rejects a human-authored [factory] issue under a stricter [factory-e2e] gate but accepts GitHub mirrors', async () => {
+    expect(isInFactoryScope(
+      { title: '[factory] human issue', team: 'AR', raw: { payload: { title: '[factory] human issue', team: { key: 'AR' } } } },
+      { requireTitlePrefix: '[factory-e2e]', requireTeamKey: 'AR' },
+    )).toBe(false)
+
+    expect(isInFactoryScope(
+      {
+        title: '[factory] github mirror',
+        team: 'AR',
+        raw: { payload: { title: '[factory] github mirror', team: { key: 'AR' }, source: { provider: 'github' } } },
+      },
+      { requireTitlePrefix: '[factory-e2e]', requireTeamKey: 'AR' },
+    )).toBe(true)
+
+    // The configured prefix still matches its own boundary.
+    expect(isInFactoryScope(
+      { title: '[factory-e2e] human issue', team: 'AR', raw: { payload: { title: '[factory-e2e] human issue', team: { key: 'AR' } } } },
+      { requireTitlePrefix: '[factory-e2e]', requireTeamKey: 'AR' },
+    )).toBe(true)
   })
 
   it('uses canonical issue state during startup backfill when a ready alias is stale', async () => {
@@ -3398,6 +3509,25 @@ describe('FactoryLoop', () => {
     expect(factory.status().inFlight).toEqual([])
   })
 
+  it('does not loop when resume hits a leaked broker name ("already exists")', async () => {
+    const mount = new FakeMountClient({ [issuePath(80)]: issueFile(80) })
+    const fleet = new ResumeNameCollisionFleetClient()
+    fleet.setSessionRef('ar-80-review', 'session-review-80')
+    const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
+    const decision = await factory.triageIssue(parseLinearIssue(issuePath(80), issueFile(80)))
+
+    await factory.dispatch(decision)
+    fleet.emitAgentExit('ar-80-review', 'crash')
+    await flush()
+    // A second exit event must NOT trigger another resume attempt.
+    fleet.emitAgentExit('ar-80-review', 'crash')
+    await flush()
+
+    expect(fleet.resumes).toHaveLength(1) // resumed once, collided, then short-circuited
+    expect(factory.status().counters.resumeNameCollisions).toBe(1)
+    expect(factory.status().counters.errors ?? 0).toBe(0) // not surfaced as a hard error
+  })
+
   it('does not complete on an implementer exit when only a draft PR exists', async () => {
     const issue = realIssueFile(256, ready, { title: 'Real implementer draft PR exit' })
     const mount = new FakeMountClient({ [issuePath(256)]: issue })
@@ -5166,6 +5296,161 @@ describe('FactoryLoop', () => {
     expect(slack.replies).toEqual([])
     expect(slackReplyWrites(mount)).toEqual([])
     expect(mount.confirmedPaths.filter((path) => path.includes('/replies/'))).toEqual([])
+  })
+
+  it('routes a mid-task agent question to the Slack dispatch thread and returns the human answer via sendInput', async () => {
+    const mount = new ConfirmRecordingSlackMountClient({ [issuePath(36)]: issueFile(36) })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+    })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(36), issueFile(36))))
+    fleet.emitAgentMessage({
+      from: 'ar-36-impl',
+      target: 'broker',
+      body: 'FACTORY_NEEDS_INPUT\nIssue: AR-36\nQuestion: Which retry helper should I use?',
+      eventId: 'agent-question-36',
+    })
+    await flush()
+    await flush()
+
+    expect(slackReplyWrites(mount)).toEqual([
+      expect.objectContaining({
+        content: expect.objectContaining({
+          thread_ts: mount.threadTs,
+          text: 'AR-36: ar-36-impl needs input.\nQuestion: Which retry helper should I use?',
+        }),
+      }),
+    ])
+    expect(factory.status().counters.agentQuestionsPostedToSlack).toBe(1)
+    expect(slackAnswerInputs(fleet)).toEqual([])
+
+    emitSlackReply(mount, slackReplyFixturePath('C0FACTORY__factory-e2e', mount.threadTs, 'bot-question-echo'), 'bot-question-echo', {
+      text: 'AR-36: ar-36-impl needs input.\nQuestion: Which retry helper should I use?',
+      user: 'U0B2596R7EZ',
+      user_is_bot: false,
+    })
+    await flush()
+    await flush()
+    expect(slackAnswerInputs(fleet)).toEqual([])
+
+    emitSlackReply(mount, slackReplyFixturePath('C0FACTORY__factory-e2e', mount.threadTs, 'human-answer-36'), 'human-answer-36', {
+      text: 'Use the shared retry helper in factory.ts.',
+      user: 'U123',
+      user_is_bot: false,
+    })
+    await flush()
+    await flush()
+
+    expect(slackAnswerInputs(fleet)).toEqual([
+      { name: 'ar-36-impl', data: 'Slack reply for AR-36:\nUse the shared retry helper in factory.ts.\r' },
+    ])
+    expect(fleet.messages).toHaveLength(2)
+  })
+
+  it('ignores marked agent questions that are not addressed to the factory', async () => {
+    const mount = new ConfirmRecordingSlackMountClient({ [issuePath(37)]: issueFile(37) })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+    })
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(37), issueFile(37))))
+    fleet.emitAgentMessage({
+      from: 'ar-37-impl',
+      target: 'ar-37-review',
+      body: 'FACTORY_NEEDS_INPUT\nIssue: AR-37\nQuestion: should not bridge',
+      eventId: 'agent-question-37',
+    })
+    await flush()
+    await flush()
+
+    expect(slackReplyWrites(mount)).toEqual([])
+    expect(factory.status().counters.agentQuestionsPostedToSlack).toBeUndefined()
+  })
+
+  it('treats agent questions as no-ops when Slack is unconfigured without regressing dispatch', async () => {
+    const mount = new CloudWritebackFakeMountClient({ [issuePath(38)]: issueFile(38) })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config(), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+    })
+
+    const result = await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(38), issueFile(38))))
+    fleet.emitAgentMessage({
+      from: 'ar-38-impl',
+      target: 'broker',
+      body: 'FACTORY_NEEDS_INPUT\nIssue: AR-38\nQuestion: can anyone clarify?',
+      eventId: 'agent-question-38',
+    })
+    await flush()
+    await flush()
+
+    expect(result.agents.map((agent) => agent.name)).toEqual(['ar-38-impl', 'ar-38-review'])
+    expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-38-impl', 'ar-38-review'])
+    expect(slackReplyWrites(mount)).toEqual([])
+    expect(factory.status().counters.agentQuestionsSkippedNoSlack).toBe(1)
+  })
+
+  it('treats agent questions as no-ops while Slack sync is degraded without regressing dispatch', async () => {
+    const mount = new SlackSyncStatusMount({ [issuePath(39)]: issueFile(39) })
+    mount.slackStatus = { provider: 'slack', status: 'stale' }
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+    })
+
+    const result = await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(39), issueFile(39))))
+    fleet.emitAgentMessage({
+      from: 'ar-39-impl',
+      target: 'factory',
+      body: '[factory-needs-input] Can anyone clarify the expected retry behavior?',
+      eventId: 'agent-question-39',
+    })
+    await flush()
+    await flush()
+
+    expect(result.agents.map((agent) => agent.name)).toEqual(['ar-39-impl', 'ar-39-review'])
+    expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-39-impl', 'ar-39-review'])
+    expect(mount.writes.filter((write) => isSlackRootWritePath(write.path) || write.path.includes('/replies/'))).toEqual([])
+    expect(factory.status().counters.agentQuestionsSkippedSlackDegraded).toBe(1)
+  })
+
+  it('dedupes duplicate agent question events before posting to Slack', async () => {
+    const mount = new ConfirmRecordingSlackMountClient({ [issuePath(40)]: issueFile(40) })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+    })
+    const question = {
+      from: 'ar-40-impl',
+      target: 'factory',
+      body: 'FACTORY_NEEDS_INPUT\nIssue: AR-40\nQuestion: Is this duplicate-safe?',
+      eventId: 'agent-question-40',
+    }
+
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(40), issueFile(40))))
+    fleet.emitAgentMessage(question)
+    fleet.emitAgentMessage(question)
+    await flush()
+    await flush()
+
+    expect(slackReplyWrites(mount).map((write) => write.content.text)).toEqual([
+      'AR-40: ar-40-impl needs input.\nQuestion: Is this duplicate-safe?',
+    ])
+    expect(factory.status().counters.agentQuestionsPostedToSlack).toBe(1)
+    expect(factory.status().counters.agentQuestionDuplicatesSuppressed).toBe(1)
   })
 
   it('watches top-level inbound Slack thread replies keyed by real reply ts', async () => {
