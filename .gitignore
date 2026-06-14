@@ -18,3 +18,6 @@ relayfile-mount/
 # Playwright stress harness artifacts (run-time output)
 test-results/
 tests/playwright/screenshots/
+
+# Local factory runtime config (not for commit)
+factory.config.json
