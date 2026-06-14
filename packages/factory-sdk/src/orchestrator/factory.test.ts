@@ -10,6 +10,7 @@ import {
   checkFactoryLoopLiveness,
   closeProbePr,
   createFactory,
+  isInFactoryScope,
   parseLinearIssue,
   readFactoryInFlightRegistry,
   readFactoryLoopHeartbeat,
@@ -920,6 +921,7 @@ describe('FactoryLoop', () => {
       stateId: ready,
       description: 'Use the synced GitHub mount, not the GitHub API.\n\nSource: https://github.com/AgentWorkforce/pear/issues/1116',
       labels: [{ name: 'pear' }],
+      team: { key: 'AR' },
       source: {
         provider: 'github',
         owner: 'AgentWorkforce',
@@ -1081,6 +1083,7 @@ describe('FactoryLoop', () => {
       stateId: ready,
       description: 'Implement the relay fix.\n\nAcceptance: add tests.\n\nSource: https://github.com/AgentWorkforce/pear/issues/1116',
       labels: [{ name: 'pear' }],
+      team: { key: 'AR' },
       source: {
         provider: 'github',
         owner: 'AgentWorkforce',
@@ -1162,6 +1165,106 @@ describe('FactoryLoop', () => {
     })
     expect(factory.status().counters.githubIssueMirrorsClosed).toBe(1)
     expect(parseLinearIssue(issuePath(259), (await mount.readFile(issuePath(259))).content).stateId).toBe(done)
+  })
+
+  it('mirrors a GitHub issue exposed under the live issues/<n>.json mount shape (no by-id segment)', async () => {
+    const ghPath = '/github/repos/AgentWorkforce/pear/issues/1116.json'
+    const mount = new FakeMountClient({
+      [ghPath]: githubIssueFile(1116, {
+        title: 'Live mount shape issue',
+        body: 'Body for the live-shape issue.',
+      }),
+    })
+    const factory = createFactory(config(), {
+      mount,
+      fleet: new FakeFleetClient(),
+      triage: new StaticTriage(),
+    })
+
+    await factory.runOnce()
+
+    expect(mount.writes).toHaveLength(1)
+    expect(mount.writes[0]?.path).toMatch(/^\/linear\/issues\/factory-create-github-[a-z0-9]+\.json$/u)
+    expect(mount.writes[0]?.content).toMatchObject({
+      title: '[factory] Live mount shape issue',
+      source: expect.objectContaining({ provider: 'github', path: ghPath, number: 1116 }),
+    })
+    expect(factory.status().counters.githubIssueMirrorsCreated).toBe(1)
+  })
+
+  it('routes a GitHub mirror when repos.byLabel is configured with only the bare repo name', async () => {
+    const ghPath = githubIssuePath('AgentWorkforce', 'pear', 1119)
+    const mount = new FakeMountClient({
+      [ghPath]: githubIssueFile(1119, { title: 'Bare label route' }),
+    })
+    const factory = createFactory(config({
+      repos: {
+        // Configured with just "pear", not "AgentWorkforce/pear".
+        byLabel: { pear: 'pear' },
+        byProject: {},
+        keywordRules: [],
+        clonePaths: { 'AgentWorkforce/pear': '/work/pear' },
+        default: 'AgentWorkforce/pear',
+      },
+    }), {
+      mount,
+      fleet: new FakeFleetClient(),
+      triage: new StaticTriage(),
+    })
+
+    await factory.runOnce()
+
+    expect(mount.writes).toHaveLength(1)
+    expect(mount.writes[0]?.content).toMatchObject({ labels: [{ name: 'pear' }] })
+    expect(factory.status().counters.githubIssueMirrorsCreated).toBe(1)
+    expect(factory.status().counters.githubIssueMirrorsSkippedUnroutable ?? 0).toBe(0)
+  })
+
+  it('skips GitHub issue ingestion entirely when the GitHub sub-root is not mounted', async () => {
+    const ghPath = githubIssuePath('AgentWorkforce', 'pear', 1116)
+    const mount = new FakeMountClient({
+      [ghPath]: githubIssueFile(1116),
+    })
+    mount.setSubRoot('/github/repos', 'absent')
+    let listedGithub = false
+    const originalListTree = mount.listTree.bind(mount)
+    mount.listTree = async (prefix: string) => {
+      if (prefix === '/github/repos') listedGithub = true
+      return originalListTree(prefix)
+    }
+    const factory = createFactory(config(), {
+      mount,
+      fleet: new FakeFleetClient(),
+      triage: new StaticTriage(),
+    })
+
+    await factory.runOnce()
+
+    expect(listedGithub).toBe(false)
+    expect(mount.writes).toEqual([])
+    expect(factory.status().counters.githubIssueMirrorsCreated ?? 0).toBe(0)
+  })
+
+  it('rejects a human-authored [factory] issue under a stricter [factory-e2e] gate but accepts GitHub mirrors', async () => {
+    expect(isInFactoryScope(
+      { title: '[factory] human issue', team: 'AR', raw: { payload: { title: '[factory] human issue', team: { key: 'AR' } } } },
+      { requireTitlePrefix: '[factory-e2e]', requireTeamKey: 'AR' },
+    )).toBe(false)
+
+    expect(isInFactoryScope(
+      {
+        title: '[factory] github mirror',
+        team: 'AR',
+        raw: { payload: { title: '[factory] github mirror', team: { key: 'AR' }, source: { provider: 'github' } } },
+      },
+      { requireTitlePrefix: '[factory-e2e]', requireTeamKey: 'AR' },
+    )).toBe(true)
+
+    // The configured prefix still matches its own boundary.
+    expect(isInFactoryScope(
+      { title: '[factory-e2e] human issue', team: 'AR', raw: { payload: { title: '[factory-e2e] human issue', team: { key: 'AR' } } } },
+      { requireTitlePrefix: '[factory-e2e]', requireTeamKey: 'AR' },
+    )).toBe(true)
   })
 
   it('uses canonical issue state during startup backfill when a ready alias is stale', async () => {

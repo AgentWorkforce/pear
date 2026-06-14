@@ -95,11 +95,21 @@ type GithubIssueSource = {
   raw: Record<string, unknown>
 }
 
+// Memoizes the existing Linear mirror candidates for one GitHub ingestion pass
+// so dedupe lookups reuse a single ISSUE_ROOT scan.
+type MirrorCandidateCache = {
+  load: () => Promise<LinearIssue[]>
+}
+
 const ISSUE_ROOT = '/linear/issues'
 const GITHUB_ISSUE_ROOT = '/github/repos'
 const READY_EVENTS_LIMIT = 100
 const LIVE_ISSUE_GLOB = `${ISSUE_ROOT}/**`
-const LIVE_GITHUB_ISSUE_GLOB = `${GITHUB_ISSUE_ROOT}/**/issues/by-id/*.json`
+// Matches both /github/repos/<owner>/<repo>/issues/<n>.json (the shape live
+// relayfile mounts emit) and the nested .../issues/by-id/<n>.json variant.
+// isGithubIssueFilePath() re-validates the exact shape, so a broad subscription
+// glob is safe.
+const LIVE_GITHUB_ISSUE_GLOB = `${GITHUB_ISSUE_ROOT}/**/issues/**/*.json`
 const LIVE_DEDUPE_LIMIT = 5_000
 const LIVE_EVENT_DRAIN_BATCH_SIZE = 5
 const COMPLETION_SWEEP_INTERVAL_MS = 15_000
@@ -208,6 +218,9 @@ export class FactoryLoop implements Factory {
   #offAgentExit?: () => void
   #offDeliveryFailed?: () => void
   #offAgentMessage?: () => void
+  // undefined = readiness not yet probed; resolved lazily so the standalone
+  // runOnce() path (which skips #start) still ingests when the mount is present.
+  #githubIngestionEnabled?: boolean
   #starting?: Promise<void>
   #started = false
   #stopping = false
@@ -267,10 +280,7 @@ export class FactoryLoop implements Factory {
       this.#error(new Error(`${ISSUE_ROOT} sub-root is not mounted`))
       return
     }
-    const githubReady = await this.#mount.ensureSubRoot(GITHUB_ISSUE_ROOT, { timeoutMs: 90_000 })
-    if (githubReady !== 'ready') {
-      this.#logger.warn?.(`[factory] ${GITHUB_ISSUE_ROOT} sub-root is not mounted; GitHub issue ingestion disabled`)
-    }
+    await this.#ensureGithubIngestionReady()
 
     this.#wireFleetEvents()
 
@@ -1160,10 +1170,59 @@ export class FactoryLoop implements Factory {
     }
   }
 
-  async #ingestGithubIssues(opts: { dryRun?: boolean } = {}): Promise<void> {
-    for (const path of await this.#githubIssuePaths()) {
-      await this.#handleGithubIssueChange(path, opts)
+  // Probes the GitHub issue sub-root at most once and caches the verdict so
+  // repeated iterations skip listTree calls when the mount is absent.
+  async #ensureGithubIngestionReady(): Promise<boolean> {
+    if (this.#githubIngestionEnabled !== undefined) {
+      return this.#githubIngestionEnabled
     }
+    const githubReady = await this.#mount.ensureSubRoot(GITHUB_ISSUE_ROOT, { timeoutMs: 90_000 })
+    this.#githubIngestionEnabled = githubReady === 'ready'
+    if (!this.#githubIngestionEnabled) {
+      this.#logger.warn?.(`[factory] ${GITHUB_ISSUE_ROOT} sub-root is not mounted; GitHub issue ingestion disabled`)
+    }
+    return this.#githubIngestionEnabled
+  }
+
+  async #ingestGithubIssues(opts: { dryRun?: boolean } = {}): Promise<void> {
+    if (!await this.#ensureGithubIngestionReady()) {
+      return
+    }
+    // Load the existing Linear mirror candidates once for the whole pass so
+    // dedupe stays O(N + M) reads instead of re-scanning ISSUE_ROOT for every
+    // GitHub issue (gemini perf finding on #findGithubIssueMirror).
+    const candidates = this.#newMirrorCandidateCache()
+    for (const path of await this.#githubIssuePaths()) {
+      await this.#handleGithubIssueChange(path, { ...opts, candidates })
+    }
+  }
+
+  // Lazily lists+reads ISSUE_ROOT mirror candidates at most once, then memoizes
+  // them for reuse across every GitHub issue handled in the same pass.
+  #newMirrorCandidateCache(): MirrorCandidateCache {
+    let loaded: Promise<LinearIssue[]> | undefined
+    return {
+      load: () => {
+        if (!loaded) {
+          loaded = this.#loadLinearMirrorCandidates()
+        }
+        return loaded
+      },
+    }
+  }
+
+  async #loadLinearMirrorCandidates(): Promise<LinearIssue[]> {
+    const candidates: LinearIssue[] = []
+    for (const path of await this.#mount.listTree(ISSUE_ROOT)) {
+      if (!isLinearIssueMirrorCandidatePath(path)) {
+        continue
+      }
+      const issue = await this.#readIssue(path)
+      if (issue) {
+        candidates.push(issue)
+      }
+    }
+    return candidates
   }
 
   async #githubIssuePaths(): Promise<string[]> {
@@ -1178,8 +1237,11 @@ export class FactoryLoop implements Factory {
     }
   }
 
-  async #handleGithubIssueChange(path: string, opts: { dryRun?: boolean } = {}): Promise<void> {
-    if (!isGithubIssueFilePath(path)) {
+  async #handleGithubIssueChange(
+    path: string,
+    opts: { dryRun?: boolean; candidates?: MirrorCandidateCache } = {},
+  ): Promise<void> {
+    if (this.#githubIngestionEnabled === false || !isGithubIssueFilePath(path)) {
       return
     }
 
@@ -1190,7 +1252,7 @@ export class FactoryLoop implements Factory {
       }
 
       if (githubIssueIsClosed(ghIssue)) {
-        const mirror = await this.#findGithubIssueMirror(ghIssue)
+        const mirror = await this.#findGithubIssueMirror(ghIssue, opts.candidates)
         if (mirror && mirror.stateId !== this.#config.stateIds.done) {
           if (!opts.dryRun) {
             await this.#linear.setState(mirror, this.#config.stateIds.done)
@@ -1204,7 +1266,7 @@ export class FactoryLoop implements Factory {
         return
       }
 
-      const mirror = await this.#findGithubIssueMirror(ghIssue)
+      const mirror = await this.#findGithubIssueMirror(ghIssue, opts.candidates)
       if (mirror) {
         this.#increment('githubIssueMirrorsDeduped')
         return
@@ -1244,7 +1306,10 @@ export class FactoryLoop implements Factory {
     }
   }
 
-  async #findGithubIssueMirror(ghIssue: GithubIssueSource): Promise<LinearIssue | undefined> {
+  async #findGithubIssueMirror(
+    ghIssue: GithubIssueSource,
+    candidates?: MirrorCandidateCache,
+  ): Promise<LinearIssue | undefined> {
     const draftPath = githubIssueMirrorDraftPath(ghIssue)
     try {
       return parseLinearIssue(draftPath, (await this.#mount.readFile(draftPath)).content)
@@ -1254,21 +1319,25 @@ export class FactoryLoop implements Factory {
       // source metadata on existing Linear issues for restart/replay dedupe.
     }
 
-    for (const path of await this.#mount.listTree(ISSUE_ROOT)) {
-      if (!isLinearIssueMirrorCandidatePath(path)) {
-        continue
-      }
-      const issue = await this.#readIssue(path)
-      if (issue && linearIssueMirrorsGithubIssue(issue, ghIssue)) {
-        return issue
-      }
-    }
-    return undefined
+    // During a full ingestion pass the candidate list is loaded once and shared
+    // across every GitHub issue; the live single-event path passes none and
+    // loads on demand.
+    const mirrorCandidates = candidates
+      ? await candidates.load()
+      : await this.#loadLinearMirrorCandidates()
+    return mirrorCandidates.find((issue) => linearIssueMirrorsGithubIssue(issue, ghIssue))
   }
 
   #repoLabelForGithubIssue(ghIssue: GithubIssueSource): string | undefined {
+    const fullName = ghIssue.repo.toLowerCase()
+    const bareName = ghIssue.repoName.toLowerCase()
     const entry = Object.entries(this.#config.repos.byLabel)
-      .find(([, repo]) => repo.toLowerCase() === ghIssue.repo.toLowerCase())
+      .find(([, repo]) => {
+        const configured = repo.toLowerCase()
+        // ghIssue.repo is always owner/name, so byLabel entries configured with
+        // just the bare repo name still match via repoName.
+        return configured === fullName || configured === bareName
+      })
     return entry?.[0]
   }
 
@@ -2834,7 +2903,11 @@ const repoMapFromConfig = (config: FactoryConfig) => {
 }
 
 const githubIssuePathParts = (path: string): { owner: string; repo: string; number: number } | undefined => {
-  const match = path.match(/^\/github\/repos\/([^/]+)\/([^/]+)\/issues\/by-id\/(\d+)\.json$/u)
+  // Live relayfile mounts expose GitHub issues as
+  // /github/repos/<owner>/<repo>/issues/<number>.json (see the renderer
+  // issues-store mount reader). Some mount shapes nest them under an extra
+  // by-id/ segment, so accept either to stay robust across mount versions.
+  const match = path.match(/^\/github\/repos\/([^/]+)\/([^/]+)\/issues\/(?:by-id\/)?(\d+)\.json$/u)
   if (!match) return undefined
   return {
     owner: match[1]!,

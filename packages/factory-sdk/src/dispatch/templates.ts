@@ -46,7 +46,7 @@ export function renderAgentTask(input: RenderAgentTaskInput): string {
     'Open a PR targeting `main` when done.',
     'Use `gh pr create --base main` and report the PR URL.',
     `DM the reviewer \`${input.reviewerName}\` when the PR is ready.`,
-    'If blocked and you need human input, DM `broker` with `FACTORY_NEEDS_INPUT`, `Issue: <key>`, and `Question: <your question>` so the factory can relay it to the issue Slack thread.',
+    'If blocked and you need human input, DM `factory` with `[factory-needs-input] <your question>` so the factory can relay it to the issue Slack thread.',
     'DM `broker` when fully done.',
     'Do NOT auto-merge.',
     mergePolicyLine(input.config.mergePolicy),
