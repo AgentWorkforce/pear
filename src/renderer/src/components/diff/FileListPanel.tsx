@@ -11,11 +11,7 @@ import {
 } from './FileChangeLabel'
 import { selectedFilePathTone, selectedFileRowClass } from './diffPaneUtils'
 
-function selectionCheckboxClass(
-  state: 'checked' | 'mixed' | 'unchecked',
-  _active = false,
-  _windowFocused = false
-): string {
+function selectionCheckboxClass(state: 'checked' | 'mixed' | 'unchecked'): string {
   const base = 'flex h-[15px] w-[15px] shrink-0 items-center justify-center rounded-[3px] border transition-colors'
 
   if (state === 'checked') {
@@ -30,16 +26,14 @@ function selectionCheckboxClass(
 }
 
 export function SelectionCheckbox({
-  state,
-  active = false,
-  windowFocused = false
+  state
 }: {
   state: 'checked' | 'mixed' | 'unchecked'
   active?: boolean
   windowFocused?: boolean
 }): React.ReactNode {
   return (
-    <span className={selectionCheckboxClass(state, active, windowFocused)} aria-hidden="true">
+    <span className={selectionCheckboxClass(state)} aria-hidden="true">
       {state === 'checked' ? (
         <Check size={11} strokeWidth={3} />
       ) : state === 'mixed' ? (
