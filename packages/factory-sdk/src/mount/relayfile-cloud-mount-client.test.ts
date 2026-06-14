@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import type { ChangeEvent, OperationStatusResponse, RelayfileCloudTokenSet } from '@relayfile/sdk'
@@ -7,8 +7,10 @@ import {
   RelayfileCloudMountClient,
   resolveCloudCredentials,
   persistCloudCredentials,
+  __setSharedCloudAuthModuleForTests,
   type CredsFileIo,
   type RelayFileClientLike,
+  type SharedCloudAuthModule,
 } from './relayfile-cloud-mount-client'
 
 const CANONICAL = join(homedir(), '.agentworkforce', 'relay', 'cloud-auth.json')
@@ -55,8 +57,36 @@ const fakeCredsIo = (files: Record<string, string> = {}) => {
   return { io, store, calls }
 }
 
-describe('resolveCloudCredentials', () => {
+/** In-memory stand-in for the shared @agent-relay/cloud auth owner. */
+const fakeSharedAuth = (initial: RelayfileCloudTokenSet | null = null, authFilePath = CANONICAL) => {
+  let stored = initial
+  const calls: Array<{ op: 'read' | 'write'; args: unknown[] }> = []
+  const module: SharedCloudAuthModule = {
+    authFilePath,
+    readStoredAuth: async () => {
+      calls.push({ op: 'read', args: [] })
+      return stored
+    },
+    writeStoredAuth: async (auth) => {
+      calls.push({ op: 'write', args: [auth] })
+      stored = auth
+    },
+  }
+  return { module, calls, get current() { return stored } }
+}
+
+// Reset the shared-module seam after every test so leaking state never lets one
+// test's stub bleed into another (the loader memoizes per process).
+afterEach(() => {
+  __setSharedCloudAuthModuleForTests(undefined)
+})
+
+describe('resolveCloudCredentials (factory-local fallback)', () => {
+  // Force the fallback by disabling the shared module for these cases.
+  const useFallback = () => __setSharedCloudAuthModuleForTests(null)
+
   it('prefers the canonical agent-relay store over the legacy relayfile path', async () => {
+    useFallback()
     const { io } = fakeCredsIo({
       [CANONICAL]: JSON.stringify(tokenSet({ accessToken: 'cld_at_canonical' })),
       [LEGACY]: JSON.stringify(tokenSet({ accessToken: 'cld_at_legacy' })),
@@ -69,6 +99,7 @@ describe('resolveCloudCredentials', () => {
   })
 
   it('falls back to the legacy path when the canonical store is absent', async () => {
+    useFallback()
     const { io } = fakeCredsIo({
       [LEGACY]: JSON.stringify(tokenSet({ accessToken: 'cld_at_legacy' })),
     })
@@ -80,6 +111,7 @@ describe('resolveCloudCredentials', () => {
   })
 
   it('uses only the explicit path when one is given', async () => {
+    useFallback()
     const explicit = '/tmp/custom-creds.json'
     const { io } = fakeCredsIo({
       [explicit]: JSON.stringify(tokenSet({ accessToken: 'cld_at_explicit' })),
@@ -93,14 +125,81 @@ describe('resolveCloudCredentials', () => {
   })
 
   it('throws an actionable error naming `agent-relay login` when nothing is found', async () => {
+    useFallback()
     const { io } = fakeCredsIo({})
 
     await expect(resolveCloudCredentials(undefined, io)).rejects.toThrow(/agent-relay login/)
   })
 })
 
-describe('persistCloudCredentials', () => {
+describe('resolveCloudCredentials (shared @agent-relay/cloud delegation)', () => {
+  it('reads through the shared module and reports its canonical store path', async () => {
+    const shared = fakeSharedAuth(tokenSet({ accessToken: 'cld_at_shared' }))
+    __setSharedCloudAuthModuleForTests(shared.module)
+    // The file IO must never be touched when the shared owner answers.
+    const { io, calls } = fakeCredsIo({
+      [CANONICAL]: JSON.stringify(tokenSet({ accessToken: 'cld_at_file' })),
+    })
+
+    const resolved = await resolveCloudCredentials(undefined, io)
+
+    expect(resolved.path).toBe(CANONICAL)
+    expect(resolved.credentials.accessToken).toBe('cld_at_shared')
+    expect(shared.calls).toEqual([{ op: 'read', args: [] }])
+    expect(calls).toEqual([])
+  })
+
+  it('falls back to the file walk when the shared module has no stored auth', async () => {
+    const shared = fakeSharedAuth(null)
+    __setSharedCloudAuthModuleForTests(shared.module)
+    const { io } = fakeCredsIo({
+      [CANONICAL]: JSON.stringify(tokenSet({ accessToken: 'cld_at_file' })),
+    })
+
+    const resolved = await resolveCloudCredentials(undefined, io)
+
+    expect(resolved.path).toBe(CANONICAL)
+    expect(resolved.credentials.accessToken).toBe('cld_at_file')
+    expect(shared.calls).toEqual([{ op: 'read', args: [] }])
+  })
+
+  it('falls back to the file walk when shared readStoredAuth throws', async () => {
+    __setSharedCloudAuthModuleForTests({
+      authFilePath: CANONICAL,
+      readStoredAuth: async () => { throw new Error('store unreadable') },
+      writeStoredAuth: async () => {},
+    })
+    const { io } = fakeCredsIo({
+      [LEGACY]: JSON.stringify(tokenSet({ accessToken: 'cld_at_legacy' })),
+    })
+
+    const resolved = await resolveCloudCredentials(undefined, io)
+
+    expect(resolved.path).toBe(LEGACY)
+    expect(resolved.credentials.accessToken).toBe('cld_at_legacy')
+  })
+
+  it('bypasses the shared module for an explicit credsPath', async () => {
+    const shared = fakeSharedAuth(tokenSet({ accessToken: 'cld_at_shared' }))
+    __setSharedCloudAuthModuleForTests(shared.module)
+    const explicit = '/tmp/custom-creds.json'
+    const { io } = fakeCredsIo({
+      [explicit]: JSON.stringify(tokenSet({ accessToken: 'cld_at_explicit' })),
+    })
+
+    const resolved = await resolveCloudCredentials(explicit, io)
+
+    expect(resolved.path).toBe(explicit)
+    expect(resolved.credentials.accessToken).toBe('cld_at_explicit')
+    expect(shared.calls).toEqual([])
+  })
+})
+
+describe('persistCloudCredentials (factory-local fallback)', () => {
+  const useFallback = () => __setSharedCloudAuthModuleForTests(null)
+
   it('writes atomically via a pid-scoped temp file then renames over the target', async () => {
+    useFallback()
     const { io, store, calls } = fakeCredsIo({})
     const rotated = tokenSet({ accessToken: 'cld_at_rotated', refreshToken: 'cld_rt_rotated' })
 
@@ -121,6 +220,7 @@ describe('persistCloudCredentials', () => {
   })
 
   it('round-trips: a rotated token persisted back is what the next resolve reads', async () => {
+    useFallback()
     const { io } = fakeCredsIo({
       [CANONICAL]: JSON.stringify(tokenSet({ refreshToken: 'cld_rt_old' })),
     })
@@ -129,6 +229,61 @@ describe('persistCloudCredentials', () => {
     const resolved = await resolveCloudCredentials(undefined, io)
 
     expect(resolved.credentials.refreshToken).toBe('cld_rt_new')
+  })
+
+  it('uses the atomic temp+rename write for an explicit path even when the shared module is present', async () => {
+    const shared = fakeSharedAuth(tokenSet(), '/some/other/canonical.json')
+    __setSharedCloudAuthModuleForTests(shared.module)
+    const explicit = '/tmp/custom-creds.json'
+    const { io, store, calls } = fakeCredsIo({})
+
+    await persistCloudCredentials(explicit, tokenSet({ refreshToken: 'cld_rt_explicit' }), io)
+
+    const tmp = `${explicit}.${process.pid}.tmp`
+    expect(calls.filter((c) => c.op === 'writeFile').map((c) => c.args[0])).toEqual([tmp])
+    expect(calls.some((c) => c.op === 'rename' && c.args[1] === explicit)).toBe(true)
+    expect(JSON.parse(store.get(explicit) as string).refreshToken).toBe('cld_rt_explicit')
+    // The shared writer must NOT be used for a non-canonical target.
+    expect(shared.calls).toEqual([])
+  })
+})
+
+describe('persistCloudCredentials (shared @agent-relay/cloud delegation)', () => {
+  it('delegates to the shared writeStoredAuth when persisting to the canonical store', async () => {
+    const shared = fakeSharedAuth(tokenSet({ refreshToken: 'cld_rt_old' }))
+    __setSharedCloudAuthModuleForTests(shared.module)
+    const { io, calls } = fakeCredsIo({})
+    const rotated = tokenSet({ accessToken: 'cld_at_rotated', refreshToken: 'cld_rt_rotated' })
+
+    await persistCloudCredentials(CANONICAL, rotated, io)
+
+    // Routed through the single owner; never touched the local atomic-write IO.
+    expect(shared.calls).toEqual([{ op: 'write', args: [rotated] }])
+    expect(shared.current).toMatchObject({ refreshToken: 'cld_rt_rotated' })
+    expect(calls).toEqual([])
+  })
+
+  it('round-trips through the shared owner: a rotated token persisted is what resolve reads back', async () => {
+    const shared = fakeSharedAuth(tokenSet({ refreshToken: 'cld_rt_old' }))
+    __setSharedCloudAuthModuleForTests(shared.module)
+    const { io } = fakeCredsIo({})
+
+    await persistCloudCredentials(CANONICAL, tokenSet({ refreshToken: 'cld_rt_new' }), io)
+    const resolved = await resolveCloudCredentials(undefined, io)
+
+    expect(resolved.path).toBe(CANONICAL)
+    expect(resolved.credentials.refreshToken).toBe('cld_rt_new')
+  })
+
+  it('falls back to the atomic write when the persist target differs from the canonical store', async () => {
+    const shared = fakeSharedAuth(tokenSet(), '/canonical/elsewhere.json')
+    __setSharedCloudAuthModuleForTests(shared.module)
+    const { io, store } = fakeCredsIo({})
+
+    await persistCloudCredentials(CANONICAL, tokenSet({ refreshToken: 'cld_rt_canon' }), io)
+
+    expect(shared.calls).toEqual([])
+    expect(JSON.parse(store.get(CANONICAL) as string).refreshToken).toBe('cld_rt_canon')
   })
 })
 

@@ -30,7 +30,11 @@ import {
 const DEFAULT_WORKSPACE_ID = 'rw_7ccfea89'
 // Canonical credential store written by the unified `agent-relay login`
 // (relay#1118 / cloud#2108 auth unification — "one canonical session, one
-// credential store"). Read this first.
+// credential store"). Read this first. The shared @agent-relay/cloud module
+// owns reads/writes/migration of this exact path (its AUTH_FILE_PATH); we
+// delegate to it so resolution + rotation persistence happen through one
+// owner (pear#324). The literal path below is the fallback for environments
+// where the shared module cannot be loaded.
 const CANONICAL_CREDS_PATH = join(homedir(), '.agentworkforce', 'relay', 'cloud-auth.json')
 // Legacy store. Kept only as a fallback for environments not yet migrated; the
 // unified login no longer maintains it, so reading it alone goes stale.
@@ -308,6 +312,71 @@ export interface CredsFileIo {
 
 const defaultCredsFileIo: CredsFileIo = { readFile: readLocalFile, writeFile, rename, chmod, mkdir }
 
+/**
+ * The slice of `@agent-relay/cloud` we delegate to: the single canonical owner
+ * of the unified credential store at ~/.agentworkforce/relay/cloud-auth.json.
+ * `readStoredAuth` already layers env -> canonical -> legacy migration, and
+ * `writeStoredAuth` persists rotated tokens back to the canonical path, so
+ * routing resolution + rotation through it gives one owner of refresh (pear#324)
+ * instead of every consumer hand-rolling its own read/parse/persist.
+ */
+export interface SharedCloudAuthModule {
+  /** Canonical store path the module reads/writes (its AUTH_FILE_PATH). */
+  authFilePath: string
+  readStoredAuth: () => Promise<RelayfileCloudTokenSet | null>
+  writeStoredAuth: (auth: RelayfileCloudTokenSet) => Promise<void>
+}
+
+let sharedCloudAuthModulePromise: Promise<SharedCloudAuthModule | null> | undefined
+
+/**
+ * Lazily resolve the shared auth API. We import dynamically (and tolerate a
+ * load failure) because @agent-relay/cloud is ESM-only and an optional
+ * delegation target: if it cannot be loaded the consumer must still work via
+ * the factory-local fallback (pear#323 behavior). The result is memoized so we
+ * only attempt the import once per process.
+ */
+const loadSharedCloudAuthModule = (): Promise<SharedCloudAuthModule | null> => {
+  sharedCloudAuthModulePromise ??= (async (): Promise<SharedCloudAuthModule | null> => {
+    try {
+      const mod = (await import('@agent-relay/cloud')) as {
+        readStoredAuth?: unknown
+        writeStoredAuth?: unknown
+        AUTH_FILE_PATH?: unknown
+      }
+      if (
+        typeof mod.readStoredAuth !== 'function' ||
+        typeof mod.writeStoredAuth !== 'function' ||
+        typeof mod.AUTH_FILE_PATH !== 'string'
+      ) {
+        return null
+      }
+      const readStoredAuth = mod.readStoredAuth as () => Promise<RelayfileCloudTokenSet | null>
+      const writeStoredAuth = mod.writeStoredAuth as (auth: RelayfileCloudTokenSet) => Promise<void>
+      return { authFilePath: mod.AUTH_FILE_PATH, readStoredAuth, writeStoredAuth }
+    } catch {
+      return null
+    }
+  })()
+  return sharedCloudAuthModulePromise
+}
+
+/** Test seam: override (or reset with `undefined`) the shared-module loader. */
+export function __setSharedCloudAuthModuleForTests(
+  loader: (() => Promise<SharedCloudAuthModule | null>) | SharedCloudAuthModule | null | undefined,
+): void {
+  if (loader === undefined) {
+    sharedCloudAuthModulePromise = undefined
+    return
+  }
+  sharedCloudAuthModulePromise = typeof loader === 'function'
+    ? Promise.resolve(loader())
+    : Promise.resolve(loader)
+}
+
+const isCompleteTokenSet = (value: RelayfileCloudTokenSet | null | undefined): value is RelayfileCloudTokenSet =>
+  Boolean(value && value.apiUrl && value.accessToken && value.refreshToken)
+
 export interface ResolvedCloudCredentials {
   credentials: RelayfileCloudTokenSet
   /** The path the credentials were read from; rotations are persisted back here. */
@@ -315,17 +384,38 @@ export interface ResolvedCloudCredentials {
 }
 
 /**
- * Resolve relayfile cloud credentials, preferring the canonical store the
- * unified `agent-relay login` maintains and falling back to the legacy path.
- * Completes the relay#1118 consumer migration: the login was unified onto
- * ~/.agentworkforce/relay/cloud-auth.json, but this consumer still read the
- * orphaned ~/.relayfile/cloud-credentials.json, which rots once the shared
- * session rotates the refresh token.
+ * Resolve relayfile cloud credentials.
+ *
+ * Primary path (pear#324): delegate to the shared `@agent-relay/cloud`
+ * `readStoredAuth`, which is the single canonical owner of the unified store at
+ * ~/.agentworkforce/relay/cloud-auth.json. It already layers
+ * env -> canonical -> legacy migration in one place, so we don't re-implement
+ * that walk. Rotations resolved later are persisted back through the same owner
+ * (see `persistCloudCredentials`).
+ *
+ * Fallback path (pear#323): when the shared module cannot be loaded (it is
+ * ESM-only and optional here) or it returns no usable credentials, fall back to
+ * reading the canonical then legacy files directly. This preserves the
+ * relay#1118 consumer migration and keeps the consumer working without the
+ * shared module installed.
+ *
+ * An explicit `explicitPath` always bypasses the shared module — the caller is
+ * asking for that specific file, which the shared reader does not honor.
  */
 export async function resolveCloudCredentials(
   explicitPath?: string,
   io: Pick<CredsFileIo, 'readFile'> = defaultCredsFileIo,
 ): Promise<ResolvedCloudCredentials> {
+  if (!explicitPath) {
+    const shared = await loadSharedCloudAuthModule()
+    if (shared) {
+      const auth = await shared.readStoredAuth().catch(() => null)
+      if (isCompleteTokenSet(auth)) {
+        return { credentials: auth, path: shared.authFilePath }
+      }
+    }
+  }
+
   const candidates = explicitPath ? [explicitPath] : [...DEFAULT_CREDS_PATHS]
   let lastError: unknown
   for (const path of candidates) {
@@ -342,16 +432,33 @@ export async function resolveCloudCredentials(
 }
 
 /**
- * Atomically persist rotated cloud tokens back to `path` (write a sibling temp
- * file, fsync-free rename over the target). The rename is atomic on POSIX, so a
- * concurrent reader never sees a torn file. The temp name is pid-scoped so the
- * live daemon and the external reaper don't collide on the staging file.
+ * Persist rotated cloud tokens back to `path`.
+ *
+ * Primary path (pear#324): when `path` is the shared module's canonical store,
+ * delegate to `@agent-relay/cloud` `writeStoredAuth` so the single owner of the
+ * store performs the write — keeping reads and writes funneled through one
+ * implementation. (Note: the shared writer is a plain mkdir+writeFile and is
+ * NOT atomic; cross-process write-atomicity hardening still belongs in the
+ * relay repo. We only delegate when we read from that owner in the first place.)
+ *
+ * Fallback path (pear#323): for any other target — an explicit `credsPath`, the
+ * legacy store, or when the shared module is unavailable — persist atomically
+ * via a pid-scoped sibling temp file then rename over the target. The rename is
+ * atomic on POSIX, so a concurrent reader never sees a torn file, and the
+ * pid-scoped temp name keeps the live daemon and the external reaper from
+ * colliding on the staging file.
  */
 export async function persistCloudCredentials(
   path: string,
   tokens: RelayfileCloudTokenSet,
   io: CredsFileIo = defaultCredsFileIo,
 ): Promise<void> {
+  const shared = await loadSharedCloudAuthModule()
+  if (shared && path === shared.authFilePath && isCompleteTokenSet(tokens)) {
+    await shared.writeStoredAuth(tokens)
+    return
+  }
+
   await io.mkdir(dirname(path), { recursive: true })
   const tmp = `${path}.${process.pid}.tmp`
   await io.writeFile(tmp, `${JSON.stringify(tokens, null, 2)}\n`, { mode: 0o600 })

@@ -5,6 +5,9 @@
   "bin": {
     "fleet": "bin/fleet.mjs"
   },
+  "dependencies": {
+    "@agent-relay/cloud": "^8.3.7"
+  },
   "devDependencies": {
     "esbuild": "^0.24.2"
   },
