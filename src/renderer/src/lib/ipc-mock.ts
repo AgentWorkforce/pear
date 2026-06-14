@@ -134,6 +134,12 @@ export interface PearMockHarness {
   // the PTY stream after a delay (so predictions reconcile end-to-end).
   setInputSrtt: (ms: number | null) => void
   setInputEcho: (options: { delayMs: number } | null) => void
+  // Model a DECSET ?1004 (focus-reporting) TUI like Claude Code's Ink UI:
+  // when set, every focus report the renderer emits to the PTY (\x1b[I focus-in
+  // or \x1b[O focus-out) makes the program re-commit `frame` to the stream.
+  // Spurious focus reports therefore stack duplicate frames — the exact
+  // terminal-duplication vector under test. Pass null to disable.
+  setFocusRedraw: (frame: string | null) => void
   spawnAgents: (count: number, options?: { projectId?: string; channel?: string; namePrefix?: string }) => void
   openChannel: (projectId: string, channelName: string) => void
   openAgents: (projectId?: string) => void
@@ -238,6 +244,8 @@ let seq = 0
 // a spec can configure them before booting agents.
 let mockInputSrttMs: number | null = null
 let mockInputEchoDelayMs: number | null = null
+// See PearMockHarness.setFocusRedraw. Null = no focus-reactive TUI modeled.
+let mockFocusRedrawFrame: string | null = null
 
 const mockNow = new Date('2026-06-09T09:42:00.000Z').getTime()
 
@@ -893,11 +901,18 @@ export const pearMock: PearAPI = {
     }),
     sendInput: async (_projectId: string | undefined, name: string, data: string) => ({ name, bytes_written: data.length }),
     sendInputFast: (projectId: string | undefined, name: string, data: string) => {
+      const resolvedProject = projectId || state.activeId || defaultProject.id
+      // Focus-reactive TUI model (setFocusRedraw): re-commit the frame on every
+      // focus report the renderer emits. Synchronous so the stacked frame is in
+      // the buffer by the time the harness reads it; faithful to a ?1004 TUI
+      // that redraws when told "the user just looked at me / away".
+      if (mockFocusRedrawFrame !== null && (data.includes('\x1b[I') || data.includes('\x1b[O'))) {
+        pearMockHarness.injectPtyChunk(resolvedProject, name, mockFocusRedrawFrame)
+      }
       // Optional raw echo back through the PTY stream (setInputEcho) so the
       // rendering harnesses can exercise predictive echo end-to-end: type →
       // optimistic glyph → delayed authoritative echo → reconcile.
       if (mockInputEchoDelayMs === null) return
-      const resolvedProject = projectId || state.activeId || defaultProject.id
       setTimeout(() => {
         pearMockHarness.injectPtyChunk(resolvedProject, name, data)
       }, mockInputEchoDelayMs)
@@ -1240,6 +1255,9 @@ export const pearMockHarness: PearMockHarness = {
   },
   setInputEcho: (options: { delayMs: number } | null) => {
     mockInputEchoDelayMs = options ? options.delayMs : null
+  },
+  setFocusRedraw: (frame: string | null) => {
+    mockFocusRedrawFrame = frame
   },
   spawnAgents: (count: number, options?: { projectId?: string; channel?: string; namePrefix?: string }) => {
     const projectId = options?.projectId || state.activeId || defaultProject.id
