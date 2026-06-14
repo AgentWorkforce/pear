@@ -5,20 +5,45 @@ dispatches agents to implement fixes, opens PRs, drives them to completion throu
 a merge gate, and closes the issues — all under a hard safety scope.
 
 The CLI binary is **`fleet`** (`bin/fleet.mjs`). It is an unpublished workspace
-package, so you invoke it through one of:
+package, so from a repo checkout you invoke it through one of these — both work
+with no install step:
 
 ```bash
-# 1. The pear launcher passthrough (no Electron app is launched)
-pear factory <action> [options]
-
-# 2. A root npm script
+# A root npm script (pass flags after `--`)
 npm run factory:start -- --config <cfg>
 
-# 3. Directly
+# Or directly
 node packages/factory-sdk/bin/fleet.mjs factory <action> --config <cfg>
 ```
 
+Once you've installed the `pear` command (see below), the ergonomic form is:
+
+```bash
+pear factory <action> [options]
+```
+
 All three are equivalent; `pear factory …` simply forwards to `fleet factory …`.
+
+### Installing the `pear` command (operators)
+
+The factory is an operator tool, run from a repo checkout. `pear` is declared as
+this repo's `bin` (`bin/pear.mjs`), but npm does not put a package's own bin on
+your PATH automatically — so link it once. This is the standard way to install a
+local Node CLI for development, not a workaround:
+
+```bash
+npm link        # from the repo root — creates a global `pear` → bin/pear.mjs
+# now, from anywhere:
+pear factory start --mode live --config ./factory.config.json
+```
+
+To remove it later: `npm unlink -g pear-by-agent-relay`.
+
+> **Note:** the packaged Pear `.app` also offers *"Install 'pear' command in
+> PATH"* (Pear menu), but that installs the **GUI** launcher for `pear open <dir>`
+> only — the factory CLI is not bundled into the app. `pear factory …` is for
+> operators running from the repo via `npm link` (or the `node`/`npm run` forms
+> above).
 
 > **Heads-up:** every `factory` action requires `--config <path>` (see
 > [Configuration](#configuration)). Commands fail fast with
