@@ -6,6 +6,8 @@ import { useProjectStore } from '@/stores/project-store'
 
 type FactoryConfigDraft = Record<string, any>
 
+const MAX_DISPLAYED_LOGS = 160
+
 const emptyConfig = (): FactoryConfigDraft => ({
   workspaceId: '',
   subscription: { teams: [], labels: [], projects: [], assignees: [] },
@@ -66,7 +68,7 @@ export function FactoryPage(): React.ReactNode {
   const statusLabel = status?.running ? 'Running' : 'Stopped'
   const statusColor = status?.running ? 'text-[var(--pear-teal)]' : 'text-[var(--pear-text-faint)]'
 
-  const logs = useMemo(() => status?.logs.slice(-160).reverse() ?? [], [status])
+  const logs = useMemo(() => status?.logs.slice(-MAX_DISPLAYED_LOGS).reverse() ?? [], [status])
 
   async function refresh(): Promise<void> {
     const nextStatus = await pear.factory.status()
