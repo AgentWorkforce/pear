@@ -617,6 +617,36 @@ describe('BrokerManager local + cloud coexistence', () => {
     expect(cloud.shutdown).toHaveBeenCalled()
   })
 
+  it('dedupes replayed agent_exit releases in the background', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, ['exited-agent'])
+
+    local.emitEvent({ kind: 'agent_exit', name: 'exited-agent', reason: 'done', event_id: 'exit-1' })
+    local.emitEvent({ kind: 'agent_exit', name: 'exited-agent', reason: 'done', event_id: 'exit-1' })
+
+    await vi.waitFor(() => expect(local.release).toHaveBeenCalledTimes(1))
+    expect(local.release).toHaveBeenCalledWith('exited-agent', 'agent exit')
+
+    await manager.shutdown()
+  })
+
+  it('keeps live terminal attach serving while an exited-agent release hangs', async () => {
+    const manager = new BrokerManager()
+    const local = await startLocal(manager, ['exited-agent', 'live-agent'])
+    local.release.mockImplementationOnce(() => new Promise(() => undefined))
+
+    local.emitEvent({ kind: 'agent_exit', name: 'exited-agent', reason: 'done', event_id: 'exit-1' })
+    await vi.waitFor(() => expect(local.release).toHaveBeenCalledTimes(1))
+
+    const attached = await manager.attachTerminal(PROJECT_ID, { name: 'live-agent', rows: 24, cols: 80 })
+
+    expect(attached.name).toBe('live-agent')
+    expect(attached.snapshot?.screen).toBe('hello')
+    expect(local.snapshot).toHaveBeenCalledWith('live-agent', 'ansi')
+
+    await manager.shutdown()
+  })
+
   it('reports an existing local broker start as reused', async () => {
     const manager = new BrokerManager()
     mock.state.nextLocalAgents = []

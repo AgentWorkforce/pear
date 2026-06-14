@@ -15,6 +15,7 @@ export type ViewMode =
   | 'burn-session'
   | 'burn-project'
   | 'burn-session-detail'
+  | 'factory'
 
 export type TerminalAttachMode = 'view' | 'drive' | 'passthrough'
 export type InboundDeliveryMode = 'auto_inject' | 'manual_flush'
@@ -404,6 +405,50 @@ export interface BrokerStatusEvent {
   status: string
   error?: string
 }
+
+export interface FactoryLogLine {
+  ts: number
+  stream: 'stdout' | 'stderr' | 'info'
+  text: string
+}
+
+export interface FactoryConfigReadResult {
+  configPath: string
+  exists: boolean
+  config: unknown
+  errors: string[]
+  warning?: string
+}
+
+export interface FactoryAgentStatus {
+  name: string
+  role?: string
+  issue?: {
+    key: string
+    path: string
+  }
+  pids: number[]
+}
+
+export interface FactoryStatus {
+  running: boolean
+  pid?: number
+  configPath: string
+  logs: FactoryLogLine[]
+  heartbeat?: {
+    status: 'running' | 'idle' | 'stopping'
+    iteration: number
+    maxIterations: number
+    updatedAt: string
+    updatedAtMs: number
+    registryPath?: string
+    ageMs?: number
+    reason?: string
+  }
+  agents: FactoryAgentStatus[]
+}
+
+export type FactoryEvent = { type: 'factory:status'; status: FactoryStatus }
 
 export type GitFileStatusKind = 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked'
 
@@ -907,6 +952,14 @@ export interface PearAPI {
     onEventStreamDiagnostic: (callback: (event: BrokerEventStreamDiagnostic) => void) => () => void
     onPtyChunk: (callback: (projectId: string, name: string, chunk: string) => void) => () => void
     onStatus: (callback: (status: BrokerStatusEvent) => void) => () => void
+  }
+  factory: {
+    status: () => Promise<FactoryStatus>
+    start: (configPath?: string, projectRoot?: string) => Promise<FactoryStatus>
+    stop: () => Promise<FactoryStatus>
+    readConfig: (configPath?: string, projectRoot?: string) => Promise<FactoryConfigReadResult>
+    saveConfig: (config: unknown, configPath?: string, projectRoot?: string) => Promise<FactoryConfigReadResult>
+    onEvent: (callback: (event: FactoryEvent) => void) => () => void
   }
   burn: {
     listAgentSummaries: (agents: BurnAgentInput[]) => Promise<BurnAgentSummary[]>

@@ -4,6 +4,7 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock3,
+  Factory,
   Flame,
   GitPullRequest,
   Hash,
@@ -30,6 +31,8 @@ function TabIcon({ tab, className = '' }: { tab: AppTab; className?: string }): 
       return <Settings size={14} className={iconClassName} />
     case 'broker-details':
       return <Server size={14} className={iconClassName} />
+    case 'factory':
+      return <Factory size={14} className={iconClassName} />
     case 'source-control':
       return <GitPullRequest size={14} className={iconClassName} />
     case 'ai-hist':
@@ -57,6 +60,8 @@ function tabSubtitle(tab: AppTab, projectNameById: Map<string, string>): string 
       return projectName ? `${projectName} settings` : 'Settings'
     case 'broker-details':
       return projectName ? `${projectName} relay` : 'Connection status'
+    case 'factory':
+      return projectName ? `${projectName} factory` : 'Factory'
     case 'source-control':
       return projectName ? `${projectName} changes` : 'File changes'
     case 'ai-hist':

@@ -576,6 +576,10 @@ const EVENT_STREAM_REBIND_COOLDOWN_MS = 5_000
 // Throttle malformed-event warnings per `kind` so a misbehaving broker stream
 // can't flood the terminal (AGENTS.md low-noise telemetry doctrine).
 const MALFORMED_BROKER_EVENT_WARN_THROTTLE_MS = 60_000
+const BROKER_OPERATION_CONCURRENCY = parsePositiveIntegerEnv('PEAR_BROKER_OPERATION_CONCURRENCY', 4)
+const BROKER_RELEASE_CONCURRENCY = parsePositiveIntegerEnv('PEAR_BROKER_RELEASE_CONCURRENCY', 1)
+const BROKER_RELEASE_MAX_ATTEMPTS = parsePositiveIntegerEnv('PEAR_BROKER_RELEASE_MAX_ATTEMPTS', 5)
+const BROKER_RELEASE_RETRY_BASE_MS = parsePositiveIntegerEnv('PEAR_BROKER_RELEASE_RETRY_BASE_MS', 750)
 // A single broker read timeout can be a one-off slow response; a run of them
 // means that endpoint is wedged (alive, accepting TCP, never answering).
 // After this many consecutive timeouts for one project/operation we respawn it
@@ -596,6 +600,24 @@ const AGENTWORKFORCE_CLI_VERSION = '4.0.2'
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T) => Promise<R>
+): Promise<R[]> {
+  const results: R[] = new Array(items.length)
+  let nextIndex = 0
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const index = nextIndex
+      nextIndex += 1
+      results[index] = await worker(items[index])
+    }
+  })
+  await Promise.all(workers)
+  return results
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -1289,6 +1311,7 @@ interface BrokerSession {
   // auto-shuts-down after 120s without a lease renewal, so we own the timer
   // here and clear it on shutdown.
   leaseTimer?: ReturnType<typeof setInterval>
+  operationQueue: BrokerOperationQueue
 }
 
 export interface BrokerAgentDetails {
@@ -1366,6 +1389,48 @@ interface BrokerClientInternals {
   }
 }
 
+type BrokerOperationPriority = 'live' | 'normal' | 'cleanup'
+
+class BrokerOperationQueue {
+  private active = 0
+  private readonly queues: Record<BrokerOperationPriority, Array<() => void>> = {
+    live: [],
+    normal: [],
+    cleanup: []
+  }
+
+  constructor(private readonly concurrency: number) {}
+
+  enqueue<T>(priority: BrokerOperationPriority, run: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      this.queues[priority].push(() => {
+        this.active += 1
+        run().then(resolve, reject).finally(() => {
+          this.active -= 1
+          this.drain()
+        })
+      })
+      this.drain()
+    })
+  }
+
+  private drain(): void {
+    while (this.active < this.concurrency) {
+      const next = this.queues.live.shift() ?? this.queues.normal.shift() ?? this.queues.cleanup.shift()
+      if (!next) return
+      next()
+    }
+  }
+}
+
+interface QueuedRelease {
+  sessionKey: string
+  projectId: string
+  name: string
+  reason: string
+  attempts: number
+}
+
 // A project can run a local broker and a cloud-sandbox broker side by side.
 // Local sessions are keyed by the bare projectId (keeping input-stream and
 // timeout keys back-compatible); the cloud session lives under a suffixed key
@@ -1418,6 +1483,9 @@ export class BrokerManager {
   // (throttled) and the set of unknown `kind`s already logged (once each).
   private malformedEventWarnedAt = new Map<string, number>()
   private warnedUnknownEventKinds = new Set<string>()
+  private queuedReleases = new Map<string, QueuedRelease>()
+  private releaseQueue: string[] = []
+  private activeReleases = 0
 
   get cwd(): string | null {
     return this.sessions.values().next().value?.cwd || null
@@ -1429,6 +1497,86 @@ export class BrokerManager {
 
   get isCloud(): boolean {
     return Array.from(this.sessions.values()).some((session) => session.cloudSandboxId !== null)
+  }
+
+  private brokerOperation<T>(
+    session: BrokerSession,
+    priority: BrokerOperationPriority,
+    run: () => Promise<T>
+  ): Promise<T> {
+    return session.operationQueue.enqueue(priority, run)
+  }
+
+  private queueRelease(session: BrokerSession, name: string, reason: string): void {
+    const trimmedName = name.trim()
+    if (!trimmedName) return
+    const sessionKey = sessionKeyFor(session)
+    const key = `${sessionKey}:${trimmedName}`
+    const existing = this.queuedReleases.get(key)
+    if (existing) {
+      existing.reason = reason
+      return
+    }
+    this.queuedReleases.set(key, {
+      sessionKey,
+      projectId: session.projectId,
+      name: trimmedName,
+      reason,
+      attempts: 0
+    })
+    this.releaseQueue.push(key)
+    this.drainReleaseQueue()
+  }
+
+  private drainReleaseQueue(): void {
+    while (this.activeReleases < BROKER_RELEASE_CONCURRENCY) {
+      const key = this.releaseQueue.shift()
+      if (!key) return
+      const queued = this.queuedReleases.get(key)
+      if (!queued) continue
+      this.activeReleases += 1
+      void this.runQueuedRelease(key, queued).finally(() => {
+        this.activeReleases -= 1
+        this.drainReleaseQueue()
+      })
+    }
+  }
+
+  private async runQueuedRelease(key: string, queued: QueuedRelease): Promise<void> {
+    const session = this.sessions.get(queued.sessionKey)
+    if (!session) {
+      this.queuedReleases.delete(key)
+      return
+    }
+
+    queued.attempts += 1
+    try {
+      await this.brokerOperation(session, 'cleanup', () => session.client.release(queued.name, queued.reason))
+      this.inputStreamManager.closeInputStream(
+        this.inputStreamManager.getInputStreamKey(queued.sessionKey, queued.name),
+        1000,
+        'agent released'
+      )
+      this.forgetAgentSession(queued.name, queued.sessionKey)
+      this.queuedReleases.delete(key)
+    } catch (err) {
+      if (isMissingAgentError(err)) {
+        this.queuedReleases.delete(key)
+        return
+      }
+      if (queued.attempts >= BROKER_RELEASE_MAX_ATTEMPTS) {
+        this.queuedReleases.delete(key)
+        console.warn(`[broker] Failed to release exited agent ${queued.name} after ${queued.attempts} attempts:`, err)
+        return
+      }
+      const delayMs = BROKER_RELEASE_RETRY_BASE_MS * Math.min(8, 2 ** (queued.attempts - 1))
+      console.warn(`[broker] Release for exited agent ${queued.name} failed (attempt ${queued.attempts}); retrying in ${delayMs}ms:`, err)
+      setTimeout(() => {
+        if (!this.queuedReleases.has(key)) return
+        this.releaseQueue.push(key)
+        this.drainReleaseQueue()
+      }, delayMs)
+    }
   }
 
   onBrokerEvent(observer: BrokerEventObserver): () => void {
@@ -1499,7 +1647,8 @@ export class BrokerManager {
           channels: [],
           cloudSandboxId: null,
           pearLineage: new Map(),
-          eventStreamGeneration
+          eventStreamGeneration,
+          operationQueue: new BrokerOperationQueue(BROKER_OPERATION_CONCURRENCY)
         })
         existingClient.connectEvents()
 
@@ -1569,7 +1718,8 @@ export class BrokerManager {
         channels: nextChannels,
         cloudSandboxId: null,
         pearLineage: new Map(),
-        eventStreamGeneration
+        eventStreamGeneration,
+        operationQueue: new BrokerOperationQueue(BROKER_OPERATION_CONCURRENCY)
       })
 
       this.publishBrokerEvent(normalizedProjectId, normalizedProjectId, win, {
@@ -1848,7 +1998,8 @@ export class BrokerManager {
         cloudSandboxId: sandboxId,
         pearLineage: new Map(),
         eventStreamGeneration,
-        leaseTimer
+        leaseTimer,
+        operationQueue: new BrokerOperationQueue(BROKER_OPERATION_CONCURRENCY)
       })
       client.connectEvents()
 
@@ -2378,11 +2529,7 @@ export class BrokerManager {
       } else if (event.kind === 'agent_exit' && event.name) {
         this.inputStreamManager.closeInputStream(this.inputStreamManager.getInputStreamKey(sessionKey, event.name), 1000, 'agent closed')
         this.forgetAgentSession(event.name, sessionKey)
-        void client.release(event.name, 'agent exit').catch((err) => {
-          if (!isMissingAgentError(err)) {
-            console.warn(`[broker] Failed to release exited agent ${event.name}:`, err)
-          }
-        })
+        this.queueRelease(session, event.name, 'agent exit')
       } else if ((event.kind === 'agent_exited' || event.kind === 'agent_released') && event.name) {
         this.inputStreamManager.closeInputStream(this.inputStreamManager.getInputStreamKey(sessionKey, event.name), 1000, 'agent closed')
         this.forgetAgentSession(event.name, sessionKey)
@@ -2764,7 +2911,7 @@ export class BrokerManager {
     const deadline = Date.now() + deadlineMs
     while (Date.now() < deadline) {
       try {
-        const agents = await session.client.listAgents()
+        const agents = await this.brokerOperation(session, 'live', () => session.client.listAgents())
         if (agents.some((agent) => agent.name === name)) return true
       } catch {
         // Transient broker errors during the wait are fine — keep polling
@@ -2800,7 +2947,7 @@ export class BrokerManager {
         // deadline, and a not-yet-registered agent throws transiently here.
         // Logging would flood; the `registered: false` return surfaces the
         // real outcome to the caller.
-        const agents = await candidate.client.listAgents().catch(() => null)
+        const agents = await this.brokerOperation(candidate, 'live', () => candidate.client.listAgents()).catch(() => null)
         if (agents?.some((agent) => agent.name === name)) {
           this.rememberAgentSession(name, sessionKeyFor(candidate))
           return { session: candidate, registered: true }
@@ -3170,19 +3317,29 @@ export class BrokerManager {
     let previousMode: InboundDeliveryMode | undefined
 
     try {
-      previousMode = await this.withAgentMissingRetry('getInboundDeliveryMode', name, () => client.getInboundDeliveryMode(name))
+      previousMode = await this.withAgentMissingRetry('getInboundDeliveryMode', name, () =>
+        this.brokerOperation(session, 'live', () => client.getInboundDeliveryMode(name))
+      )
     } catch (err) {
       console.warn(`[broker] Failed to read delivery mode for ${name}:`, err)
     }
 
     // Keep the broker's inbound delivery policy aligned with the renderer's
     // queue mode while human terminal input continues to go through sendInput.
-    await this.withAgentMissingRetry('setInboundDeliveryMode', name, () => client.setInboundDeliveryMode(name, mode))
+    try {
+      await this.withAgentMissingRetry('setInboundDeliveryMode', name, () =>
+        this.brokerOperation(session, 'live', () => client.setInboundDeliveryMode(name, mode))
+      )
+    } catch (err) {
+      console.warn(`[broker] Failed to set delivery mode for ${name}:`, err)
+    }
 
     let resizedBeforeSnapshot = false
     if (isPositiveInteger(input.rows) && isPositiveInteger(input.cols)) {
       try {
-        await this.withAgentMissingRetry('resizePty', name, () => client.resizePty(name, input.rows!, input.cols!))
+        await this.withAgentMissingRetry('resizePty', name, () =>
+          this.brokerOperation(session, 'live', () => client.resizePty(name, input.rows!, input.cols!))
+        )
         resizedBeforeSnapshot = true
       } catch (err) {
         console.warn(`[broker] Failed to sync PTY size for ${name}:`, err)
@@ -3192,14 +3349,18 @@ export class BrokerManager {
     // Pending count is a non-critical UI hint; 0 on failure is a safe default
     // and the snapshot call right below surfaces any real attach failure.
     const pending = mode === 'manual_flush'
-      ? await this.withAgentMissingRetry('getPending', name, () => client.getPending(name)).then((messages) => messages.length).catch(() => 0)
+      ? await this.withAgentMissingRetry('getPending', name, () =>
+          this.brokerOperation(session, 'live', () => client.getPending(name))
+        ).then((messages) => messages.length).catch(() => 0)
       : 0
 
     try {
       if (resizedBeforeSnapshot) {
         await delay(80)
       }
-      const snapshot = await this.withAgentMissingRetry('snapshot', name, () => client.snapshot(name, 'ansi'))
+      const snapshot = await this.withAgentMissingRetry('snapshot', name, () =>
+        this.brokerOperation(session, 'live', () => client.snapshot(name, 'ansi'))
+      )
       return {
         name,
         mode,
@@ -3265,7 +3426,7 @@ export class BrokerManager {
         }
       }
     }
-    return session.client.sendInput(trimmedName, data)
+    return this.brokerOperation(session, 'live', () => session.client.sendInput(trimmedName, data))
   }
 
   // Fire-and-forget input for interactive typing. We don't await the PTY
@@ -3329,7 +3490,9 @@ export class BrokerManager {
 
     let result: { mode: InboundDeliveryMode; flushed: number }
     try {
-      result = await session.client.setInboundDeliveryMode(trimmedName, toInboundDeliveryMode(mode))
+      result = await this.brokerOperation(session, 'live', () =>
+        session.client.setInboundDeliveryMode(trimmedName, toInboundDeliveryMode(mode))
+      )
     } catch (err) {
       if (isMissingAgentError(err)) {
         return { name: trimmedName, mode: toInboundDeliveryMode(mode), flushed: 0, pending: 0 }
@@ -3339,7 +3502,7 @@ export class BrokerManager {
     // Pending count is a non-critical UI hint; 0 on failure is a safe default
     // (the setInboundDeliveryMode above already succeeded for this to run).
     const pending = result.mode === 'manual_flush'
-      ? await session.client.getPending(trimmedName).then((messages) => messages.length).catch(() => 0)
+      ? await this.brokerOperation(session, 'live', () => session.client.getPending(trimmedName)).then((messages) => messages.length).catch(() => 0)
       : 0
 
     return {
@@ -3374,7 +3537,7 @@ export class BrokerManager {
     // empty held-message list is harmless, so degradeOnTimeout is on.
     return this.withWedgeRecovery(session, 'getPending', [] as PendingRelayMessage[], async (current) => {
       try {
-        return await current.client.getPending(trimmedName)
+        return await this.brokerOperation(current, 'live', () => current.client.getPending(trimmedName))
       } catch (err) {
         // Small window after the broker releases a worker but before the
         // agent_released event reaches the renderer where we get a 404. Swallow
@@ -3392,7 +3555,7 @@ export class BrokerManager {
     }
 
     const session = this.getSessionForAgent(trimmedName, projectId)
-    return session.client.flushPending(trimmedName)
+    return this.brokerOperation(session, 'live', () => session.client.flushPending(trimmedName))
   }
 
   async resizePty(projectId: string | undefined, name: string, rows: number, cols: number): Promise<void> {
@@ -3404,7 +3567,7 @@ export class BrokerManager {
       throw err
     }
     try {
-      await session.client.resizePty(name, rows, cols)
+      await this.brokerOperation(session, 'live', () => session.client.resizePty(name, rows, cols))
     } catch (err) {
       if (isMissingAgentError(err)) return
       throw err
@@ -3436,7 +3599,7 @@ export class BrokerManager {
       null,
       async (current) => {
         try {
-          const snapshot = await current.client.snapshot(trimmedName, format)
+          const snapshot = await this.brokerOperation(current, 'live', () => current.client.snapshot(trimmedName, format))
           return {
             rows: snapshot.rows,
             cols: snapshot.cols,
@@ -3459,7 +3622,7 @@ export class BrokerManager {
     const session = input.to.startsWith('#')
       ? this.getSessionForProject(projectId || '')
       : this.getSessionForAgent(input.to, projectId)
-    await session.client.sendMessage(input)
+    await this.brokerOperation(session, 'normal', () => session.client.sendMessage(input))
   }
 
   async sendMessageAndWaitForDelivery(
@@ -3527,7 +3690,7 @@ export class BrokerManager {
     })
 
     try {
-      const rawResult = await session.client.sendMessage(input) as unknown
+      const rawResult = await this.brokerOperation(session, 'normal', () => session.client.sendMessage(input)) as unknown
       const result = isRecord(rawResult) ? rawResult : {}
       eventId = typeof result.event_id === 'string' ? result.event_id : 'unsupported_operation'
       const reportedTargets = Array.isArray(result.targets)
@@ -3620,7 +3783,7 @@ export class BrokerManager {
     })
 
     try {
-      const rawResult = await session.client.sendMessage(input) as unknown
+      const rawResult = await this.brokerOperation(session, 'normal', () => session.client.sendMessage(input)) as unknown
       const result = isRecord(rawResult) ? rawResult : {}
       eventId = typeof result.event_id === 'string' ? result.event_id : 'unsupported_operation'
       const reportedTargets = Array.isArray(result.targets)
@@ -3657,7 +3820,7 @@ export class BrokerManager {
     }
 
     const session = this.getSessionForAgent(trimmedName, projectId)
-    await session.client.subscribeChannels(trimmedName, [channelName])
+    await this.brokerOperation(session, 'normal', () => session.client.subscribeChannels(trimmedName, [channelName]))
   }
 
   async unsubscribeAgentChannel(projectId: string | undefined, name: string, channel: string): Promise<void> {
@@ -3671,7 +3834,7 @@ export class BrokerManager {
     }
 
     const session = this.getSessionForAgent(trimmedName, projectId)
-    await session.client.unsubscribeChannels(trimmedName, [channelName])
+    await this.brokerOperation(session, 'normal', () => session.client.unsubscribeChannels(trimmedName, [channelName]))
   }
 
   async syncChannels(projectId: string, channels: string[]): Promise<void> {
@@ -3688,20 +3851,22 @@ export class BrokerManager {
       return
     }
 
-    const agents = await session.client.listAgents()
+    const agents = await this.brokerOperation(session, 'normal', () => session.client.listAgents())
     if (!agents.length) {
       return
     }
 
-    await Promise.all(
-      agents.map(async (agent) => {
+    await mapWithConcurrency(
+      agents,
+      BROKER_OPERATION_CONCURRENCY,
+      async (agent) => {
         if (added.length) {
-          await session.client.subscribeChannels(agent.name, added)
+          await this.brokerOperation(session, 'normal', () => session.client.subscribeChannels(agent.name, added))
         }
         if (removed.length) {
-          await session.client.unsubscribeChannels(agent.name, removed)
+          await this.brokerOperation(session, 'normal', () => session.client.unsubscribeChannels(agent.name, removed))
         }
-      })
+      }
     )
   }
 
@@ -3711,8 +3876,9 @@ export class BrokerManager {
       throw new Error('Agent name is required')
     }
     const session = this.getSessionForAgent(trimmedName, projectId)
-    await session.client.release(trimmedName)
+    await this.brokerOperation(session, 'normal', () => session.client.release(trimmedName))
     this.inputStreamManager.closeInputStream(this.inputStreamManager.getInputStreamKey(sessionKeyFor(session), trimmedName), 1000, 'agent released')
+    this.forgetAgentSession(trimmedName, sessionKeyFor(session))
   }
 
   // Run a per-session broker operation with the same self-healing listAgents
@@ -3834,13 +4000,15 @@ export class BrokerManager {
       this.rememberAgentSession(agent.name, sessionKey)
     }
     const brokerKind = session.cloudSandboxId ? ('cloud' as const) : ('local' as const)
-    return Promise.all(
-      agents.map(async (agent) => {
+    return mapWithConcurrency(
+      agents,
+      BROKER_OPERATION_CONCURRENCY,
+      async (agent) => {
         // Best-effort enrichment on every listAgents poll: undefined just omits
         // the delivery-mode badge. Logging per-agent per-poll would flood.
         const inboundDeliveryMode = await session.client.getInboundDeliveryMode(agent.name).catch(() => undefined)
         return { ...agent, projectId: session.projectId, inboundDeliveryMode, brokerKind }
-      })
+      }
     )
   }
 
@@ -3854,7 +4022,7 @@ export class BrokerManager {
         const brokerPid = session.client.brokerPid
         const connectionFile = getBrokerConnectionFileInfo(session.cwd, baseUrl, brokerPid)
         const sessionResult = await Promise.allSettled([
-          withBrokerDetailsTimeout(session.client.getSession(), 'Broker metadata'),
+          withBrokerDetailsTimeout(this.brokerOperation(session, 'normal', () => session.client.getSession()), 'Broker metadata'),
           this.getBrokerStateSnapshot(session)
         ])
         const [metadata, state] = sessionResult
@@ -3935,7 +4103,7 @@ export class BrokerManager {
   private async getBrokerStateSnapshot(session: BrokerSession): Promise<BrokerStateSnapshot> {
     try {
       const status: BrokerStatus = await withBrokerDetailsTimeout(
-        session.client.getStatus(),
+        this.brokerOperation(session, 'normal', () => session.client.getStatus()),
         'Broker status'
       )
       return {
@@ -3946,7 +4114,7 @@ export class BrokerManager {
     } catch (statusErr) {
       try {
         return {
-          agents: (await withBrokerDetailsTimeout(session.client.listAgents(), 'Agent list'))
+          agents: (await withBrokerDetailsTimeout(this.brokerOperation(session, 'normal', () => session.client.listAgents()), 'Agent list'))
             .filter((agent) => !this.isPersonaReadinessPending(session, agent.name)),
           pendingDeliveryCount: 0
         }

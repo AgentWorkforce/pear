@@ -4,6 +4,7 @@ import {
   ChevronDown,
   ChevronUp,
   AlertTriangle,
+  Factory,
   FolderKanban,
   Hash,
   Inbox,
@@ -922,6 +923,11 @@ function ProjectNavigation({ collapsed = false }: { collapsed?: boolean }): Reac
     openTab({ kind: 'project-settings', projectId: activeProject.id })
   }
 
+  function openFactory(): void {
+    if (!activeProject) return
+    openTab({ kind: 'factory', projectId: activeProject.id })
+  }
+
   function addAgent(): void {
     openDialog('spawn-agent')
   }
@@ -987,6 +993,15 @@ function ProjectNavigation({ collapsed = false }: { collapsed?: boolean }): Reac
               {agents.length}
             </span>
           )}
+        </button>
+        <button
+          type="button"
+          onClick={openFactory}
+          className={collapsedButtonClass(activeTab?.kind === 'factory' && activeTab.projectId === activeProject.id)}
+          title={`${activeProject.name} factory`}
+          aria-label={`${activeProject.name} factory`}
+        >
+          <Factory size={16} />
         </button>
         <div className="my-1 h-px w-7 shrink-0 bg-[var(--pear-border-subtle)]" />
 
@@ -1103,6 +1118,22 @@ function ProjectNavigation({ collapsed = false }: { collapsed?: boolean }): Reac
                 )
               })
             )}
+          </div>
+        </section>
+
+        <section>
+          <SectionHeader title="Factory" />
+          <div className="space-y-1">
+            <button
+              type="button"
+              onClick={openFactory}
+              className={rowClass(
+                activeTab?.kind === 'factory' && activeTab.projectId === activeProject.id
+              )}
+            >
+              <Factory size={12} className="shrink-0" />
+              <span className="min-w-0 flex-1 truncate">Issue factory</span>
+            </button>
           </div>
         </section>
 
