@@ -89,7 +89,6 @@ export function FactoryPage(): React.ReactNode {
       setStatus(event.status)
     })
     // configPath is intentionally excluded; refresh owns initial path discovery.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectRoot])
 
   function update(section: string, key: string, value: unknown): void {
