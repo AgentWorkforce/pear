@@ -305,16 +305,16 @@ function ChatMessageInner({
         </div>
       )}
 
-      <div className={`min-w-0 flex-1 ${showActions ? 'pr-16' : ''}`}>
+      <div className={`min-w-0 flex-1 ${showActions ? 'pr-20' : ''}`}>
         <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
-          <span className="text-sm font-medium" style={{ color }}>
+          <span className="min-w-0 truncate text-sm font-medium" style={{ color }}>
             {message.isHuman ? 'You' : message.from}
           </span>
-          <span className="text-[10px] text-[var(--pear-text-faint)]">
+          <span className="shrink-0 text-[10px] text-[var(--pear-text-faint)]">
             {formatClockTime(message.timestamp)}
           </span>
           {showRoute && message.to && !message.isHuman && (
-            <span className="text-[10px] text-[var(--pear-text-faint)]">
+            <span className="min-w-0 shrink-0 truncate text-[10px] text-[var(--pear-text-faint)]">
               &rarr; {message.to}
             </span>
           )}

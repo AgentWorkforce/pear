@@ -20,6 +20,31 @@ function isViewportPinnedToBottom(term: Terminal): boolean {
   return buffer.viewportY === buffer.baseY
 }
 
+// Focus the terminal's textarea so it receives input — but ONLY when it is not
+// already the active element.
+//
+// xterm focuses its own textarea synchronously on mousedown and keeps it
+// focused across writes. Re-running our focus dance (container.focus() then
+// textarea.focus()) while the textarea ALREADY holds focus blurs it
+// (container is tabIndex=0, so container.focus() pulls focus off the textarea)
+// and immediately refocuses it. Under DECSET ?1004 — which Claude Code's Ink
+// TUI enables — that pointless blur+focus pair emits "\x1b[O\x1b[I" to the PTY
+// on EVERY click/keystroke. The TUI reads it as "the user looked away / back"
+// and re-commits a frame, so duplicate frames stack in scrollback and
+// accumulate with each focus/tab interaction. The broker snapshot stays
+// correct, so the viewport-only reconciler can't undo the scrollback pile-up —
+// the spurious reports must not be emitted in the first place.
+//
+// Skipping when already focused keeps the genuine focus transitions intact:
+// first mount, and input arriving while focus is elsewhere (the textarea is
+// not the active element in either case, so the dance runs exactly once).
+function focusTerminalTextarea(container: HTMLElement, term: Terminal): void {
+  if (term.textarea && document.activeElement === term.textarea) return
+  container.focus({ preventScroll: true })
+  term.textarea?.focus({ preventScroll: true })
+  term.focus()
+}
+
 const KEY_INPUT_SEQUENCES: Record<string, string> = {
   Enter: '\r',
   Tab: '\t',
@@ -178,9 +203,7 @@ export function useTerminal(
       requestAnimationFrame(() => {
         if (disposed) return
         if (requireActive && !activeRef.current) return
-        container.focus({ preventScroll: true })
-        term.textarea?.focus({ preventScroll: true })
-        term.focus()
+        focusTerminalTextarea(container, term)
       })
     }
 
@@ -397,16 +420,12 @@ export function useTerminal(
     const handlePointerDown = (): void => {
       const term = runtimeRef.current?.term
       if (!term) return
-      requestAnimationFrame(() => {
-        container.focus({ preventScroll: true })
-        term.textarea?.focus({ preventScroll: true })
-        term.focus()
-      })
+      requestAnimationFrame(() => focusTerminalTextarea(container, term))
     }
 
     const handleKeyDown = (event: KeyboardEvent): void => {
       const term = runtimeRef.current?.term
-      if (event.isComposing || event.target === term?.textarea) {
+      if (!term || event.isComposing || event.target === term.textarea) {
         return
       }
 
@@ -416,16 +435,12 @@ export function useTerminal(
       event.preventDefault()
       event.stopPropagation()
       sendInput(data)
-      requestAnimationFrame(() => {
-        container.focus({ preventScroll: true })
-        term?.textarea?.focus({ preventScroll: true })
-        term?.focus()
-      })
+      requestAnimationFrame(() => focusTerminalTextarea(container, term))
     }
 
     const handlePaste = (event: ClipboardEvent): void => {
       const term = runtimeRef.current?.term
-      if (document.activeElement === term?.textarea) {
+      if (!term || document.activeElement === term.textarea) {
         return
       }
 
@@ -435,11 +450,7 @@ export function useTerminal(
       event.preventDefault()
       event.stopPropagation()
       sendInput(text)
-      requestAnimationFrame(() => {
-        container.focus({ preventScroll: true })
-        term?.textarea?.focus({ preventScroll: true })
-        term?.focus()
-      })
+      requestAnimationFrame(() => focusTerminalTextarea(container, term))
     }
 
     container.addEventListener('pointerdown', handlePointerDown)

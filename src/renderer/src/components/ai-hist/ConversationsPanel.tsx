@@ -41,10 +41,14 @@ const SOURCE_LABELS: Record<Source, string> = {
   relay: 'Relay'
 }
 
+// Icon tint per source. Brand hues for claude/codex/relay read fine on both
+// the dark and light badge backgrounds. Cursor's brand is monochrome, so a
+// fixed white (#FFFFFF) vanished on the light theme — map it to the
+// theme-aware text token so it stays near-white in dark and goes dark in light.
 const SOURCE_COLORS: Record<Source, string> = {
   claude: '#D97757',
   codex: '#10A37F',
-  cursor: '#FFFFFF',
+  cursor: 'var(--pear-text)',
   relay: '#D493BE'
 }
 
