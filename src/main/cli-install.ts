@@ -4,6 +4,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { execFile } from 'child_process'
 import { promisify } from 'util'
+import { buildPearCliShim } from './cli-shim'
 
 const execFileAsync = promisify(execFile)
 
@@ -28,8 +29,7 @@ export async function installPearCli(): Promise<{ ok: boolean; message: string }
     return { ok: false, message: 'The pear CLI can only be installed from the packaged app.' }
   }
 
-  const exePath = app.getPath('exe')
-  const shim = `#!/bin/sh\nexec "${exePath}" "$@"\n`
+  const shim = buildPearCliShim(app.getPath('exe'), app.getAppPath())
 
   const stagingDir = mkdtempSync(join(tmpdir(), 'pear-cli-'))
   const stagingPath = join(stagingDir, 'pear')

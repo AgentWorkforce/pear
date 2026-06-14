@@ -72,7 +72,8 @@ The factory runs as **two** coordinated processes (see issue #321 §4):
 
 - **`gh`-authenticated environment.** The gh-resolver is completion-load-bearing
   while the cloud GitHub→mount PR-sync is degraded; a `gh` auth drop halts completion.
-- Run the real binary path (`node bin/fleet.mjs` / `pear factory`), not a shim.
+- Run the real binary path (`node packages/factory-sdk/bin/fleet.mjs` from the
+  repository root / `pear factory`), not a shim.
 
 ## Configuration
 

@@ -10,12 +10,16 @@ directories:
 # Include only the bundled app, production deps, and runtime resources.
 files:
   - out/**
+  - packages/factory-sdk/bin/**
+  - packages/factory-sdk/src/**
+  - packages/factory-sdk/package.json
   - resources/**
   - package.json
   - node_modules/**
   - '!node_modules/.cache/**'
 
 asarUnpack:
+  - packages/factory-sdk/**
   - resources/**
   - bin/**
   - node_modules/@agent-relay/sdk/bin/**
