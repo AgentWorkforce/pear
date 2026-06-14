@@ -1633,7 +1633,12 @@ export class FactoryLoop implements Factory {
       if (!issue) {
         return false
       }
-      return Boolean(await this.#completionPrForIssue(issue))
+      // Only a NON-DRAFT (ready) PR counts as completion. A draft PR means the
+      // work isn't review-ready, so an implementer exiting with only a draft PR
+      // must NOT mark the issue done / release agents — mirror the
+      // #sweepPrStateCompletions draft guard, which keeps draft-PR issues in flight.
+      const pr = await this.#completionPrForIssue(issue)
+      return Boolean(pr && !pr.draft)
     } catch (error) {
       this.#logger.warn?.('[factory] PR probe failed after implementer exit; preserving restart behavior', {
         issue: record.issue.key,

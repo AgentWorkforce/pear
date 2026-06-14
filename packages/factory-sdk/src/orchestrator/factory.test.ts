@@ -3092,6 +3092,42 @@ describe('FactoryLoop', () => {
     expect(factory.status().inFlight).toEqual([])
   })
 
+  it('does not complete on an implementer exit when only a draft PR exists', async () => {
+    const issue = realIssueFile(256, ready, { title: 'Real implementer draft PR exit' })
+    const mount = new FakeMountClient({ [issuePath(256)]: issue })
+    const fleet = new FakeFleetClient()
+    fleet.setSessionRef('ar-256-impl', 'session-impl-256')
+    const probedIssues: string[] = []
+    const factory = createFactory(config({
+      safety: { requireTitlePrefix: 'Real', requireTeamKey: 'AR' },
+    }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      probePrResolver: async (issue) => {
+        probedIssues.push(issue.key)
+        return { repo: 'AgentWorkforce/pear', prNumber: 256, draft: true }
+      },
+    })
+    const decision = await factory.triageIssue(parseLinearIssue(issuePath(256), issue))
+
+    await factory.dispatch(decision)
+    fleet.emitAgentExit('ar-256-impl', 'worker_exited')
+    await flush()
+
+    // A draft PR is not a completion signal: no done, no release; the exit falls
+    // through to the normal resume path (mirrors the no-PR case).
+    expect(probedIssues).toEqual(['AR-256'])
+    expect(factory.status().counters.done).toBeUndefined()
+    expect(fleet.releases).toEqual([])
+    expect(fleet.resumes).toEqual([{
+      name: 'ar-256-impl',
+      sessionRef: 'session-impl-256',
+      node: 'self',
+      capability: 'spawn:codex',
+    }])
+  })
+
   it('still resumes an abnormally exited implementer when no PR exists yet', async () => {
     const issue = realIssueFile(255, ready, { title: 'Real implementer crash resumes' })
     const mount = new FakeMountClient({ [issuePath(255)]: issue })
