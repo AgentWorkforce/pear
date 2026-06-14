@@ -741,7 +741,7 @@ export function AccountSettings(): React.ReactNode {
             </div>
             <button
               type="button"
-              onClick={() => openTab({ kind: 'factory' })}
+              onClick={() => openTab({ kind: 'factory', projectId: activeProjectId ?? undefined })}
               className="flex shrink-0 items-center gap-1.5 rounded-md border border-[var(--pear-border-subtle)] px-2.5 py-1.5 text-sm text-[var(--pear-text)] transition-colors hover:bg-[var(--pear-bg-surface)]"
             >
               <Factory size={13} />
