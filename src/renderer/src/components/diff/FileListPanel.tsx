@@ -11,39 +11,29 @@ import {
 } from './FileChangeLabel'
 import { selectedFilePathTone, selectedFileRowClass } from './diffPaneUtils'
 
-function selectionCheckboxClass(
-  state: 'checked' | 'mixed' | 'unchecked',
-  active = false,
-  windowFocused = false
-): string {
+function selectionCheckboxClass(state: 'checked' | 'mixed' | 'unchecked'): string {
   const base = 'flex h-[15px] w-[15px] shrink-0 items-center justify-center rounded-[3px] border transition-colors'
 
   if (state === 'checked') {
-    return `${base} ${
-      active && windowFocused
-        ? 'border-[#9bd4ff] bg-[#9bd4ff] text-[#05345f]'
-        : 'border-[#1683e8] bg-[#1683e8] text-white'
-    }`
+    return `${base} border-[var(--pear-accent)] bg-[var(--pear-accent)] text-[var(--pear-bg)]`
   }
 
   if (state === 'mixed') {
-    return `${base} border-[#b8c7d8] bg-[#b8c7d8] text-[#263443]`
+    return `${base} border-[var(--pear-accent-dim)] bg-[var(--pear-bg-overlay)] text-[var(--pear-text)]`
   }
 
   return `${base} border-[var(--pear-text-faint)] bg-transparent text-transparent group-hover:border-[var(--pear-text)]`
 }
 
 export function SelectionCheckbox({
-  state,
-  active = false,
-  windowFocused = false
+  state
 }: {
   state: 'checked' | 'mixed' | 'unchecked'
   active?: boolean
   windowFocused?: boolean
 }): React.ReactNode {
   return (
-    <span className={selectionCheckboxClass(state, active, windowFocused)} aria-hidden="true">
+    <span className={selectionCheckboxClass(state)} aria-hidden="true">
       {state === 'checked' ? (
         <Check size={11} strokeWidth={3} />
       ) : state === 'mixed' ? (

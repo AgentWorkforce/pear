@@ -1,5 +1,5 @@
 import type React from 'react'
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
+import { useState, useEffect, useCallback, useMemo, useRef, useLayoutEffect } from 'react'
 import {
   ChevronDown,
   ChevronUp,
@@ -184,6 +184,9 @@ function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNod
   const [authRecovery, setAuthRecovery] = useState<IntegrationAuthRecoveryState | null>(null)
   const [loading, setLoading] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  const buttonRef = useRef<HTMLButtonElement | null>(null)
+  const menuRef = useRef<HTMLDivElement | null>(null)
+  const [menuStyle, setMenuStyle] = useState<React.CSSProperties | null>(null)
 
   useEffect(() => {
     void pear.auth.status().then(setAuth).catch(() => {})
@@ -237,6 +240,59 @@ function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNod
     setMenuOpen(false)
   }, [])
 
+  const updateMenuPosition = useCallback(() => {
+    const button = buttonRef.current
+    if (!button) return
+
+    const gutter = 8
+    const gap = 6
+    const buttonRect = button.getBoundingClientRect()
+    const viewportWidth = window.innerWidth
+    const viewportHeight = window.innerHeight
+    const maxWidth = Math.max(0, viewportWidth - gutter * 2)
+    const menuWidth = compact
+      ? Math.min(176, maxWidth)
+      : Math.min(Math.max(buttonRect.width - 16, 176), maxWidth)
+    const menuHeight = menuRef.current?.offsetHeight ?? 120
+
+    let left = compact ? buttonRect.right + gap : buttonRect.left + 8
+    left = Math.min(Math.max(gutter, left), Math.max(gutter, viewportWidth - menuWidth - gutter))
+
+    let top = buttonRect.top - menuHeight - gap
+    if (top < gutter) {
+      top = buttonRect.bottom + gap
+    }
+    top = Math.min(Math.max(gutter, top), Math.max(gutter, viewportHeight - menuHeight - gutter))
+
+    setMenuStyle({
+      left,
+      top,
+      width: menuWidth,
+      maxWidth,
+      maxHeight: Math.max(0, viewportHeight - gutter * 2)
+    })
+  }, [compact])
+
+  useLayoutEffect(() => {
+    if (!menuOpen) {
+      setMenuStyle(null)
+      return
+    }
+
+    updateMenuPosition()
+  }, [menuOpen, updateMenuPosition, authRecovery])
+
+  useEffect(() => {
+    if (!menuOpen) return
+
+    window.addEventListener('resize', updateMenuPosition)
+    window.addEventListener('scroll', updateMenuPosition, true)
+    return () => {
+      window.removeEventListener('resize', updateMenuPosition)
+      window.removeEventListener('scroll', updateMenuPosition, true)
+    }
+  }, [menuOpen, updateMenuPosition])
+
   const signedIn = hasSignedInUser(auth)
   const recovery = recoverySummary(authRecovery)
 
@@ -265,6 +321,7 @@ function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNod
   return (
     <div className="relative">
       <button
+        ref={buttonRef}
         onClick={() => setMenuOpen(!menuOpen)}
         className={`flex items-center gap-2.5 rounded-lg text-sm text-[var(--pear-text)] hover:bg-[var(--pear-bg-surface)] ${
           compact ? 'h-10 w-10 justify-center p-0' : 'w-full px-3 py-2.5'
@@ -290,10 +347,12 @@ function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNod
 
       {menuOpen && (
         <>
-          <div className="fixed inset-0 z-40" onClick={() => setMenuOpen(false)} />
-          <div className={`absolute z-50 mb-1 rounded-lg border border-[var(--pear-border)] bg-[var(--pear-bg-surface)] py-1 shadow-lg ${
-            compact ? 'bottom-0 left-full ml-2 w-44' : 'bottom-full left-2 right-2'
-          }`}>
+          <div className="fixed inset-0 z-[70]" onClick={() => setMenuOpen(false)} />
+          <div
+            ref={menuRef}
+            className="fixed z-[80] overflow-y-auto rounded-lg border border-[var(--pear-border)] bg-[var(--pear-bg-surface)] py-1 shadow-lg"
+            style={menuStyle ?? { visibility: 'hidden' }}
+          >
             <button
               type="button"
               onClick={openAccountSettings}
@@ -693,14 +752,14 @@ function ProjectSwitcher({ collapsed = false }: { collapsed?: boolean }): React.
           }
         >
           <div className="mb-2 flex items-center gap-2 px-3">
-            <label className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md border border-transparent bg-[var(--pear-bg)] px-2.5 text-[12px] text-[var(--pear-text-secondary)] transition-colors focus-within:border-[#0166D6]">
+            <label className="flex h-8 min-w-0 flex-1 items-center gap-2 rounded-md border border-transparent bg-[var(--pear-bg)] px-2.5 text-[12px] text-[var(--pear-text-secondary)] transition-colors focus-within:border-[var(--pear-accent-dim)]">
               <Search size={12} className="shrink-0 text-[var(--pear-text-faint)]" />
               <input
                 autoFocus={collapsed}
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
                 placeholder="Filter projects"
-                className="min-w-0 flex-1 border-0 bg-transparent text-[12px] text-[var(--pear-text)] caret-[#0166D6] outline-none placeholder:text-[var(--pear-text-faint)]"
+                className="min-w-0 flex-1 border-0 bg-transparent text-[12px] text-[var(--pear-text)] caret-[var(--pear-accent)] outline-none placeholder:text-[var(--pear-text-faint)]"
                 data-focus-ring="none"
               />
               {query && (

@@ -63,7 +63,9 @@ function HistoryCommit({
           <span
             key={tag}
             className={`max-w-[104px] shrink-0 truncate rounded-full px-2 py-0.5 text-[12px] font-semibold leading-4 ${
-              active ? 'bg-white/20 text-white' : 'bg-[#5c6672] text-white'
+              active
+                ? 'bg-white/20 text-white'
+                : 'border border-[var(--pear-border)] bg-[var(--pear-bg-overlay)] text-[var(--pear-text)]'
             }`}
             title={tag}
           >
