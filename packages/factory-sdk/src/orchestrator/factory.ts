@@ -94,6 +94,9 @@ type GithubIssueSource = {
   path: string
   raw: Record<string, unknown>
 }
+type SlackSyncStatusSeverity = 'soft' | 'hard'
+type SlackSyncStatusCheck = { known: boolean; degraded: boolean; reason?: string; severity?: SlackSyncStatusSeverity }
+type SlackEventWatermark = { known: boolean; lastEventAtMs?: number }
 
 // Memoizes the existing Linear mirror candidates for one GitHub ingestion pass
 // so dedupe lookups reuse a single ISSUE_ROOT scan.
@@ -105,16 +108,15 @@ const ISSUE_ROOT = '/linear/issues'
 const GITHUB_ISSUE_ROOT = '/github/repos'
 const READY_EVENTS_LIMIT = 100
 const LIVE_ISSUE_GLOB = `${ISSUE_ROOT}/**`
-// Matches both /github/repos/<owner>/<repo>/issues/<n>.json (the shape live
-// relayfile mounts emit) and the nested .../issues/by-id/<n>.json variant.
-// isGithubIssueFilePath() re-validates the exact shape, so a broad subscription
-// glob is safe.
-const LIVE_GITHUB_ISSUE_GLOB = `${GITHUB_ISSUE_ROOT}/**/issues/**/*.json`
-// PR mount snapshots: /github/repos/<owner>/<repo>/pulls/<n>__<slug>/meta.json
-// (and the /pulls/<n>/metadata.json + legacy flat variants).
-// githubPullPathParts() re-validates the exact shape. The babysitter reacts to
-// these webhook-fed change events instead of polling for PR state.
-const LIVE_GITHUB_PULL_GLOB = `${GITHUB_ISSUE_ROOT}/**/pulls/**/*.json`
+// Subscribe broadly under /github/repos and let isGithubIssueFilePath() /
+// githubPullPathParts() re-validate the exact shape in the callback.
+// globMatchesPath() treats a non-terminal `**` as a single-segment wildcard, so
+// a more specific glob like `.../issues/**/*.json` would miss the two-segment
+// <owner>/<repo> prefix and the nested <number>__<slug>/meta.json (and
+// directory) event shapes this factory accepts. A terminal `**` prefix-matches
+// every descendant, so all supported issue AND pull-request path variants reach
+// the handler — including the PR change events the babysitter reacts to.
+export const LIVE_GITHUB_ISSUE_GLOB = `${GITHUB_ISSUE_ROOT}/**`
 const LIVE_DEDUPE_LIMIT = 5_000
 const LIVE_EVENT_DRAIN_BATCH_SIZE = 5
 const COMPLETION_SWEEP_INTERVAL_MS = 15_000
@@ -143,6 +145,7 @@ const INJECTION_RETRY_DELAY_MS = 1_000
 const INJECTION_RETRY_ATTEMPT_TIMEOUT_MS = 15_000
 const INJECTION_MAX_ATTEMPTS = 6
 const STOP_TEARDOWN_TIMEOUT_MS = 2_500
+const SLACK_EVENT_WATERMARK_CACHE_MS = 60_000
 const MERGE_GATE_MAX_ATTEMPTS = 12
 const MERGE_GATE_POLL_DELAY_MS = 10_000
 const DISPATCH_FAILURE_HANDOFF_UNRESOLVED_TTL_MS = 5 * 60_000
@@ -198,6 +201,8 @@ export class FactoryLoop implements Factory {
   #slackDegradedReason: string | undefined
   #slackWritebackFailureDegraded = false
   #slackWritebackFailureBackoffUntilMs = 0
+  #slackEventWatermarkCache?: { checkedAtMs: number; result: SlackEventWatermark }
+  #slackEventWatermarkRefresh?: Promise<SlackEventWatermark>
   #subscription?: Subscription
   #livePollTimer?: ReturnType<typeof setTimeout>
   #livePollInFlight = false
@@ -412,10 +417,10 @@ export class FactoryLoop implements Factory {
     // pull finishes; batch dedupe then suppresses any overlap with what the
     // pull already dispatched.
     if (options.transport !== 'poll') {
-      const globs = this.#config.babysitter.enabled
-        ? [LIVE_ISSUE_GLOB, LIVE_GITHUB_ISSUE_GLOB, LIVE_GITHUB_PULL_GLOB]
-        : [LIVE_ISSUE_GLOB, LIVE_GITHUB_ISSUE_GLOB]
-      this.#subscription = this.#mount.subscribe(globs, (event) => {
+      // LIVE_GITHUB_ISSUE_GLOB is a terminal `${GITHUB_ISSUE_ROOT}/**`, so it
+      // already covers the PR change events the babysitter consumes; pull-event
+      // *processing* is gated on babysitter.enabled in #prepareLiveEventForDrain.
+      this.#subscription = this.#mount.subscribe([LIVE_ISSUE_GLOB, LIVE_GITHUB_ISSUE_GLOB], (event) => {
         this.#enqueueLiveEvent(event)
       }, { from: 'now', coalesce: 'none' })
     }
@@ -643,6 +648,14 @@ export class FactoryLoop implements Factory {
   async #refreshLiveHeartbeatIfDue(): Promise<void> {
     if (!this.#liveHeartbeatActive) return
     const intervalMs = liveHeartbeatIntervalMs(this.#config.loop.heartbeatStaleMs)
+    if (this.#clock.now() - this.#liveHeartbeatLastWriteMs < intervalMs) return
+    // A scheduled (real-timer) refresh may already be in flight carrying a
+    // timestamp captured before this drain batch advanced the clock. The
+    // #liveHeartbeatInFlight guard would otherwise make this due refresh a
+    // no-op, leaving the heartbeat stamped stale until the next interval. Wait
+    // for that write to settle, then re-check and force a current-timestamped
+    // write if we are still due so the heartbeat never falls behind the drain.
+    await this.#liveHeartbeatRefresh
     if (this.#clock.now() - this.#liveHeartbeatLastWriteMs < intervalMs) return
     await this.#refreshLiveHeartbeat()
   }
@@ -1277,9 +1290,24 @@ export class FactoryLoop implements Factory {
 
   async #githubIssuePaths(): Promise<string[]> {
     try {
-      return (await this.#mount.listTree(GITHUB_ISSUE_ROOT))
-        .filter(isGithubIssueFilePath)
-        .sort()
+      const paths = await this.#mount.listTree(GITHUB_ISSUE_ROOT)
+      const issuePaths: string[] = []
+      for (const path of paths) {
+        if (githubIssuePathParts(path) !== undefined) {
+          issuePaths.push(path)
+        } else if (githubIssueDirectoryPathParts(path) !== undefined) {
+          // listTree returns the issue directory entry alongside its
+          // meta.json file; githubIssuePathParts() already collected the
+          // file, so skip the directory to avoid reading the same issue
+          // twice in one backfill pass. Directory paths are only meaningful
+          // for live change events, not the tree scan.
+          continue
+        } else if (isGithubIssueTreePath(path)) {
+          this.#increment('githubIssuesIgnoredByPathRegex')
+          this.#logger.debug?.('[factory] ignored GitHub issue path with unsupported relayfile shape', { path })
+        }
+      }
+      return issuePaths.sort()
     } catch (error) {
       this.#increment('githubIssueListFailures')
       this.#logger.warn?.('[factory] failed to list GitHub issue source tree', error)
@@ -1348,9 +1376,19 @@ export class FactoryLoop implements Factory {
   }
 
   async #readGithubIssue(path: string): Promise<GithubIssueSource | undefined> {
+    const candidatePaths = githubIssueReadCandidatePaths(path)
     try {
-      const { content } = await this.#mount.readFile(path)
-      return parseGithubIssue(path, content)
+      for (const candidatePath of candidatePaths) {
+        try {
+          const { content } = await this.#mount.readFile(candidatePath)
+          return parseGithubIssue(candidatePath, content)
+        } catch (error) {
+          if (isMissingIssueFileError(error) && candidatePath !== candidatePaths.at(-1)) {
+            continue
+          }
+          throw error
+        }
+      }
     } catch (error) {
       if (isMissingIssueFileError(error)) {
         this.#increment('githubIssuePhantomSkipped')
@@ -2651,37 +2689,98 @@ export class FactoryLoop implements Factory {
   async #slackFreshness(): Promise<{ known: boolean; degraded: boolean; reason?: string; status?: ProviderSyncStatus }> {
     const staleAfterMs = this.#config.slack?.staleAfterMs ?? 10 * 60_000
     let sawSlackStatus = false
+    let softStatusResult: SlackSyncStatusCheck | undefined
+    let softStatus: ProviderSyncStatus | undefined
     try {
       const status = await this.#mount.getSyncStatus?.('slack')
       sawSlackStatus = status?.provider === 'slack'
       const statusResult = slackSyncStatusResult(status, this.#clock.now(), staleAfterMs)
       if (statusResult.known) {
-        return { known: true, degraded: statusResult.degraded, reason: statusResult.reason, status }
+        if (!statusResult.degraded || statusResult.severity === 'hard') {
+          return { known: true, degraded: statusResult.degraded, reason: statusResult.reason, status }
+        }
+        softStatusResult = statusResult
+        softStatus = status
       }
     } catch (error) {
       this.#logger.warn?.('[factory] Slack sync freshness check failed; proceeding without degradation', error)
     }
 
     try {
-      const page = await this.#mount.getEvents({ limit: 100 })
-      const lastSlackEvent = page.events
-        .filter((event) => event.resource.provider === 'slack')
-        .map((event) => Date.parse(event.occurredAt))
-        .filter((time) => Number.isFinite(time))
-        .sort((a, b) => b - a)[0]
-      if (lastSlackEvent === undefined) {
+      const watermark = await this.#slackEventWatermark()
+      if (watermark.lastEventAtMs === undefined) {
         return sawSlackStatus
-          ? { known: true, degraded: true, reason: 'slack sync has no recent event watermark' }
+          ? {
+              known: true,
+              degraded: true,
+              reason: softStatusResult?.reason ?? 'slack sync has no recent event watermark',
+              status: softStatus,
+            }
           : { known: false, degraded: false }
       }
-      const ageMs = this.#clock.now() - lastSlackEvent
-      return ageMs > staleAfterMs
-        ? { known: true, degraded: true, reason: `slack event watermark stale by ${ageMs}ms` }
-        : { known: true, degraded: false }
+      const ageMs = this.#clock.now() - watermark.lastEventAtMs
+      if (ageMs <= staleAfterMs) {
+        if (softStatusResult?.degraded) {
+          this.#increment('slackGateBypassedByEventWatermark')
+          this.#logger.info?.('[factory] Slack sync soft-degraded but event watermark is fresh; continuing Slack writeback', {
+            reason: softStatusResult.reason,
+            status: softStatus,
+            lastSlackEventAtMs: watermark.lastEventAtMs,
+            eventWatermarkAgeMs: ageMs,
+          })
+        }
+        return { known: true, degraded: false }
+      }
+      return {
+        known: true,
+        degraded: true,
+        reason: softStatusResult?.reason ?? `slack event watermark stale by ${ageMs}ms`,
+        status: softStatus,
+      }
     } catch (error) {
-      this.#logger.warn?.('[factory] Slack event freshness fallback failed; proceeding without degradation', error)
-      return { known: false, degraded: false }
+      this.#logger.warn?.(
+        softStatusResult?.degraded
+          ? '[factory] Slack event freshness fallback failed; honoring soft sync degradation'
+          : '[factory] Slack event freshness fallback failed; proceeding without degradation',
+        error,
+      )
+      return softStatusResult?.degraded
+        ? { known: true, degraded: true, reason: softStatusResult.reason, status: softStatus }
+        : { known: false, degraded: false }
     }
+  }
+
+  async #slackEventWatermark(): Promise<SlackEventWatermark> {
+    const nowMs = this.#clock.now()
+    if (this.#slackEventWatermarkCache && nowMs - this.#slackEventWatermarkCache.checkedAtMs <= SLACK_EVENT_WATERMARK_CACHE_MS) {
+      return this.#slackEventWatermarkCache.result
+    }
+
+    if (this.#slackEventWatermarkRefresh) {
+      return this.#slackEventWatermarkRefresh
+    }
+
+    this.#slackEventWatermarkRefresh = this.#refreshSlackEventWatermark()
+    try {
+      return await this.#slackEventWatermarkRefresh
+    } finally {
+      this.#slackEventWatermarkRefresh = undefined
+    }
+  }
+
+  async #refreshSlackEventWatermark(): Promise<SlackEventWatermark> {
+    this.#increment('slackEventWatermarkRefreshes')
+    const page = await this.#mount.getEvents({ provider: 'slack', last: 100, limit: 100 })
+    const lastEventAtMs = page.events
+      .filter((event) => eventProvider(event) === 'slack')
+      .map((event) => eventOccurredAtMs(event))
+      .filter((time): time is number => time !== undefined && Number.isFinite(time))
+      .sort((a, b) => b - a)[0]
+    const result = lastEventAtMs === undefined
+      ? { known: true }
+      : { known: true, lastEventAtMs }
+    this.#slackEventWatermarkCache = { checkedAtMs: this.#clock.now(), result }
+    return result
   }
 
   async #ensureSlackDispatchThread(record: InFlightIssue, result: DispatchResult): Promise<void> {
@@ -3243,17 +3342,57 @@ const repoMapFromConfig = (config: FactoryConfig) => {
   }))
 }
 
-const githubIssuePathParts = (path: string): { owner: string; repo: string; number: number } | undefined => {
-  // Live relayfile mounts expose GitHub issues as
-  // /github/repos/<owner>/<repo>/issues/<number>.json (see the renderer
-  // issues-store mount reader). Some mount shapes nest them under an extra
-  // by-id/ segment, so accept either to stay robust across mount versions.
-  const match = path.match(/^\/github\/repos\/([^/]+)\/([^/]+)\/issues\/(?:by-id\/)?(\d+)\.json$/u)
-  if (!match) return undefined
+export const githubIssuePathParts = (path: string): { owner: string; repo: string; number: number; slug?: string } | undefined => {
+  // Canonical GitHub relayfile issue entries are nested as
+  // /github/repos/<owner>/<repo>/issues/<number>__<slug>/meta.json. Keep the
+  // legacy flat and by-id forms for older mount state, and accept metadata.json
+  // as a read-only compatibility alias for historical local mount snapshots.
+  const match = path.match(
+    /^\/github\/repos\/([^/]+)\/([^/]+)\/issues\/(?:(?:by-id\/)?(\d+)\.json|(\d+)(?:__([^/]+))?\/(?:meta|metadata)\.json)$/u,
+  )
+  if (!match) {
+    return undefined
+  }
+  const number = Number(match[3] ?? match[4])
+  return {
+    owner: match[1]!,
+    repo: match[2]!,
+    number,
+    slug: match[5],
+  }
+}
+
+const githubIssueReadCandidatePaths = (path: string): string[] => {
+  if (path.endsWith('/')) {
+    return [`${path}meta.json`, `${path}metadata.json`]
+  }
+  if (path.endsWith('/meta.json')) {
+    return [path, path.replace(/\/meta\.json$/u, '/metadata.json')]
+  }
+  if (path.endsWith('/metadata.json')) {
+    return [path, path.replace(/\/metadata\.json$/u, '/meta.json')]
+  }
+  if (githubIssuePathParts(path)) {
+    return [path]
+  }
+  if (githubIssueDirectoryPathParts(path)) {
+    // meta.json is the canonical relayfile GitHub issue basename. metadata.json
+    // remains a legacy read fallback for older local mount-state snapshots.
+    return [`${path}/meta.json`, `${path}/metadata.json`]
+  }
+  return [path]
+}
+
+const githubIssueDirectoryPathParts = (path: string): { owner: string; repo: string; number: number; slug?: string } | undefined => {
+  const match = path.match(/^\/github\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)(?:__([^/]+))?$/u)
+  if (!match) {
+    return undefined
+  }
   return {
     owner: match[1]!,
     repo: match[2]!,
     number: Number(match[3]),
+    slug: match[4],
   }
 }
 
@@ -3494,7 +3633,10 @@ const isLinearIssueMirrorCandidatePath = (path: string): boolean =>
   isIssueFilePath(path) || /^\/linear\/issues\/factory-create-[^/]+\.json$/u.test(path)
 
 const isGithubIssueFilePath = (path: string): boolean =>
-  githubIssuePathParts(path) !== undefined
+  githubIssuePathParts(path) !== undefined || githubIssueDirectoryPathParts(path) !== undefined
+
+const isGithubIssueTreePath = (path: string): boolean =>
+  /^\/github\/repos\/[^/]+\/[^/]+\/issues\/.+/u.test(path)
 
 const githubPullPathParts = (path: string): { owner: string; repo: string; number: number } | undefined => {
   // Tolerate every webhook-fed PR mount layout we've seen:
@@ -3695,15 +3837,26 @@ const isHighWatermarkRouteUnavailable = (error: unknown): boolean => {
   return error instanceof Error && /route not found/i.test(error.message)
 }
 
+/**
+ * Slack writeback liveness follows the provider signal hierarchy:
+ * getEvents() provider watermarks are the authoritative ingest signal, sync
+ * status is advisory, and only explicit error/failed states fail closed. Soft
+ * sync states can be stale while Slack mount writes are still live, so
+ * #slackFreshness lets fresh event watermarks override them instead of blocking
+ * operator question writebacks.
+ */
 const slackSyncStatusResult = (
   status: ProviderSyncStatus | undefined,
   nowMs: number,
   staleAfterMs: number,
-): { known: boolean; degraded: boolean; reason?: string } => {
+): SlackSyncStatusCheck => {
   if (!status) return { known: false, degraded: false }
   const normalized = status.status?.toLowerCase()
-  if (normalized && ['lagging', 'stale', 'degraded', 'error', 'failed'].includes(normalized)) {
-    return { known: true, degraded: true, reason: `slack sync status is ${status.status}` }
+  if (normalized && ['error', 'failed'].includes(normalized)) {
+    return { known: true, degraded: true, reason: `slack sync status is ${status.status}`, severity: 'hard' }
+  }
+  if (normalized && ['lagging', 'stale', 'degraded'].includes(normalized)) {
+    return { known: true, degraded: true, reason: `slack sync status is ${status.status}`, severity: 'soft' }
   }
 
   const lastEventAtMs = status.lastEventAtMs ??
@@ -3712,14 +3865,14 @@ const slackSyncStatusResult = (
   if (lastEventAtMs !== undefined && Number.isFinite(lastEventAtMs)) {
     const ageMs = nowMs - lastEventAtMs
     return ageMs > staleAfterMs
-      ? { known: true, degraded: true, reason: `slack sync watermark stale by ${ageMs}ms` }
+      ? { known: true, degraded: true, reason: `slack sync watermark stale by ${ageMs}ms`, severity: 'soft' }
       : { known: true, degraded: false }
   }
 
   if (status.lagSeconds !== undefined && Number.isFinite(status.lagSeconds)) {
     const lagMs = status.lagSeconds * 1000
     return lagMs > staleAfterMs
-      ? { known: true, degraded: true, reason: `slack sync lag is ${lagMs}ms` }
+      ? { known: true, degraded: true, reason: `slack sync lag is ${lagMs}ms`, severity: 'soft' }
       : { known: true, degraded: false }
   }
 
@@ -3728,6 +3881,18 @@ const slackSyncStatusResult = (
   }
 
   return { known: false, degraded: false }
+}
+
+const eventProvider = (event: ChangeEvent): string | undefined => {
+  const flat = asRecord(event) ?? {}
+  return stringValue(asRecord(flat.resource)?.provider) ?? stringValue(flat.provider)
+}
+
+const eventOccurredAtMs = (event: ChangeEvent): number | undefined => {
+  const flat = asRecord(event) ?? {}
+  const timestamp = stringValue(flat.occurredAt) ?? stringValue(flat.timestamp)
+  const parsed = timestamp ? Date.parse(timestamp) : Number.NaN
+  return Number.isFinite(parsed) ? parsed : undefined
 }
 
 const eventSequenceNumber = (eventId: string): number | undefined => {

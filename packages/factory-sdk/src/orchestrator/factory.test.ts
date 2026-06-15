@@ -23,7 +23,8 @@ import type { ChangeEvent, EventPage, LinearWriteback, ProviderSyncStatus, Slack
 import { FakeFleetClient, FakeMountClient } from '../testing'
 import type { CloseProbePrInput, GithubMergeGatePort, GithubMergeGateVerdict, GithubMergeInput, LinearIssue } from '../index'
 import { BatchTracker } from './batch-tracker'
-import { keyFromPath } from './factory'
+import { LIVE_GITHUB_ISSUE_GLOB, githubIssuePathParts, keyFromPath } from './factory'
+import { globMatchesPath } from '../subscriptions/globs'
 import { InternalFleetClient, type HarnessDriverClientLike } from '../fleet/internal-fleet-client'
 
 const ready = 'b9bec744-b60c-4745-8022-d90d6ab59ae3'
@@ -49,6 +50,7 @@ const config = (overrides: FactoryConfigOverrides = {}): FactoryConfig => Factor
 const issuePath = (n: number) => `/linear/issues/AR-${n}__uuid-${n}.json`
 const readyAliasPath = (n: number) => `/linear/issues/by-state/ready-for-agent/AR-${n}.json`
 const githubIssuePath = (owner: string, repo: string, number: number) => `/github/repos/${owner}/${repo}/issues/by-id/${number}.json`
+const githubIssueNestedMetaPath = (owner: string, repo: string, number: number) => `/github/repos/${owner}/${repo}/issues/${number}/meta.json`
 const capturedReadyCanaryPath = '/linear/issues/AR-133__dac27fce-e8de-4910-bbf6-98ad436df3dd.json'
 const capturedStaleDoneCanonicalPath = '/linear/issues/AR-173__40c7e780-59ad-47ee-8809-3a9b8434d8fb.json'
 const capturedStaleReadyAliasPath = '/linear/issues/by-state/ready-for-agent/AR-173.json'
@@ -509,7 +511,7 @@ class RosterPidHarnessClient implements HarnessDriverClientLike {
 class CountingEventsMount extends FakeMountClient {
   getEventsCalls = 0
 
-  override async getEvents(opts: { cursor?: string; limit?: number }): Promise<EventPage> {
+  override async getEvents(opts: { cursor?: string; limit?: number; provider?: string; last?: number }): Promise<EventPage> {
     this.getEventsCalls += 1
     return super.getEvents(opts)
   }
@@ -567,9 +569,15 @@ class HangingUnsubscribeMount extends TrackingEventsMount {
 
 class SlackSyncStatusMount extends FakeMountClient {
   slackStatus: ProviderSyncStatus | undefined
+  eventsReadCount = 0
 
   async getSyncStatus(provider: string): Promise<ProviderSyncStatus | undefined> {
     return provider === 'slack' ? this.slackStatus : undefined
+  }
+
+  override async getEvents(opts: { cursor?: string; limit?: number; provider?: string; last?: number }): Promise<EventPage> {
+    this.eventsReadCount += 1
+    return super.getEvents(opts)
   }
 }
 
@@ -579,6 +587,14 @@ class ThrowingSlackSyncStatusMount extends FakeMountClient {
       throw new Error('sync status unavailable')
     }
     return undefined
+  }
+}
+
+class SlackEventsThrowingMount extends SlackSyncStatusMount {
+  override async getEvents(opts: { cursor?: string; limit?: number; provider?: string; last?: number }): Promise<EventPage> {
+    this.eventsReadCount += 1
+    void opts
+    throw new Error('slack event feed unavailable')
   }
 }
 
@@ -875,6 +891,58 @@ describe('FactoryLoop', () => {
     expect(keyFromPath('/linear/issues/by-state/ready-for-agent/AR-173.json')).toBe('AR-173')
   })
 
+  it('extracts GitHub issue path parts from legacy and nested relayfile shapes', () => {
+    expect(githubIssuePathParts('/github/repos/AgentWorkforce/cloud/issues/2174.json')).toEqual({
+      owner: 'AgentWorkforce',
+      repo: 'cloud',
+      number: 2174,
+      slug: undefined,
+    })
+    expect(githubIssuePathParts('/github/repos/AgentWorkforce/cloud/issues/2174/meta.json')).toEqual({
+      owner: 'AgentWorkforce',
+      repo: 'cloud',
+      number: 2174,
+      slug: undefined,
+    })
+    expect(githubIssuePathParts('/github/repos/AgentWorkforce/cloud/issues/2174__factory-path-regression/meta.json')).toEqual({
+      owner: 'AgentWorkforce',
+      repo: 'cloud',
+      number: 2174,
+      slug: 'factory-path-regression',
+    })
+    expect(githubIssuePathParts('/github/repos/AgentWorkforce/cloud/issues/2174/metadata.json')).toEqual({
+      owner: 'AgentWorkforce',
+      repo: 'cloud',
+      number: 2174,
+      slug: undefined,
+    })
+    expect(githubIssuePathParts('/github/repos/AgentWorkforce/cloud/issues/by-id/2174.json')).toEqual({
+      owner: 'AgentWorkforce',
+      repo: 'cloud',
+      number: 2174,
+      slug: undefined,
+    })
+  })
+
+  it('LIVE_GITHUB_ISSUE_GLOB matches every supported relayfile issue shape under the real glob matcher', () => {
+    // FakeMountClient.subscribe ignores globs, so assert against the real
+    // globMatchesPath() the relayfile event client uses before publishing.
+    // A non-terminal `**` is a single-segment wildcard, so the previous
+    // `.../issues/**/*.json` glob silently dropped these in subscribe mode.
+    const supported = [
+      '/github/repos/AgentWorkforce/cloud/issues/2174.json',
+      '/github/repos/AgentWorkforce/cloud/issues/by-id/2174.json',
+      '/github/repos/AgentWorkforce/cloud/issues/2174/meta.json',
+      '/github/repos/AgentWorkforce/cloud/issues/2174/metadata.json',
+      '/github/repos/AgentWorkforce/cloud/issues/2174__factory-path-regression/meta.json',
+      '/github/repos/AgentWorkforce/pear/issues/1126__directory-event',
+    ]
+    for (const path of supported) {
+      expect(globMatchesPath(LIVE_GITHUB_ISSUE_GLOB, path)).toBe(true)
+    }
+    expect(globMatchesPath(LIVE_GITHUB_ISSUE_GLOB, '/linear/issues/AR-173.json')).toBe(false)
+  })
+
   it('runOnce caps active issues, skips stale state, and pulls queued work after completion', async () => {
     const mount = new FakeMountClient({
       [issuePath(1)]: issueFile(1),
@@ -912,7 +980,7 @@ describe('FactoryLoop', () => {
   })
 
   it('mirrors factory-labeled GitHub issues from the relayfile mount into Linear create drafts', async () => {
-    const ghPath = githubIssuePath('AgentWorkforce', 'pear', 1116)
+    const ghPath = githubIssueNestedMetaPath('AgentWorkforce', 'pear', 1116)
     const mount = new FakeMountClient({
       [ghPath]: githubIssueFile(1116, {
         owner: 'AgentWorkforce',
@@ -947,6 +1015,61 @@ describe('FactoryLoop', () => {
         path: ghPath,
       },
     })
+    expect(factory.status().counters.githubIssueMirrorsCreated).toBe(1)
+  })
+
+  it('mirrors GitHub issues with owner, repo, and number derived from nested relayfile paths', async () => {
+    const ghPath = '/github/repos/AgentWorkforce/pear/issues/1116__route-github-factory-issues/meta.json'
+    const mount = new FakeMountClient({
+      [ghPath]: {
+        provider: 'github',
+        objectType: 'issue',
+        objectId: '1116',
+        payload: {
+          title: 'Route sparse GitHub factory issues',
+          body: 'Path metadata should supply the source coordinates.',
+          state: 'open',
+          labels: [{ name: 'factory' }],
+          url: 'https://github.com/AgentWorkforce/pear/issues/1116',
+        },
+      },
+    })
+    const factory = createFactory(config({
+      safety: { requireTitlePrefix: '[factory]', requireTeamKey: 'AR' },
+    }), { mount, fleet: new FakeFleetClient(), triage: new StaticTriage() })
+
+    await factory.runOnce()
+
+    expect(mount.writes[0]?.content).toEqual(expect.objectContaining({
+      title: '[factory] Route sparse GitHub factory issues',
+      source: expect.objectContaining({
+        provider: 'github',
+        owner: 'AgentWorkforce',
+        repo: 'pear',
+        number: 1116,
+        path: ghPath,
+      }),
+    }))
+    expect(factory.status().counters.githubIssueMirrorsCreated).toBe(1)
+  })
+
+  it('reads a nested GitHub issue once when listTree returns both the directory entry and its meta.json', async () => {
+    // listTree surfaces the issue directory alongside its meta.json file; both
+    // resolve to the same metadata, so the backfill scan must collect only the
+    // file path and skip the directory to avoid processing the issue twice.
+    const dirPath = '/github/repos/AgentWorkforce/pear/issues/1116__route-github-factory-issues'
+    const metaPath = `${dirPath}/meta.json`
+    const mount = new FakeMountClient({
+      [dirPath]: githubIssueFile(1116, { title: 'Directory and file both listed' }),
+      [metaPath]: githubIssueFile(1116, { title: 'Directory and file both listed' }),
+    })
+    const factory = createFactory(config({
+      safety: { requireTitlePrefix: '[factory]', requireTeamKey: 'AR' },
+    }), { mount, fleet: new FakeFleetClient(), triage: new StaticTriage() })
+
+    await factory.runOnce()
+
+    expect(mount.reads.filter((path) => path === metaPath)).toHaveLength(1)
     expect(factory.status().counters.githubIssueMirrorsCreated).toBe(1)
   })
 
@@ -1267,6 +1390,114 @@ describe('FactoryLoop', () => {
       source: expect.objectContaining({ provider: 'github', path: ghPath, number: 1116 }),
     })
     expect(factory.status().counters.githubIssueMirrorsCreated).toBe(1)
+  })
+
+  it('mirrors GitHub issues exposed under every supported relayfile issue path shape', async () => {
+    const cases = [
+      {
+        path: '/github/repos/AgentWorkforce/pear/issues/1120.json',
+        number: 1120,
+      },
+      {
+        path: '/github/repos/AgentWorkforce/pear/issues/by-id/1121.json',
+        number: 1121,
+      },
+      {
+        path: '/github/repos/AgentWorkforce/pear/issues/1122/meta.json',
+        number: 1122,
+      },
+      {
+        path: '/github/repos/AgentWorkforce/pear/issues/1123__route-github-factory/meta.json',
+        number: 1123,
+        slug: 'route-github-factory',
+      },
+      {
+        path: '/github/repos/AgentWorkforce/pear/issues/1124/metadata.json',
+        number: 1124,
+      },
+    ]
+    const mount = new FakeMountClient(Object.fromEntries(cases.map(({ path, number }) => [
+      path,
+      githubIssueFile(number, {
+        title: `Relay shape ${number}`,
+        body: `Body for relay shape ${number}.`,
+      }),
+    ])))
+    const factory = createFactory(config(), {
+      mount,
+      fleet: new FakeFleetClient(),
+      triage: new StaticTriage(),
+    })
+
+    await factory.runOnce()
+
+    expect(cases.map(({ path }) => githubIssuePathParts(path))).toEqual(cases.map(({ number, slug }) => ({
+      owner: 'AgentWorkforce',
+      repo: 'pear',
+      number,
+      slug,
+    })))
+    expect(mount.writes).toHaveLength(cases.length)
+    expect(mount.writes.map((write) => (write.content as { source?: { number?: number; path?: string } }).source)).toEqual(
+      expect.arrayContaining(cases.map(({ number, path }) => expect.objectContaining({ number, path }))),
+    )
+    expect(factory.status().counters.githubIssueMirrorsCreated).toBe(cases.length)
+    expect(factory.status().counters.githubIssuesIgnoredByPathRegex).toBeUndefined()
+  })
+
+  it('counts GitHub issue tree entries rejected by the path matcher', async () => {
+    const goodPath = '/github/repos/AgentWorkforce/pear/issues/1125/meta.json'
+    const ignoredPath = '/github/repos/AgentWorkforce/pear/issues/1125/body.md'
+    const mount = new FakeMountClient({
+      [goodPath]: githubIssueFile(1125, { title: 'Count rejected GitHub issue path' }),
+      [ignoredPath]: { text: 'not an issue metadata file' },
+    })
+    const factory = createFactory(config(), {
+      mount,
+      fleet: new FakeFleetClient(),
+      triage: new StaticTriage(),
+    })
+
+    await factory.runOnce()
+
+    expect(mount.writes).toHaveLength(1)
+    expect(factory.status().counters.githubIssueMirrorsCreated).toBe(1)
+    expect(factory.status().counters.githubIssuesIgnoredByPathRegex).toBe(1)
+  })
+
+  it('reads a nested GitHub issue metadata file when a live event names the issue directory', async () => {
+    const eventPath = '/github/repos/AgentWorkforce/pear/issues/1126__directory-event'
+    const metaPath = `${eventPath}/meta.json`
+    const mount = new FakeMountClient({
+      [metaPath]: githubIssueFile(1126, {
+        title: 'Directory event issue',
+        body: 'Body for a directory-path event.',
+      }),
+    })
+    const factory = createFactory(config(), {
+      mount,
+      fleet: new FakeFleetClient(),
+      triage: new StaticTriage(),
+    })
+    const event = changeEvent(eventPath, 'github-directory-event-1126')
+
+    await factory.start({ mode: 'live', liveSubscription: { transport: 'subscribe' } })
+    mount.emit({
+      ...event,
+      resource: {
+        ...event.resource,
+        provider: 'github',
+      },
+    })
+    await flush()
+
+    expect(mount.writes).toHaveLength(1)
+    expect(mount.writes[0]?.content).toMatchObject({
+      title: '[factory] Directory event issue',
+      source: expect.objectContaining({ provider: 'github', path: metaPath, number: 1126 }),
+    })
+    expect(factory.status().counters.githubIssueMirrorsCreated).toBe(1)
+    await factory.stop()
   })
 
   it('routes a GitHub mirror when repos.byLabel is configured with only the bare repo name', async () => {
@@ -5082,6 +5313,274 @@ describe('FactoryLoop', () => {
       },
     })
     expect(warnings.filter((warning) => warning[0] === '[factory] Slack sync degraded; skipping Slack writeback')).toHaveLength(1)
+  })
+
+  it('bypasses soft Slack sync degradation when the Slack event watermark is fresh', async () => {
+    const clock = new ManualClock()
+    const mount = new SlackSyncStatusMount({
+      [issuePath(140)]: issueFile(140),
+      [issuePath(141)]: issueFile(141),
+    })
+    mount.slackStatus = { provider: 'slack', status: 'lagging' }
+    const slackEvent = changeEvent(
+      '/slack/channels/C0FACTORY__factory-e2e/messages/1781267200_000000/meta.json',
+      'slack-fresh-140',
+      new Date(clock.now()).toISOString(),
+    )
+    mount.emit({
+      ...slackEvent,
+      resource: {
+        ...slackEvent.resource,
+        provider: 'slack',
+      },
+    })
+    const fleet = new FakeFleetClient()
+    const warnings: unknown[][] = []
+    const infos: unknown[][] = []
+    const factory = createFactory(config({ batchSize: 5, slack: slackConfig() }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      clock,
+      logger: {
+        warn: (...args: unknown[]) => warnings.push(args),
+        info: (...args: unknown[]) => infos.push(args),
+        error: () => undefined,
+      },
+    })
+
+    const report = await factory.runOnce()
+
+    expect(report.dispatched.map((result) => result.issue.key)).toEqual(['AR-140', 'AR-141'])
+    expect(report.slackDegraded).toBe(false)
+    const slackRoots = mount.writes.filter((write) => isSlackRootWritePath(write.path))
+    expect(slackRoots).toHaveLength(2)
+    expect(slackRoots.map((write) => (write.content as { text?: string }).text)).toEqual([
+      expect.stringContaining('AR-140: factory agents dispatched.'),
+      expect.stringContaining('AR-141: factory agents dispatched.'),
+    ])
+    expect(factory.status()).toMatchObject({
+      slackDegraded: false,
+      counters: {
+        dispatched: 2,
+        slackEventWatermarkRefreshes: 1,
+        slackGateBypassedByEventWatermark: 2,
+      },
+    })
+    expect(warnings.filter((warning) => warning[0] === '[factory] Slack sync degraded; skipping Slack writeback')).toEqual([])
+    expect(infos.filter((info) =>
+      info[0] === '[factory] Slack sync soft-degraded but event watermark is fresh; continuing Slack writeback',
+    )).toHaveLength(2)
+  })
+
+  it('bypasses soft Slack sync degradation from flat cloud event feed fields', async () => {
+    const clock = new ManualClock()
+    const mount = new SlackSyncStatusMount({ [issuePath(146)]: issueFile(146) })
+    mount.slackStatus = { provider: 'slack', status: 'lagging' }
+    mount.emit({
+      eventId: 'evt-slack-flat-146',
+      type: 'file.updated',
+      path: '/slack/channels/C0FACTORY__factory-e2e/messages/1781267200_000000/meta.json',
+      provider: 'slack',
+      timestamp: new Date(clock.now()).toISOString(),
+    } as unknown as ChangeEvent)
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet: new FakeFleetClient(),
+      triage: new StaticTriage(),
+      clock,
+    })
+
+    const report = await factory.runOnce()
+
+    expect(report.dispatched.map((result) => result.issue.key)).toEqual(['AR-146'])
+    expect(mount.writes.filter((write) => isSlackRootWritePath(write.path))).toHaveLength(1)
+    expect(factory.status()).toMatchObject({
+      slackDegraded: false,
+      counters: {
+        dispatched: 1,
+        slackEventWatermarkRefreshes: 1,
+        slackGateBypassedByEventWatermark: 1,
+      },
+    })
+  })
+
+  it('keeps hard Slack sync failures blocking even when the Slack event watermark is fresh', async () => {
+    for (const status of ['error', 'failed']) {
+      const clock = new ManualClock()
+      const issueNumber = status === 'error' ? 142 : 143
+      const mount = new SlackSyncStatusMount({ [issuePath(issueNumber)]: issueFile(issueNumber) })
+      mount.slackStatus = { provider: 'slack', status }
+      const slackEvent = changeEvent(
+        `/slack/channels/C0FACTORY__factory-e2e/messages/${status}/meta.json`,
+        `slack-fresh-${status}`,
+        new Date(clock.now()).toISOString(),
+      )
+      mount.emit({
+        ...slackEvent,
+        resource: {
+          ...slackEvent.resource,
+          provider: 'slack',
+        },
+      })
+      const fleet = new FakeFleetClient()
+      const factory = createFactory(config({ slack: slackConfig() }), {
+        mount,
+        fleet,
+        triage: new StaticTriage(),
+        clock,
+      })
+
+      const report = await factory.runOnce()
+
+      expect(report.dispatched.map((result) => result.issue.key)).toEqual([`AR-${issueNumber}`])
+      expect(report.slackDegraded).toBe(true)
+      expect(mount.writes.filter((write) => isSlackRootWritePath(write.path))).toEqual([])
+      expect(factory.status()).toMatchObject({
+        slackDegraded: true,
+        slackDegradedReason: `slack sync status is ${status}`,
+        counters: {
+          slackDegradedEpisodes: 1,
+          slackWritebacksSkipped: 1,
+        },
+      })
+      expect(factory.status().counters.slackGateBypassedByEventWatermark).toBeUndefined()
+      expect(mount.eventsReadCount).toBe(0)
+    }
+  })
+
+  it('keeps soft Slack sync degradation blocking when the Slack event watermark is stale', async () => {
+    const clock = new ManualClock()
+    const mount = new SlackSyncStatusMount({ [issuePath(144)]: issueFile(144) })
+    mount.slackStatus = { provider: 'slack', status: 'stale' }
+    const slackEvent = changeEvent(
+      '/slack/channels/C0FACTORY__factory-e2e/messages/1781267200_000000/meta.json',
+      'slack-stale-144',
+      new Date(clock.now() - 11 * 60_000).toISOString(),
+    )
+    mount.emit({
+      ...slackEvent,
+      resource: {
+        ...slackEvent.resource,
+        provider: 'slack',
+      },
+    })
+    const fleet = new FakeFleetClient()
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      clock,
+    })
+
+    const report = await factory.runOnce()
+
+    expect(report.dispatched.map((result) => result.issue.key)).toEqual(['AR-144'])
+    expect(report.slackDegraded).toBe(true)
+    expect(mount.writes.filter((write) => isSlackRootWritePath(write.path))).toEqual([])
+    expect(factory.status()).toMatchObject({
+      slackDegraded: true,
+      slackDegradedReason: 'slack sync status is stale',
+      counters: {
+        slackDegradedEpisodes: 1,
+        slackWritebacksSkipped: 1,
+      },
+    })
+    expect(factory.status().counters.slackGateBypassedByEventWatermark).toBeUndefined()
+    expect(mount.eventsReadCount).toBe(1)
+  })
+
+  it('bypasses numeric Slack sync watermark staleness when the event watermark is fresh', async () => {
+    // A stale lastEventAtMs is an advisory soft signal: a fresh getEvents Slack
+    // watermark must override it, same as the lagging/stale/degraded statuses.
+    const clock = new ManualClock()
+    const mount = new SlackSyncStatusMount({ [issuePath(147)]: issueFile(147) })
+    mount.slackStatus = { provider: 'slack', lastEventAtMs: clock.now() - 30 * 60_000 }
+    mount.emit({
+      eventId: 'evt-slack-watermark-147',
+      type: 'file.updated',
+      path: '/slack/channels/C0FACTORY__factory-e2e/messages/1781267201_000000/meta.json',
+      provider: 'slack',
+      timestamp: new Date(clock.now()).toISOString(),
+    } as unknown as ChangeEvent)
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet: new FakeFleetClient(),
+      triage: new StaticTriage(),
+      clock,
+    })
+
+    const report = await factory.runOnce()
+
+    expect(report.dispatched.map((result) => result.issue.key)).toEqual(['AR-147'])
+    expect(mount.writes.filter((write) => isSlackRootWritePath(write.path))).toHaveLength(1)
+    expect(factory.status()).toMatchObject({
+      slackDegraded: false,
+      counters: {
+        dispatched: 1,
+        slackEventWatermarkRefreshes: 1,
+        slackGateBypassedByEventWatermark: 1,
+      },
+    })
+  })
+
+  it('bypasses numeric Slack sync lagSeconds staleness when the event watermark is fresh', async () => {
+    const clock = new ManualClock()
+    const mount = new SlackSyncStatusMount({ [issuePath(148)]: issueFile(148) })
+    mount.slackStatus = { provider: 'slack', lagSeconds: 30 * 60 }
+    mount.emit({
+      eventId: 'evt-slack-lag-148',
+      type: 'file.updated',
+      path: '/slack/channels/C0FACTORY__factory-e2e/messages/1781267202_000000/meta.json',
+      provider: 'slack',
+      timestamp: new Date(clock.now()).toISOString(),
+    } as unknown as ChangeEvent)
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet: new FakeFleetClient(),
+      triage: new StaticTriage(),
+      clock,
+    })
+
+    const report = await factory.runOnce()
+
+    expect(report.dispatched.map((result) => result.issue.key)).toEqual(['AR-148'])
+    expect(mount.writes.filter((write) => isSlackRootWritePath(write.path))).toHaveLength(1)
+    expect(factory.status().counters.slackGateBypassedByEventWatermark).toBe(1)
+  })
+
+  it('honors soft Slack sync degradation when the event watermark fallback throws', async () => {
+    // When the event watermark fetch fails we cannot prove freshness, so a soft
+    // sync degradation must stay in effect — and the warning must say so rather
+    // than claiming the factory proceeded without degradation.
+    const clock = new ManualClock()
+    const mount = new SlackEventsThrowingMount({ [issuePath(149)]: issueFile(149) })
+    mount.slackStatus = { provider: 'slack', status: 'lagging' }
+    const warnings: unknown[][] = []
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet: new FakeFleetClient(),
+      triage: new StaticTriage(),
+      clock,
+      logger: {
+        warn: (...args: unknown[]) => warnings.push(args),
+        error: () => undefined,
+      },
+    })
+
+    const report = await factory.runOnce()
+
+    expect(report.dispatched.map((result) => result.issue.key)).toEqual(['AR-149'])
+    expect(report.slackDegraded).toBe(true)
+    expect(mount.writes.filter((write) => isSlackRootWritePath(write.path))).toEqual([])
+    expect(factory.status()).toMatchObject({
+      slackDegraded: true,
+      slackDegradedReason: 'slack sync status is lagging',
+    })
+    expect(mount.eventsReadCount).toBe(1)
+    expect(warnings.some(([message]) =>
+      typeof message === 'string' && message.includes('honoring soft sync degradation'),
+    )).toBe(true)
   })
 
   it('treats live-shaped bare Slack sync status with zero Slack events as degraded', async () => {
