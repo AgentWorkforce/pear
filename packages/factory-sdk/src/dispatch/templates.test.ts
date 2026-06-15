@@ -58,6 +58,38 @@ describe('renderAgentTask', () => {
     expect(task).toContain('DM `broker` when the review cycle is complete.')
   })
 
+  it('renders an aggressive, spec-grounded babysitter task referencing the open PR', () => {
+    const task = renderAgentTask({
+      issue,
+      route: { repo: 'pear', clonePath: '/tmp/pear' },
+      role: 'babysitter',
+      config: baseConfig,
+      reviewerName: 'ar-123-review',
+      implementerNames: ['ar-123-impl'],
+      pr: { number: 482, url: 'https://github.com/AgentWorkforce/pear/pull/482' },
+      slackDispatchThread: { channel: 'C123', threadId: '170.000' },
+    })
+
+    // Carries the original spec (definition of done) and the open PR ref.
+    expect(task).toContain('Linear issue: AR-123 - Fix duplicate delivery')
+    expect(task).toContain(issue.description)
+    expect(task).toContain('PR #482 (https://github.com/AgentWorkforce/pear/pull/482)')
+    // Aggressive posture, not the conservative reviewer.
+    expect(task).toContain('fix things directly and aggressively')
+    expect(task).toContain('Fix failing CI')
+    expect(task).toContain('Resolve any merge conflicts')
+    expect(task).toContain('Address every review comment for real')
+    // Team coordination + readiness signal + guardrail.
+    expect(task).toContain('ar-123-impl')
+    expect(task).toContain('ar-123-review')
+    expect(task).toContain('[factory-pr-ready] AR-123')
+    expect(task).toContain('Do NOT auto-merge; stop at Human Review.')
+    // It must NOT instruct opening a PR (one already exists).
+    expect(task).not.toContain('Open a PR targeting `main` when done.')
+    // Human-chat affordance.
+    expect(task).toContain('discuss the PR with the human')
+  })
+
   it('renders clone/worktree instructions and on-green merge policy for cross-repo routes', () => {
     const config = FactoryConfigSchema.parse({
       workspaceId: 'workspace',
