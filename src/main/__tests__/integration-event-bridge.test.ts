@@ -386,23 +386,18 @@ test('integration event remote stream keeps a refreshable relayfile token provid
   assert.equal(options.token, tokenProvider)
 })
 
-test('integration event remote stream falls back to event feed polling after repeated stream errors', async () => {
+test('integration event remote stream leaves transport recovery to the SDK on repeated stream errors', async () => {
+  // Regression (relayfile-ws-self-heal-latch): the bridge used to stop the
+  // sync after 5 errors and run its own getEvents poll loop. The SDK now owns
+  // recovery (self-heals its WS + delivers via sync.on('event')), so the
+  // bridge must leave the sync alone and never poll getEvents itself.
   const syncs: FakeRelayFileSync[] = []
   const received: ChangeEvent[] = []
   const getEventsCalls: Array<{ cursor?: string; limit?: number }> = []
-  const pollEvent = {
-    eventId: 'ws:file.created:/slack/channels/C123/messages/1780735314_000000/meta.json:rev-2:2026-06-06T08:41:00.000Z',
-    type: 'file.created',
-    path: '/slack/channels/C123/messages/1780735314_000000/meta.json',
-    revision: 'rev-2',
-    timestamp: '2026-06-06T08:41:00.000Z'
-  } as const
   const client = {
     async getEvents(_workspaceId: string, options: { cursor?: string; limit?: number }) {
       getEventsCalls.push({ cursor: options.cursor, limit: options.limit })
-      return getEventsCalls.length === 1
-        ? { events: [pollEvent], nextCursor: null }
-        : { events: [], nextCursor: null }
+      return { events: [], nextCursor: null }
     },
     async getResourceAtEvent() {
       throw new Error('not used')
@@ -443,20 +438,33 @@ test('integration event remote stream falls back to event feed polling after rep
     syncs[0].emit('error', new Error('websocket reconnect failed'))
   }
 
-  await waitUntil(() => received.length === 2)
-  assert.equal(syncs[0].stopped, true)
-  assert.deepEqual(getEventsCalls[0], {
-    cursor: 'ws:file.created:/slack/channels/C123/messages/1780735200_000000/meta.json:rev-1:2026-06-06T08:40:00.000Z',
-    limit: 1000
+  // Events keep flowing through the SAME live sync (the SDK's own internal
+  // polling surfaces them via sync.on('event')) — proving it was not torn down.
+  syncs[0].emit('event', {
+    eventId: 'ws:file.created:/slack/channels/C123/messages/1780735314_000000/meta.json:rev-2:2026-06-06T08:41:00.000Z',
+    type: 'file.created',
+    path: '/slack/channels/C123/messages/1780735314_000000/meta.json',
+    revision: 'rev-2',
+    timestamp: '2026-06-06T08:41:00.000Z'
   })
+  await waitUntil(() => received.length === 2)
+
   assert.equal(received[1].resource.path, '/slack/channels/C123/messages/1780735314_000000/meta.json')
+  assert.equal(syncs.length, 1)
+  assert.equal(syncs[0].stopped, false)
+  assert.equal(getEventsCalls.length, 0)
 
   await subscription.unsubscribe()
 })
 
-test('integration event remote stream fallback replays the outage gap and logs non-empty error details', async () => {
+test('integration event remote stream logs structured error detail and keeps delivering via the live sync', async () => {
+  // After Layer 2 (relayfile-ws-self-heal-latch) the bridge no longer replays
+  // the outage gap via its own getEvents poll — the SDK does that internally.
+  // What the bridge still owes: surface each stream error with non-empty
+  // detail, and keep delivering events through the (untorn-down) live sync.
   const syncs: FakeRelayFileSync[] = []
   const received: ChangeEvent[] = []
+  const getEventsCalls: number[] = []
   const warnCalls: unknown[][] = []
   const originalWarn = console.warn
   console.warn = (...args: unknown[]) => {
@@ -465,30 +473,9 @@ test('integration event remote stream fallback replays the outage gap and logs n
 
   try {
     const client = {
-      async getEvents(_workspaceId: string, options: { cursor?: string; limit?: number }) {
-        assert.equal(
-          options.cursor,
-          'ws:file.created:/slack/channels/C123/messages/1780735200_000000/meta.json:rev-1:2026-06-06T08:40:00.000Z'
-        )
-        return {
-          events: [
-            {
-              eventId: 'ws:file.created:/slack/channels/C123/messages/1780735250_000000/meta.json:rev-gap-1:2026-06-06T08:40:50.000Z',
-              type: 'file.created',
-              path: '/slack/channels/C123/messages/1780735250_000000/meta.json',
-              revision: 'rev-gap-1',
-              timestamp: '2026-06-06T08:40:50.000Z'
-            },
-            {
-              eventId: 'ws:file.created:/slack/channels/C123/messages/1780735314_000000/meta.json:rev-gap-2:2026-06-06T08:41:00.000Z',
-              type: 'file.created',
-              path: '/slack/channels/C123/messages/1780735314_000000/meta.json',
-              revision: 'rev-gap-2',
-              timestamp: '2026-06-06T08:41:00.000Z'
-            }
-          ],
-          nextCursor: null
-        }
+      async getEvents() {
+        getEventsCalls.push(1)
+        return { events: [], nextCursor: null }
       },
       async getResourceAtEvent() {
         throw new Error('not used')
@@ -528,11 +515,30 @@ test('integration event remote stream fallback replays the outage gap and logs n
       syncs[0].emit('error', { type: 'error' })
     }
 
+    // Post-error events resume through the same live sync (the SDK's own
+    // recovery path), NOT a bridge getEvents replay.
+    syncs[0].emit('event', {
+      eventId: 'ws:file.created:/slack/channels/C123/messages/1780735250_000000/meta.json:rev-gap-1:2026-06-06T08:40:50.000Z',
+      type: 'file.created',
+      path: '/slack/channels/C123/messages/1780735250_000000/meta.json',
+      revision: 'rev-gap-1',
+      timestamp: '2026-06-06T08:40:50.000Z'
+    })
+    syncs[0].emit('event', {
+      eventId: 'ws:file.created:/slack/channels/C123/messages/1780735314_000000/meta.json:rev-gap-2:2026-06-06T08:41:00.000Z',
+      type: 'file.created',
+      path: '/slack/channels/C123/messages/1780735314_000000/meta.json',
+      revision: 'rev-gap-2',
+      timestamp: '2026-06-06T08:41:00.000Z'
+    })
+
     await waitUntil(() => received.length === 3)
     assert.deepEqual(received.slice(1).map((event) => event.resource.path), [
       '/slack/channels/C123/messages/1780735250_000000/meta.json',
       '/slack/channels/C123/messages/1780735314_000000/meta.json'
     ])
+    assert.equal(syncs[0].stopped, false)
+    assert.equal(getEventsCalls.length, 0)
     const remoteStreamError = warnCalls.find((call) => call[0] === '[integration-events] remote stream error')
     assert.ok(remoteStreamError)
     assert.equal((remoteStreamError[1] as { error?: string }).error, 'type=error')
