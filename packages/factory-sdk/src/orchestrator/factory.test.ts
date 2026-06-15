@@ -1253,7 +1253,7 @@ describe('FactoryLoop', () => {
     const first = await factory.runOnce()
     expect(first.dispatched.map((result) => result.issue.key)).toEqual(['AR-366'])
 
-    fleet.emitAgentExit('ar-366-impl', 'issue-done')
+    fleet.emitAgentExit('ar-366-impl-pear', 'issue-done')
     await flush()
     expect(factory.status().counters.humanReview).toBe(1)
 
@@ -1263,9 +1263,9 @@ describe('FactoryLoop', () => {
     expect(reopened.dispatched.map((result) => result.issue.key)).toEqual(['AR-366'])
     expect(reopened.skipped).toEqual([])
     expect(fleet.spawns.map((spawn) => spawn.name)).toEqual([
-      'ar-366-impl',
+      'ar-366-impl-pear',
       'ar-366-review',
-      'ar-366-impl',
+      'ar-366-impl-pear',
       'ar-366-review',
     ])
     expect(factory.status().counters.dispatchTerminalReopened).toBe(1)
@@ -4920,7 +4920,7 @@ describe('FactoryLoop', () => {
     await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(243), realMergeIssueFile(243))))
     await factory.runLoop({ maxIterations: 1 })
 
-    expect(fleet.releases.map((release) => release.name)).toEqual(['ar-243-impl', 'ar-243-review'])
+    expect(fleet.releases.map((release) => release.name)).toEqual(['ar-243-impl-pear', 'ar-243-review'])
     expect(fleet.releases.map((release) => release.reason)).toEqual(['issue-human-review', 'issue-human-review'])
     expect(gate.checks).toEqual([])
     expect(gate.merges).toEqual([])
