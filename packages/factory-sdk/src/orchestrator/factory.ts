@@ -105,11 +105,14 @@ const ISSUE_ROOT = '/linear/issues'
 const GITHUB_ISSUE_ROOT = '/github/repos'
 const READY_EVENTS_LIMIT = 100
 const LIVE_ISSUE_GLOB = `${ISSUE_ROOT}/**`
-// Matches both /github/repos/<owner>/<repo>/issues/<n>.json (the shape live
-// relayfile mounts emit) and the nested .../issues/by-id/<n>.json variant.
-// isGithubIssueFilePath() re-validates the exact shape, so a broad subscription
-// glob is safe.
-const LIVE_GITHUB_ISSUE_GLOB = `${GITHUB_ISSUE_ROOT}/**/issues/**/*.json`
+// Subscribe broadly under /github/repos and let isGithubIssueFilePath()
+// re-validate the exact shape in the callback. globMatchesPath() treats a
+// non-terminal `**` as a single-segment wildcard, so a more specific glob like
+// `.../issues/**/*.json` would miss the two-segment <owner>/<repo> prefix and
+// the nested <number>__<slug>/meta.json (and directory) event shapes this
+// factory now accepts. A terminal `**` prefix-matches every descendant, so all
+// supported path variants reach the handler.
+export const LIVE_GITHUB_ISSUE_GLOB = `${GITHUB_ISSUE_ROOT}/**`
 const LIVE_DEDUPE_LIMIT = 5_000
 const LIVE_EVENT_DRAIN_BATCH_SIZE = 5
 const COMPLETION_SWEEP_INTERVAL_MS = 15_000
@@ -1233,8 +1236,15 @@ export class FactoryLoop implements Factory {
       const paths = await this.#mount.listTree(GITHUB_ISSUE_ROOT)
       const issuePaths: string[] = []
       for (const path of paths) {
-        if (isGithubIssueFilePath(path)) {
+        if (githubIssuePathParts(path) !== undefined) {
           issuePaths.push(path)
+        } else if (githubIssueDirectoryPathParts(path) !== undefined) {
+          // listTree returns the issue directory entry alongside its
+          // meta.json file; githubIssuePathParts() already collected the
+          // file, so skip the directory to avoid reading the same issue
+          // twice in one backfill pass. Directory paths are only meaningful
+          // for live change events, not the tree scan.
+          continue
         } else if (isGithubIssueTreePath(path)) {
           this.#increment('githubIssuesIgnoredByPathRegex')
           this.#logger.debug?.('[factory] ignored GitHub issue path with unsupported relayfile shape', { path })

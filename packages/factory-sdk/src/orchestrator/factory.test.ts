@@ -23,7 +23,8 @@ import type { ChangeEvent, EventPage, LinearWriteback, ProviderSyncStatus, Slack
 import { FakeFleetClient, FakeMountClient } from '../testing'
 import type { CloseProbePrInput, GithubMergeGatePort, GithubMergeGateVerdict, GithubMergeInput, LinearIssue } from '../index'
 import { BatchTracker } from './batch-tracker'
-import { githubIssuePathParts, keyFromPath } from './factory'
+import { LIVE_GITHUB_ISSUE_GLOB, githubIssuePathParts, keyFromPath } from './factory'
+import { globMatchesPath } from '../subscriptions/globs'
 import { InternalFleetClient, type HarnessDriverClientLike } from '../fleet/internal-fleet-client'
 
 const ready = 'b9bec744-b60c-4745-8022-d90d6ab59ae3'
@@ -909,6 +910,25 @@ describe('FactoryLoop', () => {
     })
   })
 
+  it('LIVE_GITHUB_ISSUE_GLOB matches every supported relayfile issue shape under the real glob matcher', () => {
+    // FakeMountClient.subscribe ignores globs, so assert against the real
+    // globMatchesPath() the relayfile event client uses before publishing.
+    // A non-terminal `**` is a single-segment wildcard, so the previous
+    // `.../issues/**/*.json` glob silently dropped these in subscribe mode.
+    const supported = [
+      '/github/repos/AgentWorkforce/cloud/issues/2174.json',
+      '/github/repos/AgentWorkforce/cloud/issues/by-id/2174.json',
+      '/github/repos/AgentWorkforce/cloud/issues/2174/meta.json',
+      '/github/repos/AgentWorkforce/cloud/issues/2174/metadata.json',
+      '/github/repos/AgentWorkforce/cloud/issues/2174__factory-path-regression/meta.json',
+      '/github/repos/AgentWorkforce/pear/issues/1126__directory-event',
+    ]
+    for (const path of supported) {
+      expect(globMatchesPath(LIVE_GITHUB_ISSUE_GLOB, path)).toBe(true)
+    }
+    expect(globMatchesPath(LIVE_GITHUB_ISSUE_GLOB, '/linear/issues/AR-173.json')).toBe(false)
+  })
+
   it('runOnce caps active issues, skips stale state, and pulls queued work after completion', async () => {
     const mount = new FakeMountClient({
       [issuePath(1)]: issueFile(1),
@@ -1016,6 +1036,26 @@ describe('FactoryLoop', () => {
         path: ghPath,
       }),
     }))
+    expect(factory.status().counters.githubIssueMirrorsCreated).toBe(1)
+  })
+
+  it('reads a nested GitHub issue once when listTree returns both the directory entry and its meta.json', async () => {
+    // listTree surfaces the issue directory alongside its meta.json file; both
+    // resolve to the same metadata, so the backfill scan must collect only the
+    // file path and skip the directory to avoid processing the issue twice.
+    const dirPath = '/github/repos/AgentWorkforce/pear/issues/1116__route-github-factory-issues'
+    const metaPath = `${dirPath}/meta.json`
+    const mount = new FakeMountClient({
+      [dirPath]: githubIssueFile(1116, { title: 'Directory and file both listed' }),
+      [metaPath]: githubIssueFile(1116, { title: 'Directory and file both listed' }),
+    })
+    const factory = createFactory(config({
+      safety: { requireTitlePrefix: '[factory]', requireTeamKey: 'AR' },
+    }), { mount, fleet: new FakeFleetClient(), triage: new StaticTriage() })
+
+    await factory.runOnce()
+
+    expect(mount.reads.filter((path) => path === metaPath)).toHaveLength(1)
     expect(factory.status().counters.githubIssueMirrorsCreated).toBe(1)
   })
 
