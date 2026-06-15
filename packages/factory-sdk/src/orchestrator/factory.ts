@@ -1054,6 +1054,8 @@ export class FactoryLoop implements Factory {
       return { issue: decision.issue, agents: [], dryRun }
     }
 
+    // TODO(AR-274 follow-up): short-circuit LLM triage once label-derived
+    // routes are authoritative for dispatch identity.
     const labelDispatch = labelDerivedDispatchDecision(liveIssue, decision, this.#config)
     if (!labelDispatch.ok) {
       const comment = labelDispatchFailureComment(decision.issue, labelDispatch)
@@ -3381,6 +3383,13 @@ function labelDerivedDispatchDecision(
   const implementers = routeAssignments.map(({ slug, route }) =>
     routeImplementerSpec(liveIssue, config, slug, route),
   )
+  const reviewerRoute = routeAssignments[0]!.route
+  const reviewer: AgentSpec = {
+    ...decision.reviewer,
+    repo: reviewerRoute.repo,
+    clonePath: reviewerRoute.clonePath,
+    task: taskForDispatch(liveIssue, reviewerRoute, 'reviewer'),
+  }
 
   return {
     ok: true,
@@ -3389,9 +3398,7 @@ function labelDerivedDispatchDecision(
       routes: routeAssignments.map(({ route }) => route),
       scope: implementers.length >= 2 ? 'team' : 'single',
       implementers,
-      // Reviewer naming/routing stays as triage produced it. For multi-repo
-      // dispatches today that means the reviewer keeps the first triage route.
-      reviewer: decision.reviewer,
+      reviewer,
     },
   }
 }
