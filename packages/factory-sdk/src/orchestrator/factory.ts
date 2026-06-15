@@ -1055,6 +1055,8 @@ export class FactoryLoop implements Factory {
       return { issue: decision.issue, agents: [], dryRun }
     }
 
+    // TODO(AR-274 follow-up): short-circuit LLM triage once label-derived
+    // routes are authoritative for dispatch identity.
     const labelDispatch = labelDerivedDispatchDecision(liveIssue, decision, this.#config)
     if (!labelDispatch.ok) {
       const comment = labelDispatchFailureComment(decision.issue, labelDispatch)
