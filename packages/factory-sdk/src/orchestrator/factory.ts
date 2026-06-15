@@ -196,6 +196,10 @@ export class FactoryLoop implements Factory {
   readonly #seenAgentQuestionKeys = new Set<string>()
   readonly #seenAgentQuestionOrder: string[] = []
   readonly #dispatchAttempts = new Map<string, DispatchAttemptState>()
+  // Last invalid-label failure signature we posted per issue, so a stuck Ready
+  // issue (or the comment writeback's own change event) does not re-post the
+  // same notice every cycle. Cleared once the issue dispatches successfully.
+  readonly #labelDispatchFailures = new Map<string, string>()
   readonly #canonicalIssueStates = new Map<string, string>()
   readonly #dispatchFailureReaperHandoffs = new Map<string, RegistryHandoffAgent>()
   #slackDegraded = false
@@ -1067,16 +1071,25 @@ export class FactoryLoop implements Factory {
         reason: labelDispatch.reason,
       })
       if (!dryRun) {
-        try {
-          await this.#linear.postComment(liveIssue, comment)
-        } catch (error) {
-          this.#logger.warn?.('[factory] label dispatch block comment writeback skipped', error)
+        const signature = labelDispatchFailureSignature(labelDispatch)
+        if (this.#labelDispatchFailures.get(decision.issue.key) !== signature) {
+          try {
+            await this.#linear.postComment(liveIssue, comment)
+            // Record only after a successful post so a failed writeback retries
+            // next cycle rather than being suppressed as already-notified.
+            this.#labelDispatchFailures.set(decision.issue.key, signature)
+          } catch (error) {
+            this.#logger.warn?.('[factory] label dispatch block comment writeback skipped', error)
+          }
         }
       }
       return { issue: decision.issue, agents: [], comments: [comment], dryRun }
     }
 
     const dispatchDecision = labelDispatch.decision
+    // A valid label resolution clears any prior failure notice so a later
+    // regression posts a fresh, actionable comment instead of being deduped.
+    this.#labelDispatchFailures.delete(dispatchDecision.issue.key)
     this.#recordDispatchAttempt(dispatchDecision.issue)
     const record = this.#batch.start(dispatchDecision, dryRun)
     if (!record) {
@@ -3476,6 +3489,10 @@ function routeReviewerSpec(
     clonePath: route.clonePath,
     node: reviewer.node ?? 'self',
   }
+}
+
+function labelDispatchFailureSignature(resolution: Exclude<LabelDispatchResolution, { ok: true }>): string {
+  return `${resolution.reason}:${[...resolution.offendingLabels].sort().join(',')}`
 }
 
 function labelDispatchFailureComment(issue: IssueRef, resolution: Exclude<LabelDispatchResolution, { ok: true }>): string {

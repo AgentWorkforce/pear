@@ -3810,6 +3810,39 @@ describe('FactoryLoop', () => {
     expect(warnings[0]?.[0]).toBe('[factory] skipped dispatch due to invalid repo labels')
   })
 
+  it('posts the invalid-label failure comment only once for a stuck Ready issue', async () => {
+    const unlabeledIssue = realIssueFile(722, ready, { labels: [] })
+    const mount = new FakeMountClient({ [issuePath(722)]: unlabeledIssue })
+    const fleet = new FakeFleetClient()
+    const comments: string[] = []
+    const factory = createFactory(config(), {
+      mount,
+      fleet,
+      triage: new StaticTriage(),
+      linear: {
+        async setState(issue, stateId) {
+          await mount.writeFile(issue.path, { stateId })
+        },
+        async postComment(_issue, text) {
+          comments.push(text)
+        },
+        async createIssue() {
+          throw new Error('not used')
+        },
+        async verify() {
+          return true
+        },
+      },
+    })
+
+    // Same Ready issue re-evaluated across cycles (and the writeback's own
+    // change event) must not re-post the identical failure notice.
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(722), unlabeledIssue)))
+    await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(722), unlabeledIssue)))
+
+    expect(comments).toEqual([expect.stringContaining('No Linear labels were present')])
+  })
+
   it('fails dispatch loudly when labels do not map through repos.byLabel', async () => {
     const unmappedIssue = realIssueFile(723, ready, { labels: [{ name: 'unknown' }] })
     const mount = new FakeMountClient({ [issuePath(723)]: unmappedIssue })
