@@ -627,6 +627,14 @@ export class FactoryLoop implements Factory {
     if (!this.#liveHeartbeatActive) return
     const intervalMs = liveHeartbeatIntervalMs(this.#config.loop.heartbeatStaleMs)
     if (this.#clock.now() - this.#liveHeartbeatLastWriteMs < intervalMs) return
+    // A scheduled (real-timer) refresh may already be in flight carrying a
+    // timestamp captured before this drain batch advanced the clock. The
+    // #liveHeartbeatInFlight guard would otherwise make this due refresh a
+    // no-op, leaving the heartbeat stamped stale until the next interval. Wait
+    // for that write to settle, then re-check and force a current-timestamped
+    // write if we are still due so the heartbeat never falls behind the drain.
+    await this.#liveHeartbeatRefresh
+    if (this.#clock.now() - this.#liveHeartbeatLastWriteMs < intervalMs) return
     await this.#refreshLiveHeartbeat()
   }
 
