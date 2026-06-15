@@ -29,7 +29,7 @@ export class WebhookHandler {
   async handle(request: Request): Promise<Response> {
     const timestamp = request.headers.get('x-relay-timestamp') ?? ''
     const signature = request.headers.get('x-relay-signature') ?? ''
-    const eventId = request.headers.get('x-relay-event-id') ?? ''
+    const headerEventId = request.headers.get('x-relay-event-id') ?? ''
     const rawBody = await request.text()
 
     const expected = createHmac('sha256', this.#config.secret)
@@ -39,15 +39,16 @@ export class WebhookHandler {
       return new Response('forbidden', { status: 403 })
     }
 
-    if (eventId && this.#seen.has(eventId)) {
-      return new Response('ok', { status: 200 })
-    }
-
     let event: WebhookEvent
     try {
       event = JSON.parse(rawBody) as WebhookEvent
     } catch {
       return new Response('bad_request', { status: 400 })
+    }
+
+    const eventId = event.eventId || headerEventId
+    if (eventId && this.#seen.has(eventId)) {
+      return new Response('ok', { status: 200 })
     }
 
     try {

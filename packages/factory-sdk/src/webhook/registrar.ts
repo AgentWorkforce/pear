@@ -1,4 +1,10 @@
-import type { RelayFileClient } from '@relayfile/sdk'
+import type { RelayFileClient, WebhookSubscription } from '@relayfile/sdk'
+
+const DEFAULT_PATH_GLOBS = [
+  '/linear/issues/**',
+  '/slack/channels/**',
+  '/github/repos/**',
+]
 
 export interface WebhookRegistrarConfig {
   client: RelayFileClient
@@ -17,11 +23,15 @@ export class WebhookRegistrar {
   }
 
   async register(): Promise<void> {
-    const pathGlobs = this.#config.pathGlobs ?? [
-      '/linear/issues/**',
-      '/slack/channels/**',
-      '/github/repos/**',
-    ]
+    if (this.#subscriptionId) return
+
+    const pathGlobs = this.#config.pathGlobs ?? DEFAULT_PATH_GLOBS
+    const existing = await this.#findExistingSubscription(pathGlobs)
+    if (existing) {
+      this.#subscriptionId = existing.id
+      return
+    }
+
     const subscription = await this.#config.client.registerWebhook({
       workspaceId: this.#config.workspaceId,
       url: this.#config.receiverUrl,
@@ -43,4 +53,18 @@ export class WebhookRegistrar {
   get subscriptionId(): string | undefined {
     return this.#subscriptionId
   }
+
+  async #findExistingSubscription(pathGlobs: string[]): Promise<WebhookSubscription | undefined> {
+    const subscriptions = await this.#config.client.listWebhooks(this.#config.workspaceId)
+    return subscriptions.find((subscription) => (
+      subscription.url === this.#config.receiverUrl
+      && sameStringSet(subscription.pathGlobs, pathGlobs)
+    ))
+  }
+}
+
+function sameStringSet(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false
+  const bSet = new Set(b)
+  return a.every((value) => bSet.has(value))
 }

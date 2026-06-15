@@ -52,6 +52,23 @@ describe('WebhookHandler', () => {
     expect(handlers.onGithubEvent).not.toHaveBeenCalled()
   })
 
+  it('dedupes by body event ID before falling back to the header event ID', async () => {
+    const handlers = createHandlers()
+    const handler = new WebhookHandler({ secret: SECRET, ...handlers })
+    const event = webhookEvent({
+      eventId: 'evt_body',
+      path: '/linear/issues/PROJ-123/metadata.json',
+    })
+
+    const firstResponse = await handler.handle(signedRequest(event, { headerEventId: 'evt_header_1' }))
+    handlers.onLinearEvent.mockClear()
+    const duplicateResponse = await handler.handle(signedRequest(event, { headerEventId: 'evt_header_2' }))
+
+    expect(firstResponse.status).toBe(200)
+    expect(duplicateResponse.status).toBe(200)
+    expect(handlers.onLinearEvent).not.toHaveBeenCalled()
+  })
+
   it('calls the slack handler for a valid slack event', async () => {
     const handlers = createHandlers()
     const handler = new WebhookHandler({ secret: SECRET, ...handlers })
@@ -115,7 +132,7 @@ function webhookEvent(overrides: Partial<WebhookEvent> = {}): WebhookEvent {
 
 function signedRequest(
   event: WebhookEvent,
-  options: { signature?: string } = {},
+  options: { headerEventId?: string; signature?: string } = {},
 ): Request {
   const rawBody = JSON.stringify(event)
   const signature = options.signature ?? createHmac('sha256', SECRET)
@@ -127,7 +144,7 @@ function signedRequest(
     headers: {
       'x-relay-timestamp': TIMESTAMP,
       'x-relay-signature': signature,
-      'x-relay-event-id': event.eventId,
+      'x-relay-event-id': options.headerEventId ?? event.eventId,
     },
     body: rawBody,
   })
