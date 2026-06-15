@@ -2410,7 +2410,12 @@ export class FactoryLoop implements Factory {
         status: softStatus,
       }
     } catch (error) {
-      this.#logger.warn?.('[factory] Slack event freshness fallback failed; proceeding without degradation', error)
+      this.#logger.warn?.(
+        softStatusResult?.degraded
+          ? '[factory] Slack event freshness fallback failed; honoring soft sync degradation'
+          : '[factory] Slack event freshness fallback failed; proceeding without degradation',
+        error,
+      )
       return softStatusResult?.degraded
         ? { known: true, degraded: true, reason: softStatusResult.reason, status: softStatus }
         : { known: false, degraded: false }
@@ -3438,14 +3443,14 @@ const slackSyncStatusResult = (
   if (lastEventAtMs !== undefined && Number.isFinite(lastEventAtMs)) {
     const ageMs = nowMs - lastEventAtMs
     return ageMs > staleAfterMs
-      ? { known: true, degraded: true, reason: `slack sync watermark stale by ${ageMs}ms` }
+      ? { known: true, degraded: true, reason: `slack sync watermark stale by ${ageMs}ms`, severity: 'soft' }
       : { known: true, degraded: false }
   }
 
   if (status.lagSeconds !== undefined && Number.isFinite(status.lagSeconds)) {
     const lagMs = status.lagSeconds * 1000
     return lagMs > staleAfterMs
-      ? { known: true, degraded: true, reason: `slack sync lag is ${lagMs}ms` }
+      ? { known: true, degraded: true, reason: `slack sync lag is ${lagMs}ms`, severity: 'soft' }
       : { known: true, degraded: false }
   }
 

@@ -588,6 +588,14 @@ class ThrowingSlackSyncStatusMount extends FakeMountClient {
   }
 }
 
+class SlackEventsThrowingMount extends SlackSyncStatusMount {
+  override async getEvents(opts: { cursor?: string; limit?: number; provider?: string; last?: number }): Promise<EventPage> {
+    this.eventsReadCount += 1
+    void opts
+    throw new Error('slack event feed unavailable')
+  }
+}
+
 class NoWatermarkMount extends FakeMountClient {
   override async getEventHighWatermark(): Promise<string | undefined> {
     return undefined
@@ -5263,6 +5271,99 @@ describe('FactoryLoop', () => {
     })
     expect(factory.status().counters.slackGateBypassedByEventWatermark).toBeUndefined()
     expect(mount.eventsReadCount).toBe(1)
+  })
+
+  it('bypasses numeric Slack sync watermark staleness when the event watermark is fresh', async () => {
+    // A stale lastEventAtMs is an advisory soft signal: a fresh getEvents Slack
+    // watermark must override it, same as the lagging/stale/degraded statuses.
+    const clock = new ManualClock()
+    const mount = new SlackSyncStatusMount({ [issuePath(147)]: issueFile(147) })
+    mount.slackStatus = { provider: 'slack', lastEventAtMs: clock.now() - 30 * 60_000 }
+    mount.emit({
+      eventId: 'evt-slack-watermark-147',
+      type: 'file.updated',
+      path: '/slack/channels/C0FACTORY__factory-e2e/messages/1781267201_000000/meta.json',
+      provider: 'slack',
+      timestamp: new Date(clock.now()).toISOString(),
+    } as unknown as ChangeEvent)
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet: new FakeFleetClient(),
+      triage: new StaticTriage(),
+      clock,
+    })
+
+    const report = await factory.runOnce()
+
+    expect(report.dispatched.map((result) => result.issue.key)).toEqual(['AR-147'])
+    expect(mount.writes.filter((write) => isSlackRootWritePath(write.path))).toHaveLength(1)
+    expect(factory.status()).toMatchObject({
+      slackDegraded: false,
+      counters: {
+        dispatched: 1,
+        slackEventWatermarkRefreshes: 1,
+        slackGateBypassedByEventWatermark: 1,
+      },
+    })
+  })
+
+  it('bypasses numeric Slack sync lagSeconds staleness when the event watermark is fresh', async () => {
+    const clock = new ManualClock()
+    const mount = new SlackSyncStatusMount({ [issuePath(148)]: issueFile(148) })
+    mount.slackStatus = { provider: 'slack', lagSeconds: 30 * 60 }
+    mount.emit({
+      eventId: 'evt-slack-lag-148',
+      type: 'file.updated',
+      path: '/slack/channels/C0FACTORY__factory-e2e/messages/1781267202_000000/meta.json',
+      provider: 'slack',
+      timestamp: new Date(clock.now()).toISOString(),
+    } as unknown as ChangeEvent)
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet: new FakeFleetClient(),
+      triage: new StaticTriage(),
+      clock,
+    })
+
+    const report = await factory.runOnce()
+
+    expect(report.dispatched.map((result) => result.issue.key)).toEqual(['AR-148'])
+    expect(mount.writes.filter((write) => isSlackRootWritePath(write.path))).toHaveLength(1)
+    expect(factory.status().counters.slackGateBypassedByEventWatermark).toBe(1)
+  })
+
+  it('honors soft Slack sync degradation when the event watermark fallback throws', async () => {
+    // When the event watermark fetch fails we cannot prove freshness, so a soft
+    // sync degradation must stay in effect — and the warning must say so rather
+    // than claiming the factory proceeded without degradation.
+    const clock = new ManualClock()
+    const mount = new SlackEventsThrowingMount({ [issuePath(149)]: issueFile(149) })
+    mount.slackStatus = { provider: 'slack', status: 'lagging' }
+    const warnings: unknown[][] = []
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet: new FakeFleetClient(),
+      triage: new StaticTriage(),
+      clock,
+      logger: {
+        warn: (...args: unknown[]) => warnings.push(args),
+        error: () => undefined,
+      },
+    })
+
+    const report = await factory.runOnce()
+
+    expect(report.dispatched.map((result) => result.issue.key)).toEqual(['AR-149'])
+    expect(report.slackDegraded).toBe(true)
+    expect(mount.writes.filter((write) => isSlackRootWritePath(write.path))).toEqual([])
+    expect(factory.status()).toMatchObject({
+      slackDegraded: true,
+      slackDegradedReason: 'slack sync status is lagging',
+    })
+    expect(mount.eventsReadCount).toBe(1)
+    expect(warnings.some(([message]) =>
+      typeof message === 'string' && message.includes('honoring soft sync degradation'),
+    )).toBe(true)
   })
 
   it('treats live-shaped bare Slack sync status with zero Slack events as degraded', async () => {
