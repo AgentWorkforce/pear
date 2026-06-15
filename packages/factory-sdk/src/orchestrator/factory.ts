@@ -3411,12 +3411,12 @@ const isHighWatermarkRouteUnavailable = (error: unknown): boolean => {
 }
 
 /**
- * Slack writeback liveness follows the provider signal hierarchy documented in
- * docs/event-delivery-contract.md: getEvents() provider watermarks are the
- * authoritative ingest signal, sync status is advisory, and only explicit
- * error/failed states fail closed. Soft sync states can be stale while Slack
- * mount writes are still live, so #slackFreshness lets fresh event watermarks
- * override them instead of blocking operator question writebacks.
+ * Slack writeback liveness follows the provider signal hierarchy:
+ * getEvents() provider watermarks are the authoritative ingest signal, sync
+ * status is advisory, and only explicit error/failed states fail closed. Soft
+ * sync states can be stale while Slack mount writes are still live, so
+ * #slackFreshness lets fresh event watermarks override them instead of blocking
+ * operator question writebacks.
  */
 const slackSyncStatusResult = (
   status: ProviderSyncStatus | undefined,
