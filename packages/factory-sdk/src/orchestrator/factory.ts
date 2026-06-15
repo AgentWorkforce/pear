@@ -1230,9 +1230,17 @@ export class FactoryLoop implements Factory {
 
   async #githubIssuePaths(): Promise<string[]> {
     try {
-      return (await this.#mount.listTree(GITHUB_ISSUE_ROOT))
-        .filter(isGithubIssueFilePath)
-        .sort()
+      const paths = await this.#mount.listTree(GITHUB_ISSUE_ROOT)
+      const issuePaths: string[] = []
+      for (const path of paths) {
+        if (isGithubIssueFilePath(path)) {
+          issuePaths.push(path)
+        } else if (isGithubIssueTreePath(path)) {
+          this.#increment('githubIssuesIgnoredByPathRegex')
+          this.#logger.debug?.('[factory] ignored GitHub issue path with unsupported relayfile shape', { path })
+        }
+      }
+      return issuePaths.sort()
     } catch (error) {
       this.#increment('githubIssueListFailures')
       this.#logger.warn?.('[factory] failed to list GitHub issue source tree', error)
@@ -1301,9 +1309,19 @@ export class FactoryLoop implements Factory {
   }
 
   async #readGithubIssue(path: string): Promise<GithubIssueSource | undefined> {
+    const candidatePaths = githubIssueReadCandidatePaths(path)
     try {
-      const { content } = await this.#mount.readFile(path)
-      return parseGithubIssue(path, content)
+      for (const candidatePath of candidatePaths) {
+        try {
+          const { content } = await this.#mount.readFile(candidatePath)
+          return parseGithubIssue(candidatePath, content)
+        } catch (error) {
+          if (isMissingIssueFileError(error) && candidatePath !== candidatePaths.at(-1)) {
+            continue
+          }
+          throw error
+        }
+      }
     } catch (error) {
       if (isMissingIssueFileError(error)) {
         this.#increment('githubIssuePhantomSkipped')
@@ -2945,17 +2963,57 @@ const repoMapFromConfig = (config: FactoryConfig) => {
   }))
 }
 
-const githubIssuePathParts = (path: string): { owner: string; repo: string; number: number } | undefined => {
-  // Live relayfile mounts expose GitHub issues as
-  // /github/repos/<owner>/<repo>/issues/<number>.json (see the renderer
-  // issues-store mount reader). Some mount shapes nest them under an extra
-  // by-id/ segment, so accept either to stay robust across mount versions.
-  const match = path.match(/^\/github\/repos\/([^/]+)\/([^/]+)\/issues\/(?:by-id\/)?(\d+)\.json$/u)
-  if (!match) return undefined
+export const githubIssuePathParts = (path: string): { owner: string; repo: string; number: number; slug?: string } | undefined => {
+  // Canonical GitHub relayfile issue entries are nested as
+  // /github/repos/<owner>/<repo>/issues/<number>__<slug>/meta.json. Keep the
+  // legacy flat and by-id forms for older mount state, and accept metadata.json
+  // as a read-only compatibility alias for historical local mount snapshots.
+  const match = path.match(
+    /^\/github\/repos\/([^/]+)\/([^/]+)\/issues\/(?:(?:by-id\/)?(\d+)\.json|(\d+)(?:__([^/]+))?\/(?:meta|metadata)\.json)$/u,
+  )
+  if (!match) {
+    return undefined
+  }
+  const number = Number(match[3] ?? match[4])
+  return {
+    owner: match[1]!,
+    repo: match[2]!,
+    number,
+    slug: match[5],
+  }
+}
+
+const githubIssueReadCandidatePaths = (path: string): string[] => {
+  if (path.endsWith('/')) {
+    return [`${path}meta.json`, `${path}metadata.json`]
+  }
+  if (path.endsWith('/meta.json')) {
+    return [path, path.replace(/\/meta\.json$/u, '/metadata.json')]
+  }
+  if (path.endsWith('/metadata.json')) {
+    return [path, path.replace(/\/metadata\.json$/u, '/meta.json')]
+  }
+  if (githubIssuePathParts(path)) {
+    return [path]
+  }
+  if (githubIssueDirectoryPathParts(path)) {
+    // meta.json is the canonical relayfile GitHub issue basename. metadata.json
+    // remains a legacy read fallback for older local mount-state snapshots.
+    return [`${path}/meta.json`, `${path}/metadata.json`]
+  }
+  return [path]
+}
+
+const githubIssueDirectoryPathParts = (path: string): { owner: string; repo: string; number: number; slug?: string } | undefined => {
+  const match = path.match(/^\/github\/repos\/([^/]+)\/([^/]+)\/issues\/(\d+)(?:__([^/]+))?$/u)
+  if (!match) {
+    return undefined
+  }
   return {
     owner: match[1]!,
     repo: match[2]!,
     number: Number(match[3]),
+    slug: match[4],
   }
 }
 
@@ -3196,7 +3254,10 @@ const isLinearIssueMirrorCandidatePath = (path: string): boolean =>
   isIssueFilePath(path) || /^\/linear\/issues\/factory-create-[^/]+\.json$/u.test(path)
 
 const isGithubIssueFilePath = (path: string): boolean =>
-  githubIssuePathParts(path) !== undefined
+  githubIssuePathParts(path) !== undefined || githubIssueDirectoryPathParts(path) !== undefined
+
+const isGithubIssueTreePath = (path: string): boolean =>
+  /^\/github\/repos\/[^/]+\/[^/]+\/issues\/.+/u.test(path)
 
 const isIssueAliasFilePath = (path: string): boolean =>
   path.startsWith(linearByStatePath('ready-for-agent')) &&
