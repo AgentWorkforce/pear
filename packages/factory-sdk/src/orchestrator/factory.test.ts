@@ -3756,7 +3756,7 @@ describe('FactoryLoop', () => {
     expect(fleet.spawns.map((spawn) => [spawn.name, spawn.cwd])).toEqual([
       ['ar-720-impl-cloud', '/work/cloud'],
       ['ar-720-impl-relayfile', '/work/relayfile'],
-      ['ar-720-review', '/work/pear'],
+      ['ar-720-review', '/work/cloud'],
     ])
     expect(comments[0]).toContain('Implementers: ar-720-impl-cloud, ar-720-impl-relayfile')
   })

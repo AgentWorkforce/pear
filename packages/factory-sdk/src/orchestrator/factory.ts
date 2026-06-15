@@ -148,6 +148,7 @@ const STOP_TEARDOWN_TIMEOUT_MS = 2_500
 const SLACK_EVENT_WATERMARK_CACHE_MS = 60_000
 const MERGE_GATE_MAX_ATTEMPTS = 12
 const MERGE_GATE_POLL_DELAY_MS = 10_000
+const MAX_LABEL_IMPLEMENTERS = 4
 const DISPATCH_FAILURE_HANDOFF_UNRESOLVED_TTL_MS = 5 * 60_000
 const DEFAULT_LIVE_HEARTBEAT_INTERVAL_MS = 15_000
 const GITHUB_FACTORY_LABEL = 'factory'
@@ -3345,7 +3346,7 @@ type LabelDispatchResolution =
   | { ok: true; decision: TriageDecision }
   | {
     ok: false
-    reason: 'no-route' | 'too-many-routes'
+    reason: 'no-labels' | 'unmapped-labels' | 'too-many-labels'
     offendingLabels: string[]
     maxImplementers?: number
   }
@@ -3356,29 +3357,34 @@ function labelDerivedDispatchDecision(
   config: FactoryConfig,
 ): LabelDispatchResolution {
   const routesByLabel = labelRoutesForIssue(liveIssue, config)
-  const routeAssignments = routesByLabel.routes.length > 0
-    ? routesByLabel.routes
-    : defaultRouteAssignment(config)
 
-  if (routeAssignments.length === 0) {
+  if (routesByLabel.labels.length === 0) {
     return {
       ok: false,
-      reason: 'no-route',
+      reason: 'no-labels',
+      offendingLabels: [],
+    }
+  }
+
+  if (routesByLabel.routes.length === 0) {
+    return {
+      ok: false,
+      reason: 'unmapped-labels',
       offendingLabels: routesByLabel.offendingLabels.length > 0 ? routesByLabel.offendingLabels : routesByLabel.labels,
     }
   }
 
-  const maxImplementers = config.triage.maxImplementers
-  if (routeAssignments.length > maxImplementers) {
+  const maxImplementers = Math.min(config.triage.maxImplementers, MAX_LABEL_IMPLEMENTERS)
+  if (routesByLabel.routes.length > maxImplementers) {
     return {
       ok: false,
-      reason: 'too-many-routes',
-      offendingLabels: routeAssignments.map((assignment) => assignment.slug),
+      reason: 'too-many-labels',
+      offendingLabels: routesByLabel.routes.map((assignment) => assignment.slug),
       maxImplementers,
     }
   }
 
-  const implementers = routeAssignments.map(({ slug, route }) =>
+  const implementers = routesByLabel.routes.map(({ slug, route }) =>
     routeImplementerSpec(liveIssue, config, slug, route),
   )
 
@@ -3386,12 +3392,10 @@ function labelDerivedDispatchDecision(
     ok: true,
     decision: {
       ...decision,
-      routes: routeAssignments.map(({ route }) => route),
+      routes: routesByLabel.routes.map(({ route }) => route),
       scope: implementers.length >= 2 ? 'team' : 'single',
       implementers,
-      // Reviewer naming/routing stays as triage produced it. For multi-repo
-      // dispatches today that means the reviewer keeps the first triage route.
-      reviewer: decision.reviewer,
+      reviewer: routeReviewerSpec(liveIssue, config, routesByLabel.routes[0]!.route, decision.reviewer),
     },
   }
 }
@@ -3435,21 +3439,6 @@ function labelRoutesForIssue(
   return { labels, offendingLabels, routes }
 }
 
-function defaultRouteAssignment(config: FactoryConfig): Array<{ slug: string; route: TriageDecision['routes'][number] }> {
-  const repo = config.repos.default
-  if (!repo) {
-    return []
-  }
-  return [{
-    slug: repoSlug(repo),
-    route: {
-      repo,
-      clonePath: config.repos.clonePaths[repo],
-      rationale: 'Default repository route.',
-    },
-  }]
-}
-
 function routeImplementerSpec(
   issue: LinearIssue,
   config: FactoryConfig,
@@ -3468,17 +3457,39 @@ function routeImplementerSpec(
   }
 }
 
+function routeReviewerSpec(
+  issue: LinearIssue,
+  config: FactoryConfig,
+  route: TriageDecision['routes'][number],
+  reviewer: AgentSpec,
+): AgentSpec {
+  return {
+    ...reviewer,
+    name: `${agentBaseName(issue)}-review`,
+    role: 'reviewer',
+    capability: reviewer.capability ?? 'spawn:claude',
+    model: reviewer.model ?? config.models.reviewer,
+    task: taskForDispatch(issue, route, 'reviewer'),
+    repo: route.repo,
+    clonePath: route.clonePath,
+    node: reviewer.node ?? 'self',
+  }
+}
+
 function labelDispatchFailureComment(issue: IssueRef, resolution: Exclude<LabelDispatchResolution, { ok: true }>): string {
   const lines = [`Factory dispatch for ${issue.key} skipped`]
-  if (resolution.reason === 'too-many-routes') {
-    lines.push(`Too many repo routes matched dispatch: ${resolution.offendingLabels.join(', ')}.`)
-    lines.push(`Dispatch is capped at triage.maxImplementers=${resolution.maxImplementers}; scope the issue or raise triage.maxImplementers.`)
+  if (resolution.reason === 'no-labels') {
+    lines.push('No Linear labels were present.')
+    lines.push('Add one repo label from factory.config.json repos.byLabel, then move the issue back to Ready for Agent.')
+  } else if (resolution.reason === 'too-many-labels') {
+    lines.push(`Too many repo labels matched dispatch: ${resolution.offendingLabels.join(', ')}.`)
+    lines.push(`Dispatch is capped at ${resolution.maxImplementers} implementer(s); scope the issue or raise triage.maxImplementers within the dispatch cap.`)
   } else if (resolution.offendingLabels.length > 0) {
     lines.push(`No repo labels matched factory.config.json repos.byLabel. Unmapped label(s): ${resolution.offendingLabels.join(', ')}.`)
-    lines.push('No repos.default route is configured. Update the labels or factory.config.json routing, then move the issue back to Ready for Agent.')
+    lines.push('Update the labels or factory.config.json repos.byLabel, then move the issue back to Ready for Agent.')
   } else {
-    lines.push('No repo labels matched factory.config.json repos.byLabel, and no repos.default route is configured.')
-    lines.push('Add a repo label or configure repos.default, then move the issue back to Ready for Agent.')
+    lines.push('No repo labels matched factory.config.json repos.byLabel.')
+    lines.push('Update the labels or factory.config.json repos.byLabel, then move the issue back to Ready for Agent.')
   }
   return lines.join('\n')
 }
@@ -3522,10 +3533,6 @@ function taskForDispatch(issue: LinearIssue, route: TriageDecision['routes'][num
 function agentBaseName(issue: LinearIssue): string {
   const number = issue.key.match(/\d+/)?.[0] ?? sanitizeAgentSlug(issue.key)
   return `ar-${number}`
-}
-
-function repoSlug(repo: string): string {
-  return sanitizeAgentSlug(repo.split('/').at(-1) ?? repo)
 }
 
 function sanitizeAgentSlug(slug: string): string {
