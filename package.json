@@ -43,7 +43,7 @@
     "@agent-relay/sdk": "^8.3.7",
     "@agentworkforce/deploy": "^4.0.2",
     "@relayburn/sdk": "^3.2.0",
-    "@relayfile/sdk": "^0.8.21",
+    "@relayfile/sdk": "^0.8.27",
     "@tanstack/react-virtual": "^3.14.2",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/addon-web-links": "^0.11.0",
