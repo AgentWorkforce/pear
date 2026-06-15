@@ -2437,11 +2437,11 @@ export class FactoryLoop implements Factory {
 
   async #refreshSlackEventWatermark(): Promise<SlackEventWatermark> {
     this.#increment('slackEventWatermarkRefreshes')
-    const page = await this.#mount.getEvents({ limit: 100 })
+    const page = await this.#mount.getEvents({ provider: 'slack', last: 100, limit: 100 })
     const lastEventAtMs = page.events
-      .filter((event) => event.resource.provider === 'slack')
-      .map((event) => Date.parse(event.occurredAt))
-      .filter((time) => Number.isFinite(time))
+      .filter((event) => eventProvider(event) === 'slack')
+      .map((event) => eventOccurredAtMs(event))
+      .filter((time): time is number => time !== undefined && Number.isFinite(time))
       .sort((a, b) => b - a)[0]
     const result = lastEventAtMs === undefined
       ? { known: true }
@@ -3454,6 +3454,18 @@ const slackSyncStatusResult = (
   }
 
   return { known: false, degraded: false }
+}
+
+const eventProvider = (event: ChangeEvent): string | undefined => {
+  const flat = asRecord(event) ?? {}
+  return stringValue(asRecord(flat.resource)?.provider) ?? stringValue(flat.provider)
+}
+
+const eventOccurredAtMs = (event: ChangeEvent): number | undefined => {
+  const flat = asRecord(event) ?? {}
+  const timestamp = stringValue(flat.occurredAt) ?? stringValue(flat.timestamp)
+  const parsed = timestamp ? Date.parse(timestamp) : Number.NaN
+  return Number.isFinite(parsed) ? parsed : undefined
 }
 
 const eventSequenceNumber = (eventId: string): number | undefined => {

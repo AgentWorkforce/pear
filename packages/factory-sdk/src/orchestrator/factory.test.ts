@@ -509,7 +509,7 @@ class RosterPidHarnessClient implements HarnessDriverClientLike {
 class CountingEventsMount extends FakeMountClient {
   getEventsCalls = 0
 
-  override async getEvents(opts: { cursor?: string; limit?: number }): Promise<EventPage> {
+  override async getEvents(opts: { cursor?: string; limit?: number; provider?: string; last?: number }): Promise<EventPage> {
     this.getEventsCalls += 1
     return super.getEvents(opts)
   }
@@ -573,7 +573,7 @@ class SlackSyncStatusMount extends FakeMountClient {
     return provider === 'slack' ? this.slackStatus : undefined
   }
 
-  override async getEvents(opts: { cursor?: string; limit?: number }): Promise<EventPage> {
+  override async getEvents(opts: { cursor?: string; limit?: number; provider?: string; last?: number }): Promise<EventPage> {
     this.eventsReadCount += 1
     return super.getEvents(opts)
   }
@@ -5146,6 +5146,38 @@ describe('FactoryLoop', () => {
     expect(infos.filter((info) =>
       info[0] === '[factory] Slack sync soft-degraded but event watermark is fresh; continuing Slack writeback',
     )).toHaveLength(2)
+  })
+
+  it('bypasses soft Slack sync degradation from flat cloud event feed fields', async () => {
+    const clock = new ManualClock()
+    const mount = new SlackSyncStatusMount({ [issuePath(146)]: issueFile(146) })
+    mount.slackStatus = { provider: 'slack', status: 'lagging' }
+    mount.emit({
+      eventId: 'evt-slack-flat-146',
+      type: 'file.updated',
+      path: '/slack/channels/C0FACTORY__factory-e2e/messages/1781267200_000000/meta.json',
+      provider: 'slack',
+      timestamp: new Date(clock.now()).toISOString(),
+    } as unknown as ChangeEvent)
+    const factory = createFactory(config({ slack: slackConfig() }), {
+      mount,
+      fleet: new FakeFleetClient(),
+      triage: new StaticTriage(),
+      clock,
+    })
+
+    const report = await factory.runOnce()
+
+    expect(report.dispatched.map((result) => result.issue.key)).toEqual(['AR-146'])
+    expect(mount.writes.filter((write) => isSlackRootWritePath(write.path))).toHaveLength(1)
+    expect(factory.status()).toMatchObject({
+      slackDegraded: false,
+      counters: {
+        dispatched: 1,
+        slackEventWatermarkRefreshes: 1,
+        slackGateBypassedByEventWatermark: 1,
+      },
+    })
   })
 
   it('keeps hard Slack sync failures blocking even when the Slack event watermark is fresh', async () => {
