@@ -2257,7 +2257,7 @@ export class FactoryLoop implements Factory {
           issue: templateIssueFromRecord(record, issue),
           route: routeForImplementer(record, implementer.spec),
           role: 'implementer',
-          config: { mergePolicy: this.#config.mergePolicy },
+          config: { mergePolicy: this.#config.mergePolicy, terminalState: this.#config.terminalState },
           reviewerName,
           implementerNames,
           slackDispatchThread: this.#slackDispatchThreadFor(record),
@@ -2433,7 +2433,7 @@ export class FactoryLoop implements Factory {
         issue: templateIssueFromRecord(record, issue),
         route: route ?? { repo: prRef.repo },
         role: 'babysitter',
-        config: { mergePolicy: this.#config.mergePolicy },
+        config: { mergePolicy: this.#config.mergePolicy, terminalState: this.#config.terminalState },
         reviewerName,
         implementerNames,
         pr: { number: prRef.prNumber, url: prRef.url },
@@ -2528,14 +2528,22 @@ export class FactoryLoop implements Factory {
     if (!owner || !name) {
       return []
     }
-    try {
-      const tree = await this.#mount.listTree(`/github/repos/${owner}/${name}/pulls/`)
-      // Match .../pulls/<n>/... and .../pulls/<n>__<slug>/... for this PR number.
-      const numberSegment = new RegExp(`/pulls/${prNumber}(?:__[^/]*)?/`, 'u')
-      return tree.filter((path) => path.endsWith('.json') && numberSegment.test(path))
-    } catch {
-      return []
+    // Scan both the nested <owner>/<repo> and the flat <owner>__<repo> pulls
+    // roots so the readiness guard finds the PR meta regardless of mount layout.
+    const roots = [`/github/repos/${owner}/${name}/pulls/`, `/github/repos/${owner}__${name}/pulls/`]
+    // Match .../pulls/<n>(__slug)?(/...)? for this PR number, in either the
+    // nested directory or flat <n>.json / by-id/<n>.json forms.
+    const numberSegment = new RegExp(`/pulls/(?:by-id/)?${prNumber}(?:__[^/]*)?(?:/|\\.json$)`, 'u')
+    const found: string[] = []
+    for (const root of roots) {
+      try {
+        const tree = await this.#mount.listTree(root)
+        found.push(...tree.filter((path) => path.endsWith('.json') && numberSegment.test(path)))
+      } catch {
+        // try the next root
+      }
     }
+    return found
   }
 
   async #completeIssue(record: InFlightIssue, opts: { humanReview?: boolean } = {}): Promise<void> {
@@ -2544,9 +2552,13 @@ export class FactoryLoop implements Factory {
       return
     }
     this.#completionInFlight.add(completionKey)
-    // `human-review` is only honored when the operator configured the UUID;
-    // otherwise we fall back to `done` so the issue never gets stuck.
-    const humanReview = opts.humanReview === true && Boolean(this.#config.stateIds.humanReview)
+    // Land in `human-review` only when the operator opted into that terminal
+    // state AND configured its UUID; otherwise fall back to `done` (the legacy
+    // terminal) so an operator who sets terminalState: 'done' keeps it and the
+    // issue never gets stuck waiting on an unconfigured state.
+    const humanReview = opts.humanReview === true &&
+      this.#config.terminalState === 'human-review' &&
+      Boolean(this.#config.stateIds.humanReview)
     const targetState = humanReview ? this.#config.stateIds.humanReview! : this.#config.stateIds.done
     const statusLabel = humanReview ? 'in human review' : 'done'
     try {
@@ -3639,14 +3651,21 @@ const isGithubIssueTreePath = (path: string): boolean =>
   /^\/github\/repos\/[^/]+\/[^/]+\/issues\/.+/u.test(path)
 
 const githubPullPathParts = (path: string): { owner: string; repo: string; number: number } | undefined => {
-  // Tolerate every webhook-fed PR mount layout we've seen:
-  //   .../pulls/<n>__<slug>/meta.json   (current relayfile-adapters shape)
-  //   .../pulls/<n>/meta.json | metadata.json
-  //   .../pulls/<n>.json | .../pulls/by-id/<n>.json   (legacy flat)
+  // Tolerate every webhook-fed PR mount layout we've seen, across both the
+  // nested <owner>/<repo> directory shape and the flat <owner>__<repo> shape
+  // (the latter is what githubPullRoot / resolveIssuePrFromMount still use):
+  //   .../<owner>/<repo>/pulls/<n>__<slug>/meta.json   (current adapters shape)
+  //   .../<owner>__<repo>/pulls/by-id/<n>.json         (flat mount shape)
+  //   .../pulls/<n>/meta.json | metadata.json | .../pulls/<n>.json   (variants)
   // Deliberately ignores siblings like pulls/_index.json and pulls/<n>/comments/*.
-  const match = path.match(/^\/github\/repos\/([^/]+)\/([^/]+)\/pulls\/(?:by-id\/)?(\d+)(?:__[^/]*)?(?:\/(?:meta|metadata)\.json|\.json)$/u)
+  const match = path.match(
+    /^\/github\/repos\/(?:([^/]+)\/([^/]+)|([^/]+)__([^/]+))\/pulls\/(?:by-id\/)?(\d+)(?:__[^/]*)?(?:\/(?:meta|metadata)\.json|\.json)$/u,
+  )
   if (!match) return undefined
-  return { owner: match[1]!, repo: match[2]!, number: Number(match[3]) }
+  const owner = match[1] ?? match[3]
+  const repo = match[2] ?? match[4]
+  if (!owner || !repo) return undefined
+  return { owner, repo, number: Number(match[5]) }
 }
 
 const isGithubPullFilePath = (path: string): boolean =>
@@ -3950,7 +3969,13 @@ const isAgentAlreadyExistsError = (error: unknown): boolean => {
 }
 
 const defaultRestartPolicy = (spec: AgentSpec): AgentSpec['restartPolicy'] | undefined =>
-  spec.role === 'implementer' ? { maxRestarts: 3, strategy: 'resume' } as AgentSpec['restartPolicy'] : spec.restartPolicy
+  // Implementers and babysitters are both long-running and resumable — the
+  // babysitter shepherds an open PR over many CI/review cycles, so an abnormal
+  // exit should resume its session rather than drop the PR. The reviewer is
+  // short-lived and keeps the fleet default.
+  spec.role === 'implementer' || spec.role === 'babysitter'
+    ? { maxRestarts: 3, strategy: 'resume' } as AgentSpec['restartPolicy']
+    : spec.restartPolicy
 
 const slackPayloadTs = (threadId: string): string => threadId.replace(/_/g, '.')
 

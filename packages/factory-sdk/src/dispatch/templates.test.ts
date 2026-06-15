@@ -83,11 +83,33 @@ describe('renderAgentTask', () => {
     expect(task).toContain('ar-123-impl')
     expect(task).toContain('ar-123-review')
     expect(task).toContain('[factory-pr-ready] AR-123')
-    expect(task).toContain('Do NOT auto-merge; stop at Human Review.')
+    expect(task).toContain('move the issue to Human Review')
+    expect(task).toContain('stop at Human Review')
     // It must NOT instruct opening a PR (one already exists).
     expect(task).not.toContain('Open a PR targeting `main` when done.')
     // Human-chat affordance.
     expect(task).toContain('discuss the PR with the human')
+  })
+
+  it('adapts the babysitter task to terminalState: done (no Human Review wording)', async () => {
+    const doneConfig = FactoryConfigSchema.parse({
+      workspaceId: 'workspace',
+      repos: { byLabel: { pear: 'pear' } },
+      terminalState: 'done',
+    })
+
+    const task = renderAgentTask({
+      issue,
+      route: { repo: 'pear', clonePath: '/tmp/pear' },
+      role: 'babysitter',
+      config: doneConfig,
+      reviewerName: 'ar-123-review',
+      pr: { number: 482 },
+    })
+
+    expect(task).toContain('move the issue to Done')
+    expect(task).not.toContain('Human Review')
+    expect(task).toContain('the factory moves the issue to Done once you signal ready')
   })
 
   it('renders clone/worktree instructions and on-green merge policy for cross-repo routes', () => {
