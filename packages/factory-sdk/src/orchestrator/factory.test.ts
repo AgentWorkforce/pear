@@ -6650,8 +6650,8 @@ describe('FactoryLoop PR babysitter', () => {
     expect(states.some((s) => s.stateId === humanReviewStateId)).toBe(false)
   })
 
-  it('ignores a ready signal when the PR meta shows the PR already merged/closed', async () => {
-    const issue = realIssueFile(405, ready, { title: 'Real babysitter not ready' })
+  it('advances to Done when the PR merged before the babysitter ready signal', async () => {
+    const issue = realIssueFile(405, ready, { title: 'Real babysitter already merged' })
     const mount = new FakeMountClient({ [issuePath(405)]: issue })
     seedPrMeta(mount, 'AgentWorkforce/pear', 405, { state: 'closed', merged: true })
     const fleet = new FakeFleetClient()
@@ -6669,12 +6669,115 @@ describe('FactoryLoop PR babysitter', () => {
     await vi.waitFor(() => expect(fleet.spawns.map((s) => s.name)).toContain('ar-405-babysit'))
 
     fleet.emitAgentMessage({ from: 'ar-405-babysit', target: 'factory', body: '[factory-pr-ready] AR-405' })
-    await flush()
 
+    await vi.waitFor(() => expect(factory.status().counters.done).toBe(1))
     expect(factory.status().counters.humanReview).toBeUndefined()
     expect(states.some((s) => s.stateId === humanReviewStateId)).toBe(false)
-    expect(factory.status().inFlight.map((ref) => ref.key)).toEqual(['AR-405'])
-    expect(fleet.releases).toEqual([])
+    expect(states.at(-1)).toEqual({ key: 'AR-405', stateId: done })
+    expect(factory.status().inFlight).toEqual([])
+    expect(fleet.releases.map((r) => r.name).sort()).toEqual(['ar-405-babysit', 'ar-405-impl', 'ar-405-review'])
+  })
+
+  it('advances a persisted Human Review issue to Done on a merged PR metadata event', async () => {
+    const issue = realIssueFile(408, humanReviewStateId, { title: 'Real merged after review' })
+    const mount = new FakeMountClient({ [issuePath(408)]: issue })
+    const states: Array<{ key: string; stateId: string }> = []
+    const factory = createFactory(babysitterConfig(), {
+      mount,
+      fleet: new FakeFleetClient(),
+      triage: new StaticTriage(),
+      linear: recordingLinear(states),
+    })
+
+    await factory.start({ mode: 'live', liveSubscription: { transport: 'subscribe' } })
+    try {
+      const prPath = '/github/repos/AgentWorkforce/pear/pulls/408/metadata.json'
+      mount.files.set(prPath, {
+        content: {
+          number: 408,
+          state: 'closed',
+          merged: true,
+          title: 'Ship the review gate',
+          body: 'Linear: AR-408',
+          head_ref: 'release-review-gate',
+          url: 'https://github.com/AgentWorkforce/pear/pull/408',
+        },
+      })
+      mount.emit(changeEvent(prPath, 'pr-408-merged'))
+
+      await vi.waitFor(() => expect(factory.status().counters.mergedPrAdvancedDone).toBe(1))
+      expect(states).toEqual([{ key: 'AR-408', stateId: done }])
+      expect(factory.status().counters.done).toBe(1)
+    } finally {
+      await factory.stop()
+    }
+  })
+
+  it('suppresses duplicate merged PR events after advancing a Human Review issue', async () => {
+    const issue = realIssueFile(410, humanReviewStateId, { title: 'Real duplicate merge event' })
+    const mount = new FakeMountClient({ [issuePath(410)]: issue })
+    const states: Array<{ key: string; stateId: string }> = []
+    const factory = createFactory(babysitterConfig(), {
+      mount,
+      fleet: new FakeFleetClient(),
+      triage: new StaticTriage(),
+      linear: recordingLinear(states),
+    })
+
+    await factory.start({ mode: 'live', liveSubscription: { transport: 'subscribe' } })
+    try {
+      const prPath = '/github/repos/AgentWorkforce__pear/pulls/by-id/410.json'
+      mount.files.set(prPath, {
+        content: {
+          number: 410,
+          state: 'closed',
+          merged: true,
+          title: 'AR-410: merged once',
+          head_ref: 'review-gate',
+        },
+      })
+      mount.emit(changeEvent(prPath, 'pr-410-merged-1'))
+      await vi.waitFor(() => expect(factory.status().counters.mergedPrAdvancedDone).toBe(1))
+
+      mount.emit(changeEvent(prPath, 'pr-410-merged-2'))
+      await flush()
+
+      expect(states).toEqual([{ key: 'AR-410', stateId: done }])
+      expect(factory.status().counters.mergedPrAdvanceDuplicatesSuppressed).toBe(1)
+    } finally {
+      await factory.stop()
+    }
+  })
+
+  it('re-dispatches when an operator moves Human Review back to Ready for Agent', async () => {
+    vi.useFakeTimers()
+    try {
+      const issue = realIssueFile(411, ready, { title: 'Real human review redispatch' })
+      const mount = new FakeMountClient({ [issuePath(411)]: issue })
+      seedPrMeta(mount, 'AgentWorkforce/pear', 411, { state: 'open', draft: false })
+      const fleet = new FakeFleetClient()
+      const factory = createFactory(babysitterConfig(), {
+        mount,
+        fleet,
+        triage: new StaticTriage(),
+        probePrResolver: async () => ({ repo: 'AgentWorkforce/pear', prNumber: 411 }),
+      })
+
+      const decision = await factory.triageIssue(parseLinearIssue(issuePath(411), issue))
+      await factory.dispatch(decision)
+      fleet.emitAgentExit('ar-411-impl', 'worker_exited')
+      await vi.waitFor(() => expect(fleet.spawns.map((s) => s.name)).toContain('ar-411-babysit'))
+      fleet.emitAgentMessage({ from: 'ar-411-babysit', target: 'factory', body: '[factory-pr-ready] AR-411' })
+      await vi.waitFor(() => expect(factory.status().counters.humanReview).toBe(1))
+
+      mount.files.set(issuePath(411), { content: realIssueFile(411, ready, { title: 'Real human review redispatch' }) })
+      await factory.runOnce()
+
+      expect(factory.status().counters.dispatchTerminalReopened).toBe(1)
+      expect(fleet.spawns.filter((spawn) => spawn.name === 'ar-411-impl')).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('spawns the babysitter from a PR metadata change event (webhook-driven)', async () => {
