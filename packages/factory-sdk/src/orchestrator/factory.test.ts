@@ -6801,12 +6801,14 @@ describe('FactoryLoop PR babysitter', () => {
 
   it('advances a Human Review issue to Done when the linked PR is merged', async () => {
     const issue = realIssueFile(410, humanReviewStateId, { title: 'Real merged after review' })
+    const related = realIssueFile(412, humanReviewStateId, { title: 'Real related review' })
     const prPath = '/github/repos/AgentWorkforce/pear/pulls/410/metadata.json'
     const mount = new FakeMountClient({
       [issuePath(410)]: issue,
+      [issuePath(412)]: related,
       [prPath]: prFile(410, {
         title: 'Real merged after review',
-        body: 'Linear: AR-410',
+        body: 'Linear: AR-412',
         head_ref: 'ar-410-fix',
         state: 'MERGED',
         merged: true,
@@ -6827,6 +6829,7 @@ describe('FactoryLoop PR babysitter', () => {
       await vi.waitFor(() => expect(mount.writes).toContainEqual({ path: issuePath(410), content: { stateId: done } }))
       expect(factory.status().counters.mergedPrAdvancedDone).toBe(1)
       expect(factory.status().counters.done).toBe(1)
+      expect(mount.writes.some((write) => write.path === issuePath(412))).toBe(false)
 
       mount.emit(changeEvent(prPath, 'pr-410-merged-replay'))
       await flush()

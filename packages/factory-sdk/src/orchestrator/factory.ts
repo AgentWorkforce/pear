@@ -2399,7 +2399,7 @@ export class FactoryLoop implements Factory {
 
   async #advanceMergedPrToDone(snapshot: PullSnapshot, record?: InFlightIssue): Promise<void> {
     if (record) {
-      await this.#completeIssue(record, { targetState: 'done', runMergeGate: false })
+      await this.#completeIssue(record, { targetState: 'done', runMergeGate: false, completionReason: 'pr-merged' })
       return
     }
 
@@ -2450,6 +2450,11 @@ export class FactoryLoop implements Factory {
       this.#config.stateIds.agentImplementing,
       this.#config.stateIds.humanReview,
     ].filter((stateId): stateId is string => Boolean(stateId)))
+    let best: { issue: LinearIssue; score: number } | undefined
+    const scanStartedAtMs = this.#clock.now()
+    // This no-record path runs after agents are released, so there is no
+    // tracked PR identity left. Keep the scan simple and prefer branch identity
+    // over title/body references to avoid "related to AR-N" body false positives.
     for (const path of await this.#mount.listTree(ISSUE_ROOT)) {
       if (!isIssueFilePath(path)) {
         continue
@@ -2461,11 +2466,18 @@ export class FactoryLoop implements Factory {
       if (!isRealLinearIssue(issue) || !isInFactoryScope(issue, this.#config.safety)) {
         continue
       }
-      if (prSnapshotReferencesIssue(snapshot, issue.key)) {
-        return issue
+      const score = prSnapshotIssueMatchScore(snapshot, issue.key)
+      if (score > 0 && (!best || score > best.score)) {
+        best = { issue, score }
       }
     }
-    return undefined
+    this.#logger.debug?.('[factory] scanned Linear issues for merged PR advance', {
+      prNumber: snapshot.number,
+      durationMs: this.#clock.now() - scanStartedAtMs,
+      matchedIssue: best?.issue.key,
+      matchScore: best?.score,
+    })
+    return best?.issue
   }
 
   // Safety net for a missed PR-open mount event: resolve the PR via the existing
@@ -2630,7 +2642,10 @@ export class FactoryLoop implements Factory {
     return found
   }
 
-  async #completeIssue(record: InFlightIssue, opts: { targetState?: 'configured' | 'done'; runMergeGate?: boolean } = {}): Promise<void> {
+  async #completeIssue(
+    record: InFlightIssue,
+    opts: { targetState?: 'configured' | 'done'; runMergeGate?: boolean; completionReason?: 'agents-completed' | 'pr-merged' } = {},
+  ): Promise<void> {
     const completionKey = issueKey(record.issue)
     if (this.#completionInFlight.has(completionKey)) {
       return
@@ -2655,12 +2670,15 @@ export class FactoryLoop implements Factory {
 
       if (this.#slack && this.#config.slack && !await this.#shouldSkipSlackWriteback('completion-thread')) {
         try {
-          const completionText = humanReview
-            ? `${record.issue.key}: factory agents completed; awaiting human review.\nStatus: ${statusLabel}\nMerge policy: ${this.#config.mergePolicy}`
-            : `${record.issue.key}: factory agents completed.\nStatus: ${statusLabel}\nMerge policy: ${this.#config.mergePolicy}`
-          const stateText = humanReview
-            ? `${record.issue.key}: awaiting human review; Linear state set to ${statusLabel}.`
-            : `${record.issue.key}: Linear state set to ${statusLabel}.`
+          const merged = opts.completionReason === 'pr-merged'
+          const completionText = merged
+            ? `${record.issue.key}: PR merged; Linear state set to ${statusLabel}.`
+            : `${record.issue.key}: factory agents completed${humanReview ? '; awaiting human review' : ''}.\nStatus: ${statusLabel}\nMerge policy: ${this.#config.mergePolicy}`
+          const stateText = merged
+            ? `${record.issue.key}: PR merged; Linear state set to ${statusLabel}.`
+            : humanReview
+              ? `${record.issue.key}: awaiting human review; Linear state set to ${statusLabel}.`
+              : `${record.issue.key}: Linear state set to ${statusLabel}.`
           const root = await this.#slack.postThread({
             channel: this.#config.slack.channel,
             text: completionText,
@@ -3779,10 +3797,12 @@ const parsePullSnapshot = (content: unknown, fallbackNumber: number): PullSnapsh
   }
 }
 
-const prSnapshotReferencesIssue = (snapshot: PullSnapshot, issueKey: string): boolean =>
-  containsIssueKey(snapshot.headRef ?? '', issueKey) ||
-  containsIssueKey(snapshot.title ?? '', issueKey) ||
-  containsExplicitIssueReference(snapshot.body ?? '', issueKey)
+const prSnapshotIssueMatchScore = (snapshot: PullSnapshot, issueKey: string): number => {
+  if (containsIssueKey(snapshot.headRef ?? '', issueKey)) return 30
+  if (containsIssueKey(snapshot.title ?? '', issueKey)) return 20
+  if (containsExplicitIssueReference(snapshot.body ?? '', issueKey)) return 10
+  return 0
+}
 
 const prMetaShowsMerged = (snapshot: PullSnapshot): boolean =>
   snapshot.merged === true || snapshot.state?.trim().toUpperCase() === 'MERGED'

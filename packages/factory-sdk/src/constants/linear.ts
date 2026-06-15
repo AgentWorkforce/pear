@@ -1,3 +1,6 @@
+// AR-team workflow state UUIDs. FactoryConfig deliberately omits humanReview
+// from its default stateIds so non-AR operators must opt into their own review
+// state before terminalState: 'human-review' changes behavior.
 export const LINEAR_STATE_IDS = {
   readyForAgent: 'b9bec744-b60c-4745-8022-d90d6ab59ae3',
   agentImplementing: '39b9881d-1196-4c95-8b80-a20f0c7263f7',
