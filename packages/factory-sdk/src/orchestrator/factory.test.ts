@@ -3775,35 +3775,13 @@ describe('FactoryLoop', () => {
     expect(fleet.spawns.map((spawn) => spawn.name)).toEqual(['ar-721-impl-pear', 'ar-721-review'])
   })
 
-  it('dispatches unlabeled issues through the configured default repo route', async () => {
-    const unlabeledIssue = realIssueFile(722, ready, { labels: [] })
-    const mount = new FakeMountClient({ [issuePath(722)]: unlabeledIssue })
-    const fleet = new FakeFleetClient()
-    const factory = createFactory(config(), { mount, fleet, triage: new StaticTriage() })
-
-    const result = await factory.dispatch(await factory.triageIssue(parseLinearIssue(issuePath(722), unlabeledIssue)))
-
-    expect(result.agents.map((agent) => agent.name)).toEqual(['ar-722-impl-pear', 'ar-722-review'])
-    expect(fleet.spawns.map((spawn) => [spawn.name, spawn.cwd])).toEqual([
-      ['ar-722-impl-pear', '/work/pear'],
-      ['ar-722-review', '/work/pear'],
-    ])
-  })
-
-  it('fails dispatch loudly when no labels are present and no default route is configured', async () => {
+  it('fails dispatch loudly when no labels are present', async () => {
     const unlabeledIssue = realIssueFile(722, ready, { labels: [] })
     const mount = new FakeMountClient({ [issuePath(722)]: unlabeledIssue })
     const fleet = new FakeFleetClient()
     const comments: string[] = []
     const warnings: unknown[][] = []
-    const factory = createFactory(config({
-      repos: {
-        byLabel: { pear: 'AgentWorkforce/pear' },
-        byProject: {},
-        keywordRules: [],
-        clonePaths: { 'AgentWorkforce/pear': '/work/pear' },
-      },
-    }), {
+    const factory = createFactory(config(), {
       mount,
       fleet,
       triage: new StaticTriage(),
@@ -3828,24 +3806,17 @@ describe('FactoryLoop', () => {
 
     expect(result.agents).toEqual([])
     expect(fleet.spawns).toEqual([])
-    expect(comments).toEqual([expect.stringContaining('no repos.default route is configured')])
+    expect(comments).toEqual([expect.stringContaining('No Linear labels were present')])
     expect(warnings[0]?.[0]).toBe('[factory] skipped dispatch due to invalid repo labels')
   })
 
-  it('fails dispatch loudly when labels do not map through repos.byLabel and no default route is configured', async () => {
+  it('fails dispatch loudly when labels do not map through repos.byLabel', async () => {
     const unmappedIssue = realIssueFile(723, ready, { labels: [{ name: 'unknown' }] })
     const mount = new FakeMountClient({ [issuePath(723)]: unmappedIssue })
     const fleet = new FakeFleetClient()
     const comments: string[] = []
     const warnings: unknown[][] = []
-    const factory = createFactory(config({
-      repos: {
-        byLabel: { pear: 'AgentWorkforce/pear' },
-        byProject: {},
-        keywordRules: [],
-        clonePaths: { 'AgentWorkforce/pear': '/work/pear' },
-      },
-    }), {
+    const factory = createFactory(config(), {
       mount,
       fleet,
       triage: new StaticTriage(),
@@ -3875,7 +3846,7 @@ describe('FactoryLoop', () => {
     expect(warnings[0]?.[0]).toBe('[factory] skipped dispatch due to invalid repo labels')
   })
 
-  it('fails dispatch loudly when repo routes exceed triage.maxImplementers', async () => {
+  it('fails dispatch loudly when repo labels exceed triage.maxImplementers capped at four', async () => {
     const manyLabelsIssue = realIssueFile(724, ready, {
       labels: [{ name: 'pear' }, { name: 'cloud' }, { name: 'relayfile' }],
     })
@@ -3923,8 +3894,8 @@ describe('FactoryLoop', () => {
 
     expect(result.agents).toEqual([])
     expect(fleet.spawns).toEqual([])
-    expect(comments[0]).toContain('Too many repo routes')
-    expect(comments[0]).toContain('triage.maxImplementers=2')
+    expect(comments[0]).toContain('Too many repo labels')
+    expect(comments[0]).toContain('capped at 2')
   })
 
   it('dedupes dispatch attempts by issue key even when duplicate detections use different paths', async () => {
