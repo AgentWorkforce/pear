@@ -41,6 +41,7 @@ import type {
   CloudAgentStatus,
   ConnectedIntegration,
   CreateCloudAgentInput,
+  FactoryNodeConfig,
   FsDirEntry,
   FsReadPreviewResult,
   GitBranchInfo,
@@ -971,46 +972,45 @@ export const pearMock: PearAPI = {
   },
   factory: {
     status: async () => ({
-      running: false,
-      configPath: 'factory.config.json',
-      logs: [],
-      agents: []
-    }),
-    start: async (configPath?: string) => ({
-      running: true,
-      pid: 4242,
-      configPath: configPath || 'factory.config.json',
-      logs: [{ ts: Date.now(), stream: 'info' as const, text: 'mock factory started' }],
-      agents: []
-    }),
-    stop: async () => ({
-      running: false,
-      configPath: 'factory.config.json',
-      logs: [{ ts: Date.now(), stream: 'info' as const, text: 'mock factory stopped' }],
-      agents: []
+      source: 'cloud' as const,
+      state: 'empty' as const,
+      connected: true,
+      workspaceId: 'mock',
+      cloudUrl: 'https://agentrelay.com/cloud',
+      updatedAt: new Date().toISOString(),
+      message: 'Mock cloud factory has no active work',
+      agents: [],
+      issues: []
     }),
     readConfig: async (configPath?: string) => ({
       configPath: configPath || 'factory.config.json',
       exists: true,
       config: {
         workspaceId: 'mock',
-        subscription: { teams: [], labels: [], projects: [], assignees: [] },
-        repos: { byLabel: {}, clonePaths: {}, keywordRules: [], default: 'AgentWorkforce/pear' },
-        triage: { maxImplementers: 2 },
-        batchSize: 1,
-        mergePolicy: 'never',
-        models: {},
-        safety: { requireTitlePrefix: '[factory-e2e]', requireLabel: 'factory', requireTeamKey: 'AR' }
+        capabilities: ['spawn:claude', 'spawn:codex'],
+        cloneRoot: '/mock/workspaces',
+        clonePaths: {},
+        dryRun: false
       },
       errors: []
     }),
-    saveConfig: async (config: unknown, configPath?: string) => ({
-      configPath: configPath || 'factory.config.json',
-      exists: true,
-      config,
-      errors: []
-    }),
-    onEvent: () => () => undefined
+    saveConfig: async (config: unknown, configPath?: string) => {
+      const record = config && typeof config === 'object' && !Array.isArray(config)
+        ? config as Partial<FactoryNodeConfig>
+        : {}
+      return {
+        configPath: configPath || 'factory.config.json',
+        exists: true,
+        config: {
+          workspaceId: typeof record.workspaceId === 'string' ? record.workspaceId : undefined,
+          capabilities: Array.isArray(record.capabilities) ? record.capabilities : [],
+          cloneRoot: typeof record.cloneRoot === 'string' ? record.cloneRoot : undefined,
+          clonePaths: record.clonePaths && typeof record.clonePaths === 'object' ? record.clonePaths : {},
+          dryRun: typeof record.dryRun === 'boolean' ? record.dryRun : false
+        },
+        errors: []
+      }
+    }
   },
   burn: {
     listAgentSummaries: async (agents: BurnAgentInput[]) => agents.map(emptyBurnSummary),

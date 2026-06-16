@@ -61,7 +61,7 @@ function tabSubtitle(tab: AppTab, projectNameById: Map<string, string>): string 
     case 'broker-details':
       return projectName ? `${projectName} relay` : 'Connection status'
     case 'factory':
-      return projectName ? `${projectName} factory` : 'Factory'
+      return projectName ? `${projectName} factory cloud` : 'Factory cloud'
     case 'source-control':
       return projectName ? `${projectName} changes` : 'File changes'
     case 'ai-hist':
@@ -203,7 +203,7 @@ export function AppTopBar(): React.ReactNode {
             : 'text-[var(--pear-text-faint)] hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text)]'
         }`}
         title="Open factory"
-        aria-label="Open factory"
+        aria-label="Open factory cloud status"
       >
         <Factory size={15} className={factoryActive ? 'text-[var(--pear-accent-bright)]' : ''} />
         <span>Factory</span>
