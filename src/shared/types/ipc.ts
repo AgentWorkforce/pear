@@ -609,7 +609,7 @@ export type CloudAgentEvent =
   | { type: 'sync-mode-changed'; projectId: string; syncMode: CloudAgentSyncMode }
   | { type: 'error'; projectId: string; message: string }
 
-export type ProactiveAgentHarness = 'claude' | 'codex' | 'opencode'
+export type ProactiveAgentHarness = 'claude' | 'codex' | 'opencode' | 'grok'
 export type ProactiveAgentStatus = 'draft' | 'warming' | 'active' | 'paused' | 'error'
 export type ProactiveAgentRunStatus = 'running' | 'succeeded' | 'failed'
 export type ProactiveAgentRunMode = 'cloud' | 'local'

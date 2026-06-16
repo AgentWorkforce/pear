@@ -70,12 +70,24 @@ export function GeminiIcon({ className }: AgentIconProps): React.ReactNode {
   )
 }
 
+export function GrokIcon({ className }: AgentIconProps): React.ReactNode {
+  return (
+    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
+      <path
+        d="M13.545 11.998 20.5 4H18.64L12.72 10.89 7.955 4H2l7.29 10.608L2 22.5h1.86l6.38-7.408 5.1 7.408H21.5l-7.955-11.502Zm-2.26 2.621-.74-1.059L4.52 5.26h2.535l4.753 6.799.74 1.059 6.177 8.836H16.19l-4.905-7.335Z"
+        fill="currentColor"
+      />
+    </svg>
+  )
+}
+
 const AGENT_ICON_COMPONENTS = {
   claude: ClaudeIcon,
   codex: CodexIcon,
   copilot: CopilotIcon,
   opencode: OpenCodeIcon,
-  gemini: GeminiIcon
+  gemini: GeminiIcon,
+  grok: GrokIcon
 } satisfies Record<string, React.ComponentType<AgentIconProps>>
 
 export function getAgentIcon(cli?: string): React.ComponentType<AgentIconProps> | null {

@@ -17,7 +17,7 @@ export type ProactiveAgentDraft = {
   name: string
   description?: string
   cloudAgentId: string
-  harness: 'claude' | 'codex' | 'opencode'
+  harness: 'claude' | 'codex' | 'opencode' | 'grok'
   model: string
   systemPrompt: string
   integrations: Record<string, Record<string, unknown>>
