@@ -41,7 +41,6 @@ import type {
   ConnectedIntegration,
   CreateCloudAgentInput,
   FactoryConfigReadResult,
-  FactoryEvent,
   FactoryStatus,
   FsDirEntry,
   FsReadPreviewResult,
@@ -129,7 +128,6 @@ export type {
   ConnectedIntegration,
   CreateCloudAgentInput,
   FactoryConfigReadResult,
-  FactoryEvent,
   FactoryStatus,
   FsDirEntry,
   FsReadPreviewResult,
@@ -301,15 +299,10 @@ const api = {
   },
   factory: {
     status: () => invoke<FactoryStatus>('factory:status'),
-    start: (configPath?: string, projectRoot?: string) =>
-      invoke<FactoryStatus>('factory:start', configPath, projectRoot),
-    stop: () => invoke<FactoryStatus>('factory:stop'),
     readConfig: (configPath?: string, projectRoot?: string) =>
       invoke<FactoryConfigReadResult>('factory:read-config', configPath, projectRoot),
     saveConfig: (config: unknown, configPath?: string, projectRoot?: string) =>
-      invoke<FactoryConfigReadResult>('factory:save-config', config, configPath, projectRoot),
-    onEvent: (callback: (event: FactoryEvent) => void) =>
-      subscribe<FactoryEvent>('factory:event', callback)
+      invoke<FactoryConfigReadResult>('factory:save-config', config, configPath, projectRoot)
   },
   burn: {
     listAgentSummaries: (agents: BurnAgentInput[]) =>
