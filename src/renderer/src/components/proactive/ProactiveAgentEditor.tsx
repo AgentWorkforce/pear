@@ -87,12 +87,6 @@ type KeyValueRow = {
   value: string
 }
 
-const MODEL_OPTIONS: Record<Harness, string[]> = {
-  claude: ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5'],
-  codex: ['gpt-5.2', 'gpt-5.1-codex', 'gpt-5.1-codex-mini'],
-  opencode: ['claude-sonnet-4-6', 'gpt-5.2', 'qwen3-coder'],
-  grok: ['grok-build-0.1', 'grok-code-fast-1', 'grok-code-fast']
-}
 
 const DEPLOY_PHASES: DeployPhase[] = [
   { id: 'validate', label: 'Validate', status: 'pending' },
@@ -125,7 +119,7 @@ function createDefaultDraft(): ProactiveAgentDraft {
     description: '',
     cloudAgentId: '',
     harness: 'claude',
-    model: MODEL_OPTIONS.claude[0],
+    model: '',
     systemPrompt: 'You are a proactive agent. Use $VAR inputs when needed and act only when a trigger is relevant.',
     integrations: {},
     mount: { enabled: false },
@@ -208,7 +202,6 @@ function validateDraft(draft: ProactiveAgentDraft): ValidationErrors {
   if (!normalized.name) errors.name = 'Name is required.'
   if (!normalized.cloudAgentId) errors.cloudAgentId = 'Choose a cloud agent.'
   if (!normalized.harness) errors.harness = 'Choose a harness.'
-  if (!normalized.model) errors.model = 'Choose a model.'
   if (!normalized.systemPrompt) errors.systemPrompt = 'System prompt is required.'
   if (!normalized.handlerCode.trim()) errors.handlerCode = 'Handler code is required.'
   if (normalized.watch.length === 0 || normalized.watch.every((rule) => rule.paths.length === 0)) {
@@ -525,6 +518,7 @@ export function ProactiveAgentEditor({
   const [busy, setBusy] = useState(false)
   const [deploying, setDeploying] = useState(false)
   const [deployMessage, setDeployMessage] = useState<string | null>(null)
+  const [modelExpanded, setModelExpanded] = useState(false)
   const [deployPhases, setDeployPhases] = useState<DeployPhase[]>(DEPLOY_PHASES)
 
   useEffect(() => {
@@ -754,7 +748,7 @@ export function ProactiveAgentEditor({
   }
 
   function handleHarnessChange(harness: Harness): void {
-    patchDraft({ harness, model: MODEL_OPTIONS[harness][0] })
+    patchDraft({ harness })
   }
 
   return (
@@ -904,19 +898,37 @@ export function ProactiveAgentEditor({
                     <FieldError message={errors.harness} />
                   </label>
 
-                  <label className="block">
-                    <span className="text-xs font-medium text-[var(--pear-text-dim)]">Model</span>
-                    <select
-                      value={draft.model}
-                      onChange={(event) => patchDraft({ model: event.target.value })}
-                      className="mt-1 h-9 w-full rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 text-sm text-[var(--pear-text)] outline-none focus:border-[var(--pear-accent-dim)]"
-                    >
-                      {MODEL_OPTIONS[draft.harness].map((model) => (
-                        <option key={model} value={model}>{model}</option>
-                      ))}
-                    </select>
-                    <FieldError message={errors.model} />
-                  </label>
+                  <div className="block">
+                    {modelExpanded ? (
+                      <label className="block">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-medium text-[var(--pear-text-dim)]">Model</span>
+                          <button
+                            type="button"
+                            onClick={() => setModelExpanded(false)}
+                            className="text-xs text-[var(--pear-text-faint)] hover:text-[var(--pear-text-dim)]"
+                          >
+                            hide
+                          </button>
+                        </div>
+                        <input
+                          type="text"
+                          value={draft.model}
+                          onChange={(event) => patchDraft({ model: event.target.value })}
+                          placeholder="e.g. claude-opus-4-7"
+                          className="mt-1 h-9 w-full rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 text-sm text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent-dim)]"
+                        />
+                      </label>
+                    ) : (
+                      <button
+                        type="button"
+                        onClick={() => setModelExpanded(true)}
+                        className="text-xs text-[var(--pear-text-faint)] hover:text-[var(--pear-text-dim)]"
+                      >
+                        {draft.model ? `Model: ${draft.model}` : 'Set model'}
+                      </button>
+                    )}
+                  </div>
                 </div>
 
                 <label className="mt-4 block">
