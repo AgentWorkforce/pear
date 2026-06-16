@@ -3,6 +3,7 @@
 // src/renderer/src/lib/ipc.ts (the consumer-facing re-export) import from
 // here. The preload uses `satisfies PearAPI` to enforce that the
 // implementation matches this surface.
+import type { FactoryConfig } from '@agent-relay/factory'
 
 export type ViewMode =
   | 'terminal'
@@ -406,49 +407,54 @@ export interface BrokerStatusEvent {
   error?: string
 }
 
-export interface FactoryLogLine {
-  ts: number
-  stream: 'stdout' | 'stderr' | 'info'
-  text: string
-}
+export type FactoryNodeConfig = Pick<
+  FactoryConfig,
+  'capabilities' | 'clonePaths' | 'dryRun'
+> & Partial<Pick<FactoryConfig, 'workspaceId' | 'cloneRoot'>>
 
 export interface FactoryConfigReadResult {
   configPath: string
   exists: boolean
-  config: unknown
+  config: FactoryNodeConfig | null
   errors: string[]
   warning?: string
 }
 
 export interface FactoryAgentStatus {
+  id?: string
   name: string
   role?: string
+  status?: string
   issue?: {
     key: string
-    path: string
+    path?: string
+    title?: string
+    url?: string
   }
-  pids: number[]
+}
+
+export interface FactoryIssueStatus {
+  key: string
+  title?: string
+  url?: string
+  state?: string
+  repo?: string
+  assignee?: string
+  updatedAt?: string
 }
 
 export interface FactoryStatus {
-  running: boolean
-  pid?: number
-  configPath: string
-  logs: FactoryLogLine[]
-  heartbeat?: {
-    status: 'running' | 'idle' | 'stopping'
-    iteration: number
-    maxIterations: number
-    updatedAt: string
-    updatedAtMs: number
-    registryPath?: string
-    ageMs?: number
-    reason?: string
-  }
+  source: 'cloud'
+  state: 'unauthenticated' | 'unconfigured' | 'online' | 'empty' | 'unavailable'
+  connected: boolean
+  workspaceId?: string
+  cloudUrl?: string
+  updatedAt?: string
+  message?: string
+  counters?: Record<string, number>
   agents: FactoryAgentStatus[]
+  issues: FactoryIssueStatus[]
 }
-
-export type FactoryEvent = { type: 'factory:status'; status: FactoryStatus }
 
 export type GitFileStatusKind = 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked'
 
@@ -956,11 +962,8 @@ export interface PearAPI {
   }
   factory: {
     status: () => Promise<FactoryStatus>
-    start: (configPath?: string, projectRoot?: string) => Promise<FactoryStatus>
-    stop: () => Promise<FactoryStatus>
     readConfig: (configPath?: string, projectRoot?: string) => Promise<FactoryConfigReadResult>
     saveConfig: (config: unknown, configPath?: string, projectRoot?: string) => Promise<FactoryConfigReadResult>
-    onEvent: (callback: (event: FactoryEvent) => void) => () => void
   }
   burn: {
     listAgentSummaries: (agents: BurnAgentInput[]) => Promise<BurnAgentSummary[]>

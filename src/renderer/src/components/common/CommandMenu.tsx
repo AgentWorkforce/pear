@@ -109,9 +109,9 @@ export function CommandMenu(): React.ReactNode {
       id: 'factory',
       label: 'Factory',
       description: activeProject
-        ? 'Start, stop, and configure the issue factory'
-        : 'Add a project, then configure the issue factory',
-      keywords: ['factory', 'linear', 'issues', 'automation', 'settings'],
+        ? 'View cloud factory status and edit local node config'
+        : 'Add a project, then view cloud factory status',
+      keywords: ['factory', 'linear', 'issues', 'cloud', 'node config'],
       Icon: Factory,
       run: () => {
         openTab({ kind: 'factory', projectId: activeProject?.id })

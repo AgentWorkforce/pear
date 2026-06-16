@@ -1,4 +1,8 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
+import { loadFactoryConfig } from '../../node_modules/@agent-relay/factory/dist/config/schema.js'
 
 const mock = vi.hoisted(() => {
   const handlers = new Map<string, (...args: unknown[]) => unknown>()
@@ -70,6 +74,11 @@ const mock = vi.hoisted(() => {
     },
     proactiveAgentManager: {
       onEvent: vi.fn()
+    },
+    auth: {
+      resolveCloudAuth: vi.fn(),
+      getAccountWorkspaceId: vi.fn(),
+      accountWorkspaceReadyRetryOptions: vi.fn(() => ({}))
     }
   }
 })
@@ -114,7 +123,7 @@ vi.mock('./git', () => ({
   getSelectedDiff: vi.fn()
 }))
 vi.mock('./filesystem', () => ({}))
-vi.mock('./auth', () => ({}))
+vi.mock('./auth', () => mock.auth)
 vi.mock('./cloud-agent', () => ({
   cloudAgentManager: {}
 }))
@@ -151,6 +160,11 @@ import { findProjectForPath, projectContainsPath } from './cli'
 import { isDirectory } from './path-utils'
 import { loadStore } from './store'
 import * as git from './git'
+import * as auth from './auth'
+import type { FactoryConfigReadResult, FactoryStatus } from '../shared/types/ipc'
+
+const asConfigResult = (value: unknown): FactoryConfigReadResult => value as FactoryConfigReadResult
+const asStatus = (value: unknown): FactoryStatus => value as FactoryStatus
 
 describe('registerIpcHandlers broker:start', () => {
   beforeEach(() => {
@@ -378,5 +392,298 @@ describe('registerIpcHandlers broker:check-cli-available', () => {
 
     expect(result).toBe(false)
     expect(mock.isCommandAvailableWithAugmentedPath).not.toHaveBeenCalled()
+  })
+})
+
+describe('registerIpcHandlers factory:read-config / factory:save-config', () => {
+  let dir: string
+
+  beforeEach(() => {
+    mock.handlers.clear()
+    mock.ipcMain.handle.mockClear()
+    mock.ipcMain.on.mockClear()
+    dir = mkdtempSync(join(tmpdir(), 'factory-config-'))
+    registerIpcHandlers()
+  })
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('reports an empty NodeConfig when the config file does not exist', async () => {
+    const read = mock.handlers.get('factory:read-config')
+    const path = join(dir, 'missing.config.json')
+
+    const result = await read?.({}, path)
+
+    expect(result).toEqual({
+      configPath: path,
+      exists: false,
+      config: { capabilities: [], clonePaths: {}, dryRun: false },
+      errors: []
+    })
+  })
+
+  it('round-trips a NodeConfig draft: save writes the file and re-read reproduces it', async () => {
+    const save = mock.handlers.get('factory:save-config')
+    const read = mock.handlers.get('factory:read-config')
+    const path = join(dir, 'factory.config.json')
+    const draft = {
+      workspaceId: 'ws-1',
+      capabilities: ['spawn:claude', 'spawn:codex'],
+      cloneRoot: '/clones',
+      clonePaths: { 'org/repo': '/clones/repo' },
+      dryRun: true
+    }
+
+    const saved = asConfigResult(await save?.({}, draft, path))
+    expect(saved).toMatchObject({ configPath: path, exists: true, errors: [] })
+    expect(saved.config).toEqual(draft)
+
+    // The file is written with NodeConfig fields at the TOP LEVEL.
+    const onDisk = JSON.parse(readFileSync(path, 'utf8'))
+    expect(onDisk).toEqual(draft)
+
+    const reread = asConfigResult(await read?.({}, path))
+    expect(reread.config).toEqual(draft)
+  })
+
+  it('reads NodeConfig fields that live under repos.* via fallback', async () => {
+    const read = mock.handlers.get('factory:read-config')
+    const path = join(dir, 'factory.config.json')
+    // Compact single-source shape: operative values under repos.*
+    writeFileSync(
+      path,
+      JSON.stringify({
+        capabilities: ['spawn:claude'],
+        repos: { cloneRoot: '/repos-root', clonePaths: { 'org/a': '/repos-root/a' } }
+      }),
+      'utf8'
+    )
+
+    const result = asConfigResult(await read?.({}, path))
+
+    expect(result.config).toEqual({
+      capabilities: ['spawn:claude'],
+      cloneRoot: '/repos-root',
+      clonePaths: { 'org/a': '/repos-root/a' },
+      dryRun: false
+    })
+  })
+
+  it('promotes edited NodeConfig fields to the top level, leaving repos.* untouched (pins the read/save asymmetry)', async () => {
+    const read = mock.handlers.get('factory:read-config')
+    const save = mock.handlers.get('factory:save-config')
+    const path = join(dir, 'factory.config.json')
+    writeFileSync(
+      path,
+      JSON.stringify({
+        capabilities: ['spawn:claude'],
+        repos: { cloneRoot: '/old-root', clonePaths: { 'org/a': '/old-root/a' } }
+      }),
+      'utf8'
+    )
+
+    // Read falls back into repos.*, the editor changes the clone root, and saves.
+    const loaded = asConfigResult(await read?.({}, path))
+    const edited = { ...loaded.config, cloneRoot: '/new-root' }
+    await save?.({}, edited, path)
+
+    const onDisk = JSON.parse(readFileSync(path, 'utf8'))
+    // The edited value is written at the top level...
+    expect(onDisk.cloneRoot).toBe('/new-root')
+    // ...while the original repos.* block is preserved (NodeConfigSchema picks the top-level field).
+    expect(onDisk.repos).toEqual({ cloneRoot: '/old-root', clonePaths: { 'org/a': '/old-root/a' } })
+  })
+
+  it('preserves inherited split-config checkout mappings on a no-op read/save', async () => {
+    const read = mock.handlers.get('factory:read-config')
+    const save = mock.handlers.get('factory:save-config')
+    const path = join(dir, 'split.config.json')
+    const splitConfig = {
+      workspaceConfig: {
+        workspaceId: 'ws-1',
+        repos: {
+          cloneRoot: '/work',
+          clonePaths: { 'AgentWorkforce/pear': '/custom/pear' }
+        }
+      },
+      nodeConfig: {
+        capabilities: ['spawn:claude']
+      }
+    }
+    writeFileSync(path, JSON.stringify(splitConfig), 'utf8')
+    const before = loadFactoryConfig(splitConfig)
+
+    const loaded = asConfigResult(await read?.({}, path))
+    expect(loaded.config).toMatchObject({
+      workspaceId: 'ws-1',
+      capabilities: ['spawn:claude'],
+      cloneRoot: '/work',
+      clonePaths: { 'AgentWorkforce/pear': '/custom/pear' },
+      dryRun: false
+    })
+
+    await save?.({}, loaded.config, path)
+
+    const onDisk = JSON.parse(readFileSync(path, 'utf8'))
+    expect(onDisk.nodeConfig).toEqual({
+      capabilities: ['spawn:claude'],
+      dryRun: false
+    })
+    const after = loadFactoryConfig(onDisk)
+    expect(after.nodeConfig.cloneRoot).toBe(before.nodeConfig.cloneRoot)
+    expect(after.nodeConfig.clonePaths).toEqual(before.nodeConfig.clonePaths)
+  })
+
+  it('preserves an explicit split-config empty clonePaths override', async () => {
+    const read = mock.handlers.get('factory:read-config')
+    const save = mock.handlers.get('factory:save-config')
+    const path = join(dir, 'split-explicit-empty.config.json')
+    writeFileSync(
+      path,
+      JSON.stringify({
+        workspaceConfig: {
+          repos: {
+            cloneRoot: '/work',
+            clonePaths: { 'AgentWorkforce/pear': '/custom/pear' }
+          }
+        },
+        nodeConfig: {
+          capabilities: ['spawn:claude'],
+          clonePaths: {}
+        }
+      }),
+      'utf8'
+    )
+
+    const loaded = asConfigResult(await read?.({}, path))
+    expect(loaded.config?.clonePaths).toEqual({})
+
+    await save?.({}, loaded.config, path)
+
+    const onDisk = JSON.parse(readFileSync(path, 'utf8'))
+    expect(onDisk.nodeConfig.clonePaths).toEqual({})
+  })
+
+  it('returns validation errors without writing when the draft is invalid', async () => {
+    const save = mock.handlers.get('factory:save-config')
+    const path = join(dir, 'invalid.config.json')
+
+    const result = asConfigResult(await save?.({}, { capabilities: 'not-an-array' }, path))
+
+    expect(result.config).toBeNull()
+    expect(result.errors).toContain('capabilities: must be an array of strings')
+    expect(existsSync(path)).toBe(false)
+  })
+})
+
+describe('registerIpcHandlers factory:status', () => {
+  const apiUrl = 'https://cloud.example.com'
+  const accessToken = 'token-1'
+  const workspaceId = 'workspace-1'
+
+  beforeEach(() => {
+    mock.handlers.clear()
+    mock.ipcMain.handle.mockClear()
+    mock.ipcMain.on.mockClear()
+    vi.mocked(auth.resolveCloudAuth).mockReset()
+    vi.mocked(auth.getAccountWorkspaceId).mockReset()
+    vi.mocked(auth.accountWorkspaceReadyRetryOptions).mockReturnValue({} as never)
+    vi.mocked(auth.getAccountWorkspaceId).mockResolvedValue(workspaceId)
+    registerIpcHandlers()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('returns unauthenticated when there is no cloud auth', async () => {
+    const handler = mock.handlers.get('factory:status')
+    vi.mocked(auth.resolveCloudAuth).mockResolvedValue(null as never)
+
+    const result = await handler?.({})
+
+    expect(result).toMatchObject({ source: 'cloud', state: 'unauthenticated', connected: false })
+    expect(auth.getAccountWorkspaceId).not.toHaveBeenCalled()
+  })
+
+  it('falls back across endpoints and reports empty when all are unsupported (404)', async () => {
+    const handler = mock.handlers.get('factory:status')
+    vi.mocked(auth.resolveCloudAuth).mockResolvedValue({ apiUrl, accessToken } as never)
+    const fetchMock = vi.fn(async () => ({ status: 404, ok: false }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await handler?.({})
+
+    expect(fetchMock).toHaveBeenCalledTimes(3)
+    expect(result).toMatchObject({ source: 'cloud', state: 'empty', connected: true, workspaceId })
+  })
+
+  it('reports unauthenticated on a 401 from the cloud endpoint', async () => {
+    const handler = mock.handlers.get('factory:status')
+    vi.mocked(auth.resolveCloudAuth).mockResolvedValue({ apiUrl, accessToken } as never)
+    vi.stubGlobal('fetch', vi.fn(async () => ({ status: 401, ok: false })))
+
+    const result = await handler?.({})
+
+    expect(result).toMatchObject({ source: 'cloud', state: 'unauthenticated', connected: false, workspaceId })
+  })
+
+  it('reports unavailable on a non-OK, non-auth response', async () => {
+    const handler = mock.handlers.get('factory:status')
+    vi.mocked(auth.resolveCloudAuth).mockResolvedValue({ apiUrl, accessToken } as never)
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      status: 500,
+      ok: false,
+      statusText: 'Server Error',
+      text: async () => 'boom'
+    })))
+
+    const result = asStatus(await handler?.({}))
+
+    expect(result).toMatchObject({ source: 'cloud', state: 'unavailable', connected: false })
+    expect(result.message).toContain('500')
+  })
+
+  it('normalizes a 200 payload and dedups issues that span multiple buckets', async () => {
+    const handler = mock.handlers.get('factory:status')
+    vi.mocked(auth.resolveCloudAuth).mockResolvedValue({ apiUrl, accessToken } as never)
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      status: 200,
+      ok: true,
+      json: async () => ({
+        issues: [{ key: 'AR-1', title: 'First', state: 'in_progress' }],
+        inFlight: [{ key: 'AR-1', title: 'First (dup)' }],
+        queued: [{ key: 'AR-2', title: 'Second' }],
+        agents: [{ name: 'worker-1', status: 'running', issue: { key: 'AR-1' } }],
+        counters: { active: 2, idle: 0 }
+      })
+    })))
+
+    const result = asStatus(await handler?.({}))
+
+    expect(result).toMatchObject({ source: 'cloud', state: 'online', connected: true, workspaceId })
+    // AR-1 appears in both issues and inFlight buckets — dedup keeps the first occurrence.
+    expect(result.issues).toHaveLength(2)
+    expect(result.issues.map((i) => i.key)).toEqual(['AR-1', 'AR-2'])
+    expect(result.issues[0]).toMatchObject({ key: 'AR-1', title: 'First', state: 'in_progress' })
+    expect(result.agents).toHaveLength(1)
+    expect(result.counters).toEqual({ active: 2, idle: 0 })
+  })
+
+  it('coalesces concurrent factory:status calls into a single in-flight promise', async () => {
+    const handler = mock.handlers.get('factory:status')
+    vi.mocked(auth.resolveCloudAuth).mockResolvedValue(null as never)
+
+    // Two concurrent calls share a single in-flight read: without the
+    // `factoryStatusInFlight` coalescer the second call would start its own read
+    // and consult resolveCloudAuth a second time.
+    const first = handler?.({})
+    const second = handler?.({})
+
+    const [a, b] = await Promise.all([first, second])
+    expect(auth.resolveCloudAuth).toHaveBeenCalledTimes(1)
+    expect(a).toEqual(b)
   })
 })

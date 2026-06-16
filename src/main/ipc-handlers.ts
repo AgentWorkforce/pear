@@ -1,6 +1,8 @@
 import { app, ipcMain, dialog, BrowserWindow, shell } from 'electron'
 import { createHash } from 'crypto'
-import { basename, join, resolve } from 'path'
+import { existsSync } from 'fs'
+import { mkdir, readFile, writeFile } from 'fs/promises'
+import { basename, dirname, isAbsolute, join, resolve } from 'path'
 import type { SpawnPtyInput, SendMessageInput } from '@agent-relay/harness-driver'
 import {
   loadStore,
@@ -27,11 +29,18 @@ import { integrationsManager } from './integrations'
 import { getIntegrationEventTelemetrySnapshot, integrationEventBridge } from './integration-event-bridge'
 import { aiHistManager } from './ai-hist'
 import { burnManager, type BurnAgentInput, type BurnProjectInput, type BurnSessionBreakdownInput, type BurnFingerprintInput } from './burn'
-import { factoryManager } from './factory-manager'
 import { resetRelayWorkspaceManager } from './relay-workspace'
 import { isDirectory } from './path-utils'
 import { findProjectForPath, projectContainsPath } from './cli'
-import type { BrokerReconcileMessagesInput, BrokerSpawnAgentResult } from '../shared/types/ipc'
+import type {
+  BrokerReconcileMessagesInput,
+  BrokerSpawnAgentResult,
+  FactoryAgentStatus,
+  FactoryConfigReadResult,
+  FactoryIssueStatus,
+  FactoryNodeConfig,
+  FactoryStatus
+} from '../shared/types/ipc'
 import type { ProactiveAgentDraft } from './proactive-agent.types'
 
 function toBrokerSpawnAgentResult(result: BrokerSpawnAgentResult): BrokerSpawnAgentResult {
@@ -70,17 +79,420 @@ function warnGitStatusOnce(path: string, error: unknown): void {
   console.warn(`[git] Failed to read status for ${path}: ${message}`)
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
+
+function firstString(record: Record<string, unknown>, keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = record[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return undefined
+}
+
+function firstRecord(record: Record<string, unknown>, keys: string[]): Record<string, unknown> | undefined {
+  for (const key of keys) {
+    const value = record[key]
+    if (isRecord(value)) return value
+  }
+  return undefined
+}
+
+function firstArray(record: Record<string, unknown>, keys: string[]): unknown[] {
+  for (const key of keys) {
+    const value = record[key]
+    if (Array.isArray(value)) return value
+  }
+  return []
+}
+
+function buildCloudApiUrl(apiUrl: string, path: string): string {
+  return new URL(path.replace(/^\/+/u, ''), `${apiUrl.replace(/\/+$/u, '')}/`).toString()
+}
+
+function defaultFactoryConfigPath(projectRoot?: string): string {
+  const candidates = [
+    projectRoot ? join(projectRoot, 'factory.config.json') : undefined,
+    join(process.cwd(), 'factory.config.json'),
+    join(app.getAppPath(), 'factory.config.json')
+  ].filter((candidate): candidate is string => !!candidate)
+
+  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]
+}
+
+function normalizeFactoryConfigPath(path?: string, projectRoot?: string): string {
+  if (path?.trim()) return isAbsolute(path) ? path : resolve(projectRoot || process.cwd(), path)
+  return defaultFactoryConfigPath(projectRoot)
+}
+
+function emptyNodeConfig(): FactoryNodeConfig {
+  return {
+    capabilities: [],
+    clonePaths: {},
+    dryRun: false
+  }
+}
+
+function stringRecord(value: unknown): Record<string, string> {
+  if (!isRecord(value)) return {}
+  const out: Record<string, string> = {}
+  for (const [key, entry] of Object.entries(value)) {
+    if (typeof entry === 'string') out[key] = entry
+  }
+  return out
+}
+
+function hasOwn(record: Record<string, unknown>, key: string): boolean {
+  return Object.prototype.hasOwnProperty.call(record, key)
+}
+
+function recordsEqual(a: Record<string, string>, b: Record<string, string>): boolean {
+  const aKeys = Object.keys(a)
+  const bKeys = Object.keys(b)
+  if (aKeys.length !== bKeys.length) return false
+  return aKeys.every((key) => a[key] === b[key])
+}
+
+function normalizeNodeConfigInput(input: unknown): { config: FactoryNodeConfig | null; errors: string[] } {
+  if (!isRecord(input)) {
+    return { config: null, errors: ['nodeConfig: must be an object'] }
+  }
+
+  const errors: string[] = []
+  const workspaceId = typeof input.workspaceId === 'string' && input.workspaceId.trim()
+    ? input.workspaceId.trim()
+    : undefined
+  const cloneRoot = typeof input.cloneRoot === 'string' && input.cloneRoot.trim()
+    ? input.cloneRoot.trim()
+    : undefined
+  const capabilities = Array.isArray(input.capabilities)
+    ? input.capabilities.filter((item): item is string => typeof item === 'string' && !!item.trim()).map((item) => item.trim())
+    : []
+  if (input.capabilities !== undefined && !Array.isArray(input.capabilities)) {
+    errors.push('capabilities: must be an array of strings')
+  }
+  if (input.clonePaths !== undefined && !isRecord(input.clonePaths)) {
+    errors.push('clonePaths: must be an object of repo-to-path strings')
+  }
+  if (input.dryRun !== undefined && typeof input.dryRun !== 'boolean') {
+    errors.push('dryRun: must be a boolean')
+  }
+
+  if (errors.length > 0) return { config: null, errors }
+
+  return {
+    config: {
+      ...(workspaceId ? { workspaceId } : {}),
+      capabilities,
+      ...(cloneRoot ? { cloneRoot } : {}),
+      clonePaths: stringRecord(input.clonePaths),
+      dryRun: typeof input.dryRun === 'boolean' ? input.dryRun : false
+    },
+    errors: []
+  }
+}
+
+// NodeConfig fields (cloneRoot/clonePaths) live at the TOP LEVEL of compact
+// configs, but split configs inherit them from workspaceConfig.repos when
+// nodeConfig omits them. Keep this in sync with @agent-relay/factory's
+// combineSplitConfigInput semantics.
+function extractNodeConfig(raw: Record<string, unknown>): FactoryNodeConfig {
+  const isSplitConfig = isRecord(raw.nodeConfig) || isRecord(raw.workspaceConfig)
+  const source = isRecord(raw.nodeConfig)
+    ? raw.nodeConfig
+    : isRecord(raw.factoryConfig)
+      ? raw.factoryConfig
+      : raw
+  const workspaceConfig = isSplitConfig && isRecord(raw.workspaceConfig) ? raw.workspaceConfig : undefined
+  const repos = isRecord(source.repos)
+    ? source.repos
+    : isRecord(workspaceConfig?.repos)
+      ? workspaceConfig.repos
+      : undefined
+  const normalized = normalizeNodeConfigInput({
+    workspaceId: source.workspaceId ?? workspaceConfig?.workspaceId,
+    capabilities: source.capabilities,
+    cloneRoot: source.cloneRoot ?? repos?.cloneRoot,
+    clonePaths: source.clonePaths ?? repos?.clonePaths,
+    dryRun: source.dryRun
+  })
+  return normalized.config ?? emptyNodeConfig()
+}
+
+function splitNodeConfigForSave(raw: Record<string, unknown>, parsed: FactoryNodeConfig): Partial<FactoryNodeConfig> {
+  const previousNode = isRecord(raw.nodeConfig) ? raw.nodeConfig : {}
+  const workspace = isRecord(raw.workspaceConfig) ? raw.workspaceConfig : {}
+  const workspaceRepos = isRecord(workspace.repos) ? workspace.repos : {}
+  const next: Partial<FactoryNodeConfig> = { ...parsed }
+
+  if (!hasOwn(previousNode, 'workspaceId') && parsed.workspaceId === workspace.workspaceId) {
+    delete next.workspaceId
+  }
+
+  if (!hasOwn(previousNode, 'cloneRoot') && parsed.cloneRoot === workspaceRepos.cloneRoot) {
+    delete next.cloneRoot
+  }
+
+  const workspaceClonePaths = stringRecord(workspaceRepos.clonePaths)
+  if (
+    !hasOwn(previousNode, 'clonePaths') &&
+    recordsEqual(parsed.clonePaths ?? {}, workspaceClonePaths)
+  ) {
+    delete next.clonePaths
+  }
+
+  return next
+}
+
+async function readFactoryNodeConfig(configPath?: string, projectRoot?: string): Promise<FactoryConfigReadResult> {
+  const path = normalizeFactoryConfigPath(configPath, projectRoot)
+  if (!existsSync(path)) {
+    return { configPath: path, exists: false, config: emptyNodeConfig(), errors: [] }
+  }
+
+  try {
+    const raw = JSON.parse(await readFile(path, 'utf8')) as unknown
+    if (!isRecord(raw)) throw new Error('factory config must be a JSON object')
+    return { configPath: path, exists: true, config: extractNodeConfig(raw), errors: [] }
+  } catch (error) {
+    return { configPath: path, exists: true, config: null, errors: [toErrorMessage(error)] }
+  }
+}
+
+async function saveFactoryNodeConfig(
+  config: unknown,
+  configPath?: string,
+  projectRoot?: string
+): Promise<FactoryConfigReadResult> {
+  const path = normalizeFactoryConfigPath(configPath, projectRoot)
+  const parsed = normalizeNodeConfigInput(config)
+  if (!parsed.config) {
+    return { configPath: path, exists: existsSync(path), config: null, errors: parsed.errors }
+  }
+
+  let raw: Record<string, unknown> = {}
+  if (existsSync(path)) {
+    try {
+      const existing = JSON.parse(await readFile(path, 'utf8')) as unknown
+      if (isRecord(existing)) raw = existing
+    } catch {
+      raw = {}
+    }
+  }
+
+  let next: Record<string, unknown>
+  if (isRecord(raw.nodeConfig) || isRecord(raw.workspaceConfig)) {
+    next = { ...raw, nodeConfig: splitNodeConfigForSave(raw, parsed.config) }
+  } else if (isRecord(raw.factoryConfig)) {
+    next = { ...raw, factoryConfig: { ...raw.factoryConfig, ...parsed.config } }
+  } else {
+    next = { ...raw, ...parsed.config }
+  }
+
+  await mkdir(dirname(path), { recursive: true })
+  await writeFile(path, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
+  return { configPath: path, exists: true, config: parsed.config, errors: [] }
+}
+
+function normalizeIssue(value: unknown): FactoryIssueStatus | null {
+  if (!isRecord(value)) return null
+  const key = firstString(value, ['key', 'issueKey', 'id'])
+  if (!key) return null
+  return {
+    key,
+    title: firstString(value, ['title', 'name', 'summary']),
+    url: firstString(value, ['url', 'href']),
+    state: firstString(value, ['state', 'status']),
+    repo: firstString(value, ['repo', 'repository', 'repositoryName']),
+    assignee: firstString(value, ['assignee', 'owner']),
+    updatedAt: firstString(value, ['updatedAt', 'updated_at', 'lastActivityAt'])
+  }
+}
+
+function normalizeAgent(value: unknown): FactoryAgentStatus | null {
+  if (!isRecord(value)) return null
+  const name = firstString(value, ['name', 'agentName', 'id'])
+  if (!name) return null
+  const issueRecord = firstRecord(value, ['issue', 'linearIssue'])
+  const issue = issueRecord ? normalizeIssue(issueRecord) : null
+  return {
+    id: firstString(value, ['id', 'agentId']),
+    name,
+    role: firstString(value, ['role', 'persona']),
+    status: firstString(value, ['status', 'state']),
+    ...(issue ? { issue } : {})
+  }
+}
+
+function normalizeFactoryCloudStatus(
+  payload: Record<string, unknown>,
+  auth: { apiUrl: string },
+  workspaceId: string
+): FactoryStatus {
+  const root = firstRecord(payload, ['factory', 'status']) ?? payload
+  // A speculative cloud payload can list the same issue across the
+  // issues/inFlight/queued buckets; dedup by key (keep first occurrence) so the
+  // renderer never emits duplicate React keys and we treat duplicate delivery as
+  // normal per AGENTS.md.
+  const seenIssueKeys = new Set<string>()
+  const issues = [
+    ...firstArray(root, ['issues']),
+    ...firstArray(root, ['inFlight', 'inflight']),
+    ...firstArray(root, ['queued'])
+  ]
+    .map(normalizeIssue)
+    .filter((issue): issue is FactoryIssueStatus => {
+      if (!issue) return false
+      if (seenIssueKeys.has(issue.key)) return false
+      seenIssueKeys.add(issue.key)
+      return true
+    })
+  const agents = firstArray(root, ['agents', 'workers', 'spawns'])
+    .map(normalizeAgent)
+    .filter((agent): agent is FactoryAgentStatus => !!agent)
+  const counters = firstRecord(root, ['counters', 'counts'])
+  const stateText = firstString(root, ['state', 'status'])
+  const hasCloudState = issues.length > 0 || agents.length > 0 || (counters && Object.keys(counters).length > 0)
+
+  return {
+    source: 'cloud',
+    state: stateText === 'unavailable' || stateText === 'offline'
+      ? 'unavailable'
+      : hasCloudState
+        ? 'online'
+        : 'empty',
+    connected: true,
+    workspaceId,
+    cloudUrl: auth.apiUrl,
+    updatedAt: firstString(root, ['updatedAt', 'updated_at']) ?? new Date().toISOString(),
+    message: firstString(root, ['message', 'detail']),
+    counters: counters
+      ? Object.fromEntries(
+        Object.entries(counters)
+          .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1]))
+      )
+      : undefined,
+    agents,
+    issues
+  }
+}
+
+function emptyFactoryCloudStatus(
+  auth: { apiUrl: string },
+  workspaceId: string,
+  message = 'Cloud factory status is not available yet.'
+): FactoryStatus {
+  return {
+    source: 'cloud',
+    state: 'empty',
+    connected: true,
+    workspaceId,
+    cloudUrl: auth.apiUrl,
+    updatedAt: new Date().toISOString(),
+    message,
+    agents: [],
+    issues: []
+  }
+}
+
+let factoryStatusInFlight: Promise<FactoryStatus> | null = null
+
+async function readFactoryCloudStatus(): Promise<FactoryStatus> {
+  const authState = await auth.resolveCloudAuth()
+  if (!authState) {
+    return {
+      source: 'cloud',
+      state: 'unauthenticated',
+      connected: false,
+      message: 'Sign in to Agent Relay Cloud to view factory status.',
+      agents: [],
+      issues: []
+    }
+  }
+
+  let workspaceId: string
+  try {
+    workspaceId = await auth.getAccountWorkspaceId(auth.accountWorkspaceReadyRetryOptions())
+  } catch (error) {
+    return {
+      source: 'cloud',
+      state: 'unconfigured',
+      connected: false,
+      cloudUrl: authState.apiUrl,
+      message: toErrorMessage(error),
+      agents: [],
+      issues: []
+    }
+  }
+
+  const endpoints = [
+    `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/factory/status`,
+    `/api/v1/factory/status?workspaceId=${encodeURIComponent(workspaceId)}`,
+    `/api/factory/status?workspaceId=${encodeURIComponent(workspaceId)}`
+  ]
+  let unsupported = false
+
+  for (const endpoint of endpoints) {
+    const response = await fetch(buildCloudApiUrl(authState.apiUrl, endpoint), {
+      headers: { Authorization: `Bearer ${authState.accessToken}`, Accept: 'application/json' }
+    }).catch((error: unknown) => {
+      throw new Error(`Cloud factory status request failed: ${toErrorMessage(error)}`)
+    })
+    if (response.status === 404 || response.status === 405 || response.status === 501) {
+      unsupported = true
+      continue
+    }
+    if (response.status === 401 || response.status === 403) {
+      return {
+        source: 'cloud',
+        state: 'unauthenticated',
+        connected: false,
+        workspaceId,
+        cloudUrl: authState.apiUrl,
+        message: 'Cloud authentication expired. Sign in again to view factory status.',
+        agents: [],
+        issues: []
+      }
+    }
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      return {
+        source: 'cloud',
+        state: 'unavailable',
+        connected: false,
+        workspaceId,
+        cloudUrl: authState.apiUrl,
+        message: `Cloud factory status failed: ${response.status} ${text || response.statusText}`,
+        agents: [],
+        issues: []
+      }
+    }
+    const payload = await response.json().catch(() => ({})) as unknown
+    return normalizeFactoryCloudStatus(isRecord(payload) ? payload : {}, authState, workspaceId)
+  }
+
+  return emptyFactoryCloudStatus(
+    authState,
+    workspaceId,
+    unsupported ? 'Cloud factory status endpoint is not available yet.' : undefined
+  )
+}
+
+function factoryStatus(): Promise<FactoryStatus> {
+  if (!factoryStatusInFlight) {
+    factoryStatusInFlight = readFactoryCloudStatus().finally(() => {
+      factoryStatusInFlight = null
+    })
+  }
+  return factoryStatusInFlight
+}
+
 export function registerIpcHandlers(): void {
   // Fan proactive-agent events out to all renderer windows.
   proactiveAgentManager.onEvent((event) => {
     for (const win of BrowserWindow.getAllWindows()) {
       win.webContents.send('proactive-agent:event', event)
-    }
-  })
-
-  factoryManager.onEvent((factoryEvent) => {
-    for (const win of BrowserWindow.getAllWindows()) {
-      win.webContents.send('factory:event', factoryEvent)
     }
   })
 
@@ -102,7 +514,6 @@ export function registerIpcHandlers(): void {
 
     if (result.response !== 0) return false
 
-    await factoryManager.stop()
     await brokerManager.shutdown()
     app.quit()
     return true
@@ -404,23 +815,15 @@ export function registerIpcHandlers(): void {
 
   // --- Factory ---
   ipcMain.handle('factory:status', async () => {
-    return factoryManager.status()
-  })
-
-  ipcMain.handle('factory:start', async (_, configPath?: string, projectRoot?: string) => {
-    return factoryManager.start(configPath, projectRoot)
-  })
-
-  ipcMain.handle('factory:stop', async () => {
-    return factoryManager.stop()
+    return factoryStatus()
   })
 
   ipcMain.handle('factory:read-config', async (_, configPath?: string, projectRoot?: string) => {
-    return factoryManager.readConfig(configPath, projectRoot)
+    return readFactoryNodeConfig(configPath, projectRoot)
   })
 
   ipcMain.handle('factory:save-config', async (_, config: unknown, configPath?: string, projectRoot?: string) => {
-    return factoryManager.saveConfig(config, configPath, projectRoot)
+    return saveFactoryNodeConfig(config, configPath, projectRoot)
   })
 
   // --- Burn ---

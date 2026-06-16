@@ -5,7 +5,6 @@ import { registerIpcHandlers } from './ipc-handlers'
 import { burnManager } from './burn'
 import { brokerManager } from './broker'
 import { cloudAgentManager } from './cloud-agent'
-import { factoryManager } from './factory-manager'
 import { integrationsManager } from './integrations'
 import { registerAvatarCacheProtocol } from './avatar-cache'
 import { openProjectForPath, parseOpenCommand, type OpenPathDeps } from './cli'
@@ -97,7 +96,6 @@ function shutdownBrokerOnce(): Promise<void> {
   integrationAgentRefreshTimers.clear()
   if (!shutdownPromise) {
     shutdownPromise = Promise.all([
-      factoryManager.shutdown(),
       cloudAgentManager.shutdownAll(),
       brokerManager.shutdown()
     ]).then(() => undefined)
