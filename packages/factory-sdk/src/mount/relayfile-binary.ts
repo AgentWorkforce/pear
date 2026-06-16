@@ -2,7 +2,7 @@ import { accessSync, constants, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 
 const STALE_RECONCILE_MS = 15 * 60 * 1000
-const NOT_FOUND_ERROR = '[factory] relayfile-mount binary not found. Run: npm run relayfile-mount:install'
+const NOT_FOUND_ERROR = '[factory] relayfile-mount binary not found. Install dependencies or run: npm run relayfile-mount:install'
 
 type MountState = {
   workspaceId?: unknown
@@ -20,7 +20,7 @@ function canExecute(filePath: string | undefined): filePath is string {
   }
 }
 
-function archSuffix(): string {
+function devArchSuffix(): string {
   if (process.platform === 'darwin') {
     return process.arch === 'arm64' ? 'darwin-arm64' : 'darwin-amd64'
   }
@@ -32,6 +32,10 @@ function archSuffix(): string {
 
 function binaryName(): string {
   return process.platform === 'win32' ? 'relayfile-mount.exe' : 'relayfile-mount'
+}
+
+function optionalPackageArchSuffix(): string {
+  return `${process.platform}-${process.arch}`
 }
 
 function findPearRoot(startDir: string): string | null {
@@ -50,24 +54,36 @@ function findPearRoot(startDir: string): string | null {
 
 function devRelayfileCandidates(pearRoot: string): string[] {
   const distRoot = resolve(process.env.RELAYFILE_DIST_DIR ?? join(pearRoot, '..', 'relayfile', 'dist'))
-  const suffix = archSuffix()
+  const suffix = devArchSuffix()
   return [
     join(distRoot, `relayfile-mount-${suffix}`),
     join(distRoot, suffix, binaryName()),
   ]
 }
 
-export function resolveRelayfileMountBinary(): string {
+// @relayfile/sdk carries relayfile-mount through per-platform optional
+// dependencies. Prefer that bundled binary so factory start does not depend on
+// a global relayfile install or a manually populated repo bin/ directory.
+function optionalPackageCandidates(pearRoot: string): string[] {
+  const suffix = optionalPackageArchSuffix()
+  return [
+    join(pearRoot, 'node_modules', '@relayfile', `mount-${suffix}`, 'bin', binaryName()),
+    join(pearRoot, 'node_modules', '@relayfile', 'sdk', 'node_modules', '@relayfile', `mount-${suffix}`, 'bin', binaryName()),
+  ]
+}
+
+export function resolveRelayfileMountBinary(startDir = __dirname): string {
   if (process.env.RELAYFILE_MOUNT_BIN) {
     const explicitBinary = resolve(process.env.RELAYFILE_MOUNT_BIN)
     if (canExecute(explicitBinary)) return explicitBinary
     throw new Error(NOT_FOUND_ERROR)
   }
 
-  const pearRoot = findPearRoot(__dirname)
+  const pearRoot = findPearRoot(startDir)
   const candidates = pearRoot
     ? [
-        join(pearRoot, 'bin', 'relayfile-mount'),
+        ...optionalPackageCandidates(pearRoot),
+        join(pearRoot, 'bin', binaryName()),
         ...devRelayfileCandidates(pearRoot),
       ]
     : []

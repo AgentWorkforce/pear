@@ -6,12 +6,21 @@ import { checkMountStaleness, resolveRelayfileMountBinary } from './relayfile-bi
 
 const STATE_FILE = '.integrations/.relay/state.json'
 
-export async function ensureLocalMount(workspaceId: string, startDir: string): Promise<void> {
+interface EnsureLocalMountOptions {
+  stateWaitTimeoutMs?: number
+  stateWaitPollMs?: number
+}
+
+export async function ensureLocalMount(
+  workspaceId: string,
+  startDir: string,
+  options: EnsureLocalMountOptions = {},
+): Promise<void> {
   const stateFilePath = join(startDir, STATE_FILE)
 
   if (!(await isMountStatePresent(stateFilePath))) {
     await spawnMount(workspaceId, startDir)
-    await waitForStateFile(stateFilePath)
+    await waitForStateFile(stateFilePath, workspaceId, options.stateWaitTimeoutMs, options.stateWaitPollMs)
     return
   }
 
@@ -67,17 +76,42 @@ async function spawnMount(workspaceId: string, startDir: string): Promise<void> 
   })
 }
 
-async function waitForStateFile(stateFilePath: string, timeoutMs = 10_000): Promise<void> {
+async function waitForStateFile(
+  stateFilePath: string,
+  workspaceId: string,
+  timeoutMs = 10_000,
+  pollMs = 200,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs
+  let lastInvalidReason = 'state file was not created'
   while (Date.now() < deadline) {
     try {
-      await readFile(stateFilePath, 'utf8')
-      return
-    } catch {
+      const raw = await readFile(stateFilePath, 'utf8')
+      const state = JSON.parse(raw) as unknown
+      if (isValidMountState(state, workspaceId)) return
+      lastInvalidReason = `state file is malformed or for another workspace: ${stateFilePath}`
+    } catch (error) {
+      if (typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT') {
+        lastInvalidReason = 'state file was not created'
+      } else {
+        lastInvalidReason = error instanceof Error ? error.message : String(error)
+      }
       // not yet present
     }
-    await sleep(200)
+    await sleep(pollMs)
   }
+  throw new Error(`[factory] relayfile mount did not become ready within ${timeoutMs}ms (${lastInvalidReason})`)
+}
+
+function isValidMountState(value: unknown, workspaceId: string): boolean {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return false
+  const state = value as { workspaceId?: unknown; lastReconcileAt?: unknown; pid?: unknown }
+  return state.workspaceId === workspaceId &&
+    typeof state.lastReconcileAt === 'string' &&
+    Number.isFinite(Date.parse(state.lastReconcileAt)) &&
+    typeof state.pid === 'number' &&
+    Number.isInteger(state.pid) &&
+    state.pid > 0
 }
 
 const isAuthError = (stderr: string): boolean =>

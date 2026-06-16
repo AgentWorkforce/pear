@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -43,6 +43,44 @@ describe('resolveRelayfileMountBinary', () => {
       process.env.RELAYFILE_MOUNT_BIN = binary
 
       expect(resolveRelayfileMountBinary()).toBe(binary)
+    })
+  })
+
+  it('prefers the relayfile SDK optional mount package binary', async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(join(dir, 'factory.config.json'), '{}', 'utf8')
+      const packageBinDir = join(dir, 'node_modules', '@relayfile', 'mount-darwin-arm64', 'bin')
+      await mkdir(packageBinDir, { recursive: true })
+      const packageBinary = join(packageBinDir, 'relayfile-mount')
+      await writeFile(packageBinary, '#!/bin/sh\n', 'utf8')
+      await chmod(packageBinary, 0o755)
+
+      const repoBinDir = join(dir, 'bin')
+      await mkdir(repoBinDir, { recursive: true })
+      const repoBinary = join(repoBinDir, 'relayfile-mount')
+      await writeFile(repoBinary, '#!/bin/sh\n', 'utf8')
+      await chmod(repoBinary, 0o755)
+
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('darwin')
+      vi.spyOn(process, 'arch', 'get').mockReturnValue('arm64')
+
+      expect(resolveRelayfileMountBinary(dir)).toBe(packageBinary)
+    })
+  })
+
+  it('resolves the repo-root Windows relayfile-mount.exe fallback', async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(join(dir, 'factory.config.json'), '{}', 'utf8')
+      const binDir = join(dir, 'bin')
+      await mkdir(binDir, { recursive: true })
+      const binary = join(binDir, 'relayfile-mount.exe')
+      await writeFile(binary, '#!/bin/sh\n', 'utf8')
+      await chmod(binary, 0o755)
+
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32')
+      vi.spyOn(process, 'arch', 'get').mockReturnValue('x64')
+
+      expect(resolveRelayfileMountBinary(dir)).toBe(binary)
     })
   })
 })
