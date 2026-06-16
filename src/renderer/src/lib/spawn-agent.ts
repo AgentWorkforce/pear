@@ -56,7 +56,8 @@ export async function spawnProjectAgent(
   project: Project,
   cli: SpawnAgentCli,
   customName?: string,
-  rootOverride?: ProjectRoot
+  rootOverride?: ProjectRoot,
+  customModel?: string
 ): Promise<string> {
   if (rootOverride && !rootOverride.pathExists) {
     throw new Error(`Project root not found: ${rootOverride.path || project.rootPath}`)
@@ -96,7 +97,8 @@ export async function spawnProjectAgent(
   const spawned = await pear.broker.spawnAgent(project.id, {
     name: requestedName,
     cli,
-    cwd: root.path
+    cwd: root.path,
+    ...(customModel?.trim() ? { model: customModel.trim() } : {})
   })
   const name = spawned.name || requestedName
 

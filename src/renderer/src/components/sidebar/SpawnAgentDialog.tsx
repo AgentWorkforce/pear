@@ -21,6 +21,7 @@ export function SpawnAgentDialog(): React.ReactNode {
   const [loadingPersonas, setLoadingPersonas] = useState(false)
   const [selectedPersonaId, setSelectedPersonaId] = useState('')
   const [customName, setCustomName] = useState('')
+  const [customModel, setCustomModel] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [cliAvailability, setCliAvailability] = useState<Partial<Record<SpawnAgentCli, boolean>>>({})
   const [selectedRootId, setSelectedRootId] = useState<string | null>(null)
@@ -129,7 +130,7 @@ export function SpawnAgentDialog(): React.ReactNode {
     setError(null)
     setSpawningCli(cli)
     try {
-      await spawnProjectAgent(project, cli, customName, root)
+      await spawnProjectAgent(project, cli, customName, root, customModel)
       closeDialog()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -217,6 +218,22 @@ export function SpawnAgentDialog(): React.ReactNode {
                   onChange={(event) => setCustomName(event.target.value)}
                   disabled={spawning}
                   placeholder={`auto: ${AGENT_OPTIONS[0].cli}-N`}
+                  spellCheck={false}
+                  autoComplete="off"
+                  className="h-9 w-full rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 text-sm text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent-dim)] disabled:opacity-50"
+                />
+              </div>
+              <div>
+                <label htmlFor="spawn-agent-model" className="mb-1 block text-xs font-medium text-[var(--pear-text-dim)]">
+                  Model <span className="text-[var(--pear-text-faint)]">(optional)</span>
+                </label>
+                <input
+                  id="spawn-agent-model"
+                  type="text"
+                  value={customModel}
+                  onChange={(event) => setCustomModel(event.target.value)}
+                  disabled={spawning}
+                  placeholder="e.g. claude-opus-4-7"
                   spellCheck={false}
                   autoComplete="off"
                   className="h-9 w-full rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 text-sm text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent-dim)] disabled:opacity-50"
