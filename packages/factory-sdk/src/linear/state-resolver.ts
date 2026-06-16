@@ -12,6 +12,10 @@ const REQUIRED_ROLES: readonly FactoryStateRole[] = [
 const STATES_INDEX_PATH = '/linear/states/_index.json'
 const stateCanonicalPath = (id: string): string => `/linear/states/${id}.json`
 
+// Cap concurrent canonical-record reads so a large states catalog can't flood a
+// remote/cloud mount (rate limits, timeouts, fd exhaustion).
+const CATALOG_READ_CONCURRENCY = 10
+
 // Minimal read surface so the resolver is decoupled from the full MountClient
 // and trivially testable with an in-memory map.
 export interface LinearStateReader {
@@ -128,14 +132,22 @@ class StateCatalog {
     const ids = asArray(index)
       .map((row) => str((row as Record<string, unknown>)?.id))
       .filter((id): id is string => Boolean(id))
-    const records = await Promise.all(ids.map(async (id): Promise<StateRecord> => {
-      try {
-        const rec = unwrap((await this.reader.readFile(stateCanonicalPath(id))).content)
-        return { id, name: str(rec.name), teamKey: str(rec.team_key), teamName: str(rec.team_name) }
-      } catch {
-        return { id }
-      }
-    }))
+    // Read canonical records in bounded batches — a workspace can have many
+    // states, and an unbounded Promise.all would flood a remote/cloud mount.
+    const records: StateRecord[] = []
+    for (let i = 0; i < ids.length; i += CATALOG_READ_CONCURRENCY) {
+      const batch = await Promise.all(
+        ids.slice(i, i + CATALOG_READ_CONCURRENCY).map(async (id): Promise<StateRecord> => {
+          try {
+            const rec = unwrap((await this.reader.readFile(stateCanonicalPath(id))).content)
+            return { id, name: str(rec.name), teamKey: str(rec.team_key), teamName: str(rec.team_name) }
+          } catch {
+            return { id }
+          }
+        }),
+      )
+      records.push(...batch)
+    }
     this.#records = records
     return records
   }
@@ -146,7 +158,13 @@ class StateCatalog {
     const records = await this.records()
     let matches = records.filter((rec) => norm(rec.name) === norm(name))
     if (teamToken) {
-      const scoped = matches.filter((rec) => norm(rec.teamKey) === norm(teamToken) || norm(rec.teamName) === norm(teamToken))
+      // Restrict to states that belong to this team (or are team-less). Never
+      // fall back to another team's state of the same name — that would silently
+      // mis-route issues across teams. If nothing remains, it's a hard no-match.
+      const teamless = (rec: StateRecord) => !rec.teamKey && !rec.teamName
+      const inTeam = (rec: StateRecord) => norm(rec.teamKey) === norm(teamToken) || norm(rec.teamName) === norm(teamToken)
+      matches = matches.filter((rec) => inTeam(rec) || teamless(rec))
+      const scoped = matches.filter(inTeam)
       if (scoped.length > 0) matches = scoped
     }
     if (matches.length === 0) {
@@ -172,28 +190,40 @@ export async function resolveFactoryStates(
   const catalog = new StateCatalog(reader)
   const globalNames = input.states ?? {}
   const explicitIds = input.stateIds ?? {}
-  const byTeamNames = input.statesByTeam ?? {}
+  // Normalize statesByTeam keys up front so per-team lookups are case-insensitive
+  // and consistent with how byTeam/teamTokens are keyed (avoids a lowercase
+  // team token silently missing an uppercase override, then overwriting it).
+  const byTeamNames: Record<string, RoleNames> = {}
+  for (const [team, names] of Object.entries(input.statesByTeam ?? {})) {
+    byTeamNames[norm(team)] = names
+  }
 
   // Resolve one role for one team token, applying precedence:
   // per-team name > global name > explicit UUID.
   const resolveRole = async (teamToken: string | undefined, role: FactoryStateRole): Promise<string | undefined> => {
-    const perTeamName = teamToken ? byTeamNames[teamToken]?.[role] : undefined
+    const perTeamName = teamToken ? byTeamNames[norm(teamToken)]?.[role] : undefined
     const name = perTeamName ?? globalNames[role]
     if (name) return catalog.resolve(name, teamToken)
     return explicitIds[role]
   }
 
-  const teamTokens = new Set<string>([...Object.keys(byTeamNames), ...(input.teams ?? [])])
+  // Dedupe team tokens by normalized form while keeping the first original
+  // casing for resolution + error messages.
+  const teamTokenByNorm = new Map<string, string>()
+  for (const team of [...Object.keys(input.statesByTeam ?? {}), ...(input.teams ?? [])]) {
+    const key = norm(team)
+    if (key && !teamTokenByNorm.has(key)) teamTokenByNorm.set(key, team)
+  }
   const byTeam = new Map<string, RoleIds>()
 
-  const resolveAllRoles = async (teamToken: string | undefined): Promise<RoleIds> => {
+  const resolveAllRoles = async (teamToken: string | undefined, enforce: boolean): Promise<RoleIds> => {
     const resolved: RoleIds = {}
     for (const role of FACTORY_STATE_ROLES) {
       const id = await resolveRole(teamToken, role)
       if (id) resolved[role] = id
     }
     const missing = REQUIRED_ROLES.filter((role) => !resolved[role])
-    if (missing.length > 0) {
+    if (enforce && missing.length > 0) {
       throw new Error(
         `Linear state resolution incomplete${teamToken ? ` for team "${teamToken}"` : ''}: ` +
         `missing [${missing.join(', ')}]. Set linear.states / linear.statesByTeam (by name) or stateIds (UUIDs).`,
@@ -202,9 +232,14 @@ export async function resolveFactoryStates(
     return resolved
   }
 
-  const defaultIds = await resolveAllRoles(undefined)
-  for (const team of teamTokens) {
-    byTeam.set(norm(team), await resolveAllRoles(team))
+  // The team-less default only needs to satisfy required roles when there's
+  // global config meant to fill it; a per-team-only setup leaves it best-effort
+  // (each subscribed team is enforced below, and idFor() throws at use if an
+  // unconfigured team's issue ever appears).
+  const hasGlobalConfig = Object.keys(globalNames).length > 0 || Object.keys(explicitIds).length > 0
+  const defaultIds = await resolveAllRoles(undefined, hasGlobalConfig)
+  for (const [key, team] of teamTokenByNorm) {
+    byTeam.set(key, await resolveAllRoles(team, true))
   }
 
   const idsFor = (teamToken: string | undefined): RoleIds =>

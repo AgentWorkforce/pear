@@ -62,32 +62,35 @@ describe('resolveFactoryStates', () => {
     expect(reader.reads).toEqual([]) // never touched /linear/states
   })
 
-  it('resolves different state names per team with a global fallback', async () => {
+  it('resolves different state names per team, each scoped to its own team', async () => {
     const reader = makeReader(
-      [{ id: 'a-ready' }, { id: 'a-impl' }, { id: 'a-plan' }, { id: 'a-done' }, { id: 'e-todo' }, { id: 'e-ship' }, { id: 'e-plan' }],
+      [{ id: 'a-ready' }, { id: 'a-impl' }, { id: 'a-plan' }, { id: 'a-done' }, { id: 'e-todo' }, { id: 'e-build' }, { id: 'e-plan' }, { id: 'e-ship' }],
       {
         'a-ready': { name: 'Ready for Agent', team_key: 'AR' },
         'a-impl': { name: 'Agent Implementing', team_key: 'AR' },
         'a-plan': { name: 'In Planning', team_key: 'AR' },
         'a-done': { name: 'Done', team_key: 'AR' },
         'e-todo': { name: 'To Do', team_key: 'ENG' },
-        'e-ship': { name: 'Shipped', team_key: 'ENG' },
+        'e-build': { name: 'Building', team_key: 'ENG' },
         'e-plan': { name: 'Backlog', team_key: 'ENG' },
+        'e-ship': { name: 'Shipped', team_key: 'ENG' },
       },
     )
     const states = await resolveFactoryStates(reader, {
+      // AR uses the global defaults (all those names exist in AR); ENG fully
+      // overrides with its own names (all exist in ENG).
       states: { readyForAgent: 'Ready for Agent', agentImplementing: 'Agent Implementing', inPlanning: 'In Planning', done: 'Done' },
       statesByTeam: {
-        ENG: { readyForAgent: 'To Do', agentImplementing: 'Agent Implementing', inPlanning: 'Backlog', done: 'Shipped' },
+        ENG: { readyForAgent: 'To Do', agentImplementing: 'Building', inPlanning: 'Backlog', done: 'Shipped' },
       },
       teams: ['AR', 'ENG'],
     })
 
     expect(states.idFor('AR', 'readyForAgent')).toBe('a-ready')
+    expect(states.idFor('AR', 'agentImplementing')).toBe('a-impl')
     expect(states.idFor('ENG', 'readyForAgent')).toBe('e-todo')
+    expect(states.idFor('ENG', 'agentImplementing')).toBe('e-build')
     expect(states.idFor('ENG', 'done')).toBe('e-ship')
-    // ENG inherits agentImplementing from the global default (resolved per team)
-    expect(states.idFor('ENG', 'agentImplementing')).toBe('a-impl')
     // reverse map covers both teams
     expect(states.roleOf('e-todo')).toBe('readyForAgent')
     expect(states.roleOf('a-ready')).toBe('readyForAgent')
@@ -98,6 +101,49 @@ describe('resolveFactoryStates', () => {
     await expect(resolveFactoryStates(reader, {
       states: { readyForAgent: 'Ready for Agent' }, // missing the other required roles
     })).rejects.toThrow(/missing \[agentImplementing, inPlanning, done\]/)
+  })
+
+  it("never resolves a team role to another team's state of the same name", async () => {
+    // "Done" exists only in ENG. Resolving it for AR must fail loudly rather
+    // than silently borrowing ENG's state id (cross-team mis-routing).
+    const reader = makeReader(
+      [{ id: 'ar-ready' }, { id: 'ar-impl' }, { id: 'ar-plan' }, { id: 'eng-done' }],
+      {
+        'ar-ready': { name: 'Ready for Agent', team_key: 'AR' },
+        'ar-impl': { name: 'Agent Implementing', team_key: 'AR' },
+        'ar-plan': { name: 'In Planning', team_key: 'AR' },
+        'eng-done': { name: 'Done', team_key: 'ENG' },
+      },
+    )
+    await expect(resolveFactoryStates(reader, {
+      statesByTeam: {
+        AR: { readyForAgent: 'Ready for Agent', agentImplementing: 'Agent Implementing', inPlanning: 'In Planning', done: 'Done' },
+      },
+      teams: ['AR'],
+    })).rejects.toThrow(/No Linear workflow state named "Done" for team "AR"/)
+  })
+
+  it('matches statesByTeam keys case-insensitively against teams', async () => {
+    const reader = makeReader(
+      [{ id: 'e-todo' }, { id: 'e-impl' }, { id: 'e-plan' }, { id: 'e-ship' }],
+      {
+        'e-todo': { name: 'To Do', team_key: 'ENG' },
+        'e-impl': { name: 'Building', team_key: 'ENG' },
+        'e-plan': { name: 'Backlog', team_key: 'ENG' },
+        'e-ship': { name: 'Shipped', team_key: 'ENG' },
+      },
+    )
+    // statesByTeam key is "ENG" but the subscribed team token is lowercase "eng".
+    const states = await resolveFactoryStates(reader, {
+      statesByTeam: {
+        ENG: { readyForAgent: 'To Do', agentImplementing: 'Building', inPlanning: 'Backlog', done: 'Shipped' },
+      },
+      teams: ['eng'],
+    })
+
+    expect(states.idFor('eng', 'readyForAgent')).toBe('e-todo')
+    expect(states.idFor('ENG', 'done')).toBe('e-ship')
+    expect(states.roleOf('e-todo')).toBe('readyForAgent')
   })
 
   it('throws a clear error when the states resource is unavailable', async () => {
