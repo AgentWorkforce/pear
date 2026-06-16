@@ -177,7 +177,7 @@ export default function CloudAgentPicker({
   const [createName, setCreateName] = useState('')
   const [createHarness, setCreateHarness] = useState('claude')
   const [createModel, setCreateModel] = useState('')
-  const [modelExpanded, setModelExpanded] = useState(false)
+
   const [busy, setBusy] = useState(false)
   const [nowMs, setNowMs] = useState(() => Date.now())
   const prewarmTargetRef = useRef<string | null>(null)
@@ -639,37 +639,16 @@ export default function CloudAgentPicker({
                   ))}
                 </select>
               </label>
-              <div className="min-w-0 md:col-span-2 flex items-end pb-0.5">
-                {modelExpanded ? (
-                  <label className="block w-full">
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-xs text-[var(--pear-text-faint)]">Model</span>
-                      <button
-                        type="button"
-                        onClick={() => setModelExpanded(false)}
-                        className="text-xs text-[var(--pear-text-faint)] hover:text-[var(--pear-text-dim)]"
-                      >
-                        hide
-                      </button>
-                    </div>
-                    <input
-                      value={createModel}
-                      onChange={(event) => setCreateModel(event.target.value)}
-                      disabled={busy}
-                      placeholder="e.g. claude-opus-4-7"
-                      className="h-9 w-full rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 text-sm text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent-dim)] disabled:opacity-50"
-                    />
-                  </label>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => setModelExpanded(true)}
-                    className="text-xs text-[var(--pear-text-faint)] hover:text-[var(--pear-text-dim)]"
-                  >
-                    {createModel ? `Model: ${createModel}` : 'Set model'}
-                  </button>
-                )}
-              </div>
+              <label className="min-w-0 md:col-span-2">
+                <span className="mb-1.5 block text-xs text-[var(--pear-text-faint)]">Model <span className="opacity-60">(optional)</span></span>
+                <input
+                  value={createModel}
+                  onChange={(event) => setCreateModel(event.target.value)}
+                  disabled={busy}
+                  placeholder="e.g. claude-opus-4-7"
+                  className="h-9 w-full rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 text-sm text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent-dim)] disabled:opacity-50"
+                />
+              </label>
             </div>
             <div className="mt-4 flex justify-end">
               <button

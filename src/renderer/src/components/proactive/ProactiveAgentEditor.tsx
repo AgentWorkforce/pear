@@ -518,7 +518,7 @@ export function ProactiveAgentEditor({
   const [busy, setBusy] = useState(false)
   const [deploying, setDeploying] = useState(false)
   const [deployMessage, setDeployMessage] = useState<string | null>(null)
-  const [modelExpanded, setModelExpanded] = useState(false)
+
   const [deployPhases, setDeployPhases] = useState<DeployPhase[]>(DEPLOY_PHASES)
 
   useEffect(() => {
@@ -898,37 +898,16 @@ export function ProactiveAgentEditor({
                     <FieldError message={errors.harness} />
                   </label>
 
-                  <div className="block">
-                    {modelExpanded ? (
-                      <label className="block">
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs font-medium text-[var(--pear-text-dim)]">Model</span>
-                          <button
-                            type="button"
-                            onClick={() => setModelExpanded(false)}
-                            className="text-xs text-[var(--pear-text-faint)] hover:text-[var(--pear-text-dim)]"
-                          >
-                            hide
-                          </button>
-                        </div>
-                        <input
-                          type="text"
-                          value={draft.model}
-                          onChange={(event) => patchDraft({ model: event.target.value })}
-                          placeholder="e.g. claude-opus-4-7"
-                          className="mt-1 h-9 w-full rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 text-sm text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent-dim)]"
-                        />
-                      </label>
-                    ) : (
-                      <button
-                        type="button"
-                        onClick={() => setModelExpanded(true)}
-                        className="text-xs text-[var(--pear-text-faint)] hover:text-[var(--pear-text-dim)]"
-                      >
-                        {draft.model ? `Model: ${draft.model}` : 'Set model'}
-                      </button>
-                    )}
-                  </div>
+                  <label className="block">
+                    <span className="text-xs font-medium text-[var(--pear-text-dim)]">Model <span className="font-normal text-[var(--pear-text-faint)]">(optional)</span></span>
+                    <input
+                      type="text"
+                      value={draft.model}
+                      onChange={(event) => patchDraft({ model: event.target.value })}
+                      placeholder="e.g. claude-opus-4-7"
+                      className="mt-1 h-9 w-full rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 text-sm text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent-dim)]"
+                    />
+                  </label>
                 </div>
 
                 <label className="mt-4 block">
