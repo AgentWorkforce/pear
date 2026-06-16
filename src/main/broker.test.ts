@@ -192,6 +192,7 @@ vi.mock('./burn', () => ({
 
 import {
   BrokerManager,
+  isCommandAvailableWithAugmentedPath,
   parseBrokerInitCliFlags,
   resolveAgentRelayMcpCommand,
   resolveBundledBrokerBinary
@@ -209,6 +210,7 @@ const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'pla
 const originalPublicEnv = process.env.PUBLIC
 const originalProgramDataEnv = process.env.ProgramData
 const originalPersonaHarnessReadyTimeoutEnv = process.env.PEAR_PERSONA_HARNESS_READY_TIMEOUT_MS
+const originalPathEnv = process.env.PATH
 
 function setProcessPlatform(platform: NodeJS.Platform): void {
   Object.defineProperty(process, 'platform', {
@@ -2340,5 +2342,30 @@ describe('BrokerManager spawnAgent CLI preflight', () => {
     }))
 
     await manager.shutdown()
+  })
+})
+
+describe('isCommandAvailableWithAugmentedPath', () => {
+  let tempDir: string | null = null
+
+  afterEach(async () => {
+    process.env.PATH = originalPathEnv
+    if (tempDir) await rm(tempDir, { recursive: true, force: true })
+    tempDir = null
+  })
+
+  it('resolves commands without mutating PATH', async () => {
+    tempDir = await mkdtemp(join(tmpdir(), 'pear-cli-path-'))
+    const toolPath = join(tempDir, 'opencode')
+    await writeFile(toolPath, '#!/bin/sh\nexit 0\n')
+    await chmod(toolPath, 0o755)
+    process.env.PATH = tempDir
+
+    expect(isCommandAvailableWithAugmentedPath('opencode')).toBe(true)
+    expect(process.env.PATH).toBe(tempDir)
+  })
+
+  it('returns false for blank commands', () => {
+    expect(isCommandAvailableWithAugmentedPath('   ')).toBe(false)
   })
 })

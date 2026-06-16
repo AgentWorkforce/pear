@@ -28,8 +28,6 @@ import type {
   BurnAgentInput,
   BurnAgentSummary,
   BurnFingerprintInput,
-  BurnHotspotInsight,
-  BurnHotspotMcpServer,
   BurnProjectBreakdown,
   BurnProjectInput,
   BurnProjectOverhead,
@@ -284,6 +282,8 @@ const api = {
       invoke<void>('broker:release-agent', projectId, name),
     listAgents: (projectId?: string) =>
       invoke<BrokerListAgent[]>('broker:list-agents', projectId),
+    checkCliAvailable: (cli: string) =>
+      invoke<boolean>('broker:check-cli-available', cli),
     listDetails: () => invoke<BrokerDetails[]>('broker:list-details'),
     listEvents: () => invoke<BrokerEventRecord[]>('broker:list-events'),
     shutdown: () => invoke<void>('broker:shutdown'),

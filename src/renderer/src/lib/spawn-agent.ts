@@ -3,7 +3,14 @@ import { getAgentKey, useAgentStore } from '@/stores/agent-store'
 import { useProjectStore, type Project, type ProjectRoot } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 
-export type SpawnAgentCli = 'claude' | 'codex' | 'grok'
+export type SpawnAgentCli = 'claude' | 'codex' | 'grok' | 'opencode'
+
+export const SPAWN_AGENT_CLI_INSTALL_COMMANDS: Record<SpawnAgentCli, string> = {
+  claude: 'npm install -g @anthropic-ai/claude-code',
+  codex: 'npm install -g @openai/codex',
+  grok: 'npm install -g grok-ai',
+  opencode: 'npm install -g opencode-ai'
+}
 
 function nextAgentName(cli: SpawnAgentCli, projectId: string, liveNames: string[]): string {
   const existingNames = new Set([
@@ -49,7 +56,8 @@ export async function spawnProjectAgent(
   project: Project,
   cli: SpawnAgentCli,
   customName?: string,
-  rootOverride?: ProjectRoot
+  rootOverride?: ProjectRoot,
+  customModel?: string
 ): Promise<string> {
   if (rootOverride && !rootOverride.pathExists) {
     throw new Error(`Project root not found: ${rootOverride.path || project.rootPath}`)
@@ -89,7 +97,8 @@ export async function spawnProjectAgent(
   const spawned = await pear.broker.spawnAgent(project.id, {
     name: requestedName,
     cli,
-    cwd: root.path
+    cwd: root.path,
+    ...(customModel?.trim() ? { model: customModel.trim() } : {})
   })
   const name = spawned.name || requestedName
 

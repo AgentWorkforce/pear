@@ -36,7 +36,6 @@ export function initTypingTrace(): void {
   if (!enabled) return
   ;(window as unknown as { __pearTypingStats?: () => void }).__pearTypingStats = printStats
   ;(window as unknown as { __pearTypingClear?: () => void }).__pearTypingClear = clearStats
-  // eslint-disable-next-line no-console
   console.log('[pear-typing-trace] enabled. Call __pearTypingStats() to see samples.')
 }
 
@@ -76,13 +75,11 @@ export function recordChunkEchoed(chunk: string): void {
 function printStats(): void {
   const completed = samples.filter((s) => typeof s.echoedAt === 'number') as Required<Sample>[]
   if (completed.length === 0) {
-    // eslint-disable-next-line no-console
     console.log('[pear-typing-trace] no samples yet')
     return
   }
   const latencies = completed.map((s) => s.echoedAt - s.sentAt).sort((a, b) => a - b)
   const pct = (p: number): number => latencies[Math.floor((latencies.length - 1) * p)]
-  // eslint-disable-next-line no-console
   console.log('[pear-typing-trace]', {
     count: latencies.length,
     p50_ms: +pct(0.5).toFixed(2),

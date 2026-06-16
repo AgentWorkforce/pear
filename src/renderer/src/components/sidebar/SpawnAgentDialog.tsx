@@ -1,16 +1,17 @@
 import type React from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Loader2, X } from 'lucide-react'
-import { ClaudeIcon, CodexIcon, GrokIcon } from '@/components/common/AgentIcons'
-import { listProjectPersonas, spawnProjectAgent, spawnProjectPersona, type SpawnAgentCli } from '@/lib/spawn-agent'
-import type { WorkforcePersona } from '@/lib/ipc'
+import { ClaudeIcon, CodexIcon, GrokIcon, OpenCodeIcon } from '@/components/common/AgentIcons'
+import { SPAWN_AGENT_CLI_INSTALL_COMMANDS, listProjectPersonas, spawnProjectAgent, spawnProjectPersona, type SpawnAgentCli } from '@/lib/spawn-agent'
+import { pear, type WorkforcePersona } from '@/lib/ipc'
 import { useProjectStore, type ProjectRoot } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 
 const AGENT_OPTIONS: Array<{ cli: SpawnAgentCli; label: string; Icon: typeof ClaudeIcon }> = [
   { cli: 'claude', label: 'Claude', Icon: ClaudeIcon },
   { cli: 'codex', label: 'Codex', Icon: CodexIcon },
-  { cli: 'grok', label: 'Grok', Icon: GrokIcon }
+  { cli: 'grok', label: 'Grok', Icon: GrokIcon },
+  { cli: 'opencode', label: 'OpenCode', Icon: OpenCodeIcon }
 ]
 
 export function SpawnAgentDialog(): React.ReactNode {
@@ -20,7 +21,9 @@ export function SpawnAgentDialog(): React.ReactNode {
   const [loadingPersonas, setLoadingPersonas] = useState(false)
   const [selectedPersonaId, setSelectedPersonaId] = useState('')
   const [customName, setCustomName] = useState('')
+  const [customModel, setCustomModel] = useState('')
   const [error, setError] = useState<string | null>(null)
+  const [cliAvailability, setCliAvailability] = useState<Partial<Record<SpawnAgentCli, boolean>>>({})
   const [selectedRootId, setSelectedRootId] = useState<string | null>(null)
   const project = useProjectStore((s) => s.getActiveProject())
   const defaultRoot = useProjectStore((s) => s.getActiveRoot())
@@ -45,6 +48,18 @@ export function SpawnAgentDialog(): React.ReactNode {
       setSelectedRootId(root?.id ?? null)
     }
   }, [project, root?.id, selectedRootId])
+
+  useEffect(() => {
+    let cancelled = false
+    const clis: SpawnAgentCli[] = ['claude', 'codex', 'opencode']
+    void Promise.all(clis.map(async (cli) => {
+      const available = await pear.broker.checkCliAvailable(cli).catch(() => false)
+      return [cli, available] as const
+    })).then((results) => {
+      if (!cancelled) setCliAvailability(Object.fromEntries(results))
+    })
+    return () => { cancelled = true }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -115,7 +130,7 @@ export function SpawnAgentDialog(): React.ReactNode {
     setError(null)
     setSpawningCli(cli)
     try {
-      await spawnProjectAgent(project, cli, customName, root)
+      await spawnProjectAgent(project, cli, customName, root, customModel)
       closeDialog()
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
@@ -208,6 +223,22 @@ export function SpawnAgentDialog(): React.ReactNode {
                   className="h-9 w-full rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 text-sm text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent-dim)] disabled:opacity-50"
                 />
               </div>
+              <div>
+                <label htmlFor="spawn-agent-model" className="mb-1 block text-xs font-medium text-[var(--pear-text-dim)]">
+                  Model <span className="text-[var(--pear-text-faint)]">(optional)</span>
+                </label>
+                <input
+                  id="spawn-agent-model"
+                  type="text"
+                  value={customModel}
+                  onChange={(event) => setCustomModel(event.target.value)}
+                  disabled={spawning}
+                  placeholder="e.g. claude-opus-4-7"
+                  spellCheck={false}
+                  autoComplete="off"
+                  className="h-9 w-full rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 text-sm text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent-dim)] disabled:opacity-50"
+                />
+              </div>
               <div className="grid grid-cols-3 gap-3">
                 {AGENT_OPTIONS.map(({ cli, label, Icon }) => (
                   <button
@@ -215,9 +246,13 @@ export function SpawnAgentDialog(): React.ReactNode {
                     type="button"
                     autoFocus={cli === 'claude'}
                     onClick={() => handleSpawn(cli)}
-                    disabled={!root?.pathExists || spawning}
+                    disabled={!root?.pathExists || spawning || cliAvailability[cli] === false}
                     className="flex min-h-[92px] flex-col items-center justify-center gap-2 rounded-lg border border-[var(--pear-border)] text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:cursor-not-allowed disabled:opacity-40"
-                    title={root?.pathExists ? `Spawn ${label}` : `Path not found: ${root?.path || project.rootPath}`}
+                    title={
+                      !root?.pathExists ? `Path not found: ${root?.path || project.rootPath}`
+                      : cliAvailability[cli] === false ? `${label} is not installed - run: ${SPAWN_AGENT_CLI_INSTALL_COMMANDS[cli]}`
+                      : `Spawn ${label}`
+                    }
                   >
                     <Icon className="h-6 w-6" />
                     <span>{spawningCli === cli ? 'Starting' : label}</span>

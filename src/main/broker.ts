@@ -99,7 +99,7 @@ function augmentedPath(): string {
   return Array.from(entries).join(delimiter)
 }
 
-function resolveCommandWithAugmentedPath(command: string): string | undefined {
+export function resolveCommandWithAugmentedPath(command: string): string | undefined {
   const resolved = resolveCommandOnPath(command)
   if (resolved) return resolved
 
@@ -112,6 +112,15 @@ function resolveCommandWithAugmentedPath(command: string): string | undefined {
   }
 
   return undefined
+}
+
+export function isCommandAvailableWithAugmentedPath(command: string): boolean {
+  const trimmed = command.trim()
+  if (!trimmed) return false
+  return Boolean(resolveCommandOnPath(trimmed, {
+    ...process.env,
+    PATH: augmentedPath()
+  }))
 }
 
 function executableCliPath(input: SpawnPtyInput): string {
@@ -3075,6 +3084,7 @@ export class BrokerManager {
   ): Promise<void> {
     let output = ''
     let timer: ReturnType<typeof setTimeout> | undefined
+    // eslint-disable-next-line prefer-const
     let livenessTimer: ReturnType<typeof setInterval> | undefined
     let settled = false
     let resolveReady: (() => void) | undefined

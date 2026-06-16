@@ -55,10 +55,10 @@ export type CloudAgentPickerProps = {
 }
 
 const HARNESS_OPTIONS = [
-  { value: 'claude', label: 'Claude', defaultModel: 'claude-opus-4-7' },
-  { value: 'codex', label: 'Codex', defaultModel: 'gpt-5.2' },
-  { value: 'opencode', label: 'OpenCode', defaultModel: 'claude-sonnet-4-6' },
-  { value: 'grok', label: 'Grok', defaultModel: 'grok-build-0.1' }
+  { value: 'claude', label: 'Claude' },
+  { value: 'codex', label: 'Codex' },
+  { value: 'opencode', label: 'OpenCode' },
+  { value: 'grok', label: 'Grok' }
 ]
 
 function getErrorMessage(error: unknown): string {
@@ -176,7 +176,8 @@ export default function CloudAgentPicker({
   const [creating, setCreating] = useState(false)
   const [createName, setCreateName] = useState('')
   const [createHarness, setCreateHarness] = useState('claude')
-  const [createModel, setCreateModel] = useState('claude-opus-4-7')
+  const [createModel, setCreateModel] = useState('')
+
   const [busy, setBusy] = useState(false)
   const [nowMs, setNowMs] = useState(() => Date.now())
   const prewarmTargetRef = useRef<string | null>(null)
@@ -453,9 +454,7 @@ export default function CloudAgentPicker({
   }
 
   function handleHarnessChange(value: string): void {
-    const option = HARNESS_OPTIONS.find((candidate) => candidate.value === value)
     setCreateHarness(value)
-    if (option) setCreateModel(option.defaultModel)
   }
 
   return (
@@ -641,11 +640,12 @@ export default function CloudAgentPicker({
                 </select>
               </label>
               <label className="min-w-0 md:col-span-2">
-                <span className="mb-1.5 block text-xs text-[var(--pear-text-faint)]">Model</span>
+                <span className="mb-1.5 block text-xs text-[var(--pear-text-faint)]">Model <span className="opacity-60">(optional)</span></span>
                 <input
                   value={createModel}
                   onChange={(event) => setCreateModel(event.target.value)}
                   disabled={busy}
+                  placeholder="e.g. claude-opus-4-7"
                   className="h-9 w-full rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 text-sm text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent-dim)] disabled:opacity-50"
                 />
               </label>
@@ -653,7 +653,7 @@ export default function CloudAgentPicker({
             <div className="mt-4 flex justify-end">
               <button
                 type="submit"
-                disabled={busy || !createName.trim() || !createModel.trim()}
+                disabled={busy || !createName.trim()}
                 className="flex h-9 items-center gap-2 rounded-md bg-[var(--pear-accent)] px-3 text-sm font-medium text-white hover:bg-[var(--pear-accent-bright)] disabled:opacity-40"
               >
                 {busy && <Loader2 size={14} className="animate-spin" />}

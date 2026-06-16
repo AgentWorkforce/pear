@@ -4,6 +4,7 @@ import { Circle, Save, Square, Play, RefreshCw } from 'lucide-react'
 import { pear, type FactoryStatus } from '@/lib/ipc'
 import { useProjectStore } from '@/stores/project-store'
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type FactoryConfigDraft = Record<string, any>
 
 const MAX_DISPLAYED_LOGS = 160

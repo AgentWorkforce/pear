@@ -51,7 +51,7 @@ const SLACK_SELF_ECHO_WRITEBACK_TTL_MS = 15 * 60_000
 // available, so an edit to the same Slack message can still inject.
 const SLACK_RECORD_REPLAY_TTL_MS = 60 * 60_000
 const REPLAY_SKEW_TOLERANCE_MS = 15 * 60_000
-const REMOTE_SUBSCRIPTION_FROM: 'legacy' = 'legacy'
+const REMOTE_SUBSCRIPTION_FROM = 'legacy' as const
 const INTEGRATION_EVENT_LOG_PATH = join(homedir(), '.agentworkforce', 'pear', 'integration-events.log')
 const AGGREGATED_WARNING_REPEAT_EVERY = 25
 const MAX_AGGREGATED_WARNING_KEYS = 256
@@ -2806,7 +2806,7 @@ export class IntegrationEventBridge {
         ? slackContextReadCandidatePaths(path, matchedSpecs)
         : [path]
       if (typeof client.readFile === 'function') {
-        for (const [index, delayMs] of readDelays.entries()) {
+        for (const [, delayMs] of readDelays.entries()) {
           if (delayMs > 0) await delay(delayMs)
           for (const candidatePath of candidatePaths) {
             try {

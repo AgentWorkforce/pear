@@ -966,7 +966,8 @@ export const pearMock: PearAPI = {
       noopUnsubscribe(state.brokerDiagnosticListeners, callback),
     onPtyChunk: (callback: (projectId: string, name: string, chunk: string) => void) =>
       noopUnsubscribe(state.ptyChunkListeners, callback),
-    onStatus: (callback: (status: BrokerStatusEvent) => void) => noopUnsubscribe(state.brokerStatusListeners, callback)
+    onStatus: (callback: (status: BrokerStatusEvent) => void) => noopUnsubscribe(state.brokerStatusListeners, callback),
+    checkCliAvailable: async (_cli: string) => true
   },
   factory: {
     status: async () => ({
