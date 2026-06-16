@@ -3084,7 +3084,8 @@ export class BrokerManager {
   ): Promise<void> {
     let output = ''
     let timer: ReturnType<typeof setTimeout> | undefined
-    const livenessTimer: ReturnType<typeof setInterval> | undefined
+    // eslint-disable-next-line prefer-const
+    let livenessTimer: ReturnType<typeof setInterval> | undefined
     let settled = false
     let resolveReady: (() => void) | undefined
     let rejectReady: ((error: Error) => void) | undefined
