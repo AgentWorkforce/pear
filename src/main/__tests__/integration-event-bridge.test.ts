@@ -2548,7 +2548,6 @@ test('slack self-bot writeback echoes are suppressed without dropping humans or 
   const workspaceRoot = join(homedir(), '.agentworkforce', 'pear', 'relayfile', 'workspaces', localMountWorkspaceId)
   const localRoot = join(workspaceRoot, 'slack', 'channels', 'C123ABC', 'messages')
   const localDraftPath = join(localRoot, 'codex-175-self-echo.json')
-  const remoteDraftPath = '/slack/channels/C123ABC/messages/codex-175-self-echo.json'
   const outboundText = 'Pear posted this from an agent'
   await mkdir(localRoot, { recursive: true })
 

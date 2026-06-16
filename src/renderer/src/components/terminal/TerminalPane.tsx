@@ -1,6 +1,6 @@
 import type React from 'react'
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { AlertTriangle, ChevronLeft, ChevronRight, Columns2, CornerUpLeft, Loader2, Network, PanelTop, X } from 'lucide-react'
+import { AlertTriangle, ChevronLeft, ChevronRight, Columns2, CornerUpLeft, Loader2, PanelTop, X } from 'lucide-react'
 import { AgentHarnessIcon, ClaudeIcon, CodexIcon, GrokIcon, OpenCodeIcon } from '@/components/common/AgentIcons'
 import { ChatComposerInput } from '@/components/chat/ChatComposerInput'
 import { SPAWN_AGENT_CLI_INSTALL_COMMANDS, spawnProjectAgent, type SpawnAgentCli } from '@/lib/spawn-agent'

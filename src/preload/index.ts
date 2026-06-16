@@ -28,8 +28,6 @@ import type {
   BurnAgentInput,
   BurnAgentSummary,
   BurnFingerprintInput,
-  BurnHotspotInsight,
-  BurnHotspotMcpServer,
   BurnProjectBreakdown,
   BurnProjectInput,
   BurnProjectOverhead,

@@ -484,7 +484,6 @@ function createRuntime(
       // See pty-buffer-store.ts for the enable instructions. Flag is
       // cached to avoid a per-batch localStorage read.
       if (diagPtyEnabled()) {
-        // eslint-disable-next-line no-console
         console.log(`[diag:runtime:writeChunks] key=${key} count=${newChunks.length} firstPreview="${newChunks[0]?.slice(0, 80).replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\x1b/g, '\\e')}"`)
       }
       // Typing-trace accounting stays per-chunk: recordChunkEchoed consumes

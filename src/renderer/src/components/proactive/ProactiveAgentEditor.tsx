@@ -1,4 +1,4 @@
-import React, { Suspense, useCallback, useEffect, useMemo, useState } from 'react'
+import React, { Suspense, useEffect, useMemo, useState } from 'react'
 import {
   AlertTriangle,
   CheckCircle2,
@@ -301,34 +301,6 @@ function Section({
         {children}
       </div>
     </details>
-  )
-}
-
-function TextInput({
-  error,
-  label,
-  onChange,
-  placeholder,
-  value
-}: {
-  error?: string
-  label: string
-  onChange: (value: string) => void
-  placeholder?: string
-  value: string
-}): React.ReactNode {
-  return (
-    <label className="block">
-      <span className="text-xs font-medium text-[var(--pear-text-dim)]">{label}</span>
-      <input
-        type="text"
-        value={value}
-        placeholder={placeholder}
-        onChange={(event) => onChange(event.target.value)}
-        className="mt-1 h-9 w-full rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 text-sm text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent-dim)]"
-      />
-      <FieldError message={error} />
-    </label>
   )
 }
 

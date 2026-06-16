@@ -210,14 +210,10 @@ describe('registerIpcHandlers broker:spawn-agent', () => {
 })
 
 describe('registerIpcHandlers broker:list-personas', () => {
-=======
-describe('registerIpcHandlers broker:check-cli-available', () => {
->>>>>>> ed6285c (chore: apply pr-reviewer fixes for #143)
   beforeEach(() => {
     mock.handlers.clear()
     mock.ipcMain.handle.mockClear()
     mock.ipcMain.on.mockClear()
-<<<<<<< HEAD
     mock.brokerManager.listPersonas.mockReset()
     vi.mocked(loadStore).mockReset()
     vi.mocked(loadStore).mockReturnValue({ projects: [], activeProjectId: null })
