@@ -1,8 +1,29 @@
+import { mkdirSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 type FetchCall = {
   url: string
   init?: RequestInit
+}
+
+/** Build a minimal connected-integration fixture for prescriptive tests. */
+function makeIntegration(provider: string, mountPaths: string[]) {
+  return {
+    id: `${provider}-integration-1`,
+    name: provider,
+    type: provider,
+    provider,
+    integrationId: `${provider}-integration-1`,
+    scope: {},
+    mountPaths,
+    connectedAt: '2026-06-05T00:00:00.000Z',
+    notifyAgent: true,
+    subscribeAgent: false,
+    downloadHistoricalData: false,
+    visibleInProject: true
+  }
 }
 
 const mock = vi.hoisted(() => {
@@ -257,6 +278,11 @@ vi.mock('./store', () => ({
 vi.mock('./integration-mounts', () => ({
   integrationMountManager: mock.integrationMountManager,
   integrationMountRootForWorkspace: vi.fn((workspaceId: string) => `/tmp/relayfile/${workspaceId}`),
+  integrationLocalPathForRemote: vi.fn((workspaceId: string, remotePath: string) => {
+    const segments = remotePath.split('/').filter(Boolean)
+    const withoutRoot = segments[0] === 'integrations' ? segments.slice(1) : segments
+    return ['/tmp/relayfile', workspaceId, ...withoutRoot].join('/')
+  }),
   MAX_LOCAL_INTEGRATION_MOUNT_PATHS: 24
 }))
 
@@ -326,7 +352,10 @@ describe('IntegrationsManager', () => {
     mock.loadStore.mockClear()
     mock.saveStore.mockClear()
     mock.integrationMountManager.ensureMounted.mockClear()
-    mock.integrationMountManager.currentWorkspaceId.mockClear()
+    // Full reset: the prescriptive adapter-doc test overrides the return value
+    // with a workspace id, which must default back to null for other tests.
+    mock.integrationMountManager.currentWorkspaceId.mockReset()
+    mock.integrationMountManager.currentWorkspaceId.mockReturnValue(null)
     mock.integrationMountManager.localPathsFor.mockClear()
     mock.integrationMountManager.setHealthObserver.mockClear()
     mock.integrationMountManager.stop.mockClear()
@@ -1487,84 +1516,101 @@ describe('IntegrationsManager', () => {
     expect(instructions).toContain('.integrations/discovery/slack')
   })
 
-  it('builds prescriptive spawn instructions with exact write paths', () => {
+  it('builds prescriptive spawn instructions from the adapter discovery doc', () => {
+    // Materialize a discovery .adapter.md on the (mocked) local mount so the
+    // generator reads writable resources from adapter data, not hardcoded rows.
+    const workspaceId = 'ws-prescriptive'
+    mock.integrationMountManager.currentWorkspaceId.mockReturnValue(workspaceId)
+    const slackDiscoveryDir = join('/tmp/relayfile', workspaceId, 'discovery', 'slack')
+    const linearDiscoveryDir = join('/tmp/relayfile', workspaceId, 'discovery', 'linear')
+    mkdirSync(slackDiscoveryDir, { recursive: true })
+    mkdirSync(linearDiscoveryDir, { recursive: true })
+    writeFileSync(
+      join(slackDiscoveryDir, '.adapter.md'),
+      [
+        '# slack writeback adapter',
+        '## Writable resources',
+        '### messages — `/slack/channels/{channelId}/messages`',
+        '- schema: `discovery/slack/channels/{channelId}/messages/.schema.json`',
+        '### direct-messages — `/slack/users/{userId}/messages`',
+        '- schema: `discovery/slack/users/{userId}/messages/.schema.json`',
+        '## Contract',
+        '### not-a-resource — `/slack/should/not/appear`'
+      ].join('\n')
+    )
+    writeFileSync(
+      join(linearDiscoveryDir, '.adapter.md'),
+      [
+        '# linear writeback adapter',
+        '## Writable resources',
+        '### issues — `/linear/issues`',
+        '### comments — `/linear/issues/{issueId}/comments`'
+      ].join('\n')
+    )
+
     mock.store.projects[0].integrations = [
-      {
-        id: 'slack-integration-1',
-        name: 'Slack',
-        type: 'slack',
-        provider: 'slack',
-        integrationId: 'slack-integration-1',
-        scope: {},
-        mountPaths: ['/slack/channels/C12345__general'],
-        connectedAt: '2026-06-05T00:00:00.000Z',
-        notifyAgent: true,
-        subscribeAgent: false,
-        downloadHistoricalData: false,
-        visibleInProject: true
-      },
-      {
-        id: 'linear-integration-1',
-        name: 'Linear',
-        type: 'linear',
-        provider: 'linear',
-        integrationId: 'linear-integration-1',
-        scope: {},
-        mountPaths: ['/linear/issues'],
-        connectedAt: '2026-06-05T00:00:00.000Z',
-        notifyAgent: true,
-        subscribeAgent: false,
-        downloadHistoricalData: false,
-        visibleInProject: true
-      }
+      makeIntegration('slack', ['/slack/channels/C12345__general']),
+      makeIntegration('linear', ['/linear/issues'])
     ]
     const manager = new IntegrationsManager()
 
     const instructions = manager.prescriptiveSpawnInstructions('project-1')
 
     expect(instructions).toBeDefined()
-    // Slack channel path derived from mount
-    expect(instructions).toContain('.integrations/slack/channels/C12345__general/messages/<name>.json')
-    expect(instructions).toContain('"channelId"')
-    // Linear paths
-    expect(instructions).toContain('.integrations/linear/issues/<name>.json')
-    expect(instructions).toContain('"_action":"update"')
-    expect(instructions).toContain('"_action":"delete"')
-    // Comments hang off the canonical issue resource file, not a bare id.
-    expect(instructions).toContain('.integrations/linear/issues/<issueFile>/comments/<name>.json')
-    expect(instructions).toContain('<KEY>-<num>__<uuid>.json')
-    // Slack DM payload is text-only; userId is path-derived (no userId field anywhere).
-    expect(instructions).not.toContain('"userId"')
-    // No narrative prose / XML tags
+    // Path comes from the adapter doc; concrete channel id resolved from the scoped mount.
+    expect(instructions).toContain('messages → .integrations/slack/channels/C12345__general/messages/<name>.json')
+    // Payload shape points at the adapter's discovery create example — not hardcoded.
+    expect(instructions).toContain('fields: .integrations/discovery/slack/channels/{channelId}/messages/.create.example.json')
+    // Linear create + nested comments (id placeholder preserved).
+    expect(instructions).toContain('issues → .integrations/linear/issues/<name>.json')
+    expect(instructions).toContain('comments → .integrations/linear/issues/{issueId}/comments/<name>.json')
+    expect(instructions).toContain('fields: .integrations/discovery/linear/issues/{issueId}/comments/.create.example.json')
+    expect(instructions).toContain('{…} path segments are resource ids')
+    // The "## Contract" heading ends the writable section — its row is ignored.
+    expect(instructions).not.toContain('should/not/appear')
+    // No hardcoded payloads or narrative block.
+    expect(instructions).not.toContain('"text":"<message>"')
     expect(instructions).not.toContain('<integrations-update>')
-    expect(instructions).not.toContain('Initial project integration context')
   })
 
-  it('emits a text-only Slack DM payload when a user mount is present', () => {
+  it('works generically for a provider with no pear-side knowledge', () => {
+    // notion has no special-casing anywhere in pear — paths + example pointers
+    // come entirely from its adapter doc.
+    const workspaceId = 'ws-notion'
+    mock.integrationMountManager.currentWorkspaceId.mockReturnValue(workspaceId)
+    const dir = join('/tmp/relayfile', workspaceId, 'discovery', 'notion')
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(
+      join(dir, '.adapter.md'),
+      [
+        '# notion writeback adapter',
+        '## Writable resources',
+        '### pages — `/notion/databases/{databaseId}/pages`'
+      ].join('\n')
+    )
     mock.store.projects[0].integrations = [
-      {
-        id: 'slack-integration-1',
-        name: 'Slack',
-        type: 'slack',
-        provider: 'slack',
-        integrationId: 'slack-integration-1',
-        scope: {},
-        mountPaths: ['/slack/users/U67890EVAL/messages'],
-        connectedAt: '2026-06-05T00:00:00.000Z',
-        notifyAgent: true,
-        subscribeAgent: false,
-        downloadHistoricalData: false,
-        visibleInProject: true
-      }
+      makeIntegration('notion', ['/notion/databases/DB123/pages'])
     ]
     const manager = new IntegrationsManager()
 
     const instructions = manager.prescriptiveSpawnInstructions('project-1')
 
-    expect(instructions).toContain('Slack DM →')
-    expect(instructions).toContain('.integrations/slack/users/U67890EVAL/messages/<name>.json')
-    expect(instructions).toContain('payload: {"text":"<message>"}')
-    expect(instructions).not.toContain('"userId"')
+    expect(instructions).toContain('pages → .integrations/notion/databases/DB123/pages/<name>.json')
+    expect(instructions).toContain('fields: .integrations/discovery/notion/databases/{databaseId}/pages/.create.example.json')
+  })
+
+  it('falls back to a discovery pointer when the adapter doc is unavailable', () => {
+    // currentWorkspaceId defaults to null in the mock → no adapter doc to read.
+    mock.store.projects[0].integrations = [
+      makeIntegration('slack', ['/slack/channels/C12345__general'])
+    ]
+    const manager = new IntegrationsManager()
+
+    const instructions = manager.prescriptiveSpawnInstructions('project-1')
+
+    expect(instructions).toBeDefined()
+    expect(instructions).toContain('read .integrations/discovery/slack/.adapter.md')
+    expect(instructions).toContain('.integrations/slack/channels/C12345__general/messages/<name>.json')
   })
 
   it('returns undefined from prescriptiveSpawnInstructions when no integrations', () => {

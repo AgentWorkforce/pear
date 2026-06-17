@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { existsSync, readFileSync } from 'node:fs'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { BrowserWindow, shell } from 'electron'
 import { RelayfileSetup, type FileReadResponse, type TreeResponse, type WorkspaceHandle } from '@relayfile/sdk'
@@ -8,6 +9,7 @@ import { cloudAgentManager } from './cloud-agent'
 import * as filesystem from './filesystem'
 import { integrationEventBridge, integrationSubscriptionSummaries, slackListenDms } from './integration-event-bridge'
 import {
+  integrationLocalPathForRemote,
   integrationMountManager,
   integrationMountRootForWorkspace,
   MAX_LOCAL_INTEGRATION_MOUNT_PATHS
@@ -387,6 +389,56 @@ function projectIntegrationPathForRelayfilePath(mountPath: string): string {
 
 function discoveryMountPathForProvider(provider: string): string {
   return `/discovery/${toRelayfileProvider(provider)}`
+}
+
+/** One writable resource declared by an adapter's discovery doc. */
+interface WritableResource {
+  /** Human label from the adapter doc, e.g. "messages", "direct-messages". */
+  name: string
+  /** Remote path template (may contain {placeholder} id segments), e.g. /slack/channels/{channelId}/messages. */
+  pathTemplate: string
+}
+
+// The discovery `.adapter.md` lists writable resources in a structured block:
+//   ## Writable resources
+//   ### <name> — `/<path-template>`
+// We parse those headings so prescriptiveSpawnInstructions stays adapter-driven:
+// adding a provider (which ships its own adapter doc) needs no code change here.
+const ADAPTER_WRITABLE_RESOURCE_RE = /^###\s+(.+?)\s+[—-]\s+`(\/[^`]+)`/u
+
+function parseWritableResources(adapterDoc: string): WritableResource[] {
+  const lines = adapterDoc.split('\n')
+  const resources: WritableResource[] = []
+  let inWritableSection = false
+  for (const line of lines) {
+    const heading = line.match(/^##\s+(.*)$/u)
+    if (heading) {
+      inWritableSection = /writable resources/iu.test(heading[1])
+      continue
+    }
+    if (!inWritableSection) continue
+    const match = line.match(ADAPTER_WRITABLE_RESOURCE_RE)
+    if (match) resources.push({ name: match[1].trim(), pathTemplate: match[2].trim() })
+  }
+  return resources
+}
+
+function isTemplatePlaceholder(segment: string): boolean {
+  return segment.startsWith('{') && segment.endsWith('}')
+}
+
+// True when concrete root `R` is the resolved form of template `T` (same depth),
+// e.g. R=/slack/channels/C123__general/messages, T=/slack/channels/{channelId}/messages.
+function templateMatchesConcrete(templateSegs: string[], concreteSegs: string[]): boolean {
+  if (templateSegs.length !== concreteSegs.length) return false
+  return templateSegs.every((seg, i) => isTemplatePlaceholder(seg) || seg === concreteSegs[i])
+}
+
+// True when concrete root `R` is a prefix of template `T` (T is nested under R),
+// e.g. R=/linear/issues, T=/linear/issues/{issueId}/comments.
+function concreteIsPrefixOfTemplate(templateSegs: string[], concreteSegs: string[]): boolean {
+  if (concreteSegs.length >= templateSegs.length) return false
+  return concreteSegs.every((seg, i) => isTemplatePlaceholder(templateSegs[i]) || templateSegs[i] === seg)
 }
 
 function canonicalMountPathsForConnectedIntegration(integration: ConnectedIntegration): string[] {
@@ -2286,63 +2338,105 @@ export class IntegrationsManager {
     ].join('\n')
   }
 
-  // Generates a compact, explicit write-path lookup table for CLIs that cannot
-  // reliably reason from the full narrative integration context (e.g. opencode).
-  // Same data source as initialSpawnInstructions but produces provider/action
-  // rows with exact paths and minimal payload schemas instead of prose.
+  // Generates a compact write-path table for CLIs that cannot reliably reason
+  // from the full narrative integration context (e.g. opencode). Fully data-driven
+  // and provider-agnostic: the writable resources + path templates come from each
+  // provider's discovery `.adapter.md` (shipped by relayfile-adapters) and payload
+  // shape is read from that resource's discovery `.create.example.json`. No
+  // per-provider knowledge is hardcoded here, so a new integration works with no
+  // code change. (The adapters publish write-shaped examples; cloud's
+  // discovery-emitter currently serves read-inferred ones that can drop required
+  // write fields — see AgentWorkforce/cloud#2245.)
   prescriptiveSpawnInstructions(projectId: string): string | undefined {
     const integrations = this.visibleIntegrationsForProject(projectId)
     if (integrations.length === 0) return undefined
 
     const lines: string[] = [
-      'To dispatch an integration action, write a JSON file to the provider path — do NOT use relay messaging for these actions.',
+      'To dispatch an integration action, write a JSON file under the resource path — do NOT use relay messaging for these actions.',
       '',
-      'Integration write paths (use exactly as shown):'
+      'Writable resources (read each resource’s create example for the payload, then write a sibling .json):'
     ]
+    let usedIdPlaceholder = false
 
     for (const integration of integrations) {
       const provider = toRelayfileProvider(integration.provider)
+      const discoveryDisplay = projectIntegrationPathForRelayfilePath(
+        discoveryMountPathForProvider(provider)
+      )
+      // Concrete, in-scope writeback roots (real channel/user/issue ids resolved).
+      const concreteRoots = writebackCommandMountPathsForIntegration(integration)
+        .map((p) => p.split('/').filter(Boolean))
+      const resources = this.readWritableResources(provider)
+
+      // Pair each adapter-declared resource with a concrete in-scope root so we
+      // emit real paths. Resources the integration isn't scoped to are skipped.
+      const rows: Array<{ name: string; displaySegs: string[]; templateSegs: string[] }> = []
+      for (const resource of resources) {
+        const templateSegs = resource.pathTemplate.split('/').filter(Boolean)
+        const exact = concreteRoots.find((r) => templateMatchesConcrete(templateSegs, r))
+        if (exact) {
+          rows.push({ name: resource.name, displaySegs: exact, templateSegs })
+          continue
+        }
+        const parent = concreteRoots.find((r) => concreteIsPrefixOfTemplate(templateSegs, r))
+        if (parent) {
+          const displaySegs = [...parent, ...templateSegs.slice(parent.length)]
+          rows.push({ name: resource.name, displaySegs, templateSegs })
+        }
+      }
+
+      if (rows.length > 0) {
+        lines.push(`${provider}:`)
+        for (const row of rows) {
+          const displayPath = projectIntegrationPathForRelayfilePath('/' + row.displaySegs.join('/'))
+          if (row.displaySegs.some(isTemplatePlaceholder)) usedIdPlaceholder = true
+          // Payload shape lives in the adapter's discovery create example, under
+          // the template path. No payload is hardcoded here.
+          const examplePath = `${discoveryDisplay}/${row.templateSegs.slice(1).join('/')}/.create.example.json`
+          lines.push(`  ${row.name} → ${displayPath}/<name>.json`)
+          lines.push(`    fields: ${examplePath}`)
+        }
+        continue
+      }
+
+      // Fallback: adapter doc unavailable or no resource matched — point at the
+      // concrete writeback roots and the discovery adapter doc for this provider.
       const writebackPaths = writebackCommandMountPathsForIntegration(integration)
         .map(projectIntegrationPathForRelayfilePath)
-
-      if (provider === 'slack') {
-        const channelPaths = writebackPaths.filter((p) => p.includes('/channels/'))
-        const dmPaths = writebackPaths.filter((p) => p.includes('/users/'))
-        for (const p of channelPaths) {
-          // p is already the concrete channel messages mount (…/channels/<id>__<slug>/messages).
-          lines.push(`  Slack channel message → ${p}/<name>.json`)
-          lines.push(`    payload: {"text":"<message>","channelId":"<channelId>"}`)
-        }
-        if (dmPaths.length > 0 || channelPaths.length === 0) {
-          const dmBase = dmPaths[0] ?? `${PROJECT_INTEGRATIONS_LINK_NAME}/slack/users/<userId>/messages`
-          // userId is taken from the path; the payload only needs the text.
-          lines.push(`  Slack DM → ${dmBase}/<name>.json`)
-          lines.push(`    payload: {"text":"<message>"}`)
-        }
-      } else if (provider === 'linear') {
-        const base = writebackPaths[0] ?? `${PROJECT_INTEGRATIONS_LINK_NAME}/linear/issues`
-        const issueBase = base.replace(/\/issues\/.*$/, '/issues')
-        lines.push(`  Linear create issue → ${issueBase}/<name>.json`)
-        lines.push(`    payload: {"title":"<title>","description":"<desc>","priority":<0-4>}`)
-        lines.push(`  Linear update issue → ${issueBase}/<name>.json`)
-        lines.push(`    payload: {"id":"<issueId>","_action":"update",<fields to change>}`)
-        lines.push(`  Linear delete issue → ${issueBase}/<name>.json`)
-        lines.push(`    payload: {"id":"<issueId>","_action":"delete"}`)
-        // Comments hang off the canonical issue resource file, not a bare id —
-        // the local mount only accepts comments under <KEY>-<num>__<uuid>.json.
-        lines.push(`  Linear comment → ${issueBase}/<issueFile>/comments/<name>.json`)
-        lines.push(`    <issueFile> is the canonical issue filename from listing ${issueBase}/ (format: <KEY>-<num>__<uuid>.json)`)
-        lines.push(`    payload: {"issueId":"<id>","body":"<text>"}`)
+      if (writebackPaths.length > 0) {
+        lines.push(`${provider} — read ${discoveryDisplay}/.adapter.md for writable resources and payload shape:`)
+        for (const p of writebackPaths) lines.push(`  ${p}/<name>.json`)
       } else {
-        for (const p of writebackPaths) {
-          lines.push(`  ${integration.provider} → ${p}/<name>.json`)
-          lines.push(`    (read ${PROJECT_INTEGRATIONS_LINK_NAME}/discovery/${provider}/.adapter.md for payload shape)`)
-        }
+        lines.push(`${provider} — see ${discoveryDisplay}/.adapter.md for writable resources and payload shape.`)
       }
     }
 
-    lines.push('', `Rules: use any filename ending in .json; do not write inside discovery/.`)
+    lines.push('', 'Rules:')
+    lines.push('- Use any filename ending in .json. Do not write inside discovery/.')
+    lines.push('- Read each resource’s “fields:” create example for the payload; omit readOnly (server-managed) fields.')
+    if (usedIdPlaceholder) {
+      lines.push('- {…} path segments are resource ids: use the exact resource filename from listing the parent directory; never invent one.')
+    }
     return lines.join('\n')
+  }
+
+  // Reads a provider's discovery `.adapter.md` from the local mount and returns
+  // its declared writable resources. Returns [] when the mount/doc isn't present
+  // (callers fall back to a discovery pointer), so this never throws at spawn.
+  private readWritableResources(provider: string): WritableResource[] {
+    const workspaceId = integrationMountManager.currentWorkspaceId()
+    if (!workspaceId) return []
+    try {
+      const discoveryDir = integrationLocalPathForRemote(
+        workspaceId,
+        discoveryMountPathForProvider(provider)
+      )
+      const adapterDocPath = resolve(discoveryDir, '.adapter.md')
+      if (!existsSync(adapterDocPath)) return []
+      return parseWritableResources(readFileSync(adapterDocPath, 'utf8'))
+    } catch {
+      return []
+    }
   }
 
   // Called after a spawn whose task embedded initialSpawnInstructions: the
