@@ -40,7 +40,7 @@
     "@agent-relay/harness-driver": "^8.3.7",
     "@agent-relay/sdk": "^8.3.7",
     "@agentworkforce/deploy": "^4.0.2",
-    "@relayburn/sdk": "^3.2.0",
+    "@relayburn/sdk": "^3.3.0",
     "@relayfile/sdk": "^0.8.29",
     "@tanstack/react-virtual": "^3.14.2",
     "@xterm/addon-fit": "^0.10.0",
