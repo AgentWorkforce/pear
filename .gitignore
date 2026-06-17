@@ -21,3 +21,6 @@ tests/playwright/screenshots/
 
 # Local factory runtime config (not for commit)
 factory.config.json
+
+evals/reports/*.json
+evals/reports/*.html

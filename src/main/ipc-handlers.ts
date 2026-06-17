@@ -671,7 +671,10 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('broker:spawn-agent', async (_, projectId: string, input: SpawnPtyInput & { broker?: 'local' | 'cloud' }) => {
-    const integrationInstructions = integrationsManager.initialSpawnInstructions(projectId)
+    const usePrescriptive = typeof input.cli === 'string' && input.cli !== 'claude'
+    const integrationInstructions = usePrescriptive
+      ? integrationsManager.prescriptiveSpawnInstructions(projectId)
+      : integrationsManager.initialSpawnInstructions(projectId)
     const result = await brokerManager.spawnAgent(projectId, integrationInstructions
       ? {
           ...input,
@@ -680,10 +683,12 @@ export function registerIpcHandlers(): void {
             : integrationInstructions
         }
       : input)
-    if (integrationInstructions && result?.name) {
+    if (!usePrescriptive && integrationInstructions && result?.name) {
       // The spawn task embedded the current integrations snippet — mark the
       // new agent as already notified so the next project broadcast doesn't
       // deliver the same setup context to it a second time.
+      // Not needed for prescriptive spawns: they use a different text format
+      // that the per-agent delivery tracker doesn't manage.
       integrationsManager.recordSpawnInstructionDelivery(projectId, result.name)
     }
     integrationEventBridge.invalidateProjectAgentCache(projectId)

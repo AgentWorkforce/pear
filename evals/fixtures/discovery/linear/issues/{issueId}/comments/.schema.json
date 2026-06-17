@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "linear issue comments",
+  "description": "Record shape for /linear/issues/{issueId}/comments. Fields marked readOnly are server-managed; omit them from create payloads.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "id": { "type": "string", "readOnly": true },
+    "issueId": { "type": "string" },
+    "body": { "type": "string" },
+    "createdAt": { "type": "string", "readOnly": true },
+    "userId": { "type": "string", "readOnly": true }
+  },
+  "required": ["issueId", "body"]
+}
