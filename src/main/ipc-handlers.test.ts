@@ -51,6 +51,8 @@ const mock = vi.hoisted(() => {
     integrationsManager: {
       notifyAgentState: vi.fn(async () => undefined),
       initialSpawnInstructions: vi.fn(),
+      prescriptiveSpawnInstructions: vi.fn(),
+      recordSpawnInstructionDelivery: vi.fn(),
       hydrateActiveProject: vi.fn(),
       listCatalog: vi.fn(),
       startConnect: vi.fn(),
@@ -189,6 +191,8 @@ describe('registerIpcHandlers broker:spawn-agent', () => {
     mock.ipcMain.on.mockClear()
     mock.brokerManager.spawnAgent.mockReset()
     mock.integrationsManager.initialSpawnInstructions.mockReset()
+    mock.integrationsManager.prescriptiveSpawnInstructions.mockReset()
+    mock.integrationsManager.recordSpawnInstructionDelivery.mockReset()
     registerIpcHandlers()
   })
 
@@ -206,6 +210,34 @@ describe('registerIpcHandlers broker:spawn-agent', () => {
 
     expect(result).toEqual({ name: 'worker', runtime: 'pty' })
     expect(() => structuredClone(result)).not.toThrow()
+  })
+
+  it('uses prescriptive instructions for non-claude CLIs', async () => {
+    const handler = mock.handlers.get('broker:spawn-agent')
+    mock.integrationsManager.prescriptiveSpawnInstructions.mockReturnValueOnce('PRESCRIPTIVE')
+    mock.brokerManager.spawnAgent.mockResolvedValueOnce({ name: 'oc-1', runtime: 'pty' })
+
+    await handler?.({}, 'project-1', { name: 'oc-1', cli: 'opencode', task: 'do it' })
+
+    expect(mock.integrationsManager.prescriptiveSpawnInstructions).toHaveBeenCalledWith('project-1')
+    expect(mock.integrationsManager.initialSpawnInstructions).not.toHaveBeenCalled()
+    const spawnArg = mock.brokerManager.spawnAgent.mock.calls[0][1]
+    expect(spawnArg.task).toContain('PRESCRIPTIVE')
+    expect(spawnArg.task).toContain('do it')
+    // Prescriptive spawns do not register narrative per-agent delivery.
+    expect(mock.integrationsManager.recordSpawnInstructionDelivery).not.toHaveBeenCalled()
+  })
+
+  it('uses narrative instructions for claude and records delivery', async () => {
+    const handler = mock.handlers.get('broker:spawn-agent')
+    mock.integrationsManager.initialSpawnInstructions.mockReturnValueOnce('NARRATIVE')
+    mock.brokerManager.spawnAgent.mockResolvedValueOnce({ name: 'claude-1', runtime: 'pty' })
+
+    await handler?.({}, 'project-1', { name: 'claude-1', cli: 'claude', task: 'do it' })
+
+    expect(mock.integrationsManager.initialSpawnInstructions).toHaveBeenCalledWith('project-1')
+    expect(mock.integrationsManager.prescriptiveSpawnInstructions).not.toHaveBeenCalled()
+    expect(mock.integrationsManager.recordSpawnInstructionDelivery).toHaveBeenCalledWith('project-1', 'claude-1')
   })
 })
 

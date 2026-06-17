@@ -1530,10 +1530,41 @@ describe('IntegrationsManager', () => {
     expect(instructions).toContain('.integrations/linear/issues/<name>.json')
     expect(instructions).toContain('"_action":"update"')
     expect(instructions).toContain('"_action":"delete"')
-    expect(instructions).toContain('.integrations/linear/issues/<issueId>/comments/<name>.json')
+    // Comments hang off the canonical issue resource file, not a bare id.
+    expect(instructions).toContain('.integrations/linear/issues/<issueFile>/comments/<name>.json')
+    expect(instructions).toContain('<KEY>-<num>__<uuid>.json')
+    // Slack DM payload is text-only; userId is path-derived (no userId field anywhere).
+    expect(instructions).not.toContain('"userId"')
     // No narrative prose / XML tags
     expect(instructions).not.toContain('<integrations-update>')
     expect(instructions).not.toContain('Initial project integration context')
+  })
+
+  it('emits a text-only Slack DM payload when a user mount is present', () => {
+    mock.store.projects[0].integrations = [
+      {
+        id: 'slack-integration-1',
+        name: 'Slack',
+        type: 'slack',
+        provider: 'slack',
+        integrationId: 'slack-integration-1',
+        scope: {},
+        mountPaths: ['/slack/users/U67890EVAL/messages'],
+        connectedAt: '2026-06-05T00:00:00.000Z',
+        notifyAgent: true,
+        subscribeAgent: false,
+        downloadHistoricalData: false,
+        visibleInProject: true
+      }
+    ]
+    const manager = new IntegrationsManager()
+
+    const instructions = manager.prescriptiveSpawnInstructions('project-1')
+
+    expect(instructions).toContain('Slack DM →')
+    expect(instructions).toContain('.integrations/slack/users/U67890EVAL/messages/<name>.json')
+    expect(instructions).toContain('payload: {"text":"<message>"}')
+    expect(instructions).not.toContain('"userId"')
   })
 
   it('returns undefined from prescriptiveSpawnInstructions when no integrations', () => {

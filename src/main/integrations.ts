@@ -2309,14 +2309,15 @@ export class IntegrationsManager {
         const channelPaths = writebackPaths.filter((p) => p.includes('/channels/'))
         const dmPaths = writebackPaths.filter((p) => p.includes('/users/'))
         for (const p of channelPaths) {
+          // p is already the concrete channel messages mount (…/channels/<id>__<slug>/messages).
           lines.push(`  Slack channel message → ${p}/<name>.json`)
-          lines.push(`    <channelDir> is the mount directory name provided in the task (format: <channelId>__<slug>)`)
           lines.push(`    payload: {"text":"<message>","channelId":"<channelId>"}`)
         }
         if (dmPaths.length > 0 || channelPaths.length === 0) {
           const dmBase = dmPaths[0] ?? `${PROJECT_INTEGRATIONS_LINK_NAME}/slack/users/<userId>/messages`
+          // userId is taken from the path; the payload only needs the text.
           lines.push(`  Slack DM → ${dmBase}/<name>.json`)
-          lines.push(`    payload: {"text":"<message>","userId":"<id>"}`)
+          lines.push(`    payload: {"text":"<message>"}`)
         }
       } else if (provider === 'linear') {
         const base = writebackPaths[0] ?? `${PROJECT_INTEGRATIONS_LINK_NAME}/linear/issues`
@@ -2327,7 +2328,10 @@ export class IntegrationsManager {
         lines.push(`    payload: {"id":"<issueId>","_action":"update",<fields to change>}`)
         lines.push(`  Linear delete issue → ${issueBase}/<name>.json`)
         lines.push(`    payload: {"id":"<issueId>","_action":"delete"}`)
-        lines.push(`  Linear comment → ${issueBase}/<issueId>/comments/<name>.json`)
+        // Comments hang off the canonical issue resource file, not a bare id —
+        // the local mount only accepts comments under <KEY>-<num>__<uuid>.json.
+        lines.push(`  Linear comment → ${issueBase}/<issueFile>/comments/<name>.json`)
+        lines.push(`    <issueFile> is the canonical issue filename from listing ${issueBase}/ (format: <KEY>-<num>__<uuid>.json)`)
         lines.push(`    payload: {"issueId":"<id>","body":"<text>"}`)
       } else {
         for (const p of writebackPaths) {

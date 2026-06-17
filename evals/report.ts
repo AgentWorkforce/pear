@@ -25,7 +25,7 @@ export function writeReport(entries: MountScenarioResult[], stamp: string): void
   console.log(`HTML report: ${htmlPath}`)
 }
 
-const VARIANT_ORDER = ['bare', 'claude-md', 'slim-inject', 'full-inject']
+const VARIANT_ORDER = ['bare', 'claude-md', 'slim-inject', 'full-inject', 'prescriptive']
 
 function buildHtml(entries: MountScenarioResult[], stamp: string): string {
   const scenarios = [...new Set(entries.map((e) => e.scenarioId))].sort()

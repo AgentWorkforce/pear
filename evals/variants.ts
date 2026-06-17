@@ -68,7 +68,7 @@ Integration write paths (use exactly as shown):
     <channelDir> is the mount directory name provided in the task (format: <channelId>__<slug>)
     payload: {"text":"<message>","channelId":"<channelId>"}
   Slack DM             → ${base}/slack/users/<userId>/messages/<name>.json
-    payload: {"text":"<message>","userId":"<id>"}
+    payload: {"text":"<message>"}
   Linear create issue  → ${base}/linear/issues/<name>.json
     payload: {"title":"<title>","description":"<desc>","priority":<0-4>}
   Linear update issue  → ${base}/linear/issues/<name>.json
