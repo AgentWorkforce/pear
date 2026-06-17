@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "slack messages",
+  "description": "Record shape for /slack/channels/{channelId}/messages. Fields marked readOnly are server-managed; omit them from create payloads.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "id": { "type": "string", "readOnly": true },
+    "ts": { "type": "string", "readOnly": true },
+    "text": { "type": "string" },
+    "channel": { "type": "string" },
+    "channelId": { "type": "string" },
+    "channel_name": { "type": "string" },
+    "channel_is_private": { "type": "boolean" },
+    "user": { "type": "string", "readOnly": true },
+    "user_name": { "type": "string", "readOnly": true },
+    "is_bot": { "type": "boolean", "readOnly": true },
+    "thread_ts": { "type": ["string", "null"] },
+    "reply_count": { "type": "integer", "readOnly": true },
+    "reactions_json": { "type": "string", "readOnly": true }
+  }
+}

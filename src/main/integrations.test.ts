@@ -1487,6 +1487,61 @@ describe('IntegrationsManager', () => {
     expect(instructions).toContain('.integrations/discovery/slack')
   })
 
+  it('builds prescriptive spawn instructions with exact write paths', () => {
+    mock.store.projects[0].integrations = [
+      {
+        id: 'slack-integration-1',
+        name: 'Slack',
+        type: 'slack',
+        provider: 'slack',
+        integrationId: 'slack-integration-1',
+        scope: {},
+        mountPaths: ['/slack/channels/C12345__general'],
+        connectedAt: '2026-06-05T00:00:00.000Z',
+        notifyAgent: true,
+        subscribeAgent: false,
+        downloadHistoricalData: false,
+        visibleInProject: true
+      },
+      {
+        id: 'linear-integration-1',
+        name: 'Linear',
+        type: 'linear',
+        provider: 'linear',
+        integrationId: 'linear-integration-1',
+        scope: {},
+        mountPaths: ['/linear/issues'],
+        connectedAt: '2026-06-05T00:00:00.000Z',
+        notifyAgent: true,
+        subscribeAgent: false,
+        downloadHistoricalData: false,
+        visibleInProject: true
+      }
+    ]
+    const manager = new IntegrationsManager()
+
+    const instructions = manager.prescriptiveSpawnInstructions('project-1')
+
+    expect(instructions).toBeDefined()
+    // Slack channel path derived from mount
+    expect(instructions).toContain('.integrations/slack/channels/C12345__general/messages/<name>.json')
+    expect(instructions).toContain('"channelId"')
+    // Linear paths
+    expect(instructions).toContain('.integrations/linear/issues/<name>.json')
+    expect(instructions).toContain('"_action":"update"')
+    expect(instructions).toContain('"_action":"delete"')
+    expect(instructions).toContain('.integrations/linear/issues/<issueId>/comments/<name>.json')
+    // No narrative prose / XML tags
+    expect(instructions).not.toContain('<integrations-update>')
+    expect(instructions).not.toContain('Initial project integration context')
+  })
+
+  it('returns undefined from prescriptiveSpawnInstructions when no integrations', () => {
+    mock.store.projects[0].integrations = []
+    const manager = new IntegrationsManager()
+    expect(manager.prescriptiveSpawnInstructions('project-1')).toBeUndefined()
+  })
+
   it('reads a targeted remote Slack event record without reconciling local mounts', async () => {
     const manager = new IntegrationsManager()
 

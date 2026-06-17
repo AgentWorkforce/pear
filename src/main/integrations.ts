@@ -2286,6 +2286,61 @@ export class IntegrationsManager {
     ].join('\n')
   }
 
+  // Generates a compact, explicit write-path lookup table for CLIs that cannot
+  // reliably reason from the full narrative integration context (e.g. opencode).
+  // Same data source as initialSpawnInstructions but produces provider/action
+  // rows with exact paths and minimal payload schemas instead of prose.
+  prescriptiveSpawnInstructions(projectId: string): string | undefined {
+    const integrations = this.visibleIntegrationsForProject(projectId)
+    if (integrations.length === 0) return undefined
+
+    const lines: string[] = [
+      'To dispatch an integration action, write a JSON file to the provider path — do NOT use relay messaging for these actions.',
+      '',
+      'Integration write paths (use exactly as shown):'
+    ]
+
+    for (const integration of integrations) {
+      const provider = toRelayfileProvider(integration.provider)
+      const writebackPaths = writebackCommandMountPathsForIntegration(integration)
+        .map(projectIntegrationPathForRelayfilePath)
+
+      if (provider === 'slack') {
+        const channelPaths = writebackPaths.filter((p) => p.includes('/channels/'))
+        const dmPaths = writebackPaths.filter((p) => p.includes('/users/'))
+        for (const p of channelPaths) {
+          lines.push(`  Slack channel message → ${p}/<name>.json`)
+          lines.push(`    <channelDir> is the mount directory name provided in the task (format: <channelId>__<slug>)`)
+          lines.push(`    payload: {"text":"<message>","channelId":"<channelId>"}`)
+        }
+        if (dmPaths.length > 0 || channelPaths.length === 0) {
+          const dmBase = dmPaths[0] ?? `${PROJECT_INTEGRATIONS_LINK_NAME}/slack/users/<userId>/messages`
+          lines.push(`  Slack DM → ${dmBase}/<name>.json`)
+          lines.push(`    payload: {"text":"<message>","userId":"<id>"}`)
+        }
+      } else if (provider === 'linear') {
+        const base = writebackPaths[0] ?? `${PROJECT_INTEGRATIONS_LINK_NAME}/linear/issues`
+        const issueBase = base.replace(/\/issues\/.*$/, '/issues')
+        lines.push(`  Linear create issue → ${issueBase}/<name>.json`)
+        lines.push(`    payload: {"title":"<title>","description":"<desc>","priority":<0-4>}`)
+        lines.push(`  Linear update issue → ${issueBase}/<name>.json`)
+        lines.push(`    payload: {"id":"<issueId>","_action":"update",<fields to change>}`)
+        lines.push(`  Linear delete issue → ${issueBase}/<name>.json`)
+        lines.push(`    payload: {"id":"<issueId>","_action":"delete"}`)
+        lines.push(`  Linear comment → ${issueBase}/<issueId>/comments/<name>.json`)
+        lines.push(`    payload: {"issueId":"<id>","body":"<text>"}`)
+      } else {
+        for (const p of writebackPaths) {
+          lines.push(`  ${integration.provider} → ${p}/<name>.json`)
+          lines.push(`    (read ${PROJECT_INTEGRATIONS_LINK_NAME}/discovery/${provider}/.adapter.md for payload shape)`)
+        }
+      }
+    }
+
+    lines.push('', `Rules: use any filename ending in .json; do not write inside discovery/.`)
+    return lines.join('\n')
+  }
+
   // Called after a spawn whose task embedded initialSpawnInstructions: the
   // new agent already has the current integrations snippet, so per-agent
   // delivery records treat it as up to date.

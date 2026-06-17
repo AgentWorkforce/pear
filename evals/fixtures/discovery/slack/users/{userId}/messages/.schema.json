@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "slack direct messages",
+  "description": "Record shape for /slack/users/{userId}/messages. Fields marked readOnly are server-managed; omit them from create payloads.",
+  "type": "object",
+  "additionalProperties": true,
+  "properties": {
+    "id": { "type": "string", "readOnly": true },
+    "ts": { "type": "string", "readOnly": true },
+    "text": { "type": "string" },
+    "user": { "type": "string", "readOnly": true },
+    "user_name": { "type": "string", "readOnly": true },
+    "channel": { "type": "string", "readOnly": true }
+  }
+}
