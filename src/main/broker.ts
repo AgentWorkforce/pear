@@ -600,6 +600,13 @@ const PERSONA_REGISTRATION_TIMEOUT_MS = 5_000
 const PERSONA_REGISTRATION_STABILITY_MS = 1_000
 const PERSONA_HARNESS_READY_TIMEOUT_MS = 120_000
 const PERSONA_READY_PROBE_TIMEOUT_MS = 5_000
+// Gap between failed delivery-readiness probes. "Sandbox mount ready" prints
+// when the sandbox mount is up, but the inner harness can still be booting and
+// not yet at a prompt that accepts steer injection — so the first probe(s) can
+// time out. We retry fresh probes (PTY injection can silently drop, so a new
+// send lands where waiting longer on the same one would not) until the overall
+// harness-ready deadline.
+const PERSONA_READY_PROBE_RETRY_DELAY_MS = 1_000
 // How often the harness-ready wait re-checks that the persona's worker is
 // still registered. A workforce CLI that dies during setup (e.g. a failed
 // skill install calls process.exit) would otherwise burn the entire
@@ -3183,30 +3190,56 @@ export class BrokerManager {
     personaId: string,
     deadline: number
   ): Promise<void> {
-    try {
-      const confirmation = await this.sendMessageAndWaitForInjected(session.projectId, {
-        to: name,
-        from: 'pear',
-        text: 'Persona launch readiness check. No action required.',
-        priority: -100,
-        mode: 'steer',
-        data: {
-          kind: 'persona-readiness-check',
-          system: true,
-          personaId
+    // The inner harness often isn't injection-ready the instant the sandbox
+    // mount reports ready (see PERSONA_READY_PROBE_RETRY_DELAY_MS). A single 5s
+    // probe with no retry was failing the whole spawn for heavier personas
+    // (e.g. nango-integrations) that need longer than 5s — but well under the
+    // 120s harness-ready budget — to reach a steerable prompt. Retry fresh
+    // probes until that shared deadline before giving up.
+    const probeTimeoutMs = parsePositiveIntegerEnv('PEAR_PERSONA_READY_PROBE_TIMEOUT_MS', PERSONA_READY_PROBE_TIMEOUT_MS)
+    const retryDelayMs = parsePositiveIntegerEnv('PEAR_PERSONA_READY_PROBE_RETRY_DELAY_MS', PERSONA_READY_PROBE_RETRY_DELAY_MS)
+    let attempt = 0
+    let lastErr: unknown
+    while (Date.now() < deadline) {
+      attempt += 1
+      const probeTimeout = Math.min(probeTimeoutMs, Math.max(1, deadline - Date.now()))
+      try {
+        const confirmation = await this.sendMessageAndWaitForInjected(session.projectId, {
+          to: name,
+          from: 'pear',
+          text: 'Persona launch readiness check. No action required.',
+          priority: -100,
+          mode: 'steer',
+          data: {
+            kind: 'persona-readiness-check',
+            system: true,
+            personaId
+          }
+        } as SendMessageInput, {
+          timeoutMs: probeTimeout
+        })
+        if (confirmation.eventId === 'unsupported_operation' || !confirmation.targets.includes(name)) {
+          throw new Error(`Broker did not confirm delivery injection for ${name}`)
         }
-      } as SendMessageInput, {
-        timeoutMs: Math.min(PERSONA_READY_PROBE_TIMEOUT_MS, Math.max(1, deadline - Date.now()))
-      })
-      if (confirmation.eventId === 'unsupported_operation' || !confirmation.targets.includes(name)) {
-        throw new Error(`Broker did not confirm delivery injection for ${name}`)
+        if (attempt > 1) {
+          console.info('[broker] Workforce persona delivery readiness confirmed after retry', {
+            projectId: session.projectId,
+            personaId,
+            name,
+            attempt
+          })
+        }
+        return
+      } catch (err) {
+        lastErr = err
+        if (Date.now() + retryDelayMs >= deadline) break
+        await delay(retryDelayMs)
       }
-      return
-    } catch (err) {
-      throw new Error(
-        `Workforce persona ${personaId} launched but did not become ready for broker delivery: ${toErrorMessage(err)}`
-      )
     }
+
+    throw new Error(
+      `Workforce persona ${personaId} launched but did not become ready for broker delivery: ${toErrorMessage(lastErr)}`
+    )
   }
 
   async generateCommitDraft(projectId: string, diff: string): Promise<GeneratedCommitDraft> {

@@ -1248,6 +1248,50 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('retries the delivery readiness probe until the inner harness becomes injectable', async () => {
+    personaTempDir = await mkdtemp(join(tmpdir(), 'pear-persona-spawn-'))
+    await writeAgentWorkforceFixture(personaTempDir)
+    // Generous overall budget, but a tight per-probe window + retry gap so the
+    // first probe times out fast and a retry can land within the same test.
+    process.env.PEAR_PERSONA_HARNESS_READY_TIMEOUT_MS = '2000'
+    process.env.PEAR_PERSONA_READY_PROBE_TIMEOUT_MS = '40'
+    process.env.PEAR_PERSONA_READY_PROBE_RETRY_DELAY_MS = '10'
+
+    const manager = new BrokerManager()
+    mock.state.nextLocalAgents = []
+    await manager.start(PROJECT_ID, personaTempDir, 'pear-project-1', undefined as never, [])
+    const local = lastSpawned()
+    local.spawnPty.mockImplementationOnce(async (input: { name: string }) => {
+      local.agentNames.push(input.name)
+      setImmediate(() => emitPersonaHarnessReady(local, input.name))
+      return {
+        name: input.name,
+        runtime: 'pty',
+        cli: 'agentworkforce'
+      }
+    })
+    // First probe: broker accepts the send but the inner harness never injects
+    // (no delivery_injected event) — it isn't steerable yet. Subsequent probes
+    // fall through to the default mock, which auto-emits delivery_injected.
+    local.sendMessage.mockResolvedValueOnce({
+      event_id: 'evt-readiness-not-yet-injected',
+      targets: ['autonomous-actor']
+    })
+
+    await expect(manager.spawnPersona(PROJECT_ID, 'autonomous-actor')).resolves.toEqual({
+      name: 'autonomous-actor',
+      runtime: 'pty',
+      cli: 'claude'
+    })
+    expect(local.sendMessage.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(local.release).not.toHaveBeenCalled()
+
+    delete process.env.PEAR_PERSONA_HARNESS_READY_TIMEOUT_MS
+    delete process.env.PEAR_PERSONA_READY_PROBE_TIMEOUT_MS
+    delete process.env.PEAR_PERSONA_READY_PROBE_RETRY_DELAY_MS
+    await manager.shutdown()
+  })
+
   it('does not reuse old sandbox-ready output for a new workforce persona launch', async () => {
     personaTempDir = await mkdtemp(join(tmpdir(), 'pear-persona-spawn-'))
     await writeAgentWorkforceFixture(personaTempDir)
