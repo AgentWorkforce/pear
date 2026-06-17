@@ -3199,12 +3199,16 @@ export class BrokerManager {
     const probeTimeoutMs = parsePositiveIntegerEnv('PEAR_PERSONA_READY_PROBE_TIMEOUT_MS', PERSONA_READY_PROBE_TIMEOUT_MS)
     const retryDelayMs = parsePositiveIntegerEnv('PEAR_PERSONA_READY_PROBE_RETRY_DELAY_MS', PERSONA_READY_PROBE_RETRY_DELAY_MS)
     let attempt = 0
-    let lastErr: unknown
+    // Surfaced if the readiness deadline is already spent before the first probe
+    // runs (e.g. waitForPersonaHarnessReadyOutput consumed the whole budget) —
+    // without it the failure message would read "...: undefined".
+    let lastErr: unknown = new Error('readiness deadline elapsed before any delivery probe could run')
     while (Date.now() < deadline) {
       attempt += 1
       const probeTimeout = Math.min(probeTimeoutMs, Math.max(1, deadline - Date.now()))
+      let confirmation: DeliveryConfirmationResult
       try {
-        const confirmation = await this.sendMessageAndWaitForInjected(session.projectId, {
+        confirmation = await this.sendMessageAndWaitForInjected(session.projectId, {
           to: name,
           from: 'pear',
           text: 'Persona launch readiness check. No action required.',
@@ -3218,23 +3222,32 @@ export class BrokerManager {
         } as SendMessageInput, {
           timeoutMs: probeTimeout
         })
-        if (confirmation.eventId === 'unsupported_operation' || !confirmation.targets.includes(name)) {
-          throw new Error(`Broker did not confirm delivery injection for ${name}`)
-        }
-        if (attempt > 1) {
-          console.info('[broker] Workforce persona delivery readiness confirmed after retry', {
-            projectId: session.projectId,
-            personaId,
-            name,
-            attempt
-          })
-        }
-        return
       } catch (err) {
+        // Timeout / delivery_failed — the inner harness wasn't injectable this
+        // round. Retry a fresh probe until the shared deadline.
         lastErr = err
         if (Date.now() + retryDelayMs >= deadline) break
         await delay(retryDelayMs)
+        continue
       }
+      // A resolved-but-unsupported confirmation (broker returns no event_id, or
+      // a target set that can't include this persona) is deterministic — it is
+      // not fixed by waiting, so fail fast instead of resending every retry
+      // interval until the full harness deadline.
+      if (confirmation.eventId === 'unsupported_operation' || !confirmation.targets.includes(name)) {
+        throw new Error(
+          `Workforce persona ${personaId} launched but did not become ready for broker delivery: broker did not confirm delivery injection for ${name}`
+        )
+      }
+      if (attempt > 1) {
+        console.info('[broker] Workforce persona delivery readiness confirmed after retry', {
+          projectId: session.projectId,
+          personaId,
+          name,
+          attempt
+        })
+      }
+      return
     }
 
     throw new Error(

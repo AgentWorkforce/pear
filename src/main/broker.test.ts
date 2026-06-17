@@ -1258,38 +1258,82 @@ describe('BrokerManager local + cloud coexistence', () => {
     process.env.PEAR_PERSONA_READY_PROBE_RETRY_DELAY_MS = '10'
 
     const manager = new BrokerManager()
-    mock.state.nextLocalAgents = []
-    await manager.start(PROJECT_ID, personaTempDir, 'pear-project-1', undefined as never, [])
-    const local = lastSpawned()
-    local.spawnPty.mockImplementationOnce(async (input: { name: string }) => {
-      local.agentNames.push(input.name)
-      setImmediate(() => emitPersonaHarnessReady(local, input.name))
-      return {
-        name: input.name,
+    try {
+      mock.state.nextLocalAgents = []
+      await manager.start(PROJECT_ID, personaTempDir, 'pear-project-1', undefined as never, [])
+      const local = lastSpawned()
+      local.spawnPty.mockImplementationOnce(async (input: { name: string }) => {
+        local.agentNames.push(input.name)
+        setImmediate(() => emitPersonaHarnessReady(local, input.name))
+        return {
+          name: input.name,
+          runtime: 'pty',
+          cli: 'agentworkforce'
+        }
+      })
+      // First probe: broker accepts the send but the inner harness never injects
+      // (no delivery_injected event) — it isn't steerable yet. Subsequent probes
+      // fall through to the default mock, which auto-emits delivery_injected.
+      local.sendMessage.mockResolvedValueOnce({
+        event_id: 'evt-readiness-not-yet-injected',
+        targets: ['autonomous-actor']
+      })
+
+      await expect(manager.spawnPersona(PROJECT_ID, 'autonomous-actor')).resolves.toEqual({
+        name: 'autonomous-actor',
         runtime: 'pty',
-        cli: 'agentworkforce'
-      }
-    })
-    // First probe: broker accepts the send but the inner harness never injects
-    // (no delivery_injected event) — it isn't steerable yet. Subsequent probes
-    // fall through to the default mock, which auto-emits delivery_injected.
-    local.sendMessage.mockResolvedValueOnce({
-      event_id: 'evt-readiness-not-yet-injected',
-      targets: ['autonomous-actor']
-    })
+        cli: 'claude'
+      })
+      expect(local.sendMessage.mock.calls.length).toBeGreaterThanOrEqual(2)
+      expect(local.release).not.toHaveBeenCalled()
+    } finally {
+      delete process.env.PEAR_PERSONA_HARNESS_READY_TIMEOUT_MS
+      delete process.env.PEAR_PERSONA_READY_PROBE_TIMEOUT_MS
+      delete process.env.PEAR_PERSONA_READY_PROBE_RETRY_DELAY_MS
+      await manager.shutdown()
+    }
+  })
 
-    await expect(manager.spawnPersona(PROJECT_ID, 'autonomous-actor')).resolves.toEqual({
-      name: 'autonomous-actor',
-      runtime: 'pty',
-      cli: 'claude'
-    })
-    expect(local.sendMessage.mock.calls.length).toBeGreaterThanOrEqual(2)
-    expect(local.release).not.toHaveBeenCalled()
+  it('fails fast on an unsupported delivery readiness confirmation instead of retrying', async () => {
+    personaTempDir = await mkdtemp(join(tmpdir(), 'pear-persona-spawn-'))
+    await writeAgentWorkforceFixture(personaTempDir)
+    // Large budget + tight retry gap: if an unsupported confirmation were
+    // (wrongly) retried it would resend many probes before the deadline. A
+    // fail-fast path sends exactly one.
+    process.env.PEAR_PERSONA_HARNESS_READY_TIMEOUT_MS = '5000'
+    process.env.PEAR_PERSONA_READY_PROBE_RETRY_DELAY_MS = '5'
 
-    delete process.env.PEAR_PERSONA_HARNESS_READY_TIMEOUT_MS
-    delete process.env.PEAR_PERSONA_READY_PROBE_TIMEOUT_MS
-    delete process.env.PEAR_PERSONA_READY_PROBE_RETRY_DELAY_MS
-    await manager.shutdown()
+    const manager = new BrokerManager()
+    try {
+      mock.state.nextLocalAgents = []
+      await manager.start(PROJECT_ID, personaTempDir, 'pear-project-1', undefined as never, [])
+      const local = lastSpawned()
+      local.spawnPty.mockImplementationOnce(async (input: { name: string }) => {
+        local.agentNames.push(input.name)
+        setImmediate(() => emitPersonaHarnessReady(local, input.name))
+        return {
+          name: input.name,
+          runtime: 'pty',
+          cli: 'agentworkforce'
+        }
+      })
+      // Broker resolves without an event_id -> unsupported_operation. This is
+      // deterministic; waiting cannot fix it, so the spawn should fail at once.
+      local.sendMessage.mockResolvedValueOnce({})
+
+      await expect(manager.spawnPersona(PROJECT_ID, 'autonomous-actor')).rejects.toThrow(
+        /did not become ready for broker delivery/
+      )
+      expect(local.sendMessage).toHaveBeenCalledTimes(1)
+      expect(local.release).toHaveBeenCalledWith(
+        'autonomous-actor',
+        'persona harness readiness verification failed'
+      )
+    } finally {
+      delete process.env.PEAR_PERSONA_HARNESS_READY_TIMEOUT_MS
+      delete process.env.PEAR_PERSONA_READY_PROBE_RETRY_DELAY_MS
+      await manager.shutdown()
+    }
   })
 
   it('does not reuse old sandbox-ready output for a new workforce persona launch', async () => {
