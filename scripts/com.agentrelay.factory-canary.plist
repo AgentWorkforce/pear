@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd template for the factory sync-fidelity canary (see factory-canary.sh).
+
+  Install (macOS):
+    1. Replace __PEAR_ROOT__ with the absolute pear repo path, and set the
+       FACTORY_BIN / FACTORY_CANARY_SLACK_WEBHOOK values below.
+    2. cp scripts/com.agentrelay.factory-canary.plist ~/Library/LaunchAgents/
+    3. launchctl load ~/Library/LaunchAgents/com.agentrelay.factory-canary.plist
+    4. launchctl start com.agentrelay.factory-canary   # run once now to verify
+
+  Runs every 6h (StartInterval 21600). Logs to <root>/.factory-canary.log.
+  A non-zero exit (canary FAILED) is recorded in the log + posted to Slack if
+  FACTORY_CANARY_SLACK_WEBHOOK is set.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.agentrelay.factory-canary</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__PEAR_ROOT__/scripts/factory-canary.sh</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__PEAR_ROOT__</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>FACTORY_CANARY_ISSUE</key>
+    <string>AR-305</string>
+    <!-- Until @agent-relay/factory with the `canary` command publishes, point
+         this at a local build; afterwards delete this key to use node_modules. -->
+    <key>FACTORY_BIN</key>
+    <string>__PEAR_ROOT__/node_modules/@agent-relay/factory/bin/factory.mjs</string>
+    <!-- Optional: a Slack incoming-webhook URL for failure alerts. -->
+    <key>FACTORY_CANARY_SLACK_WEBHOOK</key>
+    <string></string>
+  </dict>
+
+  <key>StartInterval</key>
+  <integer>21600</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__PEAR_ROOT__/.factory-canary.log</string>
+  <key>StandardErrorPath</key>
+  <string>__PEAR_ROOT__/.factory-canary.log</string>
+</dict>
+</plist>
