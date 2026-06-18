@@ -14,6 +14,8 @@ import {
   integrationMountRootForWorkspace,
   MAX_LOCAL_INTEGRATION_MOUNT_PATHS
 } from './integration-mounts'
+import { parseWritableResources as parsePackageWritableResources } from '@agent-relay/integration-prompts'
+import type { WritableResourceDescriptor } from '@agent-relay/integration-prompts'
 import {
   canListRemoteDirectoryForMountPaths,
   canShowRemoteDirectoryEntryForMountPaths,
@@ -399,14 +401,10 @@ interface WritableResource {
   pathTemplate: string
 }
 
-// The discovery `.adapter.md` lists writable resources in a structured block:
-//   ## Writable resources
-//   ### <name> — `/<path-template>`
-// We parse those headings so prescriptiveSpawnInstructions stays adapter-driven:
-// adding a provider (which ships its own adapter doc) needs no code change here.
+// Split out so it can be kept when the package parser falls through.
 const ADAPTER_WRITABLE_RESOURCE_RE = /^###\s+(.+?)\s+[—-]\s+`(\/[^`]+)`/u
 
-function parseWritableResources(adapterDoc: string): WritableResource[] {
+function parseLegacyHeadingResources(adapterDoc: string): WritableResource[] {
   const lines = adapterDoc.split('\n')
   const resources: WritableResource[] = []
   let inWritableSection = false
@@ -421,6 +419,25 @@ function parseWritableResources(adapterDoc: string): WritableResource[] {
     if (match) resources.push({ name: match[1].trim(), pathTemplate: match[2].trim() })
   }
   return resources
+}
+
+function toWritableResource(descriptor: WritableResourceDescriptor): WritableResource {
+  const path = descriptor.path.replace(/^\//u, '')
+  return { name: descriptor.name ?? lastMeaningfulSegment(path), pathTemplate: path }
+}
+
+function lastMeaningfulSegment(path: string): string {
+  const segments = path.split('/').filter(Boolean)
+  return segments.at(-1)?.replace(/\.(json|md)$/u, '') ?? segments[0] ?? path
+}
+
+// Consume `@agent-relay/integration-prompts` parser (handles markdown tables
+// and write-field-contract formats), then fall back to the legacy heading
+// format still used in some adapter docs.
+function parseWritableResources(adapterDoc: string, providerHint?: string): WritableResource[] {
+  const packageResults = parsePackageWritableResources(adapterDoc, providerHint)
+  if (packageResults.length > 0) return packageResults.map(toWritableResource)
+  return parseLegacyHeadingResources(adapterDoc)
 }
 
 function isTemplatePlaceholder(segment: string): boolean {
@@ -2433,7 +2450,7 @@ export class IntegrationsManager {
       )
       const adapterDocPath = resolve(discoveryDir, '.adapter.md')
       if (!existsSync(adapterDocPath)) return []
-      return parseWritableResources(readFileSync(adapterDocPath, 'utf8'))
+      return parseWritableResources(readFileSync(adapterDocPath, 'utf8'), provider)
     } catch {
       return []
     }
