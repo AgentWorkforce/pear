@@ -19,6 +19,7 @@ import {
 import { AgentRelay, type RelayMessage } from '@agent-relay/sdk'
 import { getAccessToken, getApiUrl } from './auth'
 import { assertDirectory } from './path-utils'
+import { toErrorMessage } from './errors'
 import { PtyInputStreamManager } from './pty-input-stream'
 import { PtyChunkDeduper } from './pty-dedup'
 import {
@@ -824,11 +825,6 @@ async function terminateOwnedBrokerProcess(pid: number | undefined): Promise<voi
 // broker. The SDK's internal 10s polling is the only retry that's safe at
 // this layer; if it fails, surface the error and let the user retry through
 // the UI (which goes through connectExistingBroker first).
-
-function toErrorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
-}
-
 
 function isBrokerDebugEnabled(): boolean {
   return process.env.PEAR_BROKER_DEBUG === '1' || process.env.PEAR_BROKER_DEBUG === 'true'

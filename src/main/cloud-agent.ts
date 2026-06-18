@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process'
+import { toErrorMessage } from './errors'
 import { realpath, stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import { promisify } from 'node:util'
@@ -142,9 +143,6 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
-function toErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
 
 function normalizeAgentRecord(record: ProactiveAgentRecord | Record<string, unknown>): CloudAgentRecord {
   const fallbackId = typeof record.agentId === 'string' ? record.agentId : ''

@@ -1,4 +1,5 @@
 import { app, ipcMain, dialog, BrowserWindow, shell } from 'electron'
+import { toErrorMessage } from './errors'
 import { createHash } from 'crypto'
 import { existsSync } from 'fs'
 import { mkdir, readFile, writeFile } from 'fs/promises'
@@ -67,9 +68,6 @@ function assertPathWithinProjects(targetPath: string): void {
 
 const gitStatusWarnings = new Set<string>()
 
-function toErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
 
 function warnGitStatusOnce(path: string, error: unknown): void {
   const message = toErrorMessage(error)

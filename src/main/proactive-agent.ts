@@ -1,4 +1,5 @@
 import { rm } from 'node:fs/promises'
+import { toErrorMessage } from './errors'
 import {
   buildPersonaSpec,
   deployBundle,
@@ -104,9 +105,6 @@ async function readCloudJson(response: Response): Promise<unknown> {
   return response.json().catch(() => null)
 }
 
-function toErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
 
 function isMissingModuleError(error: unknown): boolean {
   if (!isRecord(error)) return false
