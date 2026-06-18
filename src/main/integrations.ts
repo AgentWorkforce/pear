@@ -14,8 +14,11 @@ import {
   integrationMountRootForWorkspace,
   MAX_LOCAL_INTEGRATION_MOUNT_PATHS
 } from './integration-mounts'
-import { parseWritableResources as parsePackageWritableResources } from '@agent-relay/integration-prompts'
-import type { WritableResourceDescriptor } from '@agent-relay/integration-prompts'
+import {
+  fullInjectInstructions as buildIntegrationsUpdateSnippet,
+  parseWritableResources as parsePackageWritableResources
+} from '@agent-relay/integration-prompts'
+import type { IntegrationDescriptor, WritableResourceDescriptor } from '@agent-relay/integration-prompts'
 import {
   canListRemoteDirectoryForMountPaths,
   canShowRemoteDirectoryEntryForMountPaths,
@@ -894,10 +897,6 @@ export class IntegrationsManager {
   // newly spawned agent receives the current update without re-sending it to
   // everyone else.
   private lastAgentSystemMessages = new Map<string, Map<string, AgentSystemMessageRecord>>()
-  // Subscription readiness from the last reconcile, used so spawn-embedded
-  // snippets render with the same readiness clause the next broadcast will
-  // use (a hardcoded `true` made the texts differ and re-notified the agent).
-  private lastSubscriptionsReady = new Map<string, boolean>()
   // When each project's last broadcast went out. Mount-path discovery and
   // subscription readiness converge in stages (e.g. bare → suffixed Slack
   // channel ids), each stage changing the rendered text slightly; without a
@@ -2238,15 +2237,13 @@ export class IntegrationsManager {
     systemMessageOptions: IntegrationSystemMessageOptions = {}
   ): Promise<void> {
     const integrations = this.visibleIntegrationsForProject(projectId)
-    const subscriptionsReady = await this.syncEventSubscriptions(projectId)
-    this.lastSubscriptionsReady.set(projectId, subscriptionsReady)
+    await this.syncEventSubscriptions(projectId)
 
     if (notifyAgent) {
-      this.scheduleSystemMessage(
-        projectId,
-        this.buildSystemMessageSnippet(integrations, subscriptionsReady),
-        systemMessageOptions
-      )
+      const snippet = this.buildSystemMessageSnippet(integrations)
+      if (snippet) {
+        this.scheduleSystemMessage(projectId, snippet, systemMessageOptions)
+      }
     }
 
     void this.syncLocalIntegrationState(projectId).catch((error) => {
@@ -2259,90 +2256,84 @@ export class IntegrationsManager {
     await this.safeUpdateMountPaths(projectId, this.mountPathsFor(projectId))
   }
 
-  private buildSystemMessageSnippet(integrations: ConnectedIntegration[], subscriptionsReady: boolean): string {
-    const lines = [
-      '<integrations-update>',
-      'The user has connected the following integrations to this project:'
-    ]
+  // Builds the <integrations-update> narrative via the shared
+  // @agent-relay/integration-prompts builder (fullInjectInstructions) instead of
+  // a hand-maintained copy. Returns '' when no integration is currently active
+  // (see buildActiveIntegrationDescriptors) so callers can skip the message
+  // entirely — a visible-but-idle integration adds only noise at spawn.
+  private buildSystemMessageSnippet(integrations: ConnectedIntegration[]): string {
+    const descriptors = this.buildActiveIntegrationDescriptors(integrations)
+    if (descriptors.length === 0) return ''
+    return buildIntegrationsUpdateSnippet(descriptors)
+  }
 
-    if (integrations.length === 0) {
-      lines.push('- none')
-    } else {
-      for (const integration of integrations) {
-        const scopeLabels = collectScopeLabels(integration.scope)
-        const scopeSummary = scopeLabels.length > 0 ? scopeLabels.join(', ') : 'all configured scope'
-        const mountPaths = this.canonicalMountPathsForIntegration(integration)
+  // Maps connected integrations to the package's IntegrationDescriptor shape,
+  // keeping only the ones the agent actually needs to know about at spawn:
+  //   - syncing: historical download is enabled, OR
+  //   - listening: a registered event subscription exists, OR
+  //   - actionable: narrow writeback command roots are mounted.
+  // Visible integrations with none of the above (no sync, no events, no narrow
+  // resources) are omitted; if nothing qualifies the caller suppresses the
+  // whole <integrations-update> message.
+  private buildActiveIntegrationDescriptors(
+    integrations: ConnectedIntegration[]
+  ): IntegrationDescriptor[] {
+    // Subscription summaries are derived purely from each integration's config
+    // (subscribeAgent + event globs), independent of whether Relayfile has
+    // finished registering them — an integration the user has set to receive
+    // events counts as "listening" for spawn-context purposes.
+    const subscriptionSummaries = integrationSubscriptionSummaries(integrations)
+    const subscribedProviders = new Set(subscriptionSummaries.map((summary) => summary.provider))
+
+    const descriptors: IntegrationDescriptor[] = []
+    for (const integration of integrations) {
+      const historyEnabled = integration.downloadHistoricalData === true
+      const eventScopePaths = this.canonicalMountPathsForIntegration(integration)
+        .map(projectIntegrationPathForRelayfilePath)
+      const writebackCommandPaths = writebackCommandMountPathsForIntegration(integration)
+        .map(projectIntegrationPathForRelayfilePath)
+
+      const isActive = historyEnabled
+        || writebackCommandPaths.length > 0
+        || subscribedProviders.has(integration.provider)
+      if (!isActive) continue
+
+      const writebackPaths = historyEnabled ? eventScopePaths : writebackCommandPaths
+      const liveContextPaths = historyEnabled
+        ? []
+        : slackThreadContextMountPathsForIntegration(integration)
           .map(projectIntegrationPathForRelayfilePath)
-        const discoveryPath = projectIntegrationPathForRelayfilePath(discoveryMountPathForProvider(integration.provider))
-        const writebackCommandPaths = writebackCommandMountPathsForIntegration(integration)
-          .map(projectIntegrationPathForRelayfilePath)
-        const liveContextPaths = integration.downloadHistoricalData === true
-          ? []
-          : slackThreadContextMountPathsForIntegration(integration)
-            .map(projectIntegrationPathForRelayfilePath)
-        const historyEnabled = integration.downloadHistoricalData === true
-        const writebackPaths = historyEnabled
-          ? mountPaths.join(', ') || 'the configured provider paths'
-          : writebackCommandPaths.join(', ')
-        const writebackInstruction = writebackPaths
-          ? `create writeback files under ${writebackPaths}, not under discovery`
-          : 'select narrower resources before creating local writeback files; discovery is schema-only'
-        const skippedHistoryPaths = skippedHistoricalMountPathsForIntegration(integration)
-          .map(projectIntegrationPathForRelayfilePath)
-        const skippedCappedPaths = skippedCappedLocalSyncMountPathsForIntegration(integration)
-          .map(projectIntegrationPathForRelayfilePath)
-        const skippedLocalPaths = dedupeStrings([...skippedHistoryPaths, ...skippedCappedPaths])
-        const scopeClause = mountPaths.length > 0
-          ? ` (event scope ${mountPaths.join(', ')})`
-          : ' (no event scope configured)'
-        const historyClause = historyEnabled
-          ? skippedLocalPaths.length > 0
-            ? ` Historical download is enabled, but these provider paths are not locally poll-mounted: ${skippedLocalPaths.join(', ')}. Select fewer or narrower resources to download local history.`
-            : ` Historical provider records are available at ${writebackPaths}.`
-          : writebackPaths
-            ? ` Local historical provider records are not broadly downloaded. Writeback command roots are mounted at ${writebackPaths}${liveContextPaths.length > 0 ? `, and live thread context roots are mounted at ${liveContextPaths.join(', ')}` : ''}; provider context should be read on demand or through incoming events.`
-            : ` Local historical provider records are not downloaded. No narrow writeback command roots are mounted; select narrower resources to enable local writeback transport.`
-        lines.push(
-          `- ${integration.provider}: ${scopeSummary}${scopeClause}. Writeback schemas and examples are available at ${discoveryPath}; ${writebackInstruction}. ${historyClause}`
-        )
-      }
+      const skippedLocalPaths = dedupeStrings([
+        ...skippedHistoricalMountPathsForIntegration(integration).map(projectIntegrationPathForRelayfilePath),
+        ...skippedCappedLocalSyncMountPathsForIntegration(integration).map(projectIntegrationPathForRelayfilePath)
+      ])
+
+      descriptors.push({
+        provider: integration.provider,
+        mountRoot: `${PROJECT_INTEGRATIONS_LINK_NAME}/${integration.provider}`,
+        writableResources: [],
+        discoveryRoot: projectIntegrationPathForRelayfilePath(
+          discoveryMountPathForProvider(integration.provider)
+        ),
+        scopeLabels: collectScopeLabels(integration.scope),
+        eventScopePaths,
+        writebackPaths,
+        downloadHistoricalData: historyEnabled,
+        liveContextPaths,
+        skippedLocalPaths,
+        subscriptions: subscriptionSummaries.filter((summary) => summary.provider === integration.provider)
+      })
     }
-
-    const subscriptions = integrationSubscriptionSummaries(integrations)
-    lines.push('')
-    if (!subscriptionsReady && subscriptions.length > 0) {
-      lines.push('Integration event subscriptions are requested for this project, but Pear could not register them with Relayfile yet.')
-      lines.push('Do not assume notifications will arrive until a later integrations update confirms active subscriptions. If historical provider records are mounted for an integration, read them when the user asks for current state; otherwise rely on incoming event notifications, inline event context, and the event file path when present.')
-    } else if (subscriptions.length === 0) {
-      lines.push('No integration event subscriptions are active for this project.')
-    } else {
-      lines.push('Active integration event subscriptions for this project:')
-      for (const subscription of subscriptions) {
-        const parts = [
-          subscription.watches.length > 0 ? `file changes at ${subscription.watches.join(', ')}` : '',
-          subscription.targets.length > 0 ? `delivered to ${subscription.targets.join(', ')}` : 'delivered to all project agents'
-        ].filter(Boolean)
-        lines.push(`- ${subscription.provider}: ${parts.join('; ')}`)
-      }
-      lines.push(
-        'You will receive <integration-event> system messages for these subscribed changes. Do not poll these integrations for background changes; wait for the event notification, then read the mounted files for context if needed.'
-      )
-    }
-
-    lines.push(
-      `Writeback discovery schemas and examples are mounted through ${PROJECT_INTEGRATIONS_LINK_NAME}/discovery/<provider>/ for connected integrations. Use those schemas to create files under the provider paths such as ${PROJECT_INTEGRATIONS_LINK_NAME}/slack/channels/<channelId>/messages; do not create provider records inside discovery. Historical provider records are only intentionally downloaded when historical download is enabled. Incoming webhook events do not require downloading history.`,
-      '</integrations-update>'
-    )
-    return lines.join('\n')
+    return descriptors
   }
 
   initialSpawnInstructions(projectId: string): string | undefined {
     const integrations = this.visibleIntegrationsForProject(projectId)
     if (integrations.length === 0) return undefined
-    const snippet = this.buildSystemMessageSnippet(
-      integrations,
-      this.lastSubscriptionsReady.get(projectId) ?? true
-    )
+    const snippet = this.buildSystemMessageSnippet(integrations)
+    // No integration is currently syncing/listening/actionable — skip the spawn
+    // message entirely rather than inject an empty "- none" narrative.
+    if (!snippet) return undefined
     // Remember what this spawn embedded so recordSpawnInstructionDelivery
     // can mark the new agent as already-notified — without it, the next
     // project broadcast re-delivered the same setup context to the agent

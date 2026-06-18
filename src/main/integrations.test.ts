@@ -34,11 +34,11 @@ const mock = vi.hoisted(() => {
     type: 'slack',
     provider: 'slack',
     integrationId: 'slack-integration-1',
-    scope: {},
-    mountPaths: ['/slack/channels'],
+    scope: { channels: ['C123'] },
+    mountPaths: ['/slack/channels/C123'],
     connectedAt: '2026-06-05T00:00:00.000Z',
     notifyAgent: true,
-    subscribeAgent: false,
+    subscribeAgent: true,
     downloadHistoricalData: false,
     visibleInProject: true
   })
@@ -315,11 +315,13 @@ vi.mock('./relay-workspace', () => ({
 }))
 
 import { IntegrationsManager, localSyncMountPathsForIntegration } from './integrations'
+// Mocked module (see vi.mock('./integration-event-bridge') above): importing the
+// stubbed function lets a test override what subscription summaries it returns.
+import { integrationSubscriptionSummaries } from './integration-event-bridge'
 
 type SystemMessageSnippetBuilder = {
   buildSystemMessageSnippet(
-    integrations: Array<Parameters<typeof localSyncMountPathsForIntegration>[0]>,
-    subscriptionsReady: boolean
+    integrations: Array<Parameters<typeof localSyncMountPathsForIntegration>[0]>
   ): string
 }
 
@@ -982,7 +984,7 @@ describe('IntegrationsManager', () => {
       notifyAgent: true,
       subscribeAgent: true,
       downloadHistoricalData: false
-    }], true)
+    }])
 
     expect(message).toContain('create writeback files under .integrations/slack/channels/C123/messages')
     expect(message).toContain('Writeback command roots are mounted at .integrations/slack/channels/C123/messages')
@@ -1002,7 +1004,7 @@ describe('IntegrationsManager', () => {
       notifyAgent: true,
       subscribeAgent: true,
       downloadHistoricalData: false
-    }], true)
+    }])
 
     expect(message).toContain('create writeback files under .integrations/linear/issues')
     expect(message).toContain('Writeback command roots are mounted at .integrations/linear/issues')
@@ -1020,10 +1022,45 @@ describe('IntegrationsManager', () => {
       notifyAgent: true,
       subscribeAgent: true,
       downloadHistoricalData: true
-    }], true)
+    }])
 
     expect(message).toContain('not locally poll-mounted')
     expect(message).toContain('.integrations/slack/channels/C023')
+  })
+
+  it('treats a subscribed-but-otherwise-idle integration as active (listening)', () => {
+    const manager = new IntegrationsManager() as unknown as SystemMessageSnippetBuilder
+    // No history sync and a base mount path (no narrow writeback command roots),
+    // so the integration is active only by virtue of "listening" — a registered
+    // event subscription.
+    const idleSubscribedLinear = {
+      provider: 'linear',
+      integrationId: 'linear-integration-1',
+      scope: {},
+      mountPaths: ['/linear'],
+      connectedAt: '2026-06-05T00:00:00.000Z',
+      notifyAgent: true,
+      subscribeAgent: true,
+      downloadHistoricalData: false
+    }
+
+    // Without an active subscription summary the gate suppresses the message:
+    // not syncing, not actionable, not listening.
+    vi.mocked(integrationSubscriptionSummaries).mockReturnValueOnce([])
+    expect(manager.buildSystemMessageSnippet([idleSubscribedLinear])).toBe('')
+
+    // With a subscription summary present the integration is listening, so the
+    // message renders and lists the active subscription.
+    vi.mocked(integrationSubscriptionSummaries).mockReturnValue([
+      { provider: 'linear', watches: ['.integrations/linear/**'], targets: [] }
+    ])
+    const message = manager.buildSystemMessageSnippet([idleSubscribedLinear])
+    expect(message).toContain('<integrations-update>')
+    expect(message).toContain('linear')
+    expect(message).toContain('Active integration event subscriptions for this project')
+    expect(message).toContain('file changes at .integrations/linear/**')
+
+    vi.mocked(integrationSubscriptionSummaries).mockReturnValue([])
   })
 
   it('does not block updateScope on integration state sync', async () => {
@@ -1171,8 +1208,9 @@ describe('IntegrationsManager', () => {
     // Hermetic snippet text: background cloud hydration re-adds integrations
     // to the store and changes the rendered text between broadcasts (the
     // separate staged-churn case the cooldown test covers). Block hydration
-    // and pin the store empty so the text is identical across reconciles.
-    mock.store.projects[0].integrations = []
+    // and pin a single active integration so the text is identical across
+    // reconciles (an idle/empty project now produces no snippet at all).
+    mock.store.projects[0].integrations = [makeIntegration('slack', ['/slack/channels/C123'])]
     mock.getAccountWorkspaceId.mockRejectedValue(new Error('offline'))
     mock.brokerManager.listAgents.mockResolvedValue([
       { name: 'claude-1', projectId: 'project-1' },
@@ -1204,7 +1242,7 @@ describe('IntegrationsManager', () => {
 
   it('sends an unchanged update to a newly arrived agent without re-sending to existing agents', async () => {
     vi.useFakeTimers()
-    mock.store.projects[0].integrations = []
+    mock.store.projects[0].integrations = [makeIntegration('slack', ['/slack/channels/C123'])]
     mock.getAccountWorkspaceId.mockRejectedValue(new Error('offline'))
     mock.brokerManager.listAgents.mockResolvedValue([{ name: 'claude-1', projectId: 'project-1' }] as never)
     const manager = new IntegrationsManager()
@@ -1232,10 +1270,10 @@ describe('IntegrationsManager', () => {
       provider: 'linear',
       integrationId: 'linear-integration-1',
       scope: {},
-      mountPaths: ['/linear'],
+      mountPaths: ['/linear/issues'],
       connectedAt: '2026-06-05T00:00:00.000Z',
       notifyAgent: true,
-      subscribeAgent: false,
+      subscribeAgent: true,
       downloadHistoricalData: false,
       visibleInProject: true
     }]
@@ -1271,10 +1309,10 @@ describe('IntegrationsManager', () => {
       provider: 'linear',
       integrationId: 'linear-integration-1',
       scope: {},
-      mountPaths: ['/linear'],
+      mountPaths: ['/linear/issues'],
       connectedAt: '2026-06-05T00:00:00.000Z',
       notifyAgent: true,
-      subscribeAgent: false,
+      subscribeAgent: true,
       downloadHistoricalData: false,
       visibleInProject: true
     }]
@@ -1286,10 +1324,11 @@ describe('IntegrationsManager', () => {
     manager.recordSpawnInstructionDelivery('project-1', 'codex-1')
 
     // Simulate staged churn: the store changes right after the spawn, so the
-    // broadcast text differs from the embedded snippet.
+    // broadcast text differs from the embedded snippet (historical download
+    // flips on, which rewrites the history clause).
     mock.store.projects[0].integrations = [{
       ...mock.store.projects[0].integrations[0],
-      mountPaths: ['/linear/issues']
+      downloadHistoricalData: true
     }]
     await manager.notifyAgentState('project-1')
     await vi.advanceTimersByTimeAsync(5_000)
@@ -1309,7 +1348,7 @@ describe('IntegrationsManager', () => {
 
   it('holds a changed update inside the rebroadcast cooldown and sends the latest text once', async () => {
     vi.useFakeTimers()
-    mock.store.projects[0].integrations = []
+    mock.store.projects[0].integrations = [makeIntegration('slack', ['/slack/channels/C123'])]
     mock.getAccountWorkspaceId.mockRejectedValue(new Error('offline'))
     mock.brokerManager.listAgents.mockResolvedValue([{ name: 'claude-1', projectId: 'project-1' }] as never)
     const manager = new IntegrationsManager()
@@ -1330,10 +1369,10 @@ describe('IntegrationsManager', () => {
       provider: 'linear',
       integrationId: 'linear-integration-1',
       scope: {},
-      mountPaths: ['/linear'],
+      mountPaths: ['/linear/issues'],
       connectedAt: '2026-06-05T00:00:00.000Z',
       notifyAgent: true,
-      subscribeAgent: false,
+      subscribeAgent: true,
       downloadHistoricalData: false,
       visibleInProject: true
     }]
@@ -1348,10 +1387,10 @@ describe('IntegrationsManager', () => {
 
   it('does not re-send an unchanged integrations update after the dedupe window lapses', async () => {
     vi.useFakeTimers()
-    // Pin the state so the rendered text is identical across reconciles
-    // (background hydration would otherwise change it, which is the
-    // legitimate-rebroadcast case).
-    mock.store.projects[0].integrations = []
+    // Pin a single active integration so the rendered text is identical across
+    // reconciles (background hydration would otherwise change it, which is the
+    // legitimate-rebroadcast case; an idle/empty project now yields no snippet).
+    mock.store.projects[0].integrations = [makeIntegration('slack', ['/slack/channels/C123'])]
     mock.getAccountWorkspaceId.mockRejectedValue(new Error('offline'))
     mock.brokerManager.listAgents.mockResolvedValue([{ name: 'claude-1', projectId: 'project-1' }] as never)
     const manager = new IntegrationsManager()
