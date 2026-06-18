@@ -34,11 +34,13 @@ const mock = vi.hoisted(() => {
     type: 'slack',
     provider: 'slack',
     integrationId: 'slack-integration-1',
-    scope: { channels: ['C123'] },
+    scope: {},
+    // Narrow channel mount → a writeback command root is mounted, so the default
+    // fixture is "active" (the integrations-update snippet now omits idle ones).
     mountPaths: ['/slack/channels/C123'],
     connectedAt: '2026-06-05T00:00:00.000Z',
     notifyAgent: true,
-    subscribeAgent: true,
+    subscribeAgent: false,
     downloadHistoricalData: false,
     visibleInProject: true
   })
@@ -1383,6 +1385,35 @@ describe('IntegrationsManager', () => {
     await vi.advanceTimersByTimeAsync(60_000)
     expect(updateTexts()).toHaveLength(2)
     expect(updateTexts()[1]).toContain('linear')
+  })
+
+  it('broadcasts one clearing update when the last active integration is removed', async () => {
+    vi.useFakeTimers()
+    mock.store.projects[0].integrations = [makeIntegration('slack', ['/slack/channels/C123'])]
+    mock.getAccountWorkspaceId.mockRejectedValue(new Error('offline'))
+    mock.brokerManager.listAgents.mockResolvedValue([{ name: 'claude-1', projectId: 'project-1' }] as never)
+    const manager = new IntegrationsManager()
+    const updateTexts = (): string[] => integrationUpdateSendInputs().map((input) => input.text)
+
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(updateTexts()).toHaveLength(1)
+    expect(updateTexts()[0]).toContain('.integrations/slack/channels/C123')
+
+    // Last integration disconnected: agents already told about it must get one
+    // clearing update rather than silence (otherwise they keep stale context).
+    mock.store.projects[0].integrations = []
+    await vi.advanceTimersByTimeAsync(60_000) // clear the rebroadcast cooldown
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(1_000)
+    expect(updateTexts()).toHaveLength(2)
+    expect(updateTexts()[1]).toContain('- none')
+
+    // A further idle reconcile stays silent — the prior context was cleared once.
+    await vi.advanceTimersByTimeAsync(60_000)
+    await manager.notifyAgentState('project-1')
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(updateTexts()).toHaveLength(2)
   })
 
   it('does not re-send an unchanged integrations update after the dedupe window lapses', async () => {

@@ -905,6 +905,12 @@ export class IntegrationsManager {
   // Snippet most recently embedded into spawn instructions, per project, so
   // the spawn path can record it as already-delivered for the new agent.
   private lastSpawnInstructionSnippets = new Map<string, string>()
+  // Projects that have broadcast (or spawned with) a non-empty integrations
+  // update. When such a project transitions to having no active integrations
+  // (e.g. the last one is disconnected), we broadcast one clearing update so
+  // already-notified agents stop relying on the stale context — idle context is
+  // only suppressed for spawn/no-op, not for state changes that clear it.
+  private projectsWithActiveSnippet = new Set<string>()
   private catalogCache: IntegrationAdapter[] | null = null
   private catalogFetchedAt = 0
   private localMountCloudHydrationStartedAt = 0
@@ -2242,7 +2248,17 @@ export class IntegrationsManager {
     if (notifyAgent) {
       const snippet = this.buildSystemMessageSnippet(integrations)
       if (snippet) {
+        this.projectsWithActiveSnippet.add(projectId)
         this.scheduleSystemMessage(projectId, snippet, systemMessageOptions)
+      } else if (this.projectsWithActiveSnippet.delete(projectId)) {
+        // Active → none transition: tell already-notified agents the prior
+        // integration context is gone, rather than leaving them to attempt
+        // stale writebacks or wait on subscriptions that no longer exist.
+        this.scheduleSystemMessage(
+          projectId,
+          buildIntegrationsUpdateSnippet([]),
+          systemMessageOptions
+        )
       }
     }
 
@@ -2278,13 +2294,6 @@ export class IntegrationsManager {
   private buildActiveIntegrationDescriptors(
     integrations: ConnectedIntegration[]
   ): IntegrationDescriptor[] {
-    // Subscription summaries are derived purely from each integration's config
-    // (subscribeAgent + event globs), independent of whether Relayfile has
-    // finished registering them — an integration the user has set to receive
-    // events counts as "listening" for spawn-context purposes.
-    const subscriptionSummaries = integrationSubscriptionSummaries(integrations)
-    const subscribedProviders = new Set(subscriptionSummaries.map((summary) => summary.provider))
-
     const descriptors: IntegrationDescriptor[] = []
     for (const integration of integrations) {
       const historyEnabled = integration.downloadHistoricalData === true
@@ -2292,10 +2301,16 @@ export class IntegrationsManager {
         .map(projectIntegrationPathForRelayfilePath)
       const writebackCommandPaths = writebackCommandMountPathsForIntegration(integration)
         .map(projectIntegrationPathForRelayfilePath)
+      // Listening is derived per integration from its own config (subscribeAgent
+      // + event globs), independent of whether Relayfile has finished
+      // registering it. Scoping the summary to this single integration avoids
+      // marking every integration of a provider active when only one of several
+      // (e.g. multiple Slack workspaces) actually subscribes.
+      const subscriptions = integrationSubscriptionSummaries([integration])
 
       const isActive = historyEnabled
         || writebackCommandPaths.length > 0
-        || subscribedProviders.has(integration.provider)
+        || subscriptions.length > 0
       if (!isActive) continue
 
       const writebackPaths = historyEnabled ? eventScopePaths : writebackCommandPaths
@@ -2321,7 +2336,7 @@ export class IntegrationsManager {
         downloadHistoricalData: historyEnabled,
         liveContextPaths,
         skippedLocalPaths,
-        subscriptions: subscriptionSummaries.filter((summary) => summary.provider === integration.provider)
+        subscriptions
       })
     }
     return descriptors
@@ -2340,6 +2355,9 @@ export class IntegrationsManager {
     // that just received it in its spawn task ("Setup context received"
     // acknowledged twice).
     this.lastSpawnInstructionSnippets.set(projectId, snippet)
+    // A later transition to no active integrations should still clear this for
+    // the spawned agent (see projectsWithActiveSnippet).
+    this.projectsWithActiveSnippet.add(projectId)
     return [
       'Initial project integration context. Treat this as setup context, not as the user task.',
       snippet
