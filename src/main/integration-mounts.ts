@@ -15,6 +15,20 @@ const MOUNT_SYNC_TIMEOUT = '180s'
 const MOUNT_REFRESH_FALLBACK_MARGIN_MS = 5 * 60_000
 const MOUNT_REFRESH_MIN_DELAY_MS = 1_000
 const MOUNT_AUTH_RESTART_THROTTLE_MS = 60_000
+// Forced restarts back off exponentially from the 60s floor (60s, 120s, 240s …)
+// capped at 30min, instead of a flat 60s. A persistently-wedged mount used to
+// respawn every ~60s forever (364 restarts observed since 06-10), and each
+// fresh process re-leaks file descriptors from zero while it mirrors. After
+// MOUNT_RESTART_CONSECUTIVE_CAP rapid restarts we pause auto-restart and
+// escalate. A mount that runs clean for MOUNT_RESTART_RESET_MS resets its
+// counter (so the hourly token-refresh restart, which is far apart, never
+// accrues backoff).
+const MOUNT_RESTART_BACKOFF_MAX_MS = 30 * 60_000
+// Must exceed the largest backoff window actually used (60s * 2^(CAP-1) = 16min
+// at CAP=5) so a genuinely-stable mount resets the counter, but a mount merely
+// waiting out a long backoff window does NOT reset and can still reach the cap.
+const MOUNT_RESTART_RESET_MS = 30 * 60_000
+const MOUNT_RESTART_CONSECUTIVE_CAP = 5
 // Stays under MOUNT_AUTH_RESTART_THROTTLE_MS so back-to-back poll hits
 // coalesce into one restart instead of racing it.
 const MOUNT_HEALTH_POLL_INTERVAL_MS = 45_000
@@ -75,6 +89,11 @@ export type MountHealthAlert = {
   remotePath: string
   status: string | null
   lastSuccessfulReconcileAt: string | null
+} | {
+  type: 'restart-cap-exceeded'
+  remotePath: string
+  attempts: number
+  reason: string
 }
 
 type MountAuthRequiredReason = 'cloud-auth-required' | 'account-workspace-required'
@@ -187,6 +206,7 @@ export class IntegrationMountManager {
   private handles = new Map<string, MountedWorkspaceHandle>()
   private refreshTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private authRestartedAt = new Map<string, number>()
+  private restartAttempts = new Map<string, number>()
   private workspaceId: string | null = null
   private pending: Promise<void> | null = null
   private desiredMountPaths: string[] = []
@@ -269,6 +289,7 @@ export class IntegrationMountManager {
     for (const timer of this.refreshTimers.values()) clearTimeout(timer)
     this.refreshTimers.clear()
     this.authRestartedAt.clear()
+    this.restartAttempts.clear()
     this.handledHealthErrorKeys.clear()
     this.lastAuthRequiredReason = null
     const roots = Array.from(this.handles.keys())
@@ -282,7 +303,12 @@ export class IntegrationMountManager {
     const timer = this.refreshTimers.get(providerRoot)
     if (timer) clearTimeout(timer)
     this.refreshTimers.delete(providerRoot)
-    this.authRestartedAt.delete(providerRoot)
+    // NB: do NOT clear authRestartedAt / restartAttempts here. stopHandle runs
+    // as part of a forced RESTART (mount() tears the handle down before
+    // respawning), so clearing the backoff state every restart is exactly what
+    // defeated the throttle and produced the respawn storm. The backoff counters
+    // are cleared only on genuine teardown (stopAll) or when a path is dropped
+    // from the desired set (see mount()).
     const handle = this.handles.get(providerRoot)
     this.handles.delete(providerRoot)
     if (handle) {
@@ -511,8 +537,26 @@ export class IntegrationMountManager {
     if (!this.handles.has(remotePath)) return false
     const now = Date.now()
     const lastRestartedAt = this.authRestartedAt.get(remotePath) ?? 0
-    if (now - lastRestartedAt < MOUNT_AUTH_RESTART_THROTTLE_MS) return false
+    const sinceLast = now - lastRestartedAt
+    // A mount that ran clean for a while resets its backoff — isolated restarts
+    // (incl. the hourly token refresh, far apart) get fast recovery.
+    const attempts = sinceLast >= MOUNT_RESTART_RESET_MS ? 0 : (this.restartAttempts.get(remotePath) ?? 0)
+    // Capped: we already burned the last-ditch restart at the cap and escalated.
+    // Stay paused until a stable period (RESET) elapses, instead of hot-looping
+    // a fresh (FD-leaking) process every cycle.
+    if (attempts >= MOUNT_RESTART_CONSECUTIVE_CAP) return false
+    // Exponential backoff floor on the 60s throttle, capped at 30min.
+    const throttle = Math.min(MOUNT_AUTH_RESTART_THROTTLE_MS * 2 ** attempts, MOUNT_RESTART_BACKOFF_MAX_MS)
+    if (lastRestartedAt && sinceLast < throttle) return false
+    const nextAttempts = attempts + 1
     this.authRestartedAt.set(remotePath, now)
+    this.restartAttempts.set(remotePath, nextAttempts)
+    if (nextAttempts >= MOUNT_RESTART_CONSECUTIVE_CAP) {
+      console.warn(
+        `[integration-mounts] Mount ${remotePath} reached ${MOUNT_RESTART_CONSECUTIVE_CAP} consecutive restarts (${reason}); pausing auto-restart for ${Math.round(MOUNT_RESTART_RESET_MS / 60_000)}min pending manual recovery`
+      )
+      this.healthObserver?.({ type: 'restart-cap-exceeded', remotePath, attempts: nextAttempts, reason })
+    }
 
     const previous = this.pending ?? Promise.resolve()
     const pending = previous
@@ -587,10 +631,13 @@ export class IntegrationMountManager {
     const mountSpecs = this.mountSpecsFor(mountPaths, mountRoot)
     const expectedRemotePaths = mountSpecs.map((spec) => spec.remotePath)
 
-    // Drop mounts for paths that are no longer connected.
+    // Drop mounts for paths that are no longer connected. This is a genuine
+    // teardown (not a restart), so also clear the backoff counters for them.
     for (const existingRemotePath of Array.from(this.handles.keys())) {
       if (!expectedRemotePaths.includes(existingRemotePath)) {
         await this.stopHandle(existingRemotePath)
+        this.authRestartedAt.delete(existingRemotePath)
+        this.restartAttempts.delete(existingRemotePath)
       }
     }
 
