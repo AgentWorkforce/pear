@@ -97,6 +97,15 @@
     "inPlanning": "3de351f2-90e6-4731-aa6b-4a55b77f481e",
     "humanReview": "24462e2d-9946-4dd1-a798-931cdd678498"
   },
+  "linear": {
+    "states": {
+      "readyForAgent": "Ready for Agent",
+      "agentImplementing": "Agent Implementing",
+      "done": "Done",
+      "inPlanning": "In Planning",
+      "humanReview": "In Human Review"
+    }
+  },
   "safety": {
     "requireTitlePrefix": "[factory]",
     "requireTeamKey": "AR"
