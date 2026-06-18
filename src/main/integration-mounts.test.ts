@@ -122,7 +122,7 @@ vi.mock('./relayfile-mount-launcher', () => ({
   createPearMountLauncher: vi.fn((options) => ({ start: mock.startMount, __options: options }))
 }))
 
-import { IntegrationMountManager, readStalledInjectedRevisions } from './integration-mounts'
+import { IntegrationMountManager, readStalledInjectedRevisions, type MountHealthAlert } from './integration-mounts'
 
 describe('IntegrationMountManager', () => {
   beforeEach(() => {
@@ -652,7 +652,7 @@ describe('IntegrationMountManager', () => {
     expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/threads')).toHaveLength(2)
   })
 
-  it('still checks sync wedge logs after a replayed auth state error', async () => {
+  it('backs off forced restarts after a replayed auth state error instead of respawning every poll', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-06-06T14:00:00.000Z'))
     const manager = new IntegrationMountManager()
@@ -684,14 +684,62 @@ describe('IntegrationMountManager', () => {
       }
     ])
 
+    const restarts = () => mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/threads').length
+
+    // First wedge poll restarts once (initial mount + 1 restart = 2).
     await vi.advanceTimersByTimeAsync(45_000)
     await Promise.resolve()
     await Promise.resolve()
+    expect(restarts()).toBe(2)
+
+    // A poll within the backoff window (next floor is 120s) must NOT respawn —
+    // this is the storm guard: previously stopHandle wiped the throttle so every
+    // ~45-60s poll respawned a fresh (FD-leaking) process.
     await vi.advanceTimersByTimeAsync(60_000)
     await Promise.resolve()
     await Promise.resolve()
+    expect(restarts()).toBe(2)
 
-    expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/threads')).toHaveLength(3)
+    // Past the backoff window, recovery still proceeds (not permanently wedged).
+    await vi.advanceTimersByTimeAsync(90_000)
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(restarts()).toBe(3)
+  })
+
+  it('pauses auto-restart and escalates after the consecutive-restart cap', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-06T14:00:00.000Z'))
+    const manager = new IntegrationMountManager()
+    const alerts: MountHealthAlert[] = []
+    manager.setHealthObserver((alert) => alerts.push(alert))
+    mock.readFile.mockImplementation(async (path: string) => {
+      if (path.endsWith('/.relay/mount.log')) {
+        return '2026/06/06 14:00:00 mount sync cycle failed: context deadline exceeded'
+      }
+      return JSON.stringify({
+        status: 'writeback-pending',
+        pendingWriteback: 1,
+        lastSuccessfulReconcileAt: '2026-06-06T13:59:00.000Z',
+        lastError: { code: 'unauthorized', statusCode: 401, message: 'http 401 unauthorized: Token has expired', at: '2026-06-06T14:00:30.000Z' }
+      })
+    })
+
+    await manager.ensureMounted([{ provider: 'slack', mountPaths: ['/slack/channels/C123/threads'] }])
+    const restarts = () => mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/threads').length
+
+    // Over ~50min the wedge polls drive restarts with exponential backoff
+    // (~45s, 180s, 450s, 945s, 1935s cumulative — floors 60/120/240/480/960s);
+    // the 5th trips the cap. The 6th is then gated by RESET (30min from the 5th
+    // ≈ 3735s), which this 3000s window stays below.
+    for (let i = 0; i < 10; i += 1) {
+      await vi.advanceTimersByTimeAsync(300_000)
+      await Promise.resolve()
+      await Promise.resolve()
+    }
+    // initial mount + 5 restarts; the 5th trips the cap + escalates exactly once.
+    expect(restarts()).toBe(6)
+    expect(alerts.filter((a) => a.type === 'restart-cap-exceeded')).toHaveLength(1)
   })
 
   it('does not restart when sync deadline failures are followed by a completed cycle', async () => {
