@@ -22,6 +22,15 @@ import { assertDirectory } from './path-utils'
 import { toErrorMessage } from './errors'
 import { isRecord } from './guards'
 import { resolveHarnessBrokerBinary } from './broker-binary'
+import {
+  brokerEventChunk,
+  brokerEventNumber,
+  brokerEventString,
+  deliveryFailureMessage,
+  isAgentExitEventForAgent,
+  isDeliveryEventForMessage,
+  isWorkerStreamForAgent
+} from './broker-event-utils'
 import { PtyInputStreamManager } from './pty-input-stream'
 import { PtyChunkDeduper } from './pty-dedup'
 import {
@@ -421,63 +430,6 @@ async function mapWithConcurrency<T, R>(
   })
   await Promise.all(workers)
   return results
-}
-
-
-function brokerEventString(event: BrokerEvent, key: string): string | undefined {
-  const value = (event as unknown as Record<string, unknown>)[key]
-  return typeof value === 'string' ? value : undefined
-}
-
-function isDeliveryEventForMessage(
-  event: BrokerEvent,
-  eventId: string,
-  targets: string[],
-  allowedKinds: string[] = [
-    'delivery_ack',
-    'delivery_verified',
-    'delivery_failed',
-    'message_delivery_confirmed',
-    'message_delivery_failed'
-  ]
-): boolean {
-  const kind = brokerEventString(event, 'kind')
-  if (!allowedKinds.includes(kind || '')) return false
-  if (brokerEventString(event, 'event_id') !== eventId) return false
-  const name = brokerEventString(event, 'name')
-  return !name || targets.length === 0 || targets.includes(name)
-}
-
-function deliveryFailureMessage(event: BrokerEvent): string {
-  if (!isRecord(event)) return 'Broker delivery failed'
-  // reason/lastError are not declared on the base BrokerEvent union; read them
-  // through the same dynamic accessor used for other optional broker fields.
-  const reason = brokerEventString(event, 'reason')
-  const lastError = brokerEventString(event, 'lastError')
-  return reason || lastError || 'Broker delivery failed'
-}
-
-function isWorkerStreamForAgent(event: BrokerEvent, name: string): boolean {
-  return brokerEventString(event, 'kind') === 'worker_stream' && brokerEventString(event, 'name') === name
-}
-
-const AGENT_EXIT_EVENT_KINDS = ['agent_exit', 'agent_exited', 'agent_released']
-
-function isAgentExitEventForAgent(event: BrokerEvent, name: string): boolean {
-  return (
-    AGENT_EXIT_EVENT_KINDS.includes(brokerEventString(event, 'kind') || '') &&
-    brokerEventString(event, 'name') === name
-  )
-}
-
-function brokerEventChunk(event: BrokerEvent): string {
-  const value = (event as unknown as Record<string, unknown>).chunk
-  return typeof value === 'string' ? value : ''
-}
-
-function brokerEventNumber(event: BrokerEvent, key: string): number | undefined {
-  const value = (event as unknown as Record<string, unknown>)[key]
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
 function personaHarnessReadyFromOutput(output: string): boolean {
