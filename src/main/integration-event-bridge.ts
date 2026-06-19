@@ -1,6 +1,8 @@
 import { createHash } from 'node:crypto'
 // @ts-expect-error Node's strip-types test runner requires the explicit .ts extension.
 import { describeError as toErrorMessage } from './errors.ts'
+// @ts-expect-error Node's strip-types test runner requires the explicit .ts extension.
+import { isRecord } from './guards.ts'
 import { existsSync, watch, type FSWatcher } from 'node:fs'
 import { appendFile, mkdir, readFile, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
@@ -440,9 +442,6 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   })
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-}
 
 // View any value as a string-keyed record for dynamic field access. Non-record
 // inputs collapse to an empty record so callers can read optional keys off

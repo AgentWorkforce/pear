@@ -20,6 +20,7 @@ import { AgentRelay, type RelayMessage } from '@agent-relay/sdk'
 import { getAccessToken, getApiUrl } from './auth'
 import { assertDirectory } from './path-utils'
 import { toErrorMessage } from './errors'
+import { isRecord } from './guards'
 import { PtyInputStreamManager } from './pty-input-stream'
 import { PtyChunkDeduper } from './pty-dedup'
 import {
@@ -637,9 +638,6 @@ async function mapWithConcurrency<T, R>(
   return results
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
 
 function brokerEventString(event: BrokerEvent, key: string): string | undefined {
   const value = (event as unknown as Record<string, unknown>)[key]
