@@ -1645,6 +1645,14 @@ function logIntegrationEvent(message: string, metadata: Record<string, unknown>)
   void appendIntegrationEventLog(message, metadata)
 }
 
+// A recipient that the broker reports as nonexistent (rotated out, never
+// registered) is a PERMANENT delivery failure, not a transient one: retrying
+// the inject — and the Relaycast fallback — just spams the same vanished agent
+// every few seconds for every event. Mirrors broker.ts isMissingAgentError.
+function isPermanentRecipientError(error: unknown): boolean {
+  return /agent_not_found|no worker named|not found/i.test(toErrorMessage(error))
+}
+
 function warnIntegrationEventAggregated(key: string, message: string, metadata: Record<string, unknown>): void {
   if (!aggregatedWarnings.has(key) && aggregatedWarnings.size >= MAX_AGGREGATED_WARNING_KEYS) {
     const oldestKey = aggregatedWarnings.keys().next().value
@@ -3256,13 +3264,35 @@ export class IntegrationEventBridge {
       const aborted = failed.find((result) => isAbortError(result.error))
       if (aborted) throw aborted.error
 
-      for (const { confirmation, error } of failed) {
+      // A recipient that no longer exists is a permanent failure — retrying just
+      // re-spams the vanished agent. Drop those from the retry set and warn once
+      // (aggregated). Treat them as resolved so the dedupe key commits and a
+      // duplicate of this event doesn't re-attempt delivery to the ghost.
+      const permanent = failed.filter(({ error }) => isPermanentRecipientError(error))
+      const retryable = failed.filter(({ error }) => !isPermanentRecipientError(error))
+      for (const { confirmation, error } of permanent) {
+        warnIntegrationEventAggregated(
+          `delivery recipient gone:${projectId}`,
+          'delivery recipient no longer registered; suppressing',
+          {
+            projectId,
+            eventId: event.id,
+            path: event.resource.path,
+            recipient: confirmation.recipient,
+            duplicateKey: deliveryClaim.key,
+            error: toErrorMessage(error)
+          }
+        )
+      }
+      if (retryable.length === 0) return
+
+      for (const { confirmation, error } of retryable) {
         this.warnDeliveryInjectedConfirmationFailed(projectId, event, deliveryClaim, confirmation, error)
       }
 
       const delayMs = retryDelays[retryIndex]
       if (delayMs === undefined) {
-        for (const { confirmation, error } of failed) {
+        for (const { confirmation, error } of retryable) {
           console.warn('[integration-events] delivery injected retries exhausted', {
             projectId,
             eventId: event.id,
@@ -3273,10 +3303,10 @@ export class IntegrationEventBridge {
             error: toErrorMessage(error)
           })
         }
-        throw failed[0].error
+        throw retryable[0].error
       }
 
-      for (const { confirmation, error } of failed) {
+      for (const { confirmation, error } of retryable) {
         warnIntegrationEventAggregated(
           `delivery injected confirmation retrying:${projectId}`,
           'delivery injected confirmation retrying',
@@ -3296,7 +3326,7 @@ export class IntegrationEventBridge {
 
       await delay(delayMs, signal)
       const retryConfirmations: InjectedConfirmation[] = []
-      for (const { confirmation } of failed) {
+      for (const { confirmation } of retryable) {
         const nextAttempt = (attemptsByRecipient.get(confirmation.recipient) ?? 1) + 1
         attemptsByRecipient.set(confirmation.recipient, nextAttempt)
         try {
@@ -3378,6 +3408,11 @@ export class IntegrationEventBridge {
       const onlineExplicitAgents = projectAgents
         ? targets.agents.filter((agent) => projectAgents.includes(agent))
         : []
+      // An EMPTY live roster is treated as a transient broker-startup race, not
+      // proof the agent is gone — fall back to the configured targets so a real
+      // agent that simply hasn't been listed yet still gets the event. If that
+      // optimism is wrong (agent truly vanished), delivery fails permanently and
+      // confirmInjectedDeliveryWithRetry suppresses it instead of retry-storming.
       const explicitAgents = projectAgents && projectAgents.length === 0 && targets.agents.length > 0
         ? targets.agents
         : onlineExplicitAgents

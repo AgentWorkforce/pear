@@ -928,6 +928,19 @@ export class IntegrationsManager {
         this.setAuthRecoveryState(alert.reason, undefined, alert.message)
         return
       }
+      // A mount that exhausted its restart cap is paused, not recovering — five
+      // consecutive restarts failed, so this is not a transient blip the loop
+      // will fix on its own. Surface it to the user (the documented remedy for a
+      // wedged integration mount is re-auth) instead of letting the alert drop
+      // silently and the mount cycle every reset window forever.
+      if (alert.type === 'restart-cap-exceeded') {
+        this.setAuthRecoveryState(
+          'cloud-auth-required',
+          'mount-recovery-exhausted',
+          `Integration sync for ${alert.remotePath} stopped recovering after ${alert.attempts} restarts (${alert.reason}). Re-authenticate to resume writebacks.`
+        )
+        return
+      }
       // Only auth-stall alerts carry pendingWriteback/message and map to a
       // mount-auth-stall event. reconcile-stalled alerts have neither field, so
       // emitting one here previously produced a malformed event with undefined

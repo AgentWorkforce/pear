@@ -10,6 +10,7 @@ import {
 } from '@relayfile/sdk'
 import { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, refreshCloudAuth, resolveCloudAuth } from './auth'
 import { createPearMountLauncher } from './relayfile-mount-launcher'
+import { forgetMountPid, killMountPid, reapOrphanedMountPids, recordMountPid } from './relayfile-mount-pids'
 
 const MOUNT_READY_TIMEOUT_MS = 60_000
 const MOUNT_SYNC_TIMEOUT = '180s'
@@ -202,6 +203,11 @@ export class IntegrationMountManager {
   // One mount per configured Relayfile path. Mounting provider roots makes
   // large integrations mirror far more data than the project selected.
   private handles = new Map<string, MountedWorkspaceHandle>()
+  // Last-known OS pid per mounted path, captured from handle.status(). Used to
+  // hard-kill a detached mount daemon the SDK's stop() may not reap, and to
+  // distinguish this instance's live mounts from reapable orphans at boot.
+  private mountPids = new Map<string, number>()
+  private reapedOrphanMounts = false
   private refreshTimers = new Map<string, ReturnType<typeof setTimeout>>()
   private authRestartedAt = new Map<string, number>()
   private restartAttempts = new Map<string, number>()
@@ -309,6 +315,8 @@ export class IntegrationMountManager {
     // from the desired set (see mount()).
     const handle = this.handles.get(providerRoot)
     this.handles.delete(providerRoot)
+    const pid = this.mountPids.get(providerRoot)
+    this.mountPids.delete(providerRoot)
     if (handle) {
       await handle.stop().catch((error) => {
         console.warn(
@@ -317,6 +325,14 @@ export class IntegrationMountManager {
         )
       })
     }
+    // Backstop: stop() does not reliably reap a detached (`background: true`)
+    // daemon, so kill the captured pid if it is still a live relayfile-mount.
+    // Without this, a wedged mount's old process survives every forced restart
+    // and they pile up (the respawn-storm orphans).
+    if (killMountPid(pid)) {
+      console.warn(`[integration-mounts] Hard-killed lingering mount process ${pid} for ${providerRoot}`)
+    }
+    await forgetMountPid(pid)
   }
 
   currentWorkspaceId(): string | null {
@@ -615,6 +631,19 @@ export class IntegrationMountManager {
     }
     this.workspaceId = workspaceId
 
+    // Once per app run, now that we're committed to mounting, reap
+    // relayfile-mount daemons a prior instance left orphaned (crash / kill -9 /
+    // dev hot-reload bypassing before-quit). Only PIDs we recorded and that
+    // still resolve to a live relayfile-mount are killed; our own live mounts
+    // are excluded.
+    if (!this.reapedOrphanMounts) {
+      this.reapedOrphanMounts = true
+      const killed = await reapOrphanedMountPids(new Set(this.mountPids.values()))
+      if (killed.length > 0) {
+        console.warn(`[integration-mounts] Reaped ${killed.length} orphaned mount process(es) from a prior run`, { pids: killed })
+      }
+    }
+
     const mountRoot = integrationMountRootForWorkspace(workspaceId)
     await ensureProtectedDirectory(join(homedir(), '.agentworkforce'))
     await ensureProtectedDirectory(join(homedir(), '.agentworkforce', 'pear'))
@@ -695,6 +724,14 @@ export class IntegrationMountManager {
           handle = await startMount()
         }
         this.handles.set(spec.remotePath, handle)
+        // Capture the daemon pid so stopHandle can hard-kill it if stop() leaves
+        // it detached, and so the boot-time orphan reaper can tell our live
+        // mounts apart from strays. Best-effort: a missing pid just skips both.
+        const pid = await handle.status().then((s) => s.pid).catch(() => undefined)
+        if (typeof pid === 'number') {
+          this.mountPids.set(spec.remotePath, pid)
+          await recordMountPid(pid, spec.localDir)
+        }
         this.scheduleRefresh(spec.remotePath, handle)
       } catch (error) {
         if (isUnauthorizedError(error)) {
