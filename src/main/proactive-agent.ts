@@ -1,4 +1,6 @@
 import { rm } from 'node:fs/promises'
+import { toErrorMessage } from './errors'
+import { isRecord } from './guards'
 import {
   buildPersonaSpec,
   deployBundle,
@@ -68,9 +70,6 @@ function cloneRun(run: ProactiveAgentRun): ProactiveAgentRun {
   return JSON.parse(JSON.stringify(run)) as ProactiveAgentRun
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-}
 
 function cloudPath(path: string, query?: Record<string, string | undefined>): string {
   const params = new URLSearchParams()
@@ -104,9 +103,6 @@ async function readCloudJson(response: Response): Promise<unknown> {
   return response.json().catch(() => null)
 }
 
-function toErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
 
 function isMissingModuleError(error: unknown): boolean {
   if (!isRecord(error)) return false

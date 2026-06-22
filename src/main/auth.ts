@@ -1,4 +1,5 @@
 import { app, shell, safeStorage } from 'electron'
+import { isRecord } from './guards'
 import { createHash } from 'crypto'
 import { createServer, type Server } from 'http'
 import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'fs'
@@ -77,9 +78,6 @@ function hasStoredTokens(): boolean {
 // The cloud API has historically returned the same logical field under several
 // keys. We tolerate common camelCase/snake_case variants, then validate the
 // final shape with UserInfoSchema.
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-}
 
 function firstString(record: Record<string, unknown> | undefined, keys: string[]): string | undefined {
   if (!record) return undefined

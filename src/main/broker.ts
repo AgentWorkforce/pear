@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'fs'
-import { chmod, mkdir, readFile, rm, writeFile } from 'fs/promises'
+import { rm } from 'fs/promises'
 import { randomUUID } from 'node:crypto'
 import { homedir } from 'node:os'
 import { delimiter, basename, isAbsolute, join } from 'path'
@@ -19,6 +19,18 @@ import {
 import { AgentRelay, type RelayMessage } from '@agent-relay/sdk'
 import { getAccessToken, getApiUrl } from './auth'
 import { assertDirectory } from './path-utils'
+import { toErrorMessage } from './errors'
+import { isRecord } from './guards'
+import { resolveHarnessBrokerBinary } from './broker-binary'
+import {
+  brokerEventChunk,
+  brokerEventNumber,
+  brokerEventString,
+  deliveryFailureMessage,
+  isAgentExitEventForAgent,
+  isDeliveryEventForMessage,
+  isWorkerStreamForAgent
+} from './broker-event-utils'
 import { PtyInputStreamManager } from './pty-input-stream'
 import { PtyChunkDeduper } from './pty-dedup'
 import {
@@ -306,222 +318,6 @@ async function findWorkforcePersona(
   }
 }
 
-function resolveBrokerBinaryOverride(): string | null {
-  const configured = process.env.AGENT_RELAY_BIN?.trim()
-  if (!configured) return null
-  if (canExecute(configured)) return configured
-  console.warn('[broker] Ignoring AGENT_RELAY_BIN because it is not executable:', configured)
-  return null
-}
-
-// Resolve the broker binary bundled with the v8 harness-driver runtime.
-// The runtime normally resolves this via import.meta.url, but that breaks when
-// electron-vite bundles the driver into the main process (import.meta.url points
-// to out/main/ instead of node_modules/).
-function brokerBinaryNameForPlatform(platform: NodeJS.Platform): string {
-  return platform === 'win32' ? 'agent-relay-broker.exe' : 'agent-relay-broker'
-}
-
-export function resolveBundledBrokerBinary(baseDir = __dirname, isPackaged = app.isPackaged): string {
-  const configuredBinary = resolveBrokerBinaryOverride()
-  if (configuredBinary) {
-    console.log('[broker] Using configured Agent Relay broker binary:', configuredBinary)
-    return configuredBinary
-  }
-
-  const suffix = `${process.platform}-${process.arch}`
-  const unpackIfPackaged = (binary: string): string =>
-    isPackaged ? binary.replace('app.asar', 'app.asar.unpacked') : binary
-
-  // v8 ships the broker as a per-platform optional package (@agent-relay/broker-*).
-  const brokerBinaryName = brokerBinaryNameForPlatform(process.platform)
-  const optionalPackageBinary = join(
-    baseDir, '..', '..', 'node_modules', '@agent-relay', `broker-${suffix}`, 'bin',
-    brokerBinaryName
-  )
-  const unpackedOptionalPackageBinary = unpackIfPackaged(optionalPackageBinary)
-  if (canExecute(unpackedOptionalPackageBinary)) return unpackedOptionalPackageBinary
-  if (unpackedOptionalPackageBinary !== optionalPackageBinary && canExecute(optionalPackageBinary)) {
-    return optionalPackageBinary
-  }
-
-  const localBinary = join(baseDir, '..', '..', '..', 'relay', 'target', 'debug', brokerBinaryName)
-  if (canExecute(localBinary)) {
-    console.warn('[broker] Bundled Agent Relay broker binary was not found; falling back to local relay build:', localBinary)
-    return localBinary
-  }
-
-  // Backward-compatible fallback for SDK packages that still carry per-platform
-  // broker binaries directly.
-  const brokerBinary = join(
-    baseDir, '..', '..', 'node_modules', '@agent-relay', 'sdk', 'bin',
-    `agent-relay-broker-${suffix}${process.platform === 'win32' ? '.exe' : ''}`
-  )
-  return unpackIfPackaged(brokerBinary)
-}
-
-interface BrokerInitCliFlags {
-  supportsInstanceName: boolean
-  supportsName: boolean
-  supportsWorkspaceKey: boolean
-}
-
-export function parseBrokerInitCliFlags(helpText: string): BrokerInitCliFlags {
-  return {
-    supportsInstanceName: /(?:^|\s)--instance-name(?:\s|[<=[,]|$)/.test(helpText),
-    supportsName: /(?:^|\s)--name(?:\s|[<=[,]|$)/.test(helpText),
-    supportsWorkspaceKey: /(?:^|\s)--workspace-key(?:\s|[<=[,]|$)/.test(helpText)
-  }
-}
-
-function inspectBrokerInitCliFlags(binaryPath: string): Promise<BrokerInitCliFlags> {
-  return new Promise((resolve) => {
-    execFile(binaryPath, ['init', '--help'], {
-      encoding: 'utf8',
-      timeout: 2_000,
-      windowsHide: true
-    }, (err, stdout) => {
-      if (err) {
-        console.warn(`[broker] Failed to inspect broker init CLI for ${binaryPath}:`, err)
-        resolve({
-          supportsInstanceName: true,
-          supportsName: true,
-          supportsWorkspaceKey: true
-        })
-        return
-      }
-      resolve(parseBrokerInitCliFlags(stdout))
-    })
-  })
-}
-
-function brokerBinaryCompatShimSource(): string {
-  return `#!/usr/bin/env node
-const { spawn } = require('node:child_process')
-
-const realBinary = process.env.PEAR_AGENT_RELAY_BROKER_BINARY
-if (!realBinary) {
-  console.error('[pear-broker-compat] PEAR_AGENT_RELAY_BROKER_BINARY is required')
-  process.exit(127)
-}
-
-const supportsInstanceName = process.env.PEAR_AGENT_RELAY_BROKER_SUPPORTS_INSTANCE_NAME === '1'
-const supportsWorkspaceKey = process.env.PEAR_AGENT_RELAY_BROKER_SUPPORTS_WORKSPACE_KEY === '1'
-const inputArgs = process.argv.slice(2)
-const outputArgs = []
-
-for (let index = 0; index < inputArgs.length; index += 1) {
-  const arg = inputArgs[index]
-  if (!supportsInstanceName && arg === '--instance-name') {
-    outputArgs.push('--name')
-    if (index + 1 < inputArgs.length) outputArgs.push(inputArgs[++index])
-    continue
-  }
-  if (!supportsInstanceName && arg.startsWith('--instance-name=')) {
-    outputArgs.push('--name=' + arg.slice('--instance-name='.length))
-    continue
-  }
-  if (!supportsWorkspaceKey && arg === '--workspace-key') {
-    index += 1
-    continue
-  }
-  if (!supportsWorkspaceKey && arg.startsWith('--workspace-key=')) {
-    continue
-  }
-  outputArgs.push(arg)
-}
-
-const child = spawn(realBinary, outputArgs, {
-  cwd: process.cwd(),
-  env: process.env,
-  stdio: 'inherit'
-})
-
-child.on('error', (error) => {
-  console.error('[pear-broker-compat] failed to launch broker:', error instanceof Error ? error.message : String(error))
-  process.exit(127)
-})
-
-child.on('exit', (code, signal) => {
-  if (signal) {
-    try {
-      process.kill(process.pid, signal)
-    } catch {
-      // Re-raising the child's signal failed; exit non-zero so the failure still
-      // propagates to the parent. Nothing to log from inside this shim process.
-      process.exit(1)
-    }
-    return
-  }
-  process.exit(code ?? 0)
-})
-`
-}
-
-async function textFileMatches(filePath: string, source: string): Promise<boolean> {
-  try {
-    return await readFile(filePath, 'utf8') === source
-  } catch {
-    return false
-  }
-}
-
-async function ensureBrokerBinaryCompatShim(): Promise<string> {
-  const shimDir = join(app.getPath('userData'), 'broker-compat')
-  const shimPath = join(shimDir, process.platform === 'win32' ? 'agent-relay-broker-compat.cmd' : 'agent-relay-broker-compat')
-  const source = process.platform === 'win32'
-    ? `@echo off\r\nnode "%~dp0agent-relay-broker-compat.js" %*\r\n`
-    : brokerBinaryCompatShimSource()
-
-  await mkdir(shimDir, { recursive: true })
-  if (!(await textFileMatches(shimPath, source))) {
-    await writeFile(shimPath, source)
-    await chmod(shimPath, 0o755)
-  }
-  if (process.platform === 'win32') {
-    const jsPath = join(shimDir, 'agent-relay-broker-compat.js')
-    const jsSource = brokerBinaryCompatShimSource()
-    if (!(await textFileMatches(jsPath, jsSource))) {
-      await writeFile(jsPath, jsSource)
-    }
-  }
-  return shimPath
-}
-
-// `binaryPath` is what Pear launches (possibly the legacy compat shim);
-// `realBinaryPath` is always the actual broker binary, for callers that hand
-// the binary itself to other processes.
-async function resolveHarnessBrokerBinary(workspaceKey?: string): Promise<{ binaryPath: string; realBinaryPath: string; env: NodeJS.ProcessEnv }> {
-  const binaryPath = resolveBundledBrokerBinary()
-  const flags = await inspectBrokerInitCliFlags(binaryPath)
-
-  if (workspaceKey && !flags.supportsWorkspaceKey) {
-    throw new Error(
-      `Broker binary does not support --workspace-key: ${binaryPath}. Rebuild or update agent-relay-broker, or unset AGENT_RELAY_WORKSPACE_KEY.`
-    )
-  }
-
-  if (flags.supportsInstanceName) {
-    return { binaryPath, realBinaryPath: binaryPath, env: {} }
-  }
-
-  if (!flags.supportsName) {
-    throw new Error(`Broker binary supports neither --instance-name nor --name: ${binaryPath}`)
-  }
-
-  const shimPath = await ensureBrokerBinaryCompatShim()
-  console.warn(`[broker] Broker binary uses legacy --name flag; launching through compatibility shim: ${binaryPath}`)
-  return {
-    binaryPath: shimPath,
-    realBinaryPath: binaryPath,
-    env: {
-      PEAR_AGENT_RELAY_BROKER_BINARY: binaryPath,
-      PEAR_AGENT_RELAY_BROKER_SUPPORTS_INSTANCE_NAME: flags.supportsInstanceName ? '1' : '0',
-      PEAR_AGENT_RELAY_BROKER_SUPPORTS_WORKSPACE_KEY: flags.supportsWorkspaceKey ? '1' : '0'
-    }
-  }
-}
-
 type TerminalAttachMode = 'view' | 'drive' | 'passthrough'
 
 export interface CloudAgentSandboxHandle {
@@ -634,66 +430,6 @@ async function mapWithConcurrency<T, R>(
   })
   await Promise.all(workers)
   return results
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
-
-function brokerEventString(event: BrokerEvent, key: string): string | undefined {
-  const value = (event as unknown as Record<string, unknown>)[key]
-  return typeof value === 'string' ? value : undefined
-}
-
-function isDeliveryEventForMessage(
-  event: BrokerEvent,
-  eventId: string,
-  targets: string[],
-  allowedKinds: string[] = [
-    'delivery_ack',
-    'delivery_verified',
-    'delivery_failed',
-    'message_delivery_confirmed',
-    'message_delivery_failed'
-  ]
-): boolean {
-  const kind = brokerEventString(event, 'kind')
-  if (!allowedKinds.includes(kind || '')) return false
-  if (brokerEventString(event, 'event_id') !== eventId) return false
-  const name = brokerEventString(event, 'name')
-  return !name || targets.length === 0 || targets.includes(name)
-}
-
-function deliveryFailureMessage(event: BrokerEvent): string {
-  if (!isRecord(event)) return 'Broker delivery failed'
-  // reason/lastError are not declared on the base BrokerEvent union; read them
-  // through the same dynamic accessor used for other optional broker fields.
-  const reason = brokerEventString(event, 'reason')
-  const lastError = brokerEventString(event, 'lastError')
-  return reason || lastError || 'Broker delivery failed'
-}
-
-function isWorkerStreamForAgent(event: BrokerEvent, name: string): boolean {
-  return brokerEventString(event, 'kind') === 'worker_stream' && brokerEventString(event, 'name') === name
-}
-
-const AGENT_EXIT_EVENT_KINDS = ['agent_exit', 'agent_exited', 'agent_released']
-
-function isAgentExitEventForAgent(event: BrokerEvent, name: string): boolean {
-  return (
-    AGENT_EXIT_EVENT_KINDS.includes(brokerEventString(event, 'kind') || '') &&
-    brokerEventString(event, 'name') === name
-  )
-}
-
-function brokerEventChunk(event: BrokerEvent): string {
-  const value = (event as unknown as Record<string, unknown>).chunk
-  return typeof value === 'string' ? value : ''
-}
-
-function brokerEventNumber(event: BrokerEvent, key: string): number | undefined {
-  const value = (event as unknown as Record<string, unknown>)[key]
-  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
 function personaHarnessReadyFromOutput(output: string): boolean {
@@ -824,11 +560,6 @@ async function terminateOwnedBrokerProcess(pid: number | undefined): Promise<voi
 // broker. The SDK's internal 10s polling is the only retry that's safe at
 // this layer; if it fails, surface the error and let the user retry through
 // the UI (which goes through connectExistingBroker first).
-
-function toErrorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err)
-}
-
 
 function isBrokerDebugEnabled(): boolean {
   return process.env.PEAR_BROKER_DEBUG === '1' || process.env.PEAR_BROKER_DEBUG === 'true'

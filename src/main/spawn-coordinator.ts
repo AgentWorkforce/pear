@@ -1,4 +1,5 @@
 import type { SpawnPtyInput } from '@agent-relay/harness-driver'
+import { isRecord } from './guards'
 
 export type BrokerSpawnResult = {
   name: string
@@ -11,9 +12,6 @@ export type PersonaBrokerSpawnResult = BrokerSpawnResult & {
   workerStreamBaselineCount: number
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null
-}
 
 // Coerce the loosely-typed spawnPty result into a BrokerSpawnResult, filling in
 // a fallback name/runtime and preferring an explicitly resolved CLI over the

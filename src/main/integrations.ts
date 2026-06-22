@@ -1,4 +1,6 @@
 import { randomUUID } from 'node:crypto'
+import { toErrorMessage } from './errors'
+import { isRecord } from './guards'
 import { existsSync, readFileSync } from 'node:fs'
 import { isAbsolute, relative, resolve } from 'node:path'
 import { BrowserWindow, shell } from 'electron'
@@ -294,9 +296,6 @@ function buildApiUrl(apiUrl: string, path: string): string {
   return new URL(path.replace(/^\/+/, ''), `${apiUrl}/`).toString()
 }
 
-function toErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
 
 function isCloudAuthRequiredError(error: unknown): boolean {
   return /cloud-auth-required/i.test(toErrorMessage(error))
@@ -324,9 +323,6 @@ function integrationAuthRecoveryMessage(reason: IntegrationAuthRecoveryState['re
   return failureClass ? `${reason}:${failureClass}` : reason
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return !!value && typeof value === 'object' && !Array.isArray(value)
-}
 
 function stringList(value: unknown): string[] {
   if (!Array.isArray(value)) return []

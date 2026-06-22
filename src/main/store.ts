@@ -1,4 +1,5 @@
 import { app } from 'electron'
+import { isRecord } from './guards'
 import { readFileSync, writeFileSync, renameSync, mkdirSync, existsSync } from 'fs'
 import { basename, join, resolve } from 'path'
 import { z } from 'zod'
@@ -83,9 +84,6 @@ function defaultRootName(path: string): string {
   return basename(path) || path
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
 
 // Normalize an untrusted relay-workspace record read from disk or supplied by a
 // caller into a clean RelayWorkspaceRecord, or undefined when it lacks a usable

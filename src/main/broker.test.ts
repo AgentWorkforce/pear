@@ -193,10 +193,12 @@ vi.mock('./burn', () => ({
 import {
   BrokerManager,
   isCommandAvailableWithAugmentedPath,
-  parseBrokerInitCliFlags,
-  resolveAgentRelayMcpCommand,
-  resolveBundledBrokerBinary
+  resolveAgentRelayMcpCommand
 } from './broker'
+import {
+  parseBrokerInitCliFlags,
+  resolveBundledBrokerBinary
+} from './broker-binary'
 import {
   classifyBrokerEvent,
   KNOWN_BROKER_EVENT_KINDS

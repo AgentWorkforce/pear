@@ -3,6 +3,7 @@ import { lstat, mkdir, readFile, readlink, rm, symlink, writeFile } from 'node:f
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { integrationMountRootForWorkspace } from './integration-mounts'
+import { toErrorMessage } from './errors'
 
 const execFileAsync = promisify(execFile)
 const gitDirCache = new Map<string, Promise<string | null>>()
@@ -15,9 +16,6 @@ export const PROJECT_INTEGRATIONS_LINK_NAME = '.integrations'
 
 const GIT_EXCLUDE_MARKER = '# pear: integration mount symlink (auto-managed)'
 
-function toErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
 
 function isFileAlreadyExistsError(error: unknown): boolean {
   return !!error &&

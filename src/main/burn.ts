@@ -1,4 +1,6 @@
 import { existsSync } from 'fs'
+// @ts-expect-error Node's strip-types test runner requires the explicit .ts extension.
+import { toErrorMessage } from './errors.ts'
 import { spawn } from 'child_process'
 import { createRequire } from 'module'
 import { homedir } from 'os'
@@ -234,9 +236,6 @@ const BURN_INGEST_TOOL_RESULT_WARNING_START =
   /^\u26a0(?:\uFE0F)? [^:]+: \d+ sessions logged tool calls without any observed tool_result content \(\d+ tool calls\)\.\r?\n$/
 const BURN_INGEST_WARNING_CONTINUATION_LINES = 3
 
-function toErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
 
 function toNumber(value: number | bigint | undefined): number {
   if (typeof value === 'bigint') return Number(value)

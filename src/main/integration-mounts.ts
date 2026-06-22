@@ -1,4 +1,5 @@
 import { chmod, mkdir, readFile, rm } from 'node:fs/promises'
+import { toErrorMessage } from './errors'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -107,9 +108,6 @@ type IntegrationMountSpec = {
   scopes: string[]
 }
 
-function toErrorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}
 
 function isAccountWorkspaceRequiredError(error: unknown): boolean {
   return /account-workspace-required/i.test(toErrorMessage(error))
