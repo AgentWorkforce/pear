@@ -1324,6 +1324,53 @@ test('slack injected confirmation retries exhausted releases dedupe key', async 
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice', 'alice', 'alice', 'alice'])
 })
 
+test('agent_not_found injected confirmation is suppressed without retry', async () => {
+  process.env.PEAR_INTEGRATION_EVENT_INJECTED_RETRY_DELAYS_MS = '5,5'
+  const harness = makeHarness(['alice'], { manualInjectedConfirmations: true })
+  const warnCalls: unknown[][] = []
+  const originalWarn = console.warn
+  console.warn = (...args: unknown[]) => {
+    warnCalls.push(args)
+  }
+
+  try {
+    await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
+      await harness.bridge.reconcile('project-1', [
+        integration({
+          provider: 'slack',
+          integrationId: 'slack-1',
+          mountPaths: ['/slack/channels/C123ABC__proj-cloud'],
+          scope: { notifyAgents: ['alice'] }
+        })
+      ])
+    })
+
+    const path = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
+    await harness.emit(changeEvent(path, 'slack'))
+    await waitForSent(harness, 1)
+    // A recipient the broker reports as nonexistent is a permanent failure.
+    harness.pendingInjectedConfirmations[0].reject(
+      new Error('relaycast send_dm failed: API error (agent_not_found): Agent "alice" not found')
+    )
+
+    await waitUntil(() =>
+      warnCalls.some((call) => call[0] === '[integration-events] delivery recipient no longer registered; suppressing')
+    )
+    // No retry: exactly one send, no further injected-confirmation attempts, and
+    // crucially no "retries exhausted" storm against the vanished agent.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    assert.equal(harness.sent.length, 1)
+    assert.equal(harness.injectedConfirmationCalls.length, 1)
+    assert.equal(harness.pendingInjectedConfirmations.length, 1)
+    assert.equal(
+      warnCalls.some((call) => call[0] === '[integration-events] delivery injected retries exhausted'),
+      false
+    )
+  } finally {
+    console.warn = originalWarn
+  }
+})
+
 test('slack injected confirmation retry resends only failed recipient', async () => {
   process.env.PEAR_INTEGRATION_EVENT_INJECTED_RETRY_DELAYS_MS = '5,5'
   const harness = makeHarness(['alice', 'bob'], { manualInjectedConfirmations: true })

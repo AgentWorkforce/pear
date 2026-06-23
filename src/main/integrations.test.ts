@@ -716,6 +716,24 @@ describe('IntegrationsManager', () => {
     })
   })
 
+  it('surfaces a restart-cap-exceeded mount as user-actionable auth recovery', () => {
+    const manager = new IntegrationsManager()
+    const observer = mock.integrationMountManager.setHealthObserver.mock.calls.at(-1)?.[0]
+
+    observer?.({
+      type: 'restart-cap-exceeded',
+      remotePath: '/slack/channels/C0BBTBC1RCM__epic/messages',
+      attempts: 5,
+      reason: 'reconcile loop stalled'
+    })
+
+    expect(manager.getAuthRecoveryState()).toMatchObject({
+      reason: 'cloud-auth-required',
+      failureClass: 'mount-recovery-exhausted'
+    })
+    expect(manager.getAuthRecoveryState()?.message).toMatch(/stopped recovering after 5 restarts/)
+  })
+
   it('clears sticky auth recovery state after the all-dead recovery retry respawns mounts', async () => {
     vi.useFakeTimers()
     const manager = new IntegrationsManager()
