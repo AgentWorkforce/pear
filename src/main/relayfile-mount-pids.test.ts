@@ -113,7 +113,7 @@ describe('relayfile-mount-pids', () => {
     expect(killMountPid(50_004)).toBe(true)
     expect(killSpy).toHaveBeenCalledWith(50_004, 'SIGKILL')
 
-    killSpy.mockImplementation((_pid, signal) => {
+    killSpy.mockImplementation((_pid: number, signal?: string | number) => {
       if (signal === 0) throw new Error('ESRCH')
       return true
     })
