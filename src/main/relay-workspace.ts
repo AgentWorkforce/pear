@@ -3,6 +3,7 @@ import { RelayfileSetup, type WorkspaceHandle } from '@relayfile/sdk'
 import { resolveCloudAuth } from './auth'
 import { loadStore, saveStore } from './store'
 import type { RelayWorkspaceManagerLike, RelayWorkspaceRecord } from './relay-workspace.types'
+import { normalizeRelayWorkspaceInfo } from './relay-service-urls'
 
 const ACCOUNT_AGENT_NAME = 'pear-account'
 // Scope grammar is `plane:resource:action:path`; the cloud API only accepts the
@@ -172,10 +173,10 @@ export class RelayWorkspaceManager {
         clearPersistedWorkspace(existing)
       } else {
         try {
-          const handle = await setup.joinWorkspace(existing.id, {
+          const handle = normalizeRelayWorkspaceInfo(await setup.joinWorkspace(existing.id, {
             agentName: this.agentName,
             scopes: this.scopes
-          })
+          }))
           return { handle }
         } catch (err) {
           if (!isWorkspaceMissing(err)) throw err
@@ -184,10 +185,10 @@ export class RelayWorkspaceManager {
       }
     }
 
-    const handle = await setup.createWorkspace({
+    const handle = normalizeRelayWorkspaceInfo(await setup.createWorkspace({
       agentName: this.agentName,
       scopes: this.scopes
-    })
+    }))
     return {
       handle,
       persist: {

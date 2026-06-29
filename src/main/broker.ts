@@ -33,6 +33,7 @@ import {
 } from './broker-event-utils'
 import { PtyInputStreamManager } from './pty-input-stream'
 import { PtyChunkDeduper } from './pty-dedup'
+import { RELAYCAST_BASE_URL } from './relay-service-urls'
 import {
   SpawnCoordinator,
   spawnRequestKey,
@@ -2170,7 +2171,7 @@ export class BrokerManager {
 
     const relay = new AgentRelay({
       workspaceKey,
-      ...(process.env.RELAY_BASE_URL ? { baseUrl: process.env.RELAY_BASE_URL } : {})
+      baseUrl: process.env.RELAY_BASE_URL || RELAYCAST_BASE_URL
     })
     const limit = normalizeReconcileLimit(input.limit)
     const messages = input.kind === 'channel'

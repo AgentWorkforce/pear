@@ -12,6 +12,7 @@
 import { HarnessDriverClient } from '@agent-relay/harness-driver'
 import type { BrokerEvent, AgentExitInfo } from '@agent-relay/harness-driver'
 import { RelaycastSetup } from '@relaycast/sdk'
+import { RELAYCAST_BASE_URL } from '../src/main/relay-service-urls'
 
 const AGENT_EXIT_TIMEOUT_MS = 180_000  // 3 min max per run
 const AGENT_IDLE_THRESHOLD_SECS = 30   // release after 30s idle
@@ -41,7 +42,7 @@ async function ensureWorkspaceKey(): Promise<string> {
     _cachedWorkspaceKey = process.env.RELAY_API_KEY.trim()
     return _cachedWorkspaceKey
   }
-  const setup = new RelaycastSetup()
+  const setup = new RelaycastSetup({ baseUrl: process.env.RELAY_BASE_URL || RELAYCAST_BASE_URL })
   const ws = await setup.createWorkspace({ name: `pear-eval-${Date.now().toString(36)}` })
   _cachedWorkspaceKey = ws.apiKey
   return _cachedWorkspaceKey

@@ -21,6 +21,7 @@ vi.mock('@relayfile/sdk/mount-launcher', () => ({
 }))
 
 import { createPearMountLauncher } from './relayfile-mount-launcher'
+import { RELAYCAST_BASE_URL, RELAYFILE_BASE_URL } from './relay-service-urls'
 
 describe('createPearMountLauncher', () => {
   let tempDir: string
@@ -96,5 +97,26 @@ describe('createPearMountLauncher', () => {
         RELAYFILE_MOUNT_BIN: process.env.RELAYFILE_MOUNT_BIN
       })
     }
+  })
+
+  it('canonicalizes hosted relay service URLs before launching the mount', async () => {
+    const launcher = createPearMountLauncher()
+
+    await launcher.start({
+      env: {
+        RELAYFILE_BASE_URL: 'https://api.relayfile.dev',
+        RELAYCAST_BASE_URL: 'https://api.relaycast.dev',
+        RELAYFILE_LOCAL_DIR: join(tempDir, 'canonical-hosts')
+      },
+      readyTimeoutMs: 5_000
+    })
+
+    expect(mock.start).toHaveBeenCalledWith(expect.objectContaining({
+      env: expect.objectContaining({
+        RELAYFILE_BASE_URL,
+        RELAYCAST_BASE_URL,
+        RELAY_BASE_URL: RELAYCAST_BASE_URL
+      })
+    }))
   })
 })
