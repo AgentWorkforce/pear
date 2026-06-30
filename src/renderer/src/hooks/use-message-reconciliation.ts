@@ -13,6 +13,7 @@ import type {
 
 const DEFAULT_RECONCILE_LIMIT = 50
 const DEFAULT_RECONCILE_DEBOUNCE_MS = 750
+export const ACTIVE_ROOM_RECONCILE_POLL_MS = 3_000
 const BROKER_CONNECTED_STATUSES = new Set([
   'connected',
   'event_stream_connected',
@@ -211,6 +212,10 @@ function refreshEventStream(reason: string): void {
   void broker?.refreshEventStream?.(projectId, reason)?.catch(() => undefined)
 }
 
+export function shouldPollActiveRoom(activeRoomKey: string, visibilityState: DocumentVisibilityState): boolean {
+  return activeRoomKey !== 'none' && visibilityState === 'visible'
+}
+
 export function useMessageReconciliation(): void {
   const activeProjectId = useProjectStore((s) => s.activeProjectId)
   const activeTabId = useUIStore((s) => s.activeTabId)
@@ -247,6 +252,16 @@ export function useMessageReconciliation(): void {
 
   useEffect(() => {
     reconciler.schedule('active-room')
+  }, [activeRoomKey, reconciler])
+
+  useEffect(() => {
+    if (activeRoomKey === 'none') return
+    const interval = window.setInterval(() => {
+      if (shouldPollActiveRoom(activeRoomKey, document.visibilityState)) {
+        reconciler.schedule('active-room-poll')
+      }
+    }, ACTIVE_ROOM_RECONCILE_POLL_MS)
+    return () => window.clearInterval(interval)
   }, [activeRoomKey, reconciler])
 
   useEffect(() => {
