@@ -218,6 +218,33 @@ describe('agent-store stress', () => {
     expect(ids.size).toBe(100)
   })
 
+  it('addHumanMessage does not duplicate when the canonical echo wins the race and arrives first', () => {
+    // Regression: on the very first send to a channel, relay_inbound can
+    // beat the optimistic addHumanMessage append (e.g. while the channel/
+    // broker is still spinning up). isCanonicalEchoOfLocalHuman only
+    // guards the opposite ordering (optimistic-then-canonical), so without
+    // isCanonicalAlreadyPresent, addHumanMessage would append a second,
+    // permanently-stuck copy — reconcileMessages can't clean it up because
+    // the canonical id is already present, short-circuiting the id-match
+    // branch before it ever reaches content-based optimistic matching.
+    const store = useAgentStore.getState()
+    store.handleBrokerEvent(relayInbound({
+      from: 'human',
+      target: '#general',
+      body: 'race-body',
+      projectId: 'p1',
+      event_id: 'evt-race-canonical'
+    }))
+    store.addHumanMessage('#general', 'race-body', 'p1')
+
+    const messages = useAgentStore.getState().messages.filter(
+      (m) => m.body === 'race-body'
+    )
+    expect(messages.length).toBe(1)
+    expect(messages[0]!.id).toBe('evt-race-canonical')
+    expect(messages[0]!.local).not.toBe(true)
+  })
+
   it('cross-project agent dedupe does not false-positive — identical body, different projectId survives twice', () => {
     // Invariant 3 — projectId mismatch must NEVER collapse two distinct sends.
     const store = useAgentStore.getState()
