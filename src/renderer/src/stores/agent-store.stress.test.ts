@@ -245,6 +245,44 @@ describe('agent-store stress', () => {
     expect(messages[0]!.local).not.toBe(true)
   })
 
+  it('addHumanMessage does not drop a second identical send shortly after the first was reconciled', () => {
+    // Regression for review feedback on the race guard above: matching
+    // isCanonicalAlreadyPresent against ANY non-local record (including
+    // local: false, set by reconcileChatMessages once an earlier optimistic
+    // send is confirmed) would falsely suppress a later, legitimately
+    // repeated send within the 10s human dedupe window. The guard must only
+    // match a still-unclaimed standalone canonical record (local ===
+    // undefined) within a tight race window, not confirmed history.
+    const store = useAgentStore.getState()
+    store.addHumanMessage('#general', 'repeat-body', 'p1')
+    const firstLocal = useAgentStore.getState().messages.find(
+      (m) => m.body === 'repeat-body' && m.local === true
+    )
+    expect(firstLocal).toBeTruthy()
+
+    store.reconcileMessages([{
+      id: 'canonical-repeat-1',
+      from: 'human',
+      to: '#general',
+      body: 'repeat-body',
+      timestamp: firstLocal!.timestamp,
+      isHuman: true,
+      projectId: 'p1'
+    }])
+    expect(
+      useAgentStore.getState().messages.find((m) => m.id === 'canonical-repeat-1')?.local
+    ).toBe(false)
+
+    vi.advanceTimersByTime(3_000)
+    store.addHumanMessage('#general', 'repeat-body', 'p1')
+
+    const repeatMessages = useAgentStore.getState().messages.filter(
+      (m) => m.body === 'repeat-body'
+    )
+    expect(repeatMessages.length).toBe(2)
+    expect(repeatMessages.filter((m) => m.local === true).length).toBe(1)
+  })
+
   it('cross-project agent dedupe does not false-positive — identical body, different projectId survives twice', () => {
     // Invariant 3 — projectId mismatch must NEVER collapse two distinct sends.
     const store = useAgentStore.getState()
