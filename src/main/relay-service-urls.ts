@@ -19,12 +19,13 @@ export function normalizeRelaycastBaseUrl(value: string | null | undefined): str
   return normalizeHostedServiceUrl(value, RELAYCAST_BASE_URL, LEGACY_RELAYCAST_HOSTS)
 }
 
-export function normalizeRelayServiceEnv(env: Record<string, string>): Record<string, string> {
+export function normalizeRelayServiceEnv(env?: Record<string, string> | null): Record<string, string> {
+  const safeEnv = env || {}
   return {
-    ...env,
-    RELAYFILE_BASE_URL: normalizeRelayfileBaseUrl(env.RELAYFILE_BASE_URL),
-    RELAYCAST_BASE_URL: normalizeRelaycastBaseUrl(env.RELAYCAST_BASE_URL || env.RELAY_BASE_URL),
-    RELAY_BASE_URL: normalizeRelaycastBaseUrl(env.RELAY_BASE_URL || env.RELAYCAST_BASE_URL)
+    ...safeEnv,
+    RELAYFILE_BASE_URL: normalizeRelayfileBaseUrl(safeEnv.RELAYFILE_BASE_URL),
+    RELAYCAST_BASE_URL: normalizeRelaycastBaseUrl(safeEnv.RELAYCAST_BASE_URL || safeEnv.RELAY_BASE_URL),
+    RELAY_BASE_URL: normalizeRelaycastBaseUrl(safeEnv.RELAY_BASE_URL || safeEnv.RELAYCAST_BASE_URL)
   }
 }
 
@@ -34,11 +35,17 @@ export function normalizeRelayWorkspaceInfo<T extends {
     relaycastBaseUrl?: string
   }
 }>(handle: T): T {
-  if (handle.info) {
-    handle.info.relayfileUrl = normalizeRelayfileBaseUrl(handle.info.relayfileUrl)
-    handle.info.relaycastBaseUrl = normalizeRelaycastBaseUrl(handle.info.relaycastBaseUrl)
+  if (!handle.info) {
+    return handle
   }
-  return handle
+  return {
+    ...handle,
+    info: {
+      ...handle.info,
+      relayfileUrl: normalizeRelayfileBaseUrl(handle.info.relayfileUrl),
+      relaycastBaseUrl: normalizeRelaycastBaseUrl(handle.info.relaycastBaseUrl)
+    }
+  }
 }
 
 function normalizeHostedServiceUrl(

@@ -32,7 +32,15 @@ describe('relay service URL normalization', () => {
     })
   })
 
-  it('normalizes workspace handle info in place', () => {
+  it('normalizes nullish relay mount env to hosted defaults', () => {
+    expect(normalizeRelayServiceEnv(null)).toMatchObject({
+      RELAYFILE_BASE_URL,
+      RELAYCAST_BASE_URL,
+      RELAY_BASE_URL: RELAYCAST_BASE_URL
+    })
+  })
+
+  it('normalizes workspace handle info without mutating the input', () => {
     const handle = {
       info: {
         relayfileUrl: 'https://api.relayfile.dev',
@@ -40,9 +48,16 @@ describe('relay service URL normalization', () => {
       }
     }
 
-    expect(normalizeRelayWorkspaceInfo(handle).info).toEqual({
+    const normalized = normalizeRelayWorkspaceInfo(handle)
+
+    expect(normalized.info).toEqual({
       relayfileUrl: RELAYFILE_BASE_URL,
       relaycastBaseUrl: RELAYCAST_BASE_URL
     })
+    expect(handle.info).toEqual({
+      relayfileUrl: 'https://api.relayfile.dev',
+      relaycastBaseUrl: 'https://api.relaycast.dev'
+    })
+    expect(normalized).not.toBe(handle)
   })
 })

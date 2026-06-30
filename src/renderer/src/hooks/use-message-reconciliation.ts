@@ -198,7 +198,12 @@ export function createMessageReconciler(deps: MessageReconcilerDeps): MessageRec
     if (existingRun) {
       pendingRequestReruns.set(requestKey, { request, reason })
       debug({ kind: 'scheduled', reason })
-      return existingRun
+      await existingRun
+      const followUpRun = requestInFlight.get(requestKey)
+      if (followUpRun && followUpRun !== existingRun) {
+        await followUpRun
+      }
+      return
     }
 
     const currentRun = (async () => {
@@ -404,10 +409,11 @@ export function useMessageReconciliation(): void {
 
   useEffect(() => {
     return pear?.broker?.onEvent?.((event) => {
+      if (!event) return
       const brokerEvent = event as BrokerEventLike
       const project = useProjectStore.getState()
       const projectId = brokerEvent.projectId || project.activeProjectId
-      const knownChannelNames = project.projects.find((entry) => entry.id === projectId)?.channels || []
+      const knownChannelNames = project.projects?.find((entry) => entry.id === projectId)?.channels || []
       const request = getBrokerEventMessageReconciliationRequest({
         event: brokerEvent,
         fallbackProjectId: project.activeProjectId,

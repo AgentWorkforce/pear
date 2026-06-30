@@ -369,6 +369,49 @@ describe('createMessageReconciler', () => {
     expect(mergeMessages).toHaveBeenNthCalledWith(4, [{ ...channelMessage, id: 'triage-2', to: '#triage', body: 'triage second' }])
   })
 
+  it('awaits a queued dirty rerun when runRequestNow joins an in-flight request', async () => {
+    const request = channelRequest('general')
+    const firstFetch = deferredMessages()
+    const secondFetch = deferredMessages()
+    const reconcileMessages = vi.fn()
+      .mockReturnValueOnce(firstFetch.promise)
+      .mockReturnValueOnce(secondFetch.promise)
+    const mergeMessages = vi.fn()
+    const reconciler = hooks.createMessageReconciler({
+      getRequest: () => null,
+      reconcileMessages,
+      mergeMessages,
+      setTimeout: setTimeout as unknown as typeof window.setTimeout,
+      clearTimeout: clearTimeout as unknown as typeof window.clearTimeout,
+      debounceMs: 1
+    })
+    let secondRunSettled = false
+
+    void reconciler.runRequestNow(request, 'broker-event:first')
+    await Promise.resolve()
+
+    const secondRun = reconciler.runRequestNow(request, 'broker-event:second')
+    secondRun.then(() => {
+      secondRunSettled = true
+    })
+    await Promise.resolve()
+
+    expect(reconcileMessages).toHaveBeenCalledTimes(1)
+
+    firstFetch.resolve([{ ...channelMessage, id: 'general-1', body: 'general first' }])
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(reconcileMessages).toHaveBeenCalledTimes(2)
+    expect(secondRunSettled).toBe(false)
+
+    secondFetch.resolve([{ ...channelMessage, id: 'general-2', body: 'general second' }])
+    await secondRun
+
+    expect(secondRunSettled).toBe(true)
+    expect(mergeMessages).toHaveBeenCalledTimes(2)
+  })
+
   it('cleans up keyed timers and suppresses in-flight merges after dispose', async () => {
     vi.useFakeTimers()
     const generalRequest = channelRequest('general')
