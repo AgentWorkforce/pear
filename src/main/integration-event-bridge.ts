@@ -37,6 +37,8 @@ type ChangeEvent = Omit<SdkChangeEvent, 'type' | 'expand'> & {
 import type { ConnectedIntegration } from './integrations'
 // @ts-expect-error Node's strip-types test runner requires the explicit .ts extension.
 import { isSlackWritebackCommandRoot, slackWritebackCommandMountPathFor } from './slack-writeback-command-roots.ts'
+// @ts-expect-error Node's strip-types test runner requires the explicit .ts extension.
+import { normalizeRelayWorkspaceInfo } from './relay-service-urls.ts'
 import type {
   IntegrationEventTelemetryCounters,
   IntegrationEventTelemetrySnapshot
@@ -3702,10 +3704,10 @@ export class IntegrationEventBridge {
         cloudApiUrl: auth.apiUrl,
         accessToken: tokenProvider
       })
-      return setup.joinWorkspace(accountWorkspaceId, {
+      return normalizeRelayWorkspaceInfo(await setup.joinWorkspace(accountWorkspaceId, {
         agentName: INTEGRATION_EVENT_AGENT_NAME,
         scopes: INTEGRATION_EVENT_SCOPES
-      })
+      }))
     }
 
     let joined: Awaited<ReturnType<typeof joinWorkspace>>

@@ -38,6 +38,7 @@ import {
 import { INTEGRATIONS_CATALOG } from './integrations.catalog'
 import { slackWritebackCommandMountPathFor } from './slack-writeback-command-roots'
 import { getRelayWorkspaceManager } from './relay-workspace'
+import { normalizeRelayWorkspaceInfo } from './relay-service-urls'
 import { loadStore, saveStore, type ProjectIntegration } from './store'
 
 export type IntegrationAuthMethod = 'oauth' | 'token' | 'apikey'
@@ -1711,10 +1712,10 @@ export class IntegrationsManager {
         cloudApiUrl: auth.apiUrl,
         accessToken: () => auth.accessToken
       })
-      const handle = await setup.joinWorkspace(workspaceId, {
+      const handle = normalizeRelayWorkspaceInfo(await setup.joinWorkspace(workspaceId, {
         agentName: mode === 'read' ? 'pear-integrations-reader' : 'pear-integrations-writer',
         scopes: mode === 'read' ? ['relayfile:fs:read:/**'] : ['relayfile:fs:read:/**', 'relayfile:fs:write:/**']
-      })
+      }))
       if (mode === 'read') this.integrationRemoteReaderHandle = handle
       else this.integrationRemoteWriterHandle = handle
       return handle

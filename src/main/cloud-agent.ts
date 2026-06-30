@@ -19,6 +19,7 @@ import { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, resolveCloudA
 import { brokerManager } from './broker'
 import { getRelayWorkspaceManager } from './relay-workspace'
 import { createPearMountLauncher } from './relayfile-mount-launcher'
+import { normalizeRelayServiceEnv } from './relay-service-urls'
 import { loadStore, saveStore, type Project, type ProjectCloudAgent } from './store'
 import type {
   CloudAgentBinding,
@@ -1276,7 +1277,7 @@ export class CloudAgentManager {
         return launcher.start({
           ...input,
           env: {
-            ...input.env,
+            ...normalizeRelayServiceEnv(input.env),
             RELAYFILE_MOUNT_LOCAL_LAYOUT: 'exact',
             RELAYFILE_MOUNT_SYNC_MODE: 'mirror',
             RELAYFILE_CONFLICT_POLICY: policy

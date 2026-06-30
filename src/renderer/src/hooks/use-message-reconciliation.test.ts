@@ -36,6 +36,15 @@ const channelMessage: ChatMessage = {
   projectId: 'project-1'
 }
 
+function channelRequest(channelName: string): MessageReconciliationRequest {
+  return {
+    projectId: 'project-1',
+    kind: 'channel',
+    channelName,
+    limit: 50
+  }
+}
+
 function deferredMessages(): {
   promise: Promise<ChatMessage[]>
   resolve: (messages: ChatMessage[]) => void
@@ -93,6 +102,50 @@ describe('getActiveMessageReconciliationRequest', () => {
         kind: 'agents',
         title: 'Agents'
       }
+    })).toBeNull()
+  })
+
+  it('builds a channel reconciliation request from broker channel message events', () => {
+    expect(hooks.getBrokerEventMessageReconciliationRequest({
+      event: {
+        kind: 'relaycast_published',
+        event_id: 'evt-1',
+        to: 'general',
+        target_type: 'channel',
+        projectId: 'project-1'
+      },
+      knownChannelNames: ['general']
+    })).toEqual({
+      projectId: 'project-1',
+      kind: 'channel',
+      channelName: 'general',
+      limit: 50
+    })
+
+    expect(hooks.getBrokerEventMessageReconciliationRequest({
+      event: {
+        kind: 'message_delivery_confirmed',
+        event_id: 'evt-2',
+        to: '#general'
+      },
+      fallbackProjectId: 'project-1'
+    })).toEqual({
+      projectId: 'project-1',
+      kind: 'channel',
+      channelName: 'general',
+      limit: 50
+    })
+  })
+
+  it('does not treat agent-targeted delivery events as channel updates', () => {
+    expect(hooks.getBrokerEventMessageReconciliationRequest({
+      event: {
+        kind: 'message_delivery_confirmed',
+        event_id: 'evt-3',
+        to: 'codex-1',
+        projectId: 'project-1'
+      },
+      knownChannelNames: ['general']
     })).toBeNull()
   })
 
@@ -207,6 +260,194 @@ describe('createMessageReconciler', () => {
 
     expect(mergeMessages).toHaveBeenNthCalledWith(1, [channelMessage])
     expect(mergeMessages).toHaveBeenNthCalledWith(2, [secondMessage])
+  })
+
+  it('coalesces duplicate targeted channel event reconciliations by room', async () => {
+    vi.useFakeTimers()
+    const request = channelRequest('general')
+    const reconcileMessages = vi.fn(async () => [channelMessage])
+    const mergeMessages = vi.fn()
+    const debug = vi.fn()
+    const reconciler = hooks.createMessageReconciler({
+      getRequest: () => null,
+      reconcileMessages,
+      mergeMessages,
+      setTimeout: setTimeout as unknown as typeof window.setTimeout,
+      clearTimeout: clearTimeout as unknown as typeof window.clearTimeout,
+      debounceMs: 10,
+      now: () => 123,
+      debug
+    })
+
+    reconciler.scheduleRequest(request, 'broker-event:relaycast_published')
+    reconciler.scheduleRequest(request, 'broker-event:message_delivery_confirmed')
+    await vi.advanceTimersByTimeAsync(9)
+
+    expect(reconcileMessages).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(reconcileMessages).toHaveBeenCalledTimes(1)
+    expect(reconcileMessages).toHaveBeenCalledWith(request)
+    expect(mergeMessages).toHaveBeenCalledTimes(1)
+    expect(mergeMessages).toHaveBeenCalledWith([channelMessage])
+    expect(debug).toHaveBeenCalledWith(expect.objectContaining({
+      kind: 'merged',
+      reason: 'broker-event:message_delivery_confirmed',
+      messageCount: 1,
+      timestamp: 123
+    }))
+  })
+
+  it('reruns dirty in-flight targeted reconciliations independently per channel', async () => {
+    vi.useFakeTimers()
+    const generalRequest = channelRequest('general')
+    const triageRequest = channelRequest('triage')
+    const generalFirst = deferredMessages()
+    const generalSecond = deferredMessages()
+    const triageFirst = deferredMessages()
+    const triageSecond = deferredMessages()
+    const reconcileMessages = vi.fn((request: MessageReconciliationRequest) => {
+      if (request.kind === 'channel' && request.channelName === 'general') {
+        return reconcileMessages.mock.calls.filter(([candidate]) =>
+          candidate.kind === 'channel' && candidate.channelName === 'general'
+        ).length === 1
+          ? generalFirst.promise
+          : generalSecond.promise
+      }
+      return reconcileMessages.mock.calls.filter(([candidate]) =>
+        candidate.kind === 'channel' && candidate.channelName === 'triage'
+      ).length === 1
+        ? triageFirst.promise
+        : triageSecond.promise
+    })
+    const mergeMessages = vi.fn()
+    const reconciler = hooks.createMessageReconciler({
+      getRequest: () => null,
+      reconcileMessages,
+      mergeMessages,
+      setTimeout: setTimeout as unknown as typeof window.setTimeout,
+      clearTimeout: clearTimeout as unknown as typeof window.clearTimeout,
+      debounceMs: 1
+    })
+
+    reconciler.scheduleRequest(generalRequest, 'broker-event:general:first')
+    reconciler.scheduleRequest(triageRequest, 'broker-event:triage:first')
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(reconcileMessages).toHaveBeenCalledTimes(2)
+    expect(reconcileMessages).toHaveBeenNthCalledWith(1, generalRequest)
+    expect(reconcileMessages).toHaveBeenNthCalledWith(2, triageRequest)
+
+    reconciler.scheduleRequest(generalRequest, 'broker-event:general:second')
+    reconciler.scheduleRequest(triageRequest, 'broker-event:triage:second')
+    await vi.advanceTimersByTimeAsync(1)
+
+    expect(reconcileMessages).toHaveBeenCalledTimes(2)
+
+    generalFirst.resolve([{ ...channelMessage, id: 'general-1', body: 'general first' }])
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(reconcileMessages).toHaveBeenCalledTimes(3)
+    expect(reconcileMessages).toHaveBeenNthCalledWith(3, generalRequest)
+
+    triageFirst.resolve([{ ...channelMessage, id: 'triage-1', to: '#triage', body: 'triage first' }])
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(reconcileMessages).toHaveBeenCalledTimes(4)
+    expect(reconcileMessages).toHaveBeenNthCalledWith(4, triageRequest)
+
+    generalSecond.resolve([{ ...channelMessage, id: 'general-2', body: 'general second' }])
+    triageSecond.resolve([{ ...channelMessage, id: 'triage-2', to: '#triage', body: 'triage second' }])
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mergeMessages).toHaveBeenCalledTimes(4)
+    expect(mergeMessages).toHaveBeenNthCalledWith(3, [{ ...channelMessage, id: 'general-2', body: 'general second' }])
+    expect(mergeMessages).toHaveBeenNthCalledWith(4, [{ ...channelMessage, id: 'triage-2', to: '#triage', body: 'triage second' }])
+  })
+
+  it('awaits a queued dirty rerun when runRequestNow joins an in-flight request', async () => {
+    const request = channelRequest('general')
+    const firstFetch = deferredMessages()
+    const secondFetch = deferredMessages()
+    const reconcileMessages = vi.fn()
+      .mockReturnValueOnce(firstFetch.promise)
+      .mockReturnValueOnce(secondFetch.promise)
+    const mergeMessages = vi.fn()
+    const reconciler = hooks.createMessageReconciler({
+      getRequest: () => null,
+      reconcileMessages,
+      mergeMessages,
+      setTimeout: setTimeout as unknown as typeof window.setTimeout,
+      clearTimeout: clearTimeout as unknown as typeof window.clearTimeout,
+      debounceMs: 1
+    })
+    let secondRunSettled = false
+
+    void reconciler.runRequestNow(request, 'broker-event:first')
+    await Promise.resolve()
+
+    const secondRun = reconciler.runRequestNow(request, 'broker-event:second')
+    secondRun.then(() => {
+      secondRunSettled = true
+    })
+    await Promise.resolve()
+
+    expect(reconcileMessages).toHaveBeenCalledTimes(1)
+
+    firstFetch.resolve([{ ...channelMessage, id: 'general-1', body: 'general first' }])
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(reconcileMessages).toHaveBeenCalledTimes(2)
+    expect(secondRunSettled).toBe(false)
+
+    secondFetch.resolve([{ ...channelMessage, id: 'general-2', body: 'general second' }])
+    await secondRun
+
+    expect(secondRunSettled).toBe(true)
+    expect(mergeMessages).toHaveBeenCalledTimes(2)
+  })
+
+  it('cleans up keyed timers and suppresses in-flight merges after dispose', async () => {
+    vi.useFakeTimers()
+    const generalRequest = channelRequest('general')
+    const triageRequest = channelRequest('triage')
+    const inFlight = deferredMessages()
+    const clearTimeout = vi.fn((handle: number) => globalThis.clearTimeout(handle))
+    const reconcileMessages = vi.fn(() => inFlight.promise)
+    const mergeMessages = vi.fn()
+    const reconciler = hooks.createMessageReconciler({
+      getRequest: () => null,
+      reconcileMessages,
+      mergeMessages,
+      setTimeout: setTimeout as unknown as typeof window.setTimeout,
+      clearTimeout,
+      debounceMs: 10
+    })
+
+    void reconciler.runRequestNow(generalRequest, 'broker-event:general:first')
+    void reconciler.runRequestNow(generalRequest, 'broker-event:general:second')
+    reconciler.scheduleRequest(generalRequest, 'broker-event:general:timer')
+    reconciler.scheduleRequest(triageRequest, 'broker-event:triage:timer')
+
+    expect(reconcileMessages).toHaveBeenCalledTimes(1)
+
+    reconciler.dispose()
+    expect(clearTimeout).toHaveBeenCalledTimes(2)
+
+    await vi.advanceTimersByTimeAsync(10)
+    expect(reconcileMessages).toHaveBeenCalledTimes(1)
+
+    inFlight.resolve([channelMessage])
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mergeMessages).not.toHaveBeenCalled()
+    expect(reconcileMessages).toHaveBeenCalledTimes(1)
   })
 
   it('skips fetches when no active chat room can be reconciled', async () => {
