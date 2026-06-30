@@ -113,6 +113,11 @@ const JOIN_NOTICE_DEDUPE_WINDOW_MS = 30_000
 // with different event_ids (per AGENTS.md: renderer is the final
 // guardrail; stable event_id is the broker's job).
 const AGENT_MESSAGE_DEDUPE_WINDOW_MS = 2_000
+// Tighter window for the canonical-arrived-before-optimistic race guard
+// (isCanonicalAlreadyPresent) — that guard only exists to catch a
+// sub-second startup race, not general human dedupe, so it must not reach
+// back across the full HUMAN_MESSAGE_DEDUPE_WINDOW_MS.
+const HUMAN_RACE_DEDUPE_WINDOW_MS = 2_000
 
 export function getAgentKey(projectId: string | undefined, name: string): string {
   return `${projectId || 'unknown'}:${name}`
@@ -457,13 +462,14 @@ function isDuplicateAgentEcho(
 
 function humanMessageContentMatches(
   message: ChatMessage,
-  candidate: Pick<ChatMessage, 'body' | 'projectId' | 'timestamp' | 'to'>
+  candidate: Pick<ChatMessage, 'body' | 'projectId' | 'timestamp' | 'to'>,
+  windowMs: number = HUMAN_MESSAGE_DEDUPE_WINDOW_MS
 ): boolean {
   return isHumanMessage(message) &&
     message.body === candidate.body &&
     (!message.projectId || !candidate.projectId || message.projectId === candidate.projectId) &&
     normalizeMessageTarget(message.to) === normalizeMessageTarget(candidate.to) &&
-    Math.abs(message.timestamp - candidate.timestamp) < HUMAN_MESSAGE_DEDUPE_WINDOW_MS
+    Math.abs(message.timestamp - candidate.timestamp) < windowMs
 }
 
 // Detects the canonical-of-optimistic case: an incoming broker record
@@ -484,13 +490,24 @@ function isCanonicalEchoOfLocalHuman(
 // reconcileChatMessages can never clean up — once the canonical id is
 // already present in `messages`, reconcile's id-match branch short-circuits
 // before it ever reaches the content-based optimistic-matching logic,
-// leaving the duplicate stuck permanently. Scoped to local !== true records
-// for the same reason as isCanonicalEchoOfLocalHuman above.
+// leaving the duplicate stuck permanently.
+//
+// Scoped to `local === undefined` (a standalone canonical record that
+// arrived via relay_inbound and was never claimed by reconcileChatMessages)
+// rather than `local !== true` — `local: false` means an EARLIER send was
+// already fully reconciled, and matching against that confirmed history
+// would falsely suppress a later, legitimately repeated send (e.g. "ok"
+// then "ok" again a few seconds after the first one synced). A tight race
+// window is used for the same reason: this guard exists to catch a sub-
+// second startup race, not general dedupe, so it shouldn't reach back
+// across the full human dedupe window.
 function isCanonicalAlreadyPresent(
   messages: ChatMessage[],
   candidate: Pick<ChatMessage, 'body' | 'projectId' | 'timestamp' | 'to'>
 ): boolean {
-  return messages.some((message) => message.local !== true && humanMessageContentMatches(message, candidate))
+  return messages.some((message) =>
+    message.local === undefined && humanMessageContentMatches(message, candidate, HUMAN_RACE_DEDUPE_WINDOW_MS)
+  )
 }
 
 function createChannelJoinNotice(
