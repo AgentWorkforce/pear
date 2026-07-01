@@ -1269,8 +1269,21 @@ export class BrokerManager {
   // mintObserverToken() before the first POST resolves coalesce onto one
   // request instead of each minting a separate, unrevoked token. Same
   // "keyed in-flight-promise, clear in finally guarded by identity" shape as
-  // SpawnCoordinator.coalesce.
+  // SpawnCoordinator.coalesce. Cleared in dropSession() alongside
+  // `observerTokens` — otherwise a session dropped mid-mint (e.g. joinWorkspace
+  // rejoining a different workspace) would let a restarted session for the
+  // same projectId reuse the old session's in-flight promise and cache ITS
+  // result, pointing the new session's observer link at the old workspace.
   private observerTokenMints = new Map<string, Promise<ObserverTokenResult>>()
+  // Bumped per project every time its session(s) drop (see dropSession()).
+  // Same "generation" guard idiom as `eventStreamGeneration` elsewhere in
+  // this file: a mint captures the generation in flight at the time it
+  // started, and refuses to populate `observerTokens` if the generation has
+  // since moved on — belt-and-suspenders alongside clearing the in-flight
+  // map entry, for the case where some other caller is still awaiting the
+  // stale promise directly (not through `observerTokenMints`) when the drop
+  // happens.
+  private observerTokenGenerations = new Map<string, number>()
 
   get cwd(): string | null {
     return this.sessions.values().next().value?.cwd || null
@@ -1743,7 +1756,8 @@ export class BrokerManager {
     const inFlight = this.observerTokenMints.get(normalizedProjectId)
     if (inFlight) return inFlight
 
-    const mintPromise = this.mintObserverTokenUncached(normalizedProjectId).finally(() => {
+    const generation = this.observerTokenGenerations.get(normalizedProjectId) || 0
+    const mintPromise = this.mintObserverTokenUncached(normalizedProjectId, generation).finally(() => {
       if (this.observerTokenMints.get(normalizedProjectId) === mintPromise) {
         this.observerTokenMints.delete(normalizedProjectId)
       }
@@ -1752,7 +1766,10 @@ export class BrokerManager {
     return mintPromise
   }
 
-  private async mintObserverTokenUncached(normalizedProjectId: string): Promise<ObserverTokenResult> {
+  private async mintObserverTokenUncached(
+    normalizedProjectId: string,
+    generation: number
+  ): Promise<ObserverTokenResult> {
     const session = this.getSessionForProject(normalizedProjectId)
     const baseUrl = getClientBaseUrl(session.client)
     if (!baseUrl) {
@@ -1803,7 +1820,13 @@ export class BrokerManager {
     }
 
     const result: ObserverTokenResult = { token: parsed.token, id: parsed.id }
-    this.observerTokens.set(normalizedProjectId, result)
+    // Only cache if this project's session hasn't dropped/restarted since the
+    // mint started — otherwise this could be a stale, previous-workspace
+    // mint resolving after dropSession() already bumped the generation, which
+    // would poison the cache for the new session's callers.
+    if ((this.observerTokenGenerations.get(normalizedProjectId) || 0) === generation) {
+      this.observerTokens.set(normalizedProjectId, result)
+    }
     return result
   }
 
@@ -4216,8 +4239,15 @@ export class BrokerManager {
     this.clearBrokerTimeoutCountsForProject(projectIdFromSessionKey(sessionKey))
     // A dropped session may be reconnecting to a different workspace (e.g.
     // joinWorkspace's shutdown+restart), so any cached observer token for
-    // this project would be scoped to the wrong workspace afterward.
-    this.observerTokens.delete(projectIdFromSessionKey(sessionKey))
+    // this project would be scoped to the wrong workspace afterward. Also
+    // drop any in-flight mint for this project and bump its generation, so a
+    // mint that was in flight against the now-dropped session can't populate
+    // `observerTokens` for whatever new session starts next (see the
+    // generation check in mintObserverTokenUncached).
+    const droppedProjectId = projectIdFromSessionKey(sessionKey)
+    this.observerTokens.delete(droppedProjectId)
+    this.observerTokenMints.delete(droppedProjectId)
+    this.observerTokenGenerations.set(droppedProjectId, (this.observerTokenGenerations.get(droppedProjectId) || 0) + 1)
 
     const session = this.sessions.get(sessionKey)
     if (!session) return

@@ -995,6 +995,59 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('does not let a mint left in flight by a dropped session poison the cache for a restarted session', async () => {
+    const manager = new BrokerManager()
+    await startLocal(manager)
+
+    let resolveStaleFetch: ((value: unknown) => void) | undefined
+    const staleFetchMock = vi.fn(() => new Promise((resolve) => {
+      resolveStaleFetch = resolve
+    }))
+    vi.stubGlobal('fetch', staleFetchMock)
+
+    // Mint starts against the first session but its POST never resolves yet.
+    const stalePromise = manager.mintObserverToken(PROJECT_ID)
+    await vi.waitFor(() => expect(staleFetchMock).toHaveBeenCalledTimes(1))
+
+    // The session is torn down mid-mint (e.g. joinWorkspace's shutdown path)
+    // and a new one starts for the same project id — a workspace switch
+    // while the old mint is still in flight.
+    await manager.shutdown(PROJECT_ID)
+    await startLocal(manager)
+
+    const freshFetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: 'ot_live_fresh', id: 'obs-fresh' })
+    }))
+    vi.stubGlobal('fetch', freshFetchMock)
+
+    // Without clearing observerTokenMints (and bumping the generation) in
+    // dropSession, this would reuse the stale in-flight promise from the
+    // dropped session instead of minting fresh against the new one.
+    const freshResult = await manager.mintObserverToken(PROJECT_ID)
+    expect(freshResult).toEqual({ token: 'ot_live_fresh', id: 'obs-fresh' })
+    expect(freshFetchMock).toHaveBeenCalledTimes(1)
+
+    // Now let the stale mint (against the already-dropped session) resolve
+    // late, simulating the race the fix guards against.
+    resolveStaleFetch?.({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: 'ot_live_stale', id: 'obs-stale' })
+    })
+    await expect(stalePromise).resolves.toEqual({ token: 'ot_live_stale', id: 'obs-stale' })
+
+    // The late resolution must not have overwritten the cache with the
+    // previous workspace's token — a later mint still returns the fresh,
+    // current-session token from cache (no additional fetch).
+    const cachedResult = await manager.mintObserverToken(PROJECT_ID)
+    expect(cachedResult).toEqual({ token: 'ot_live_fresh', id: 'obs-fresh' })
+    expect(freshFetchMock).toHaveBeenCalledTimes(1)
+
+    await manager.shutdown()
+  })
+
   it('emits a cloud workspace mismatch event when the sandbox ignores the sent key', async () => {
     const manager = new BrokerManager()
     const win = createMockWindow()
