@@ -2,7 +2,7 @@ import { useEffect, useMemo } from 'react'
 import { getDirectMessageRoomId } from '@/lib/direct-messages'
 import { pear } from '@/lib/ipc'
 import { useAgentStore, type ChatMessage } from '@/stores/agent-store'
-import { useProjectStore } from '@/stores/project-store'
+import { normalizeChannelName as normalizeProjectChannelName, useProjectStore } from '@/stores/project-store'
 import { type AppTab, useUIStore } from '@/stores/ui-store'
 import type {
   BrokerEventStreamDiagnostic,
@@ -27,6 +27,14 @@ const EVENT_STREAM_RECONCILED_STATUSES = new Set<BrokerEventStreamDiagnostic['st
   'received'
 ])
 
+// TODO: Add explicit edit/delete/reaction/thread-reply event kinds here once
+// the broker exposes payloads with a stable channel target for those mutations.
+const CHANNEL_MESSAGE_EVENT_KINDS = new Set([
+  'relay_inbound',
+  'relaycast_published',
+  'message_delivery_confirmed'
+])
+
 export type MessageReconciliationRequest = BrokerReconcileMessagesInput
 
 interface BrokerWithMessageReconciliation {
@@ -46,6 +54,11 @@ interface MessageReconcilerDeps {
   debug?: (event: MessageReconciliationDebugEvent) => void
 }
 
+type BrokerEventLike = Record<string, unknown> & {
+  kind?: string
+  projectId?: string
+}
+
 export interface MessageReconciliationDebugEvent {
   kind: 'scheduled' | 'started' | 'skipped' | 'merged' | 'failed'
   reason: string
@@ -57,6 +70,8 @@ export interface MessageReconciliationDebugEvent {
 export interface MessageReconciler {
   schedule: (reason: string) => void
   runNow: (reason: string) => Promise<void>
+  scheduleRequest: (request: MessageReconciliationRequest, reason: string) => void
+  runRequestNow: (request: MessageReconciliationRequest, reason: string) => Promise<void>
   dispose: () => void
 }
 
@@ -72,6 +87,58 @@ export function scheduleHumanMessageSentReconciliation(input: {
 function normalizeChannelName(value: string | undefined): string | null {
   const normalized = value?.trim().replace(/^#/, '')
   return normalized || null
+}
+
+function brokerEventString(event: BrokerEventLike, key: string): string | undefined {
+  const value = event[key]
+  return typeof value === 'string' && value.trim() ? value : undefined
+}
+
+function messageReconciliationRequestKey(request: MessageReconciliationRequest): string {
+  return JSON.stringify([
+    request.projectId,
+    request.kind,
+    request.kind === 'channel' ? request.channelName : request.conversationId
+  ])
+}
+
+export function getBrokerEventMessageReconciliationRequest(input: {
+  event: BrokerEventLike
+  fallbackProjectId?: string | null
+  knownChannelNames?: string[]
+  limit?: number
+}): MessageReconciliationRequest | null {
+  const kind = input.event.kind
+  if (!kind || !CHANNEL_MESSAGE_EVENT_KINDS.has(kind)) return null
+
+  const projectId = input.event.projectId || input.fallbackProjectId || ''
+  if (!projectId.trim()) return null
+
+  const rawTarget = brokerEventString(input.event, 'target') || brokerEventString(input.event, 'to')
+  if (!rawTarget) return null
+
+  const channelName = normalizeChannelName(rawTarget)
+  if (!channelName) return null
+
+  const normalizedKnownChannels = new Set(
+    (input.knownChannelNames || [])
+      .map((channel) => normalizeProjectChannelName(channel))
+      .filter(Boolean)
+  )
+  const targetType = brokerEventString(input.event, 'target_type')?.toLowerCase()
+  const isChannelTarget =
+    rawTarget.trim().startsWith('#') ||
+    targetType === 'channel' ||
+    normalizedKnownChannels.has(channelName)
+
+  if (!isChannelTarget) return null
+
+  return {
+    projectId,
+    kind: 'channel',
+    channelName,
+    limit: input.limit ?? DEFAULT_RECONCILE_LIMIT
+  }
 }
 
 function getActiveTab(tabs: AppTab[], activeTabId: string): AppTab | undefined {
@@ -116,25 +183,27 @@ export function createMessageReconciler(deps: MessageReconcilerDeps): MessageRec
   const debounceMs = deps.debounceMs ?? DEFAULT_RECONCILE_DEBOUNCE_MS
   const now = deps.now ?? (() => Date.now())
   let timer: number | null = null
+  const requestTimers = new Map<string, number>()
+  const requestInFlight = new Map<string, Promise<void>>()
+  const pendingRequestReruns = new Map<string, { request: MessageReconciliationRequest; reason: string }>()
   let disposed = false
-  let inFlight: Promise<void> | null = null
-  let pendingRerun: string | null = null
 
   const debug = (event: Omit<MessageReconciliationDebugEvent, 'timestamp'>): void => {
     deps.debug?.({ ...event, timestamp: now() })
   }
 
-  const runNow = async (reason: string): Promise<void> => {
+  const runRequestNow = async (request: MessageReconciliationRequest, reason: string): Promise<void> => {
     if (disposed) return
-    if (inFlight) {
-      pendingRerun = reason
+    const requestKey = messageReconciliationRequestKey(request)
+    const existingRun = requestInFlight.get(requestKey)
+    if (existingRun) {
+      pendingRequestReruns.set(requestKey, { request, reason })
       debug({ kind: 'scheduled', reason })
-      return inFlight
-    }
-
-    const request = deps.getRequest()
-    if (!request) {
-      debug({ kind: 'skipped', reason })
+      await existingRun
+      const followUpRun = requestInFlight.get(requestKey)
+      if (followUpRun && followUpRun !== existingRun) {
+        await followUpRun
+      }
       return
     }
 
@@ -155,20 +224,45 @@ export function createMessageReconciler(deps: MessageReconcilerDeps): MessageRec
         })
       }
     })()
-    inFlight = currentRun
+    requestInFlight.set(requestKey, currentRun)
 
     try {
       await currentRun
     } finally {
-      if (inFlight === currentRun) {
-        inFlight = null
+      if (requestInFlight.get(requestKey) === currentRun) {
+        requestInFlight.delete(requestKey)
       }
-      const rerunReason = pendingRerun
-      pendingRerun = null
-      if (rerunReason && !disposed) {
-        await runNow(rerunReason)
+      const rerun = pendingRequestReruns.get(requestKey)
+      pendingRequestReruns.delete(requestKey)
+      if (rerun && !disposed) {
+        await runRequestNow(rerun.request, rerun.reason)
       }
     }
+  }
+
+  const runNow = async (reason: string): Promise<void> => {
+    if (disposed) return
+    const request = deps.getRequest()
+    if (!request) {
+      debug({ kind: 'skipped', reason })
+      return
+    }
+    await runRequestNow(request, reason)
+  }
+
+  const scheduleRequest = (request: MessageReconciliationRequest, reason: string): void => {
+    if (disposed) return
+    const requestKey = messageReconciliationRequestKey(request)
+    const existingTimer = requestTimers.get(requestKey)
+    if (existingTimer) {
+      deps.clearTimeout(existingTimer)
+    }
+    debug({ kind: 'scheduled', reason })
+    const nextTimer = deps.setTimeout(() => {
+      requestTimers.delete(requestKey)
+      void runRequestNow(request, reason)
+    }, debounceMs)
+    requestTimers.set(requestKey, nextTimer)
   }
 
   const schedule = (reason: string): void => {
@@ -186,12 +280,19 @@ export function createMessageReconciler(deps: MessageReconcilerDeps): MessageRec
   return {
     schedule,
     runNow,
+    scheduleRequest,
+    runRequestNow,
     dispose: () => {
       disposed = true
       if (timer) {
         deps.clearTimeout(timer)
         timer = null
       }
+      for (const requestTimer of requestTimers.values()) {
+        deps.clearTimeout(requestTimer)
+      }
+      requestTimers.clear()
+      pendingRequestReruns.clear()
     }
   }
 }
@@ -318,6 +419,23 @@ export function useMessageReconciliation(): void {
       if (EVENT_STREAM_RECONCILED_STATUSES.has(event.status)) {
         reconciler.schedule(`event-stream:${event.status}`)
       }
+    })
+  }, [reconciler])
+
+  useEffect(() => {
+    return pear?.broker?.onEvent?.((event) => {
+      if (!event) return
+      const brokerEvent = event as BrokerEventLike
+      const project = useProjectStore.getState()
+      const projectId = brokerEvent.projectId || project.activeProjectId
+      const knownChannelNames = project.projects?.find((entry) => entry.id === projectId)?.channels || []
+      const request = getBrokerEventMessageReconciliationRequest({
+        event: brokerEvent,
+        fallbackProjectId: project.activeProjectId,
+        knownChannelNames
+      })
+      if (!request) return
+      reconciler.scheduleRequest(request, `broker-event:${brokerEvent.kind}`)
     })
   }, [reconciler])
 }

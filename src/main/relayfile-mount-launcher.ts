@@ -4,6 +4,7 @@ import { join, resolve } from 'node:path'
 import { app } from 'electron'
 import { type MountLauncher, type MountLauncherStart } from '@relayfile/sdk'
 import { createDefaultMountLauncher } from '@relayfile/sdk/mount-launcher'
+import { normalizeRelayServiceEnv } from './relay-service-urls'
 
 function canExecute(filePath: string | undefined): filePath is string {
   if (!filePath) return false
@@ -117,7 +118,7 @@ export function createPearMountLauncher(options: { onEvent?: MountLauncherStart[
       return launcher.start({
         ...input,
         env: {
-          ...input.env,
+          ...normalizeRelayServiceEnv(input.env),
           RELAYFILE_MOUNT_BIN: binary,
           ...(credsPath ? { RELAYFILE_MOUNT_CREDS_FILE: credsPath } : {})
         },

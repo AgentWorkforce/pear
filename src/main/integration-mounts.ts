@@ -11,6 +11,7 @@ import {
 import { accountWorkspaceReadyRetryOptions, getAccountWorkspaceId, refreshCloudAuth, resolveCloudAuth } from './auth'
 import { createPearMountLauncher } from './relayfile-mount-launcher'
 import { forgetMountPid, killMountPid, reapOrphanedMountPids, recordMountPid } from './relayfile-mount-pids'
+import { normalizeRelayServiceEnv } from './relay-service-urls'
 
 const MOUNT_READY_TIMEOUT_MS = 60_000
 const MOUNT_SYNC_TIMEOUT = '180s'
@@ -810,7 +811,7 @@ export class IntegrationMountManager {
       start: (input: MountLauncherStart) => launcher.start({
         ...input,
         env: {
-          ...input.env,
+          ...normalizeRelayServiceEnv(input.env),
           RELAYFILE_MOUNT_LOCAL_LAYOUT: spec.localLayout,
           RELAYFILE_MOUNT_SYNC_MODE: spec.syncMode,
           RELAYFILE_MOUNT_TIMEOUT: input.env.RELAYFILE_MOUNT_TIMEOUT ||
