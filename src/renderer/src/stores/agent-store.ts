@@ -113,6 +113,11 @@ const JOIN_NOTICE_DEDUPE_WINDOW_MS = 30_000
 // with different event_ids (per AGENTS.md: renderer is the final
 // guardrail; stable event_id is the broker's job).
 const AGENT_MESSAGE_DEDUPE_WINDOW_MS = 2_000
+// Tighter window for the canonical-arrived-before-optimistic race guard
+// (isCanonicalAlreadyPresent) — that guard only exists to catch a
+// sub-second startup race, not general human dedupe, so it must not reach
+// back across the full HUMAN_MESSAGE_DEDUPE_WINDOW_MS.
+const HUMAN_RACE_DEDUPE_WINDOW_MS = 2_000
 
 export function getAgentKey(projectId: string | undefined, name: string): string {
   return `${projectId || 'unknown'}:${name}`
@@ -455,6 +460,18 @@ function isDuplicateAgentEcho(
   return index.hasAgentEcho(candidate)
 }
 
+function humanMessageContentMatches(
+  message: ChatMessage,
+  candidate: Pick<ChatMessage, 'body' | 'projectId' | 'timestamp' | 'to'>,
+  windowMs: number = HUMAN_MESSAGE_DEDUPE_WINDOW_MS
+): boolean {
+  return isHumanMessage(message) &&
+    message.body === candidate.body &&
+    (!message.projectId || !candidate.projectId || message.projectId === candidate.projectId) &&
+    normalizeMessageTarget(message.to) === normalizeMessageTarget(candidate.to) &&
+    Math.abs(message.timestamp - candidate.timestamp) < windowMs
+}
+
 // Detects the canonical-of-optimistic case: an incoming broker record
 // that matches an existing optimistic local-UUID record by content +
 // time window. Scoped to local: true records so it doesn't collapse two
@@ -463,13 +480,33 @@ function isCanonicalEchoOfLocalHuman(
   messages: ChatMessage[],
   candidate: Pick<ChatMessage, 'body' | 'projectId' | 'timestamp' | 'to'>
 ): boolean {
+  return messages.some((message) => message.local === true && humanMessageContentMatches(message, candidate))
+}
+
+// Detects the inverse race: the canonical broker echo for this exact send
+// already landed (e.g. relay_inbound beat the optimistic append while the
+// channel/broker was still spinning up on the very first send). Without
+// this check, addHumanMessage appends a second, optimistic copy that
+// reconcileChatMessages can never clean up — once the canonical id is
+// already present in `messages`, reconcile's id-match branch short-circuits
+// before it ever reaches the content-based optimistic-matching logic,
+// leaving the duplicate stuck permanently.
+//
+// Scoped to `local === undefined` (a standalone canonical record that
+// arrived via relay_inbound and was never claimed by reconcileChatMessages)
+// rather than `local !== true` — `local: false` means an EARLIER send was
+// already fully reconciled, and matching against that confirmed history
+// would falsely suppress a later, legitimately repeated send (e.g. "ok"
+// then "ok" again a few seconds after the first one synced). A tight race
+// window is used for the same reason: this guard exists to catch a sub-
+// second startup race, not general dedupe, so it shouldn't reach back
+// across the full human dedupe window.
+function isCanonicalAlreadyPresent(
+  messages: ChatMessage[],
+  candidate: Pick<ChatMessage, 'body' | 'projectId' | 'timestamp' | 'to'>
+): boolean {
   return messages.some((message) =>
-    message.local === true &&
-    isHumanMessage(message) &&
-    message.body === candidate.body &&
-    (!message.projectId || !candidate.projectId || message.projectId === candidate.projectId) &&
-    normalizeMessageTarget(message.to) === normalizeMessageTarget(candidate.to) &&
-    Math.abs(message.timestamp - candidate.timestamp) < HUMAN_MESSAGE_DEDUPE_WINDOW_MS
+    message.local === undefined && humanMessageContentMatches(message, candidate, HUMAN_RACE_DEDUPE_WINDOW_MS)
   )
 }
 
@@ -1281,15 +1318,22 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
       projectId,
       local: true
     }
-    // Always append the optimistic record. The previous
-    // isDuplicateHumanEcho check here silently dropped the second of
-    // two identical sends within 10s ("ok", "ok"), losing a real
-    // message. Optimistic-vs-canonical dedup is now handled exclusively
-    // via the `local` flag in the relay_inbound + reconcile paths.
-    set((state) => ({
-      messages: appendChatMessageWithDedupIndex(state.messages, msg),
-      lastHumanMessageSentAt: timestamp
-    }))
+    // Append the optimistic record, unless the canonical echo for this
+    // exact send already arrived first (see isCanonicalAlreadyPresent).
+    // The previous isDuplicateHumanEcho check here silently dropped the
+    // second of two identical sends within 10s ("ok", "ok"), losing a
+    // real message — isCanonicalAlreadyPresent avoids that by only
+    // matching against non-local (canonical) records, not other
+    // optimistic ones.
+    set((state) => {
+      if (isCanonicalAlreadyPresent(state.messages, msg)) {
+        return { lastHumanMessageSentAt: timestamp }
+      }
+      return {
+        messages: appendChatMessageWithDedupIndex(state.messages, msg),
+        lastHumanMessageSentAt: timestamp
+      }
+    })
   },
 
   addChannelJoinNotice: (projectId, channelName, participantName) => {
