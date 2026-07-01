@@ -60,6 +60,7 @@ import type {
   IntegrationEventTelemetrySnapshot,
   IntegrationOption,
   IntegrationsEvent,
+  ObserverTokenResult,
   PearAPI,
   PendingRelayMessage,
   ProactiveAgentBinding,
@@ -227,6 +228,8 @@ const api = {
       invoke<void>('broker:sync-channels', projectId, channels),
     joinWorkspace: (projectId: string, cwd: string, name: string, channels: string[] | undefined, workspaceKey: string) =>
       invoke<boolean>('broker:join-workspace', projectId, cwd, name, channels, workspaceKey),
+    mintObserverToken: (projectId: string) =>
+      invoke<ObserverTokenResult>('broker:mint-observer-token', projectId),
     autoFixRuntime: (
       projectId: string,
       cwd: string,

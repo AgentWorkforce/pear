@@ -84,6 +84,23 @@ export function scheduleHumanMessageSentReconciliation(input: {
   }
 }
 
+// A `replay_gap` event means the broker's dashboard-WS replay buffer couldn't
+// cover a reconnect, so some events (possibly a dropped `relay_inbound` chat
+// message) never reached the renderer. There's no single channel/DM target on
+// the gap event itself, so — like the other reconnect-signal handlers below
+// (broker-status, window-focus, etc.) — this just resyncs whatever room is
+// currently active via `reconciler.schedule`, which reuses the same debounced
+// `reconcileMessages` IPC round trip and single shared timer as every other
+// trigger, so repeated gaps in a short window collapse into one resync.
+export function scheduleReplayGapReconciliation(input: {
+  lastReplayGapAt: number
+  reconciler: Pick<MessageReconciler, 'schedule'>
+}): void {
+  if (input.lastReplayGapAt > 0) {
+    input.reconciler.schedule('replay-gap')
+  }
+}
+
 function normalizeChannelName(value: string | undefined): string | null {
   const normalized = value?.trim().replace(/^#/, '')
   return normalized || null
@@ -323,6 +340,7 @@ export function useMessageReconciliation(): void {
   const tabs = useUIStore((s) => s.tabs)
   const brokerStatus = useAgentStore((s) => s.brokerStatus)
   const lastHumanMessageSentAt = useAgentStore((s) => s.lastHumanMessageSentAt)
+  const lastReplayGapAt = useAgentStore((s) => s.lastReplayGapAt)
   const activeTab = getActiveTab(tabs, activeTabId)
   const activeRoomKey = activeTab?.kind === 'channel'
     ? `channel:${activeTab.projectId || activeProjectId || ''}:${normalizeChannelName(activeTab.channelName) || ''}`
@@ -375,6 +393,10 @@ export function useMessageReconciliation(): void {
   useEffect(() => {
     scheduleHumanMessageSentReconciliation({ lastHumanMessageSentAt, reconciler })
   }, [lastHumanMessageSentAt, reconciler])
+
+  useEffect(() => {
+    scheduleReplayGapReconciliation({ lastReplayGapAt, reconciler })
+  }, [lastReplayGapAt, reconciler])
 
   useEffect(() => {
     const scheduleAfterRefresh = (reason: string): void => {

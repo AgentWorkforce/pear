@@ -1152,6 +1152,11 @@ interface BrokerClientInternals {
   }
 }
 
+export interface ObserverTokenResult {
+  token: string
+  id: string
+}
+
 type BrokerOperationPriority = 'live' | 'normal' | 'cleanup'
 
 class BrokerOperationQueue {
@@ -1249,6 +1254,12 @@ export class BrokerManager {
   private queuedReleases = new Map<string, QueuedRelease>()
   private releaseQueue: string[] = []
   private activeReleases = 0
+  // Minted Relaycast observer tokens (scoped, read-only) keyed by projectId.
+  // Cached for the life of the session's broker connection so re-opening the
+  // "Join as observer" UI doesn't spam the workspace with fresh unrevoked
+  // tokens; cleared in dropSession() whenever that project's session goes
+  // away (including the join-a-different-workspace shutdown+restart path).
+  private observerTokens = new Map<string, ObserverTokenResult>()
 
   get cwd(): string | null {
     return this.sessions.values().next().value?.cwd || null
@@ -1692,6 +1703,74 @@ export class BrokerManager {
     } catch {
       return undefined
     }
+  }
+
+  /**
+   * Mint a scoped, read-only Relaycast observer token (`ot_live_...`) for a
+   * project's broker, so "Join as observer" links can stop handing out the
+   * full workspace API key (which grants full read/write/spawn access).
+   *
+   * Calls the broker's own local `/api/observer-token` endpoint directly —
+   * same pattern as `getClientApiKey`/`getClientBaseUrl` reaching into the
+   * harness-driver client's transport internals elsewhere in this file — since
+   * Pear pins a published `@agent-relay/harness-driver` version that predates
+   * a first-class SDK method for this.
+   *
+   * Cached per project for the life of the session (see `observerTokens`
+   * field) so repeatedly opening the observer-link UI doesn't mint a fresh,
+   * unrevoked token every time.
+   */
+  async mintObserverToken(projectId: string): Promise<ObserverTokenResult> {
+    const normalizedProjectId = projectId.trim()
+    if (!normalizedProjectId) {
+      throw new Error('Project id is required')
+    }
+
+    const cached = this.observerTokens.get(normalizedProjectId)
+    if (cached) return cached
+
+    const session = this.getSessionForProject(normalizedProjectId)
+    const baseUrl = getClientBaseUrl(session.client)
+    if (!baseUrl) {
+      throw new Error('Agent Relay broker URL is unavailable for this project')
+    }
+    const apiKey = getClientApiKey(session.client)
+
+    const metadata = await session.client.getSession().catch(() => undefined)
+    const body: { workspaceId?: string } = {}
+    if (metadata?.default_workspace_id) {
+      body.workspaceId = metadata.default_workspace_id
+    }
+
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (apiKey) headers['X-API-Key'] = apiKey
+
+    let response: Response
+    try {
+      response = await fetch(`${baseUrl}/api/observer-token`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body)
+      })
+    } catch (err) {
+      throw new Error(`Failed to reach broker to mint observer token: ${toErrorMessage(err)}`)
+    }
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => '')
+      throw new Error(`Broker rejected observer-token request (HTTP ${response.status})${text ? `: ${text}` : ''}`)
+    }
+
+    const parsed = await response.json().catch(() => undefined) as
+      | { token?: string; id?: string; workspaceId?: string; workspaceAlias?: string }
+      | undefined
+    if (!parsed?.token || !parsed?.id) {
+      throw new Error('Broker returned an invalid observer-token response')
+    }
+
+    const result: ObserverTokenResult = { token: parsed.token, id: parsed.id }
+    this.observerTokens.set(normalizedProjectId, result)
+    return result
   }
 
   private async ensureLocalFleetSidecar(session: BrokerSession): Promise<void> {
@@ -2402,6 +2481,16 @@ export class BrokerManager {
       if (!forwarded) return
 
       this.publishBrokerEvent(sessionKey, projectId, win, forwarded)
+
+      if (forwarded.kind === 'replay_gap') {
+        // The broker's replay buffer no longer has everything between
+        // requestedSinceSeq and its current seq — some events (possibly a
+        // `relay_inbound` chat message) were silently dropped. `forwarded` is
+        // still published above like any other event, so the renderer's
+        // reconciliation pipeline (agent-store.ts / use-message-reconciliation.ts)
+        // can react to it and resync canonical history.
+        console.warn(`[broker] Replay gap on project ${projectId}: requested since seq ${forwarded.requestedSinceSeq}, oldest available ${forwarded.oldestAvailable}, now at seq ${forwarded.seq}`)
+      }
 
       if (event.kind === 'agent_spawned' && event.name) {
         this.rememberAgentSession(event.name, sessionKey)
@@ -4091,6 +4180,10 @@ export class BrokerManager {
   private dropSession(sessionKey: string, options: { disconnectOnly: boolean }): void {
     this.inputStreamManager.closeInputStreamsForSession(sessionKey)
     this.clearBrokerTimeoutCountsForProject(projectIdFromSessionKey(sessionKey))
+    // A dropped session may be reconnecting to a different workspace (e.g.
+    // joinWorkspace's shutdown+restart), so any cached observer token for
+    // this project would be scoped to the wrong workspace afterward.
+    this.observerTokens.delete(projectIdFromSessionKey(sessionKey))
 
     const session = this.sessions.get(sessionKey)
     if (!session) return

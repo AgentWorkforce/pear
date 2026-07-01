@@ -337,6 +337,26 @@ const agentPermanentlyDead = z
   .passthrough()
 
 /**
+ * Sent over the broker's local dashboard WebSocket (the same connection
+ * `relay_inbound`/chat events flow over) when a reconnect requested replay
+ * from a `sinceSeq` the broker's in-memory replay buffer no longer has —
+ * e.g. because a burst of other events (like `worker_stream` chunks)
+ * evicted it first. Any event between `requestedSinceSeq` and
+ * `oldestAvailable` was silently dropped; the reconciliation flow (see
+ * `agent-store.ts` / `use-message-reconciliation.ts`) treats this as a
+ * signal to refetch canonical channel/DM history rather than trusting the
+ * live event stream for that gap.
+ */
+const replayGap = z
+  .object({
+    kind: z.literal('replay_gap'),
+    requestedSinceSeq: z.number(),
+    oldestAvailable: z.number(),
+    seq: z.number()
+  })
+  .passthrough()
+
+/**
  * Discriminated union of every broker event `kind` the SDK emits and the app
  * forwards. Membership defines the "known" set — see `classifyBrokerEvent`.
  */
@@ -372,7 +392,8 @@ export const BrokerEventSchema = z.discriminatedUnion('kind', [
   agentBlockedOnSend,
   agentRestarting,
   agentRestarted,
-  agentPermanentlyDead
+  agentPermanentlyDead,
+  replayGap
 ])
 
 export type ValidatedBrokerEvent = z.infer<typeof BrokerEventSchema>
@@ -410,6 +431,7 @@ export type AgentBlockedOnSendEvent = Extract<ValidatedBrokerEvent, { kind: 'age
 export type AgentRestartingEvent = Extract<ValidatedBrokerEvent, { kind: 'agent_restarting' }>
 export type AgentRestartedEvent = Extract<ValidatedBrokerEvent, { kind: 'agent_restarted' }>
 export type AgentPermanentlyDeadEvent = Extract<ValidatedBrokerEvent, { kind: 'agent_permanently_dead' }>
+export type ReplayGapEvent = Extract<ValidatedBrokerEvent, { kind: 'replay_gap' }>
 
 /**
  * The shape every forwarded broker event satisfies: an object carrying a

@@ -725,6 +725,13 @@ interface AgentState {
   brokerErrors: BrokerErrorEntry[]
   brokerEvents: BrokerEventRecord[]
   lastHumanMessageSentAt: number
+  // Bumped whenever a `replay_gap` event is observed (broker dashboard WS
+  // replay buffer couldn't cover a reconnect, so some events — possibly a
+  // `relay_inbound` chat message — may have been silently dropped). Wired
+  // into use-message-reconciliation.ts the same way lastHumanMessageSentAt
+  // is, so a gap triggers a debounced resync of the active room's canonical
+  // history via the existing reconcileMessages pipeline.
+  lastReplayGapAt: number
 
   setActiveAgentKey: (key: string | null) => void
   markAgentActive: (projectId: string | undefined, name: string) => void
@@ -769,6 +776,7 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
   brokerErrors: [],
   brokerEvents: [],
   lastHumanMessageSentAt: 0,
+  lastReplayGapAt: 0,
 
   setActiveAgentKey: (key) => set({ activeAgentKey: key }),
 
@@ -1262,6 +1270,16 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
           return { ...clearPendingDeliveries(a), activity: 'idle', currentState: 'idle' }
         })
       }))
+    } else if (kind === 'replay_gap') {
+      // The broker's dashboard-WS replay buffer couldn't cover a reconnect —
+      // some events (possibly a dropped relay_inbound chat message) between
+      // requestedSinceSeq and oldestAvailable never reached us. There's no
+      // single agent/message to patch here, so just bump the timestamp;
+      // use-message-reconciliation.ts watches it the same way it watches
+      // lastHumanMessageSentAt, and schedules a debounced resync of the
+      // active room's canonical history via the existing reconcileMessages
+      // IPC round trip.
+      set({ lastReplayGapAt: Date.now() })
     }
   },
 
@@ -1479,7 +1497,8 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
       brokerError: null,
       brokerErrors: [],
       brokerEvents: [],
-      lastHumanMessageSentAt: 0
+      lastHumanMessageSentAt: 0,
+      lastReplayGapAt: 0
     })
   },
 

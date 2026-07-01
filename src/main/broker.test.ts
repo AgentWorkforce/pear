@@ -832,6 +832,81 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('mints an observer token via a direct POST to the broker\'s local HTTP API, then caches it', async () => {
+    const manager = new BrokerManager()
+    await startLocal(manager)
+
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: 'ot_live_abc', id: 'obs-1' }),
+      text: async () => ''
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await manager.mintObserverToken(PROJECT_ID)
+    expect(result).toEqual({ token: 'ot_live_abc', id: 'obs-1' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:4242/api/observer-token',
+      expect.objectContaining({ method: 'POST' })
+    )
+
+    // A second mint for the same project reuses the cached token instead of
+    // spamming the broker with fresh unrevoked tokens.
+    const second = await manager.mintObserverToken(PROJECT_ID)
+    expect(second).toEqual(result)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    vi.unstubAllGlobals()
+    await manager.shutdown()
+  })
+
+  it('throws a readable error when the broker rejects the observer-token request', async () => {
+    const manager = new BrokerManager()
+    await startLocal(manager)
+
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false,
+      status: 500,
+      text: async () => 'boom'
+    })))
+
+    await expect(manager.mintObserverToken(PROJECT_ID)).rejects.toThrow(/HTTP 500/)
+
+    vi.unstubAllGlobals()
+    await manager.shutdown()
+  })
+
+  it('mints a fresh observer token after the project session is torn down and restarted', async () => {
+    const manager = new BrokerManager()
+    await startLocal(manager)
+
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: 'ot_live_abc', id: 'obs-1' })
+    })))
+    await manager.mintObserverToken(PROJECT_ID)
+
+    await manager.shutdown(PROJECT_ID)
+    await startLocal(manager)
+
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: 'ot_live_def', id: 'obs-2' })
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await manager.mintObserverToken(PROJECT_ID)
+    expect(result).toEqual({ token: 'ot_live_def', id: 'obs-2' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    vi.unstubAllGlobals()
+    await manager.shutdown()
+  })
+
   it('emits a cloud workspace mismatch event when the sandbox ignores the sent key', async () => {
     const manager = new BrokerManager()
     const win = createMockWindow()
@@ -2407,6 +2482,29 @@ describe('BrokerManager broker event ingress validation', () => {
     warnSpy.mockRestore()
     await manager.shutdown()
   })
+
+  it('forwards replay_gap events to the renderer and logs a distinct warning', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    const local = await startLocalWithWindow(manager, win)
+    const listener = local.onEvent.mock.calls.at(-1)?.[0]
+
+    listener?.({ kind: 'replay_gap', requestedSinceSeq: 10, oldestAvailable: 42, seq: 100 })
+
+    // Forwarded like any other event — the renderer's reconciliation
+    // pipeline (agent-store.ts / use-message-reconciliation.ts) is what
+    // actually reacts to it.
+    expect(
+      brokerEventSends(win).some((payload) => (payload as { kind?: string }).kind === 'replay_gap')
+    ).toBe(true)
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Replay gap on project')
+    )
+
+    warnSpy.mockRestore()
+    await manager.shutdown()
+  })
 })
 
 describe('classifyBrokerEvent', () => {
@@ -2510,9 +2608,23 @@ describe('classifyBrokerEvent', () => {
       'delivery_queued',
       'channel_subscribed',
       'agent_idle',
-      'agent_blocked_on_send'
+      'agent_blocked_on_send',
+      'replay_gap'
     ]) {
       expect(KNOWN_BROKER_EVENT_KINDS.has(kind)).toBe(true)
+    }
+  })
+
+  it('classifies a replay_gap event as valid and preserves its fields', () => {
+    const result = classifyBrokerEvent({
+      kind: 'replay_gap',
+      requestedSinceSeq: 10,
+      oldestAvailable: 42,
+      seq: 100
+    })
+    expect(result.status).toBe('valid')
+    if (result.status === 'valid') {
+      expect(result.event).toMatchObject({ requestedSinceSeq: 10, oldestAvailable: 42, seq: 100 })
     }
   })
 })

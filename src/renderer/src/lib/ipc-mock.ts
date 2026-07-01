@@ -60,6 +60,7 @@ import type {
   IntegrationEventTelemetrySnapshot,
   IntegrationOption,
   IntegrationsEvent,
+  ObserverTokenResult,
   PearAPI,
   PendingRelayMessage,
   ProactiveAgentBinding,
@@ -888,6 +889,10 @@ export const pearMock: PearAPI = {
       emitBrokerStatus({ projectId, status: 'connected' })
       return true
     },
+    mintObserverToken: async (projectId: string): Promise<ObserverTokenResult> => ({
+      token: `ot_live_mock_${projectId}`,
+      id: `mock-observer-token-${projectId}`
+    }),
     autoFixRuntime: async () => ({ removed: [] }),
     connectCloud: async () => 'mock-cloud',
     spawnAgent: async (projectId: string, input: BrokerSpawnAgentInput): Promise<BrokerSpawnAgentResult> => {

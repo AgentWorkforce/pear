@@ -101,9 +101,8 @@ function compactValue(value: string | undefined, fallback = 'n/a'): string {
   return value?.trim() || fallback
 }
 
-function observerUrlForWorkspaceKey(workspaceKey: string | undefined): string | undefined {
-  const key = workspaceKey?.trim()
-  return key ? `https://agentrelay.com/observer?key=${encodeURIComponent(key)}` : undefined
+function observerUrlForToken(token: string): string {
+  return `https://agentrelay.com/observer?key=${encodeURIComponent(token)}`
 }
 
 function getPrimaryRelaycastWorkspace(
@@ -410,19 +409,66 @@ function CompactMetaRow({
   )
 }
 
-function ObserverLink({ href }: { href: string }): React.ReactNode {
+type ObserverLinkState =
+  | { status: 'idle' }
+  | { status: 'minting' }
+  | { status: 'ready'; url: string }
+  | { status: 'error'; message: string }
+
+/**
+ * "Join as observer" now mints a scoped, read-only Relaycast observer token
+ * (`ot_live_...`) via IPC instead of reusing the full workspace API key, so
+ * the resulting link can no longer be used to spawn/write to the workspace.
+ * Minting is a network round-trip (main process -> broker's own
+ * `/api/observer-token`), so this needs loading/error states rather than a
+ * URL that's synchronously always available. The main process caches the
+ * minted token per project, so re-clicking after the first successful mint
+ * is effectively instant and doesn't spam the workspace with fresh tokens.
+ */
+function ObserverLinkAction({ projectId }: { projectId: string }): React.ReactNode {
+  const [state, setState] = useState<ObserverLinkState>({ status: 'idle' })
+
+  const handleClick = async (): Promise<void> => {
+    if (state.status === 'ready') {
+      window.open(state.url, '_blank', 'noreferrer')
+      return
+    }
+    setState({ status: 'minting' })
+    try {
+      const result = await pear.broker.mintObserverToken(projectId)
+      const url = observerUrlForToken(result.token)
+      setState({ status: 'ready', url })
+      window.open(url, '_blank', 'noreferrer')
+    } catch (err) {
+      setState({ status: 'error', message: err instanceof Error ? err.message : String(err) })
+    }
+  }
+
+  const minting = state.status === 'minting'
+
   return (
-    <a
-      href={href}
-      target="_blank"
-      rel="noreferrer"
-      className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-[var(--pear-border-subtle)] px-2 text-[11px] text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
-      title="Join as observer"
-      aria-label="Join workspace as observer"
-    >
-      <ExternalLink size={12} />
-      <span>Join</span>
-    </a>
+    <span className="inline-flex shrink-0 items-center gap-1.5">
+      <button
+        type="button"
+        onClick={() => void handleClick()}
+        disabled={minting}
+        className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-[var(--pear-border-subtle)] px-2 text-[11px] text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)] disabled:cursor-wait disabled:opacity-60"
+        title={state.status === 'error' ? `Join as observer (retry): ${state.message}` : 'Join as observer'}
+        aria-label="Join workspace as observer"
+      >
+        {minting ? <RefreshCw size={12} className="animate-spin" /> : <ExternalLink size={12} />}
+        <span>{minting ? 'Minting' : 'Join'}</span>
+      </button>
+      {state.status === 'ready' && <CopyButton value={state.url} label="Copy link" />}
+      {state.status === 'error' && (
+        <span
+          className="max-w-[160px] truncate text-[11px] text-[var(--pear-red)]"
+          title={state.message}
+        >
+          {state.message}
+        </span>
+      )}
+    </span>
   )
 }
 
@@ -431,7 +477,6 @@ function BrokerMetadataSummary({ broker }: { broker: BrokerDetails }): React.Rea
   const primaryWorkspace = getPrimaryRelaycastWorkspace(broker)
   const workspaceId = broker.relaycast?.defaultWorkspaceId || primaryWorkspace?.workspaceId
   const workspaceKey = broker.relaycast?.workspaceKey || broker.session?.workspaceKey
-  const observerUrl = observerUrlForWorkspaceKey(workspaceKey)
   const workspaceAlias = primaryWorkspace?.workspaceAlias || undefined
   const selfAgent = primaryWorkspace
     ? `${primaryWorkspace.selfName} / ${primaryWorkspace.selfAgentId}`
@@ -460,7 +505,7 @@ function BrokerMetadataSummary({ broker }: { broker: BrokerDetails }): React.Rea
         label="Workspace key"
         value={compactValue(workspaceKey)}
         copyValue={workspaceKey}
-        action={observerUrl ? <ObserverLink href={observerUrl} /> : undefined}
+        action={workspaceKey ? <ObserverLinkAction projectId={broker.projectId} /> : undefined}
       />
       <CompactMetaRow label="Self agent" value={selfAgent} copyValue={primaryWorkspace?.selfAgentId} />
       <CompactMetaRow

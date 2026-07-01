@@ -171,6 +171,30 @@ describe('getActiveMessageReconciliationRequest', () => {
     expect(reconciler.schedule).toHaveBeenCalledTimes(1)
     expect(reconciler.schedule).toHaveBeenCalledWith('human-message-sent')
   })
+
+  it('schedules reconciliation after a replay-gap timestamp changes', () => {
+    const reconciler = { schedule: vi.fn() }
+
+    hooks.scheduleReplayGapReconciliation({
+      lastReplayGapAt: 0,
+      reconciler
+    })
+    hooks.scheduleReplayGapReconciliation({
+      lastReplayGapAt: 1_717_000_000_000,
+      reconciler
+    })
+
+    expect(reconciler.schedule).toHaveBeenCalledTimes(1)
+    expect(reconciler.schedule).toHaveBeenCalledWith('replay-gap')
+  })
+
+  it('does not schedule reconciliation when no replay gap has occurred yet', () => {
+    const reconciler = { schedule: vi.fn() }
+
+    hooks.scheduleReplayGapReconciliation({ lastReplayGapAt: 0, reconciler })
+
+    expect(reconciler.schedule).not.toHaveBeenCalled()
+  })
 })
 
 describe('createMessageReconciler', () => {
@@ -521,6 +545,13 @@ describe('createMessageReconciler', () => {
     expect(source).toContain('s.lastHumanMessageSentAt')
     expect(source).toMatch(/scheduleHumanMessageSentReconciliation\([\s\S]*lastHumanMessageSentAt[\s\S]*reconciler/)
     expect(source).toMatch(/\[lastHumanMessageSentAt,\s*reconciler\]/)
+  })
+
+  it('wires replay-gap events into the reconciliation hook', () => {
+    const source = hooks.useMessageReconciliation.toString()
+    expect(source).toContain('s.lastReplayGapAt')
+    expect(source).toMatch(/scheduleReplayGapReconciliation\([\s\S]*lastReplayGapAt[\s\S]*reconciler/)
+    expect(source).toMatch(/\[lastReplayGapAt,\s*reconciler\]/)
   })
 
   it('wires active chat rooms into periodic reconciliation', () => {

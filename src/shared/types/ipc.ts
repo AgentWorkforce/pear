@@ -327,6 +327,16 @@ export interface BrokerEventRecord {
   }
 }
 
+/**
+ * A scoped, read-only Relaycast observer token (`ot_live_...`) minted via the
+ * broker's local `/api/observer-token` endpoint — used to build "Join as
+ * observer" links without handing out the full workspace API key.
+ */
+export interface ObserverTokenResult {
+  token: string
+  id: string
+}
+
 export interface BrokerSpawnAgentInput {
   name: string
   cli: string
@@ -919,6 +929,7 @@ export interface PearAPI {
       channels: string[] | undefined,
       workspaceKey: string
     ) => Promise<boolean>
+    mintObserverToken: (projectId: string) => Promise<ObserverTokenResult>
     autoFixRuntime: (
       projectId: string,
       cwd: string,
