@@ -663,10 +663,12 @@ export function registerIpcHandlers(): void {
     if (!isDirectory(cwd)) {
       throw new Error(`Project path no longer exists: ${cwd}`)
     }
-    await brokerManager.joinWorkspace(projectId, cwd, name, win, channels, workspaceKey)
-    void integrationsManager.notifyAgentState(projectId).catch((error) => {
-      console.warn('[integrations] Failed to notify agents after workspace join:', error instanceof Error ? error.message : String(error))
-    })
+    const started = await brokerManager.joinWorkspace(projectId, cwd, name, win, channels, workspaceKey)
+    if (started) {
+      void integrationsManager.notifyAgentState(projectId).catch((error) => {
+        console.warn('[integrations] Failed to notify agents after workspace join:', error instanceof Error ? error.message : String(error))
+      })
+    }
   })
 
   ipcMain.handle('broker:auto-fix-runtime', async (

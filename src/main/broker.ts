@@ -1630,7 +1630,7 @@ export class BrokerManager {
     win: BrowserWindow,
     channels: string[] = [],
     workspaceKey: string
-  ): Promise<void> {
+  ): Promise<boolean> {
     const normalizedProjectId = projectId.trim()
     if (!normalizedProjectId) {
       throw new Error('Project id is required')
@@ -1640,8 +1640,13 @@ export class BrokerManager {
       throw new Error('Workspace key is required')
     }
     assertDirectory(cwd, 'Project path')
+    // A start already in flight for this project (e.g. the initial project
+    // open) would otherwise race start()'s in-flight-reuse path below and
+    // silently keep the broker on the old/first-requested key.
+    const inFlightStart = this.startPromises.get(normalizedProjectId)
+    if (inFlightStart) await inFlightStart.catch(() => undefined)
     await this.shutdown(normalizedProjectId)
-    await this.start(normalizedProjectId, cwd, name, win, channels, trimmedKey)
+    return this.start(normalizedProjectId, cwd, name, win, channels, trimmedKey)
   }
 
   /**

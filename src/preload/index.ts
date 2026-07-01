@@ -226,7 +226,7 @@ const api = {
     syncChannels: (projectId: string, channels: string[]) =>
       invoke<void>('broker:sync-channels', projectId, channels),
     joinWorkspace: (projectId: string, cwd: string, name: string, channels: string[] | undefined, workspaceKey: string) =>
-      invoke<void>('broker:join-workspace', projectId, cwd, name, channels, workspaceKey),
+      invoke<boolean>('broker:join-workspace', projectId, cwd, name, channels, workspaceKey),
     autoFixRuntime: (
       projectId: string,
       cwd: string,

@@ -918,7 +918,7 @@ export interface PearAPI {
       name: string,
       channels: string[] | undefined,
       workspaceKey: string
-    ) => Promise<void>
+    ) => Promise<boolean>
     autoFixRuntime: (
       projectId: string,
       cwd: string,

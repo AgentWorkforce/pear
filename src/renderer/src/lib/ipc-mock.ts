@@ -875,8 +875,18 @@ export const pearMock: PearAPI = {
       const project = state.projects.find((entry) => entry.id === projectId)
       if (project) project.channels = Array.from(new Set(channels))
     },
-    joinWorkspace: async (projectId: string) => {
+    joinWorkspace: async (
+      projectId: string,
+      _cwd: string,
+      _name: string,
+      _channels: string[] | undefined,
+      workspaceKey: string
+    ) => {
+      if (!workspaceKey.trim()) {
+        throw new Error('Workspace key is required')
+      }
       emitBrokerStatus({ projectId, status: 'connected' })
+      return true
     },
     autoFixRuntime: async () => ({ removed: [] }),
     connectCloud: async () => 'mock-cloud',
