@@ -37,7 +37,9 @@
   "dependencies": {
     "@agent-relay/cloud": "^9.1.6",
     "@agent-relay/factory": "^0.1.13",
+    "@agent-relay/fleet": "^9.1.6",
     "@agent-relay/harness-driver": "^9.1.6",
+    "@agent-relay/harnesses": "^9.1.6",
     "@agent-relay/integration-prompts": "^9.1.6",
     "@agent-relay/sdk": "^9.1.6",
     "@agentworkforce/deploy": "^4.0.2",
@@ -61,6 +63,7 @@
     "shiki": "^4.0.2",
     "unidiff": "^1.0.4",
     "use-stick-to-bottom": "^1.1.6",
+    "ws": "^8.21.0",
     "zod": "^3.25.76",
     "zustand": "^5.0.0"
   },
@@ -74,6 +77,7 @@
     "@testing-library/react": "^16.3.2",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@types/ws": "^8.18.1",
     "@typescript-eslint/eslint-plugin": "^8.61.0",
     "@typescript-eslint/parser": "^8.61.0",
     "@vitejs/plugin-react": "^4.3.0",
