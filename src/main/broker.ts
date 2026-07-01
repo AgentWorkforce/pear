@@ -71,6 +71,7 @@ import {
   resolveCommandOnPath,
   resolvePackageBin
 } from './mcp-command'
+import { startPearFleetSidecar, type RunningPearFleetSidecar } from './pear-fleet-node'
 
 function isShellLikeCommand(cli: string): boolean {
   const normalized = basename(cli).toLowerCase()
@@ -393,6 +394,8 @@ const BROKER_RELEASE_RETRY_BASE_MS = parsePositiveIntegerEnv('PEAR_BROKER_RELEAS
 // operation resets the streak.
 const MAX_BROKER_TIMEOUTS_BEFORE_REVIVE = 2
 const BROKER_REVIVE_TERM_GRACE_MS = 1_500
+const LOCAL_FLEET_REGISTRATION_TIMEOUT_MS = 2_000
+const LOCAL_FLEET_STOP_TIMEOUT_MS = 1_000
 const PERSONA_REGISTRATION_TIMEOUT_MS = 5_000
 const PERSONA_REGISTRATION_STABILITY_MS = 1_000
 const PERSONA_HARNESS_READY_TIMEOUT_MS = 120_000
@@ -413,6 +416,16 @@ const AGENTWORKFORCE_CLI_VERSION = '4.0.2'
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const timeout = new Promise<T>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(message)), timeoutMs)
+  })
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer)
+  })
 }
 
 async function mapWithConcurrency<T, R>(
@@ -1059,6 +1072,8 @@ interface BrokerSession {
   // auto-shuts-down after 120s without a lease renewal, so we own the timer
   // here and clear it on shutdown.
   leaseTimer?: ReturnType<typeof setInterval>
+  fleetSidecar?: RunningPearFleetSidecar
+  fleetSidecarCwd?: string
   operationQueue: BrokerOperationQueue
 }
 
@@ -1356,6 +1371,7 @@ export class BrokerManager {
       existing.name = name
       await this.syncChannels(normalizedProjectId, nextChannels)
       await this.refreshEventStream(normalizedProjectId, 'existing-session-start', win)
+      await this.ensureLocalFleetSidecar(existing)
       this.sendStatus(normalizedProjectId, 'connected')
       return false
     }
@@ -1372,6 +1388,7 @@ export class BrokerManager {
         started.cwd = cwd
         started.name = name
         await this.syncChannels(normalizedProjectId, nextChannels)
+        await this.ensureLocalFleetSidecar(started)
         this.sendStatus(normalizedProjectId, 'connected')
         return false
       } catch (err) {
@@ -1386,7 +1403,7 @@ export class BrokerManager {
       if (existingClient) {
         const eventStreamGeneration = this.nextEventStreamGeneration()
         const unsubEvent = this.attachClient(normalizedProjectId, existingClient, win, eventStreamGeneration)
-        this.sessions.set(normalizedProjectId, {
+        const session: BrokerSession = {
           projectId: normalizedProjectId,
           client: existingClient,
           window: win,
@@ -1398,10 +1415,12 @@ export class BrokerManager {
           pearLineage: new Map(),
           eventStreamGeneration,
           operationQueue: new BrokerOperationQueue(BROKER_OPERATION_CONCURRENCY)
-        })
+        }
+        this.sessions.set(normalizedProjectId, session)
         existingClient.connectEvents()
 
         await this.syncChannels(normalizedProjectId, nextChannels)
+        await this.ensureLocalFleetSidecar(session)
         this.publishBrokerEvent(normalizedProjectId, normalizedProjectId, win, {
           kind: 'broker_initialized',
           name,
@@ -1457,7 +1476,7 @@ export class BrokerManager {
       console.log('[broker] Started successfully for project:', normalizedProjectId)
       const eventStreamGeneration = this.nextEventStreamGeneration()
       const unsubEvent = this.attachClient(normalizedProjectId, client, win, eventStreamGeneration)
-      this.sessions.set(normalizedProjectId, {
+      const session: BrokerSession = {
         projectId: normalizedProjectId,
         client,
         window: win,
@@ -1469,7 +1488,9 @@ export class BrokerManager {
         pearLineage: new Map(),
         eventStreamGeneration,
         operationQueue: new BrokerOperationQueue(BROKER_OPERATION_CONCURRENCY)
-      })
+      }
+      this.sessions.set(normalizedProjectId, session)
+      await this.ensureLocalFleetSidecar(session)
 
       this.publishBrokerEvent(normalizedProjectId, normalizedProjectId, win, {
         kind: 'broker_initialized',
@@ -1568,6 +1589,7 @@ export class BrokerManager {
     // eslint-disable-next-line prefer-const
     promise = (async () => {
       console.warn(`[broker] Broker for project ${projectId} is unreachable; restarting on a fresh port`)
+      await this.stopSessionFleetSidecar(session)
       this.dropSession(projectId, { disconnectOnly: true })
       await terminateOwnedBrokerProcess(brokerPid)
       if (this.revivePromises.get(projectId) !== promise) return false
@@ -1672,6 +1694,89 @@ export class BrokerManager {
     }
   }
 
+  private async ensureLocalFleetSidecar(session: BrokerSession): Promise<void> {
+    if (session.cloudSandboxId) return
+    if (session.fleetSidecar && session.fleetSidecarCwd === session.cwd) return
+    if (session.fleetSidecar) {
+      await this.stopSessionFleetSidecar(session)
+    }
+
+    const url = getClientBaseUrl(session.client)
+    if (!url) {
+      console.warn(`[broker] Local fleet node skipped for project ${session.projectId}: broker URL unavailable`)
+      return
+    }
+
+    const sidecar = startPearFleetSidecar({
+      projectId: session.projectId,
+      cwd: session.cwd,
+      brokerName: session.name,
+      connection: {
+        url,
+        ...(getClientApiKey(session.client) ? { apiKey: getClientApiKey(session.client) } : {})
+      },
+      log: (message) => console.log(`[broker] ${message}`),
+      warn: (message) => console.warn(`[broker] ${message}`)
+    })
+    session.fleetSidecar = sidecar
+    session.fleetSidecarCwd = session.cwd
+    void sidecar.done.then(
+      () => {
+        if (session.fleetSidecar === sidecar) {
+          session.fleetSidecar = undefined
+          session.fleetSidecarCwd = undefined
+        }
+      },
+      (err) => {
+        if (session.fleetSidecar === sidecar) {
+          session.fleetSidecar = undefined
+          session.fleetSidecarCwd = undefined
+          console.warn(`[broker] Local fleet node exited for project ${session.projectId}:`, err)
+        }
+      }
+    )
+
+    try {
+      await withTimeout(
+        sidecar.registered,
+        LOCAL_FLEET_REGISTRATION_TIMEOUT_MS,
+        `Local fleet node registration timed out after ${LOCAL_FLEET_REGISTRATION_TIMEOUT_MS}ms`
+      )
+    } catch (err) {
+      const message = toErrorMessage(err)
+      if (/timed out/i.test(message)) {
+        console.warn(`[broker] Local fleet node registration still pending for project ${session.projectId}:`, message)
+        return
+      }
+      if (session.fleetSidecar === sidecar) {
+        await this.stopSessionFleetSidecar(session)
+      } else {
+        await withTimeout(
+          sidecar.stop(),
+          LOCAL_FLEET_STOP_TIMEOUT_MS,
+          `Local fleet node stop timed out after ${LOCAL_FLEET_STOP_TIMEOUT_MS}ms`
+        ).catch(() => undefined)
+      }
+      console.warn(`[broker] Local fleet node registration failed for project ${session.projectId}:`, err)
+    }
+  }
+
+  private async stopSessionFleetSidecar(session: BrokerSession): Promise<void> {
+    const sidecar = session.fleetSidecar
+    session.fleetSidecar = undefined
+    session.fleetSidecarCwd = undefined
+    if (!sidecar) return
+    try {
+      await withTimeout(
+        sidecar.stop(),
+        LOCAL_FLEET_STOP_TIMEOUT_MS,
+        `Local fleet node stop timed out after ${LOCAL_FLEET_STOP_TIMEOUT_MS}ms`
+      )
+    } catch (err) {
+      console.warn(`[broker] Failed to stop local fleet node for project ${session.projectId}:`, err)
+    }
+  }
+
   /**
    * Attach to an already-provisioned cloud sandbox (used by CloudAgentManager
    * which warms the box via the cloud-agents/{id}/box endpoint). connectCloud
@@ -1718,6 +1823,7 @@ export class BrokerManager {
       const previous = this.sessions.get(sessionKey)
       if (previous) {
         try {
+          await this.stopSessionFleetSidecar(previous)
           await previous.client.shutdown()
         } catch (err) {
           // Non-fatal: we replace the session regardless, but a failed shutdown
@@ -3958,6 +4064,7 @@ export class BrokerManager {
       const sessions = this.sessionsForProject(targetProjectId)
       for (const session of sessions) {
         try {
+          await this.stopSessionFleetSidecar(session)
           await session.client.shutdown()
         } catch (err) {
           // Non-fatal during teardown, but a failed cloud-session shutdown can
@@ -3990,6 +4097,7 @@ export class BrokerManager {
 
     session.unsubEvent()
     if (session.leaseTimer) clearInterval(session.leaseTimer)
+    void this.stopSessionFleetSidecar(session)
     if (options.disconnectOnly) {
       const disconnect = (session.client as { disconnect?: () => void }).disconnect
       if (typeof disconnect === 'function') {
@@ -4012,6 +4120,7 @@ export class BrokerManager {
     const session = this.sessions.get(sessionKey)
     if (!session) return
     try {
+      await this.stopSessionFleetSidecar(session)
       await session.client.shutdown()
     } catch (err) {
       // Non-fatal: we drop the session anyway, but a failed shutdown can leak
