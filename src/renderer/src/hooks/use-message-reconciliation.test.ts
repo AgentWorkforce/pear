@@ -105,6 +105,13 @@ describe('getActiveMessageReconciliationRequest', () => {
     })).toBeNull()
   })
 
+  it('polls only visible active chat rooms', () => {
+    expect(hooks.shouldPollActiveRoom('channel:project-1:general', 'visible')).toBe(true)
+    expect(hooks.shouldPollActiveRoom('dm:project-1:human|worker', 'visible')).toBe(true)
+    expect(hooks.shouldPollActiveRoom('none', 'visible')).toBe(false)
+    expect(hooks.shouldPollActiveRoom('channel:project-1:general', 'hidden')).toBe(false)
+  })
+
   it('builds a channel reconciliation request from broker channel message events', () => {
     expect(hooks.getBrokerEventMessageReconciliationRequest({
       event: {
@@ -514,5 +521,12 @@ describe('createMessageReconciler', () => {
     expect(source).toContain('s.lastHumanMessageSentAt')
     expect(source).toMatch(/scheduleHumanMessageSentReconciliation\([\s\S]*lastHumanMessageSentAt[\s\S]*reconciler/)
     expect(source).toMatch(/\[lastHumanMessageSentAt,\s*reconciler\]/)
+  })
+
+  it('wires active chat rooms into periodic reconciliation', () => {
+    const source = hooks.useMessageReconciliation.toString()
+    expect(source).toContain('ACTIVE_ROOM_RECONCILE_POLL_MS')
+    expect(source).toContain('active-room-poll')
+    expect(source).toMatch(/shouldPollActiveRoom\([\s\S]*activeRoomKey[\s\S]*document\.visibilityState/)
   })
 })

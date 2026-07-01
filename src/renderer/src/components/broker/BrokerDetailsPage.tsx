@@ -7,6 +7,7 @@ import {
   Check,
   Cloud,
   Copy,
+  ExternalLink,
   KeyRound,
   List,
   MessageSquare,
@@ -97,6 +98,11 @@ function getConnectionStatusLabel(status: BrokerDetails['connectionFileStatus'])
 
 function compactValue(value: string | undefined, fallback = 'n/a'): string {
   return value?.trim() || fallback
+}
+
+function observerUrlForWorkspaceKey(workspaceKey: string | undefined): string | undefined {
+  const key = workspaceKey?.trim()
+  return key ? `https://agentrelay.com/observer?key=${encodeURIComponent(key)}` : undefined
 }
 
 function getPrimaryRelaycastWorkspace(
@@ -377,11 +383,13 @@ function DetailField({
 function CompactMetaRow({
   label,
   value,
-  copyValue
+  copyValue,
+  action
 }: {
   label: string
   value: string
   copyValue?: string
+  action?: React.ReactNode
 }): React.ReactNode {
   return (
     <div className="grid min-w-0 grid-cols-[126px_minmax(0,1fr)_auto] items-center gap-2 border-b border-[var(--pear-border-subtle)] py-2 last:border-b-0">
@@ -389,8 +397,31 @@ function CompactMetaRow({
       <span className="min-w-0 truncate font-mono text-[12px] text-[var(--pear-text-secondary)]" title={value}>
         {value}
       </span>
-      {copyValue ? <CopyButton value={copyValue} label="Copy" /> : <span />}
+      {copyValue || action ? (
+        <span className="inline-flex shrink-0 items-center gap-1.5">
+          {action}
+          {copyValue ? <CopyButton value={copyValue} label="Copy" /> : null}
+        </span>
+      ) : (
+        <span />
+      )}
     </div>
+  )
+}
+
+function ObserverLink({ href }: { href: string }): React.ReactNode {
+  return (
+    <a
+      href={href}
+      target="_blank"
+      rel="noreferrer"
+      className="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-md border border-[var(--pear-border-subtle)] px-2 text-[11px] text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
+      title="Join as observer"
+      aria-label="Join workspace as observer"
+    >
+      <ExternalLink size={12} />
+      <span>Join</span>
+    </a>
   )
 }
 
@@ -399,6 +430,7 @@ function BrokerMetadataSummary({ broker }: { broker: BrokerDetails }): React.Rea
   const primaryWorkspace = getPrimaryRelaycastWorkspace(broker)
   const workspaceId = broker.relaycast?.defaultWorkspaceId || primaryWorkspace?.workspaceId
   const workspaceKey = broker.relaycast?.workspaceKey || broker.session?.workspaceKey
+  const observerUrl = observerUrlForWorkspaceKey(workspaceKey)
   const workspaceAlias = primaryWorkspace?.workspaceAlias || undefined
   const selfAgent = primaryWorkspace
     ? `${primaryWorkspace.selfName} / ${primaryWorkspace.selfAgentId}`
@@ -423,7 +455,12 @@ function BrokerMetadataSummary({ broker }: { broker: BrokerDetails }): React.Rea
         value={compactValue(workspaceAlias ? `${workspaceAlias} (${workspaceId || 'no id'})` : workspaceId)}
         copyValue={workspaceId}
       />
-      <CompactMetaRow label="Workspace key" value={compactValue(workspaceKey)} copyValue={workspaceKey} />
+      <CompactMetaRow
+        label="Workspace key"
+        value={compactValue(workspaceKey)}
+        copyValue={workspaceKey}
+        action={observerUrl ? <ObserverLink href={observerUrl} /> : undefined}
+      />
       <CompactMetaRow label="Self agent" value={selfAgent} copyValue={primaryWorkspace?.selfAgentId} />
       <CompactMetaRow
         label="Runtime"
