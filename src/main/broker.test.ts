@@ -101,7 +101,8 @@ const mock = vi.hoisted(() => {
         }
         return { event_id: eventId, targets: target && !target.startsWith('#') ? [target] : [] }
       }),
-      brokerPid: 4242
+      brokerPid: 4242,
+      baseUrl: 'http://127.0.0.1:4242'
     }
     return client
   }
@@ -154,6 +155,34 @@ const mock = vi.hoisted(() => {
   return { state, createMockClient, HarnessDriverClient }
 })
 
+const fleetNodeMock = vi.hoisted(() => {
+  const sidecars: Array<{ registered: Promise<unknown>; done: Promise<void>; stop: ReturnType<typeof vi.fn> }> = []
+  const startPearFleetSidecar = vi.fn((options: unknown) => {
+    const sidecar = {
+      registered: Promise.resolve({
+        name: 'pear-project-1-local-fleet',
+        capabilities: [
+          'claude',
+          'codex',
+          'gemini',
+          'opencode',
+          'grok',
+          'aider',
+          'goose',
+          'cursor',
+          'droid'
+        ].map((cli) => ({ name: `spawn:${cli}`, kind: 'action' }))
+      }),
+      done: Promise.resolve(),
+      stop: vi.fn(async () => undefined)
+    }
+    sidecars.push(sidecar)
+    return sidecar
+  })
+
+  return { sidecars, startPearFleetSidecar }
+})
+
 const electronMock = vi.hoisted(() => ({
   app: {
     getAppPath: () => '/tmp/pear-app',
@@ -169,6 +198,10 @@ vi.mock('electron', () => ({
 
 vi.mock('@agent-relay/harness-driver', () => ({
   HarnessDriverClient: mock.HarnessDriverClient
+}))
+
+vi.mock('./pear-fleet-node', () => ({
+  startPearFleetSidecar: fleetNodeMock.startPearFleetSidecar
 }))
 
 vi.mock('./auth', () => ({
@@ -581,6 +614,8 @@ describe('BrokerManager local + cloud coexistence', () => {
     mock.state.nextConnectedSessionErrors = []
     mock.HarnessDriverClient.spawn.mockClear()
     mock.HarnessDriverClient.connect.mockClear()
+    fleetNodeMock.sidecars.length = 0
+    fleetNodeMock.startPearFleetSidecar.mockClear()
   })
 
   afterEach(async () => {
@@ -663,6 +698,46 @@ describe('BrokerManager local + cloud coexistence', () => {
     expect(secondStart).toBe(false)
     expect(mock.HarnessDriverClient.spawn).toHaveBeenCalledTimes(1)
     expect(local.shutdown).not.toHaveBeenCalled()
+
+    await manager.shutdown()
+  })
+
+  it('registers a local fleet node for spawned brokers', async () => {
+    const manager = new BrokerManager()
+
+    await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', undefined as never, [])
+
+    expect(fleetNodeMock.startPearFleetSidecar).toHaveBeenCalledTimes(1)
+    expect(fleetNodeMock.startPearFleetSidecar).toHaveBeenCalledWith(expect.objectContaining({
+      projectId: PROJECT_ID,
+      cwd: '/tmp/project-1',
+      brokerName: 'pear-project-1',
+      connection: {
+        url: 'http://127.0.0.1:4242'
+      }
+    }))
+
+    await manager.shutdown()
+    expect(fleetNodeMock.sidecars[0]?.stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps one local fleet node when reusing the same broker session', async () => {
+    const manager = new BrokerManager()
+
+    await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', undefined as never, [])
+    await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', undefined as never, [])
+
+    expect(fleetNodeMock.startPearFleetSidecar).toHaveBeenCalledTimes(1)
+
+    await manager.shutdown()
+  })
+
+  it('does not register a local fleet node for cloud sandbox sessions', async () => {
+    const manager = new BrokerManager()
+
+    await attachCloud(manager, ['cloud-agent'])
+
+    expect(fleetNodeMock.startPearFleetSidecar).not.toHaveBeenCalled()
 
     await manager.shutdown()
   })
@@ -801,6 +876,11 @@ describe('BrokerManager local + cloud coexistence', () => {
       expect(mock.HarnessDriverClient.connect).toHaveBeenCalledWith({ cwd: tempDir, connectionPath })
       expect(mock.HarnessDriverClient.spawn).not.toHaveBeenCalled()
       expect(mock.state.connectedClients).toHaveLength(1)
+      expect(fleetNodeMock.startPearFleetSidecar).toHaveBeenCalledWith(expect.objectContaining({
+        projectId: PROJECT_ID,
+        cwd: tempDir,
+        brokerName: 'pear-project-1'
+      }))
 
       await manager.shutdown()
     } finally {
