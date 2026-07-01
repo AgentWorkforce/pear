@@ -330,7 +330,7 @@ function runPearFleetSidecarConnection(options: PearFleetSidecarOptions & {
     }
 
     const abort = (): void => {
-      close().finally(() => settle(resolve))
+      void close().finally(() => settle(resolve))
     }
 
     const sendHandlerResult = async (invocationId: string, output: unknown, error?: unknown): Promise<void> => {
@@ -390,7 +390,7 @@ function runPearFleetSidecarConnection(options: PearFleetSidecarOptions & {
         options.log?.(`Pear fleet node "${manifest.name}" registered with ${manifest.capabilities.length} capabilities.`)
         options.onRegistered(manifest)
       })().catch((error) => {
-        close().finally(() => settle(() => reject(toError(error))))
+        void close().finally(() => settle(() => reject(toError(error))))
       })
     })
 
