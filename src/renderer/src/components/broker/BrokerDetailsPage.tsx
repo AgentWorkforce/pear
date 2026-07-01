@@ -505,7 +505,16 @@ function BrokerMetadataSummary({ broker }: { broker: BrokerDetails }): React.Rea
         label="Workspace key"
         value={compactValue(workspaceKey)}
         copyValue={workspaceKey}
-        action={workspaceKey ? <ObserverLinkAction projectId={broker.projectId} /> : undefined}
+        action={workspaceKey
+          ? (
+              // Keyed on workspaceKey so a rejoin/restart that changes the
+              // underlying workspace (same projectId) remounts this fresh —
+              // otherwise React would preserve the 'ready' state across the
+              // re-render and keep showing a stale minted token/URL from the
+              // old workspace.
+              <ObserverLinkAction key={workspaceKey} projectId={broker.projectId} />
+            )
+          : undefined}
       />
       <CompactMetaRow label="Self agent" value={selfAgent} copyValue={primaryWorkspace?.selfAgentId} />
       <CompactMetaRow

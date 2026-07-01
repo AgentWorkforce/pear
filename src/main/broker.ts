@@ -374,6 +374,10 @@ function isPositiveInteger(value: unknown): value is number {
 }
 
 const BROKER_DETAILS_TIMEOUT_MS = 3_000
+// Guards the direct fetch to the broker's own local /api/observer-token —
+// without this, a wedged/unresponsive broker would hang the IPC promise (and
+// the renderer's "Minting" UI) indefinitely.
+const OBSERVER_TOKEN_REQUEST_TIMEOUT_MS = 5_000
 const COMMIT_DRAFT_MAX_DIFF_CHARS = 80_000
 const COMMIT_DRAFT_TIMEOUT_MS = 180_000
 const DEFAULT_DELIVERY_CONFIRMATION_TIMEOUT_MS = 15_000
@@ -1750,7 +1754,8 @@ export class BrokerManager {
       response = await fetch(`${baseUrl}/api/observer-token`, {
         method: 'POST',
         headers,
-        body: JSON.stringify(body)
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(OBSERVER_TOKEN_REQUEST_TIMEOUT_MS)
       })
     } catch (err) {
       throw new Error(`Failed to reach broker to mint observer token: ${toErrorMessage(err)}`)

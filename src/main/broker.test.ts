@@ -636,6 +636,11 @@ describe('BrokerManager local + cloud coexistence', () => {
     if (originalPlatformDescriptor) {
       Object.defineProperty(process, 'platform', originalPlatformDescriptor)
     }
+    // Guaranteed cleanup for tests that stub global fetch (mintObserverToken
+    // specs below) — relying on a `vi.unstubAllGlobals()` call at the end of
+    // each test body would leak the stub into later tests if an earlier
+    // assertion in that test throws first.
+    vi.unstubAllGlobals()
   })
 
   it('keeps the local session alive when a cloud sandbox attaches', async () => {
@@ -858,7 +863,6 @@ describe('BrokerManager local + cloud coexistence', () => {
     expect(second).toEqual(result)
     expect(fetchMock).toHaveBeenCalledTimes(1)
 
-    vi.unstubAllGlobals()
     await manager.shutdown()
   })
 
@@ -874,7 +878,6 @@ describe('BrokerManager local + cloud coexistence', () => {
 
     await expect(manager.mintObserverToken(PROJECT_ID)).rejects.toThrow(/HTTP 500/)
 
-    vi.unstubAllGlobals()
     await manager.shutdown()
   })
 
@@ -903,7 +906,6 @@ describe('BrokerManager local + cloud coexistence', () => {
     expect(result).toEqual({ token: 'ot_live_def', id: 'obs-2' })
     expect(fetchMock).toHaveBeenCalledTimes(1)
 
-    vi.unstubAllGlobals()
     await manager.shutdown()
   })
 
