@@ -636,6 +636,11 @@ describe('BrokerManager local + cloud coexistence', () => {
     if (originalPlatformDescriptor) {
       Object.defineProperty(process, 'platform', originalPlatformDescriptor)
     }
+    // Guaranteed cleanup for tests that stub global fetch (mintObserverToken
+    // specs below) — relying on a `vi.unstubAllGlobals()` call at the end of
+    // each test body would leak the stub into later tests if an earlier
+    // assertion in that test throws first.
+    vi.unstubAllGlobals()
   })
 
   it('keeps the local session alive when a cloud sandbox attaches', async () => {
@@ -828,6 +833,217 @@ describe('BrokerManager local + cloud coexistence', () => {
 
     await expect(manager.workspaceKeyForProject(PROJECT_ID)).resolves.toBeUndefined()
     await expect(manager.workspaceKeyForProject('missing-project')).resolves.toBeUndefined()
+
+    await manager.shutdown()
+  })
+
+  it('mints an observer token via a direct POST to the broker\'s local HTTP API, then caches it', async () => {
+    const manager = new BrokerManager()
+    await startLocal(manager)
+
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: 'ot_live_abc', id: 'obs-1' }),
+      text: async () => ''
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await manager.mintObserverToken(PROJECT_ID)
+    expect(result).toEqual({ token: 'ot_live_abc', id: 'obs-1' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:4242/api/observer-token',
+      expect.objectContaining({ method: 'POST' })
+    )
+
+    // A second mint for the same project reuses the cached token instead of
+    // spamming the broker with fresh unrevoked tokens.
+    const second = await manager.mintObserverToken(PROJECT_ID)
+    expect(second).toEqual(result)
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    await manager.shutdown()
+  })
+
+  it('coalesces concurrent mints for the same project onto a single in-flight request', async () => {
+    const manager = new BrokerManager()
+    await startLocal(manager)
+
+    let resolveFetch: ((value: unknown) => void) | undefined
+    const fetchMock = vi.fn(() => new Promise((resolve) => {
+      resolveFetch = resolve
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    // Two "clicks" before the first POST has resolved — without coalescing,
+    // each would race past the (still-empty) cache-miss check and mint a
+    // separate, unrevoked token.
+    const first = manager.mintObserverToken(PROJECT_ID)
+    const second = manager.mintObserverToken(PROJECT_ID)
+
+    // mintObserverTokenUncached awaits session.client.getSession() before
+    // calling fetch, so give that microtask a turn before asserting.
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+
+    resolveFetch?.({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: 'ot_live_abc', id: 'obs-1' })
+    })
+
+    await expect(first).resolves.toEqual({ token: 'ot_live_abc', id: 'obs-1' })
+    await expect(second).resolves.toEqual({ token: 'ot_live_abc', id: 'obs-1' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    // Once settled, a later mint reuses the now-populated cache rather than
+    // the (already-cleared) in-flight entry.
+    await expect(manager.mintObserverToken(PROJECT_ID)).resolves.toEqual({ token: 'ot_live_abc', id: 'obs-1' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    await manager.shutdown()
+  })
+
+  it('allows a fresh mint after a coalesced in-flight request fails', async () => {
+    const manager = new BrokerManager()
+    await startLocal(manager)
+
+    let rejectFetch: ((reason: unknown) => void) | undefined
+    const failingFetchMock = vi.fn(() => new Promise((_resolve, reject) => {
+      rejectFetch = reject
+    }))
+    vi.stubGlobal('fetch', failingFetchMock)
+
+    const first = manager.mintObserverToken(PROJECT_ID)
+    const second = manager.mintObserverToken(PROJECT_ID)
+    await vi.waitFor(() => expect(failingFetchMock).toHaveBeenCalledTimes(1))
+
+    rejectFetch?.(new Error('network down'))
+    await expect(first).rejects.toThrow(/network down/)
+    await expect(second).rejects.toThrow(/network down/)
+
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: 'ot_live_retry', id: 'obs-retry' })
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(manager.mintObserverToken(PROJECT_ID)).resolves.toEqual({ token: 'ot_live_retry', id: 'obs-retry' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    await manager.shutdown()
+  })
+
+  it('surfaces a distinct, honest error when the broker predates the observer-token route (404) instead of falling back to the insecure workspace-key link', async () => {
+    const manager = new BrokerManager()
+    await startLocal(manager)
+
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false,
+      status: 404,
+      text: async () => 'not found'
+    })))
+
+    await expect(manager.mintObserverToken(PROJECT_ID)).rejects.toThrow(
+      /Observer links require a newer broker version/
+    )
+
+    await manager.shutdown()
+  })
+
+  it('throws a readable error when the broker rejects the observer-token request', async () => {
+    const manager = new BrokerManager()
+    await startLocal(manager)
+
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false,
+      status: 500,
+      text: async () => 'boom'
+    })))
+
+    await expect(manager.mintObserverToken(PROJECT_ID)).rejects.toThrow(/HTTP 500/)
+
+    await manager.shutdown()
+  })
+
+  it('mints a fresh observer token after the project session is torn down and restarted', async () => {
+    const manager = new BrokerManager()
+    await startLocal(manager)
+
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: 'ot_live_abc', id: 'obs-1' })
+    })))
+    await manager.mintObserverToken(PROJECT_ID)
+
+    await manager.shutdown(PROJECT_ID)
+    await startLocal(manager)
+
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: 'ot_live_def', id: 'obs-2' })
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const result = await manager.mintObserverToken(PROJECT_ID)
+    expect(result).toEqual({ token: 'ot_live_def', id: 'obs-2' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    await manager.shutdown()
+  })
+
+  it('does not let a mint left in flight by a dropped session poison the cache for a restarted session', async () => {
+    const manager = new BrokerManager()
+    await startLocal(manager)
+
+    let resolveStaleFetch: ((value: unknown) => void) | undefined
+    const staleFetchMock = vi.fn(() => new Promise((resolve) => {
+      resolveStaleFetch = resolve
+    }))
+    vi.stubGlobal('fetch', staleFetchMock)
+
+    // Mint starts against the first session but its POST never resolves yet.
+    const stalePromise = manager.mintObserverToken(PROJECT_ID)
+    await vi.waitFor(() => expect(staleFetchMock).toHaveBeenCalledTimes(1))
+
+    // The session is torn down mid-mint (e.g. joinWorkspace's shutdown path)
+    // and a new one starts for the same project id — a workspace switch
+    // while the old mint is still in flight.
+    await manager.shutdown(PROJECT_ID)
+    await startLocal(manager)
+
+    const freshFetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: 'ot_live_fresh', id: 'obs-fresh' })
+    }))
+    vi.stubGlobal('fetch', freshFetchMock)
+
+    // Without clearing observerTokenMints (and bumping the generation) in
+    // dropSession, this would reuse the stale in-flight promise from the
+    // dropped session instead of minting fresh against the new one.
+    const freshResult = await manager.mintObserverToken(PROJECT_ID)
+    expect(freshResult).toEqual({ token: 'ot_live_fresh', id: 'obs-fresh' })
+    expect(freshFetchMock).toHaveBeenCalledTimes(1)
+
+    // Now let the stale mint (against the already-dropped session) resolve
+    // late, simulating the race the fix guards against.
+    resolveStaleFetch?.({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: 'ot_live_stale', id: 'obs-stale' })
+    })
+    await expect(stalePromise).resolves.toEqual({ token: 'ot_live_stale', id: 'obs-stale' })
+
+    // The late resolution must not have overwritten the cache with the
+    // previous workspace's token — a later mint still returns the fresh,
+    // current-session token from cache (no additional fetch).
+    const cachedResult = await manager.mintObserverToken(PROJECT_ID)
+    expect(cachedResult).toEqual({ token: 'ot_live_fresh', id: 'obs-fresh' })
+    expect(freshFetchMock).toHaveBeenCalledTimes(1)
 
     await manager.shutdown()
   })
@@ -2407,6 +2623,29 @@ describe('BrokerManager broker event ingress validation', () => {
     warnSpy.mockRestore()
     await manager.shutdown()
   })
+
+  it('forwards replay_gap events to the renderer and logs a distinct warning', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    const local = await startLocalWithWindow(manager, win)
+    const listener = local.onEvent.mock.calls.at(-1)?.[0]
+
+    listener?.({ kind: 'replay_gap', requestedSinceSeq: 10, oldestAvailable: 42, seq: 100 })
+
+    // Forwarded like any other event — the renderer's reconciliation
+    // pipeline (agent-store.ts / use-message-reconciliation.ts) is what
+    // actually reacts to it.
+    expect(
+      brokerEventSends(win).some((payload) => (payload as { kind?: string }).kind === 'replay_gap')
+    ).toBe(true)
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Replay gap on project')
+    )
+
+    warnSpy.mockRestore()
+    await manager.shutdown()
+  })
 })
 
 describe('classifyBrokerEvent', () => {
@@ -2510,9 +2749,23 @@ describe('classifyBrokerEvent', () => {
       'delivery_queued',
       'channel_subscribed',
       'agent_idle',
-      'agent_blocked_on_send'
+      'agent_blocked_on_send',
+      'replay_gap'
     ]) {
       expect(KNOWN_BROKER_EVENT_KINDS.has(kind)).toBe(true)
+    }
+  })
+
+  it('classifies a replay_gap event as valid and preserves its fields', () => {
+    const result = classifyBrokerEvent({
+      kind: 'replay_gap',
+      requestedSinceSeq: 10,
+      oldestAvailable: 42,
+      seq: 100
+    })
+    expect(result.status).toBe('valid')
+    if (result.status === 'valid') {
+      expect(result.event).toMatchObject({ requestedSinceSeq: 10, oldestAvailable: 42, seq: 100 })
     }
   })
 })

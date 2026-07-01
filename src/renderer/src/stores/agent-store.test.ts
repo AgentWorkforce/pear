@@ -138,3 +138,51 @@ describe('agent-store broker snapshots', () => {
     expect(state.activeAgentKey).toBe(getAgentKey('project-1', 'claude-1'))
   })
 })
+
+describe('agent-store replay gap handling', () => {
+  beforeEach(() => {
+    vi.stubGlobal('localStorage', {
+      getItem: () => null,
+      setItem: () => {},
+      removeItem: () => {},
+      clear: () => {},
+      key: () => null,
+      length: 0
+    })
+    useAgentStore.getState().clearAll()
+  })
+
+  afterEach(() => {
+    useAgentStore.getState().clearAll()
+    vi.unstubAllGlobals()
+  })
+
+  it('bumps lastReplayGapAt on a replay_gap broker event', () => {
+    expect(useAgentStore.getState().lastReplayGapAt).toBe(0)
+
+    useAgentStore.getState().handleBrokerEvent({
+      kind: 'replay_gap',
+      requestedSinceSeq: 10,
+      oldestAvailable: 42,
+      seq: 100,
+      projectId: 'project-1'
+    })
+
+    expect(useAgentStore.getState().lastReplayGapAt).toBeGreaterThan(0)
+  })
+
+  it('leaves agents and messages untouched for a replay_gap event', () => {
+    const before = useAgentStore.getState()
+
+    useAgentStore.getState().handleBrokerEvent({
+      kind: 'replay_gap',
+      requestedSinceSeq: 1,
+      oldestAvailable: 2,
+      seq: 3
+    })
+
+    const after = useAgentStore.getState()
+    expect(after.agents).toBe(before.agents)
+    expect(after.messages).toBe(before.messages)
+  })
+})

@@ -671,6 +671,10 @@ export function registerIpcHandlers(): void {
     }
   })
 
+  ipcMain.handle('broker:mint-observer-token', async (_, projectId: string) => {
+    return brokerManager.mintObserverToken(projectId)
+  })
+
   ipcMain.handle('broker:auto-fix-runtime', async (
     event,
     projectId: string,
