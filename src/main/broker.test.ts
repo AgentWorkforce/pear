@@ -174,7 +174,7 @@ const fleetNodeMock = vi.hoisted(() => {
           'droid'
         ].map((cli) => ({ name: `spawn:${cli}`, kind: 'action' }))
       }),
-      done: Promise.resolve(),
+      done: new Promise<void>(() => undefined),
       stop: vi.fn(async () => undefined)
     }
     sidecars.push(sidecar)

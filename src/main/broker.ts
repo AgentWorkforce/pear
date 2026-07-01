@@ -1688,6 +1688,21 @@ export class BrokerManager {
     })
     session.fleetSidecar = sidecar
     session.fleetSidecarCwd = session.cwd
+    void sidecar.done.then(
+      () => {
+        if (session.fleetSidecar === sidecar) {
+          session.fleetSidecar = undefined
+          session.fleetSidecarCwd = undefined
+        }
+      },
+      (err) => {
+        if (session.fleetSidecar === sidecar) {
+          session.fleetSidecar = undefined
+          session.fleetSidecarCwd = undefined
+          console.warn(`[broker] Local fleet node exited for project ${session.projectId}:`, err)
+        }
+      }
+    )
 
     try {
       await withTimeout(
@@ -1701,10 +1716,14 @@ export class BrokerManager {
         console.warn(`[broker] Local fleet node registration still pending for project ${session.projectId}:`, message)
         return
       }
-      await sidecar.stop().catch(() => undefined)
       if (session.fleetSidecar === sidecar) {
-        session.fleetSidecar = undefined
-        session.fleetSidecarCwd = undefined
+        await this.stopSessionFleetSidecar(session)
+      } else {
+        await withTimeout(
+          sidecar.stop(),
+          LOCAL_FLEET_STOP_TIMEOUT_MS,
+          `Local fleet node stop timed out after ${LOCAL_FLEET_STOP_TIMEOUT_MS}ms`
+        ).catch(() => undefined)
       }
       console.warn(`[broker] Local fleet node registration failed for project ${session.projectId}:`, err)
     }

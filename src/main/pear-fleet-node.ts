@@ -39,6 +39,7 @@ export const PEAR_LOCAL_SPAWN_HARNESSES = {
 
 const RECONNECT_BASE_DELAY_MS = 500
 const RECONNECT_MAX_DELAY_MS = 5_000
+const REQUEST_TIMEOUT_MS = 5_000
 const DEREGISTER_TIMEOUT_MS = 1_000
 
 const restartPolicySchema = z.object({
@@ -105,6 +106,7 @@ type BrokerFrame = {
 type PendingRequest = {
   resolve: (value: unknown) => void
   reject: (error: Error) => void
+  timer: ReturnType<typeof setTimeout>
 }
 
 export function createPearFleetNodeDefinition(options: PearFleetNodeOptions): FleetNodeDefinition {
@@ -312,11 +314,27 @@ function runPearFleetSidecarConnection(options: PearFleetSidecarOptions & {
       }
 
       return new Promise((requestResolve, requestReject) => {
-        pending.set(requestId, { resolve: requestResolve, reject: requestReject })
+        const timer = setTimeout(() => {
+          pending.delete(requestId)
+          requestReject(new Error(`Pear fleet sidecar ${type} request timed out after ${REQUEST_TIMEOUT_MS}ms`))
+        }, REQUEST_TIMEOUT_MS)
+        const pendingRequest: PendingRequest = {
+          timer,
+          resolve: (value) => {
+            clearTimeout(timer)
+            requestResolve(value)
+          },
+          reject: (error) => {
+            clearTimeout(timer)
+            requestReject(error)
+          }
+        }
+        pending.set(requestId, pendingRequest)
         ws.send(JSON.stringify(frame), (error) => {
           if (!error) return
+          if (!pending.has(requestId)) return
           pending.delete(requestId)
-          requestReject(error)
+          pendingRequest.reject(error)
         })
       })
     }
@@ -330,8 +348,12 @@ function runPearFleetSidecarConnection(options: PearFleetSidecarOptions & {
       }
     }
 
+    const ignoreCloseError = (error: unknown): void => {
+      options.warn?.(`Pear fleet sidecar close skipped: ${toError(error).message}`)
+    }
+
     const abort = (): void => {
-      void close().finally(() => settle(resolve))
+      void close().catch(ignoreCloseError).finally(() => settle(resolve))
     }
 
     const sendHandlerResult = async (invocationId: string, output: unknown, error?: unknown): Promise<void> => {
@@ -392,7 +414,7 @@ function runPearFleetSidecarConnection(options: PearFleetSidecarOptions & {
         options.onRegistered(manifest)
       })().catch((error) => {
         settle(() => reject(toError(error)))
-        void close()
+        void close().catch(ignoreCloseError)
       })
     })
 
