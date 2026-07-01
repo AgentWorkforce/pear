@@ -1012,12 +1012,12 @@ export function DiffPane(): React.ReactNode {
       useAgentStore.getState().setActiveAgentKey(getAgentKey(activeProjectId, agentName))
       useUIStore.getState().openTab({ kind: 'channel', projectId: activeProjectId, channelName })
 
-      await pear.broker.sendMessage(activeProjectId, {
+      const { eventId } = await pear.broker.sendMessage(activeProjectId, {
         to: `#${channelName}`,
         text: reviewRequest,
         from: 'human'
       })
-      useAgentStore.getState().addHumanMessage(`#${channelName}`, reviewRequest, activeProjectId)
+      useAgentStore.getState().addHumanMessage(`#${channelName}`, reviewRequest, activeProjectId, eventId)
       setMessage(`Spawned ${agentName} in #${channelName}.`)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Unable to spawn review agent')

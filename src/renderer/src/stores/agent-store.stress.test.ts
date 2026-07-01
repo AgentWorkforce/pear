@@ -540,4 +540,80 @@ describe('agent-store stress', () => {
     expect(messages.length).toBe(1)
     expect(messages[0]!.id).toBe('canonical-id-1')
   })
+
+  it('adopts the send event_id so the relay_inbound echo dedupes by id, not by the time window', () => {
+    // The optimistic human record adopts the relay's canonical event_id; the
+    // echo carrying that same id collapses deterministically even when it
+    // arrives far outside HUMAN_MESSAGE_DEDUPE_WINDOW_MS (proving it is not the
+    // body+timestamp heuristic doing the work).
+    const store = useAgentStore.getState()
+    store.addHumanMessage('#general', 'deterministic-hi', 'p1', 'evt-det-1')
+    vi.advanceTimersByTime(60_000)
+    store.handleBrokerEvent(relayInbound({
+      from: 'human',
+      target: '#general',
+      body: 'deterministic-hi',
+      projectId: 'p1',
+      event_id: 'evt-det-1'
+    }))
+    const messages = useAgentStore.getState().messages.filter(
+      (m) => m.body === 'deterministic-hi'
+    )
+    expect(messages.length).toBe(1)
+    expect(messages[0]!.id).toBe('evt-det-1')
+  })
+
+  it('two identical human sends with distinct adopted ids each dedupe their own echo — no false collapse', () => {
+    // The "ok" then "ok" hazard: with deterministic ids the second real send
+    // can never be swallowed by the first, regardless of the time window.
+    const store = useAgentStore.getState()
+    store.addHumanMessage('#general', 'ok', 'p1', 'evt-ok-1')
+    store.addHumanMessage('#general', 'ok', 'p1', 'evt-ok-2')
+    store.handleBrokerEvent(relayInbound({
+      from: 'human', target: '#general', body: 'ok', projectId: 'p1', event_id: 'evt-ok-1'
+    }))
+    store.handleBrokerEvent(relayInbound({
+      from: 'human', target: '#general', body: 'ok', projectId: 'p1', event_id: 'evt-ok-2'
+    }))
+    const messages = useAgentStore.getState().messages.filter((m) => m.body === 'ok')
+    expect(messages.length).toBe(2)
+    expect(new Set(messages.map((m) => m.id))).toEqual(new Set(['evt-ok-1', 'evt-ok-2']))
+  })
+
+  it('reconcile upgrades an adopted-id optimistic human record in place and clears the local flag', () => {
+    const store = useAgentStore.getState()
+    store.addHumanMessage('#general', 'reconcile-me', 'p1', 'evt-rec-1')
+    const canonical: BrokerReconciledChatMessage[] = [{
+      id: 'evt-rec-1',
+      from: 'human',
+      to: '#general',
+      body: 'reconcile-me',
+      timestamp: Date.now() + 1_000,
+      isHuman: true,
+      projectId: 'p1'
+    }]
+    store.reconcileMessages(canonical)
+    const messages = useAgentStore.getState().messages.filter((m) => m.body === 'reconcile-me')
+    expect(messages.length).toBe(1)
+    expect(messages[0]!.id).toBe('evt-rec-1')
+    expect(messages[0]!.local).toBe(false)
+  })
+
+  it('falls back to the body+time window when the send reported no canonical id', () => {
+    // Broadcast / unsupported_operation sends keep a local UUID; the canonical
+    // echo then arrives under an unpredictable server id and only the heuristic
+    // window can collapse it.
+    const store = useAgentStore.getState()
+    store.addHumanMessage('#general', 'fallback-hi', 'p1')
+    vi.advanceTimersByTime(500)
+    store.handleBrokerEvent(relayInbound({
+      from: 'human',
+      target: '#general',
+      body: 'fallback-hi',
+      projectId: 'p1',
+      event_id: 'server-minted-xyz'
+    }))
+    const messages = useAgentStore.getState().messages.filter((m) => m.body === 'fallback-hi')
+    expect(messages.length).toBe(1)
+  })
 })

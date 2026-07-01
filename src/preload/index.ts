@@ -18,6 +18,7 @@ import type {
   BrokerReconciledChatMessage,
   BrokerReconcileMessagesInput,
   BrokerSendMessageInput,
+  BrokerSendMessageResult,
   BrokerSetTerminalModeResult,
   BrokerSpawnAgentInput,
   BrokerSpawnAgentResult,
@@ -100,6 +101,7 @@ export type {
   BrokerReconciledChatMessage,
   BrokerReconcileMessagesInput,
   BrokerSendMessageInput,
+  BrokerSendMessageResult,
   BrokerSetTerminalModeResult,
   BrokerSpawnAgentInput,
   BrokerSpawnAgentResult,
@@ -267,7 +269,7 @@ const api = {
     inputSrtt: (projectId: string | undefined, name: string) =>
       invoke<number | null>('broker:input-srtt', projectId, name),
     sendMessage: (projectId: string | undefined, input: BrokerSendMessageInput) =>
-      invoke<void>('broker:send-message', projectId, input),
+      invoke<BrokerSendMessageResult>('broker:send-message', projectId, input),
     reconcileMessages: (input: BrokerReconcileMessagesInput) =>
       invoke<BrokerReconciledChatMessage[]>('broker:reconcile-messages', input),
     refreshEventStream: (projectId?: string, reason?: string) =>

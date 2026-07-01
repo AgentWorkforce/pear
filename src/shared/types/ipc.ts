@@ -401,6 +401,16 @@ export interface BrokerSendMessageInput {
   from?: string
 }
 
+export interface BrokerSendMessageResult {
+  // The relay's canonical event_id for the accepted send, when the broker
+  // reports one. The renderer stamps this onto the optimistic human echo so the
+  // later relay_inbound/reconciled copy dedupes by id instead of by a
+  // body+timestamp heuristic. Undefined for brokers that don't report an id
+  // (older `unsupported_operation` path) — the renderer then falls back to the
+  // heuristic window.
+  eventId?: string
+}
+
 export interface BrokerStatusEvent {
   projectId?: string
   status: string
@@ -944,7 +954,7 @@ export interface PearAPI {
       format: BrokerTerminalSnapshotFormat
     ) => Promise<BrokerTerminalSnapshot | null>
     inputSrtt: (projectId: string | undefined, name: string) => Promise<number | null>
-    sendMessage: (projectId: string | undefined, input: BrokerSendMessageInput) => Promise<void>
+    sendMessage: (projectId: string | undefined, input: BrokerSendMessageInput) => Promise<BrokerSendMessageResult>
     reconcileMessages: (input: BrokerReconcileMessagesInput) => Promise<BrokerReconciledChatMessage[]>
     refreshEventStream: (projectId?: string, reason?: string) => Promise<void>
     subscribeAgentChannel: (projectId: string | undefined, name: string, channel: string) => Promise<void>

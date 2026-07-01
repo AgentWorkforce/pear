@@ -930,14 +930,23 @@ export const pearMock: PearAPI = {
     snapshotTerminal: async () => null,
     inputSrtt: async () => mockInputSrttMs,
     sendMessage: async (projectId: string | undefined, input: BrokerSendMessageInput) => {
-      handleInjectedBrokerEvent({
-        kind: 'relay_inbound',
-        event_id: `${projectId || 'mock'}:human:${++seq}`,
-        from: input.from || 'human',
-        target: input.to,
-        body: input.text,
-        projectId
-      } satisfies RelayInboundEvent)
+      // Model the real contract: the send reports the canonical event_id, and
+      // the relay_inbound echo arrives asynchronously afterwards carrying that
+      // same id. Deferring the echo lets the caller append its optimistic human
+      // record (which adopts eventId) first, so the echo dedupes by id instead
+      // of leaving a self-duplicate.
+      const eventId = `${projectId || 'mock'}:human:${++seq}`
+      setTimeout(() => {
+        handleInjectedBrokerEvent({
+          kind: 'relay_inbound',
+          event_id: eventId,
+          from: input.from || 'human',
+          target: input.to,
+          body: input.text,
+          projectId
+        } satisfies RelayInboundEvent)
+      }, 0)
+      return { eventId }
     },
     reconcileMessages: async (input: BrokerReconcileMessagesInput) =>
       clone(state.messages.filter((message) => message.projectId === input.projectId)),

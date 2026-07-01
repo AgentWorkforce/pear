@@ -46,11 +46,13 @@ export interface ChatMessage {
   conversationId?: string
   reactions?: ChatReaction[]
   threadReplies?: ChatThreadReply[]
-  // True for messages added via the optimistic local-UUID path
-  // (addHumanMessage). Lets reconciliation distinguish a pending
-  // local echo from a canonical broker record so the canonical
-  // record only replaces the optimistic, not another real human
-  // message that happens to match by body/target/time.
+  // True for an optimistic human echo appended by `addHumanMessage` before its
+  // canonical broker copy arrives. When the send reported a canonical event_id
+  // the record adopts it as its `id`, so reconciliation collapses the pair by
+  // id and clears this flag on merge. When no id was available (broadcast /
+  // `unsupported_operation`) the flag scopes the body/target/time fallback so a
+  // canonical copy only replaces a pending optimistic, not another real human
+  // message that happens to match.
   local?: boolean
 }
 
@@ -104,6 +106,14 @@ const MAX_CHAT_MESSAGES = 5_000
 const MAX_RELAY_MESSAGES = 5_000
 const HUMAN_SENDER_NAME = 'human'
 const SYSTEM_NOTICE_SENDER_NAME = 'system'
+// Fallback correlation window for the optimistic human echo. The primary path
+// is deterministic: `addHumanMessage` adopts the relay's canonical event_id
+// (returned by broker.sendMessage) as the record id, so the later
+// relay_inbound/reconciled copy collapses by id with no time guessing. This
+// body+target+timestamp window only catches sends that could NOT adopt an id —
+// broadcast/multi-target fan-outs and older brokers on the
+// `unsupported_operation` path — where the canonical copy arrives under an
+// unpredictable id.
 const HUMAN_MESSAGE_DEDUPE_WINDOW_MS = 10_000
 const JOIN_NOTICE_DEDUPE_WINDOW_MS = 30_000
 // Tighter window for agent-message dedupe — agents reply fast and a
@@ -615,7 +625,12 @@ function reconcileChatMessages(
         ...previous,
         ...next,
         threadReplies: next.threadReplies || previous.threadReplies,
-        reactions: next.reactions || previous.reactions
+        reactions: next.reactions || previous.reactions,
+        // An optimistic human echo that adopted the relay's canonical
+        // event_id is confirmed the moment its canonical copy arrives under
+        // the same id. Drop the pending `local` flag so a later heuristic
+        // pass can't mistake this reconciled record for an un-sent optimistic.
+        ...(previous.local ? { local: false } : {})
       }
       if (!chatMessagesEqual(previous, merged)) {
         byId.set(next.id, merged)
@@ -707,7 +722,7 @@ interface AgentState {
   reconcileMessages: (messages: BrokerReconciledChatMessage[]) => void
   handleBrokerEvent: (event: BrokerEvent) => void
   handleBrokerStatus: (status: { projectId?: string; status: string; error?: string }) => void
-  addHumanMessage: (to: string, body: string, projectId?: string) => void
+  addHumanMessage: (to: string, body: string, projectId?: string, canonicalId?: string) => void
   addChannelJoinNotice: (projectId: string | undefined, channelName: string, participantName: string) => void
   addThreadReply: (messageId: string, body: string) => void
   toggleMessageReaction: (messageId: string, emoji: string) => void
@@ -1269,10 +1284,15 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
     })
   },
 
-  addHumanMessage: (to, body, projectId) => {
+  addHumanMessage: (to, body, projectId, canonicalId) => {
     const timestamp = Date.now()
     const msg: ChatMessage = {
-      id: crypto.randomUUID(),
+      // Adopt the relay's canonical event_id when the send reported one, so the
+      // later relay_inbound/reconciled copy collapses by id (deterministic,
+      // window-free). Falls back to a local UUID for sends without a canonical
+      // id (broadcast/multi-target, or brokers on the `unsupported_operation`
+      // path); those still rely on the body+timestamp heuristic.
+      id: canonicalId ?? crypto.randomUUID(),
       from: HUMAN_SENDER_NAME,
       to,
       body,
@@ -1284,8 +1304,9 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
     // Always append the optimistic record. The previous
     // isDuplicateHumanEcho check here silently dropped the second of
     // two identical sends within 10s ("ok", "ok"), losing a real
-    // message. Optimistic-vs-canonical dedup is now handled exclusively
-    // via the `local` flag in the relay_inbound + reconcile paths.
+    // message. Optimistic-vs-canonical dedup is handled by id when a
+    // canonical id was adopted, and otherwise via the `local` flag in the
+    // relay_inbound + reconcile heuristic paths.
     set((state) => ({
       messages: appendChatMessageWithDedupIndex(state.messages, msg),
       lastHumanMessageSentAt: timestamp

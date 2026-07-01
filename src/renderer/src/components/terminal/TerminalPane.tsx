@@ -626,8 +626,8 @@ export function TerminalPane(): React.ReactNode {
       to: target.name,
       text: queuedFirstPrompt.text,
       from: 'human'
-    }).then(() => {
-      addHumanMessage(target.name, queuedFirstPrompt.text, activeProjectId)
+    }).then(({ eventId }) => {
+      addHumanMessage(target.name, queuedFirstPrompt.text, activeProjectId, eventId)
       queueFirstPrompt(activeProjectId, null)
       if (cloudAttachProgress?.phase === 'done') {
         setCloudAttachProgress(activeProjectId, null)

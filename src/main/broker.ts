@@ -61,6 +61,7 @@ import type {
   BrokerEventStreamDiagnostic,
   BrokerReconciledChatMessage,
   BrokerReconcileMessagesInput,
+  BrokerSendMessageResult,
   BrokerTerminalSnapshot,
   BrokerTerminalSnapshotFormat,
   WorkforcePersona
@@ -3406,11 +3407,29 @@ export class BrokerManager {
     )
   }
 
-  async sendMessage(projectId: string | undefined, input: SendMessageInput): Promise<void> {
+  async sendMessage(
+    projectId: string | undefined,
+    input: SendMessageInput
+  ): Promise<BrokerSendMessageResult> {
     const session = input.to.startsWith('#')
       ? this.getSessionForProject(projectId || '')
       : this.getSessionForAgent(input.to, projectId)
-    await this.brokerOperation(session, 'normal', () => session.client.sendMessage(input))
+    // Surface the relay's canonical event_id so the renderer can stamp it onto
+    // the optimistic human echo. When the same id later arrives on the
+    // relay_inbound/reconciled record, id-based reconciliation collapses the
+    // pair deterministically — no body+timestamp guessing. `unsupported_operation`
+    // (older brokers) leaves eventId undefined and the renderer keeps its local
+    // UUID + heuristic fallback.
+    const rawResult = await this.brokerOperation(
+      session,
+      'normal',
+      () => session.client.sendMessage(input)
+    ) as unknown
+    const result = isRecord(rawResult) ? rawResult : {}
+    const eventId = typeof result.event_id === 'string' && result.event_id !== 'unsupported_operation'
+      ? result.event_id
+      : undefined
+    return { eventId }
   }
 
   async sendMessageAndWaitForDelivery(

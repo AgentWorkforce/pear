@@ -52,24 +52,30 @@ export function ComposeBar({ directMessageParticipants }: ComposeBarProps = {}):
         throw new Error('No project selected')
       }
       if (isDirectMessageComposer) {
-        await Promise.all(
+        const results = await Promise.all(
           directMessageTargets.map((target) =>
             pear.broker.sendMessage(activeProjectId, { to: target, text: body, from: 'human' })
           )
         )
-        addHumanMessage(directMessageTargets.join(', '), body, activeProjectId || undefined)
+        // Only a single-target DM has one canonical echo to adopt; a fan-out to
+        // several participants produces one echo each, none of which maps to the
+        // single combined optimistic record, so it stays on the heuristic path.
+        const canonicalId = directMessageTargets.length === 1 ? results[0]?.eventId : undefined
+        addHumanMessage(directMessageTargets.join(', '), body, activeProjectId || undefined, canonicalId)
       } else if (isChannelComposer && activeChannelNameTarget) {
-        await pear.broker.sendMessage(activeProjectId, {
+        const { eventId } = await pear.broker.sendMessage(activeProjectId, {
           to: `#${activeChannelNameTarget}`,
           text: body,
           from: 'human'
         })
-        addHumanMessage(`#${activeChannelNameTarget}`, body, activeProjectId || undefined)
+        addHumanMessage(`#${activeChannelNameTarget}`, body, activeProjectId || undefined, eventId)
       } else if (recipient === 'broadcast') {
         const targets = runningAgents.map((agent) => agent.name)
         if (targets.length === 0) {
           throw new Error('No running agents available')
         }
+        // Broadcast fans out to N agents (N canonical echoes) but shows one '*'
+        // optimistic record, so there's no single id to adopt — heuristic path.
         await Promise.all(
           targets.map((target) =>
             pear.broker.sendMessage(activeProjectId, { to: target, text: body, from: 'human' })
@@ -77,8 +83,8 @@ export function ComposeBar({ directMessageParticipants }: ComposeBarProps = {}):
         )
         addHumanMessage('*', body, activeProjectId || undefined)
       } else {
-        await pear.broker.sendMessage(activeProjectId, { to: recipient, text: body, from: 'human' })
-        addHumanMessage(recipient, body, activeProjectId || undefined)
+        const { eventId } = await pear.broker.sendMessage(activeProjectId, { to: recipient, text: body, from: 'human' })
+        addHumanMessage(recipient, body, activeProjectId || undefined, eventId)
       }
       setText('')
     } catch (err) {

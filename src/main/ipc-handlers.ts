@@ -767,7 +767,7 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('broker:send-message', async (_, projectId: string | undefined, input: SendMessageInput) => {
-    await brokerManager.sendMessage(projectId, input)
+    return brokerManager.sendMessage(projectId, input)
   })
 
   ipcMain.handle('broker:reconcile-messages', async (_, input: BrokerReconcileMessagesInput) => {
