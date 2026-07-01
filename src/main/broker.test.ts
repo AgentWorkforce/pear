@@ -866,6 +866,92 @@ describe('BrokerManager local + cloud coexistence', () => {
     await manager.shutdown()
   })
 
+  it('coalesces concurrent mints for the same project onto a single in-flight request', async () => {
+    const manager = new BrokerManager()
+    await startLocal(manager)
+
+    let resolveFetch: ((value: unknown) => void) | undefined
+    const fetchMock = vi.fn(() => new Promise((resolve) => {
+      resolveFetch = resolve
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    // Two "clicks" before the first POST has resolved — without coalescing,
+    // each would race past the (still-empty) cache-miss check and mint a
+    // separate, unrevoked token.
+    const first = manager.mintObserverToken(PROJECT_ID)
+    const second = manager.mintObserverToken(PROJECT_ID)
+
+    // mintObserverTokenUncached awaits session.client.getSession() before
+    // calling fetch, so give that microtask a turn before asserting.
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1))
+
+    resolveFetch?.({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: 'ot_live_abc', id: 'obs-1' })
+    })
+
+    await expect(first).resolves.toEqual({ token: 'ot_live_abc', id: 'obs-1' })
+    await expect(second).resolves.toEqual({ token: 'ot_live_abc', id: 'obs-1' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    // Once settled, a later mint reuses the now-populated cache rather than
+    // the (already-cleared) in-flight entry.
+    await expect(manager.mintObserverToken(PROJECT_ID)).resolves.toEqual({ token: 'ot_live_abc', id: 'obs-1' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    await manager.shutdown()
+  })
+
+  it('allows a fresh mint after a coalesced in-flight request fails', async () => {
+    const manager = new BrokerManager()
+    await startLocal(manager)
+
+    let rejectFetch: ((reason: unknown) => void) | undefined
+    const failingFetchMock = vi.fn(() => new Promise((_resolve, reject) => {
+      rejectFetch = reject
+    }))
+    vi.stubGlobal('fetch', failingFetchMock)
+
+    const first = manager.mintObserverToken(PROJECT_ID)
+    const second = manager.mintObserverToken(PROJECT_ID)
+    await vi.waitFor(() => expect(failingFetchMock).toHaveBeenCalledTimes(1))
+
+    rejectFetch?.(new Error('network down'))
+    await expect(first).rejects.toThrow(/network down/)
+    await expect(second).rejects.toThrow(/network down/)
+
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: 'ot_live_retry', id: 'obs-retry' })
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    await expect(manager.mintObserverToken(PROJECT_ID)).resolves.toEqual({ token: 'ot_live_retry', id: 'obs-retry' })
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+
+    await manager.shutdown()
+  })
+
+  it('surfaces a distinct, honest error when the broker predates the observer-token route (404) instead of falling back to the insecure workspace-key link', async () => {
+    const manager = new BrokerManager()
+    await startLocal(manager)
+
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: false,
+      status: 404,
+      text: async () => 'not found'
+    })))
+
+    await expect(manager.mintObserverToken(PROJECT_ID)).rejects.toThrow(
+      /Observer links require a newer broker version/
+    )
+
+    await manager.shutdown()
+  })
+
   it('throws a readable error when the broker rejects the observer-token request', async () => {
     const manager = new BrokerManager()
     await startLocal(manager)

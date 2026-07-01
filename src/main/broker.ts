@@ -1264,6 +1264,13 @@ export class BrokerManager {
   // tokens; cleared in dropSession() whenever that project's session goes
   // away (including the join-a-different-workspace shutdown+restart path).
   private observerTokens = new Map<string, ObserverTokenResult>()
+  // In-flight mint promises keyed by projectId, so a double-click (or two
+  // BrokerDetailsPage instances) racing the cache-miss check in
+  // mintObserverToken() before the first POST resolves coalesce onto one
+  // request instead of each minting a separate, unrevoked token. Same
+  // "keyed in-flight-promise, clear in finally guarded by identity" shape as
+  // SpawnCoordinator.coalesce.
+  private observerTokenMints = new Map<string, Promise<ObserverTokenResult>>()
 
   get cwd(): string | null {
     return this.sessions.values().next().value?.cwd || null
@@ -1733,6 +1740,19 @@ export class BrokerManager {
     const cached = this.observerTokens.get(normalizedProjectId)
     if (cached) return cached
 
+    const inFlight = this.observerTokenMints.get(normalizedProjectId)
+    if (inFlight) return inFlight
+
+    const mintPromise = this.mintObserverTokenUncached(normalizedProjectId).finally(() => {
+      if (this.observerTokenMints.get(normalizedProjectId) === mintPromise) {
+        this.observerTokenMints.delete(normalizedProjectId)
+      }
+    })
+    this.observerTokenMints.set(normalizedProjectId, mintPromise)
+    return mintPromise
+  }
+
+  private async mintObserverTokenUncached(normalizedProjectId: string): Promise<ObserverTokenResult> {
     const session = this.getSessionForProject(normalizedProjectId)
     const baseUrl = getClientBaseUrl(session.client)
     if (!baseUrl) {
@@ -1762,6 +1782,15 @@ export class BrokerManager {
     }
 
     if (!response.ok) {
+      // 404 specifically means this broker predates the /api/observer-token
+      // route (e.g. the locked @agent-relay/broker-* dependency hasn't been
+      // bumped yet) — surface that distinctly rather than a generic HTTP
+      // error, and never fall back to the old workspace-key-based link here:
+      // that would silently reintroduce the full-access-key leak this
+      // endpoint exists to close.
+      if (response.status === 404) {
+        throw new Error('Observer links require a newer broker version — restart Pear after upgrading.')
+      }
       const text = await response.text().catch(() => '')
       throw new Error(`Broker rejected observer-token request (HTTP ${response.status})${text ? `: ${text}` : ''}`)
     }
