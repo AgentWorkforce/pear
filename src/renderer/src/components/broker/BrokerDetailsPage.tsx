@@ -1,5 +1,5 @@
 import type React from 'react'
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity,
   AlertCircle,
@@ -10,6 +10,7 @@ import {
   ExternalLink,
   KeyRound,
   List,
+  LogOut,
   MessageSquare,
   RefreshCw,
   Server,
@@ -877,6 +878,108 @@ function BrokerEventFeed({
   )
 }
 
+function JoinWorkspaceControl({
+  project,
+  joining,
+  joinError,
+  onJoin,
+  onDismissError
+}: {
+  project?: Project
+  joining?: boolean
+  joinError?: string
+  onJoin: (project: Project, workspaceKey: string) => void
+  onDismissError?: (project: Project) => void
+}): React.ReactNode {
+  const [open, setOpen] = useState(false)
+  const [key, setKey] = useState('')
+  const wasJoining = useRef(false)
+
+  useEffect(() => {
+    // Auto-close and reset once a join finishes without leaving an error —
+    // otherwise the form stays open with the submitted key and no feedback
+    // that the join actually succeeded.
+    if (wasJoining.current && !joining && !joinError) {
+      setOpen(false)
+      setKey('')
+    }
+    wasJoining.current = Boolean(joining)
+  }, [joining, joinError])
+
+  if (!project) return null
+
+  const submit = (): void => {
+    const trimmed = key.trim()
+    if (!trimmed) return
+    onJoin(project, trimmed)
+  }
+
+  const close = (): void => {
+    setOpen(false)
+    setKey('')
+    onDismissError?.(project)
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => {
+          onDismissError?.(project)
+          setOpen(true)
+        }}
+        className="inline-flex items-center gap-2 rounded-md border border-[var(--pear-border-subtle)] px-3 py-1.5 text-sm text-[var(--pear-text-dim)] hover:border-[var(--pear-accent-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
+      >
+        <LogOut size={14} />
+        <span>Close this workspace and join new one</span>
+      </button>
+    )
+  }
+
+  return (
+    <form
+      className="rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] p-3"
+      onSubmit={(event) => {
+        event.preventDefault()
+        submit()
+      }}
+    >
+      <p className="mb-2 text-[11px] text-[var(--pear-text-faint)]">
+        Paste the workspace key from another Pear instance&apos;s Agent Relay Status page. This closes the
+        current broker session for this project and reconnects it to that workspace.
+      </p>
+      <div className="flex flex-wrap items-center gap-2">
+        <input
+          type="text"
+          value={key}
+          onChange={(event) => setKey(event.target.value)}
+          placeholder="Workspace key"
+          disabled={joining}
+          autoFocus
+          className="min-w-0 flex-1 rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-2 py-1.5 font-mono text-[12px] text-[var(--pear-text)] outline-none focus:border-[var(--pear-accent-dim)]"
+        />
+        <button
+          type="submit"
+          disabled={joining || !key.trim()}
+          className="inline-flex items-center gap-2 rounded-md border border-[var(--pear-accent-dim)] bg-[var(--pear-accent)]/10 px-3 py-1.5 text-sm text-[var(--pear-accent-bright)] hover:bg-[var(--pear-accent)]/15 disabled:cursor-wait disabled:opacity-60"
+        >
+          {joining ? <RefreshCw size={14} className="animate-spin" /> : null}
+          <span>{joining ? 'Joining' : 'Join workspace'}</span>
+        </button>
+        <button
+          type="button"
+          onClick={close}
+          disabled={joining}
+          className="rounded-md border border-[var(--pear-border-subtle)] px-3 py-1.5 text-sm text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)]"
+        >
+          Cancel
+        </button>
+      </div>
+      {joinError && <p className="mt-2 text-sm text-[var(--pear-red)]">{joinError}</p>}
+    </form>
+  )
+}
+
 function BrokerCard({
   broker,
   projectName,
@@ -885,7 +988,11 @@ function BrokerCard({
   project,
   fixing,
   fixError,
-  onAutoFix
+  onAutoFix,
+  joining,
+  joinError,
+  onJoinWorkspace,
+  onDismissJoinError
 }: {
   broker: BrokerDetails
   projectName: string
@@ -895,6 +1002,10 @@ function BrokerCard({
   fixing?: boolean
   fixError?: string
   onAutoFix?: (project: Project, entry: BrokerErrorEntry) => void
+  joining?: boolean
+  joinError?: string
+  onJoinWorkspace?: (project: Project, workspaceKey: string) => void
+  onDismissJoinError?: (project: Project) => void
 }): React.ReactNode {
   const Icon = broker.kind === 'cloud' ? Cloud : Server
 
@@ -940,6 +1051,16 @@ function BrokerCard({
 
       <div className="space-y-5 p-5">
         <BrokerMetadataSummary broker={broker} />
+
+        {project && onJoinWorkspace && (
+          <JoinWorkspaceControl
+            project={project}
+            joining={joining}
+            joinError={joinError}
+            onJoin={onJoinWorkspace}
+            onDismissError={onDismissJoinError}
+          />
+        )}
 
         <div>
           <div className="mb-3 flex items-center gap-2">
@@ -1012,6 +1133,8 @@ export function BrokerDetailsPage(): React.ReactNode {
   const [detailsError, setDetailsError] = useState<string | null>(null)
   const [autoFixingProjectId, setAutoFixingProjectId] = useState<string | null>(null)
   const [autoFixErrors, setAutoFixErrors] = useState<Record<string, string>>({})
+  const [joiningProjectId, setJoiningProjectId] = useState<string | null>(null)
+  const [joinErrors, setJoinErrors] = useState<Record<string, string>>({})
 
   const pageProjectId = activeBrokerTabProjectId || activeProjectId || undefined
   const pageProjectName = pageProjectId ? getProjectName(projects, pageProjectId) : 'All projects'
@@ -1124,6 +1247,47 @@ export function BrokerDetailsPage(): React.ReactNode {
     }
   }, [loadBrokerDetails])
 
+  const handleJoinWorkspace = useCallback(async (project: Project, workspaceKey: string): Promise<void> => {
+    const root = getDefaultProjectRoot(project)
+    if (!root?.pathExists) {
+      setJoinErrors((errors) => ({
+        ...errors,
+        [project.id]: `Project path no longer exists: ${root?.path || project.rootPath}`
+      }))
+      return
+    }
+
+    setJoiningProjectId(project.id)
+    setJoinErrors((errors) => {
+      const { [project.id]: _removed, ...remaining } = errors
+      return remaining
+    })
+    try {
+      await pear.broker.joinWorkspace(
+        project.id,
+        root.path,
+        getProjectBrokerName(project),
+        project.channels,
+        workspaceKey
+      )
+      await loadBrokerDetails()
+    } catch (err) {
+      setJoinErrors((errors) => ({
+        ...errors,
+        [project.id]: err instanceof Error ? err.message : String(err)
+      }))
+    } finally {
+      setJoiningProjectId(null)
+    }
+  }, [loadBrokerDetails])
+
+  const handleDismissJoinError = useCallback((project: Project): void => {
+    setJoinErrors((errors) => {
+      const { [project.id]: _removed, ...remaining } = errors
+      return remaining
+    })
+  }, [])
+
   useEffect(() => {
     void loadBrokerDetails()
   }, [loadBrokerDetails])
@@ -1182,6 +1346,10 @@ export function BrokerDetailsPage(): React.ReactNode {
                     fixing={autoFixingProjectId === broker.projectId}
                     fixError={autoFixErrors[broker.projectId]}
                     onAutoFix={(project, entry) => void handleAutoFix(project, entry)}
+                    joining={joiningProjectId === broker.projectId}
+                    joinError={joinErrors[broker.projectId]}
+                    onJoinWorkspace={(project, workspaceKey) => void handleJoinWorkspace(project, workspaceKey)}
+                    onDismissJoinError={handleDismissJoinError}
                   />
                 ))}
                 {unmatchedProjectErrorGroups.map(([projectId, entries]) => (

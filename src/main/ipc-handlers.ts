@@ -650,6 +650,27 @@ export function registerIpcHandlers(): void {
     await brokerManager.syncChannels(projectId, channels)
   })
 
+  ipcMain.handle('broker:join-workspace', async (
+    event,
+    projectId: string,
+    cwd: string,
+    name: string,
+    channels: string[] | undefined,
+    workspaceKey: string
+  ) => {
+    const win = BrowserWindow.fromWebContents(event.sender)
+    if (!win) throw new Error('No window')
+    if (!isDirectory(cwd)) {
+      throw new Error(`Project path no longer exists: ${cwd}`)
+    }
+    const started = await brokerManager.joinWorkspace(projectId, cwd, name, win, channels, workspaceKey)
+    if (started) {
+      void integrationsManager.notifyAgentState(projectId).catch((error) => {
+        console.warn('[integrations] Failed to notify agents after workspace join:', error instanceof Error ? error.message : String(error))
+      })
+    }
+  })
+
   ipcMain.handle('broker:auto-fix-runtime', async (
     event,
     projectId: string,

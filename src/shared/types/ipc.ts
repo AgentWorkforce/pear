@@ -912,6 +912,13 @@ export interface PearAPI {
   broker: {
     start: (projectId: string, cwd: string, name: string, channels?: string[]) => Promise<boolean>
     syncChannels: (projectId: string, channels: string[]) => Promise<void>
+    joinWorkspace: (
+      projectId: string,
+      cwd: string,
+      name: string,
+      channels: string[] | undefined,
+      workspaceKey: string
+    ) => Promise<boolean>
     autoFixRuntime: (
       projectId: string,
       cwd: string,

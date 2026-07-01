@@ -1339,7 +1339,8 @@ export class BrokerManager {
     cwd: string,
     name: string,
     win: BrowserWindow,
-    channels: string[] = []
+    channels: string[] = [],
+    workspaceKey?: string
   ): Promise<boolean> {
     const normalizedProjectId = projectId.trim()
     if (!normalizedProjectId) {
@@ -1380,7 +1381,7 @@ export class BrokerManager {
     }
 
     const startBroker = async (): Promise<boolean> => {
-      const explicitWorkspaceKey = process.env.AGENT_RELAY_WORKSPACE_KEY?.trim() || undefined
+      const explicitWorkspaceKey = workspaceKey?.trim() || process.env.AGENT_RELAY_WORKSPACE_KEY?.trim() || undefined
       const existingClient = await this.connectExistingBroker(normalizedProjectId, cwd, explicitWorkspaceKey)
       if (existingClient) {
         const eventStreamGeneration = this.nextEventStreamGeneration()
@@ -1615,6 +1616,37 @@ export class BrokerManager {
     await delay(250)
     await this.start(normalizedProjectId, cwd, name, win, channels)
     return { removed }
+  }
+
+  /**
+   * Tear down this project's current broker session(s) and start a fresh
+   * local broker pinned to an existing workspace key, so this Pear instance
+   * joins another instance's workspace instead of creating its own.
+   */
+  async joinWorkspace(
+    projectId: string,
+    cwd: string,
+    name: string,
+    win: BrowserWindow,
+    channels: string[] = [],
+    workspaceKey: string
+  ): Promise<boolean> {
+    const normalizedProjectId = projectId.trim()
+    if (!normalizedProjectId) {
+      throw new Error('Project id is required')
+    }
+    const trimmedKey = workspaceKey.trim()
+    if (!trimmedKey) {
+      throw new Error('Workspace key is required')
+    }
+    assertDirectory(cwd, 'Project path')
+    // A start already in flight for this project (e.g. the initial project
+    // open) would otherwise race start()'s in-flight-reuse path below and
+    // silently keep the broker on the old/first-requested key.
+    const inFlightStart = this.startPromises.get(normalizedProjectId)
+    if (inFlightStart) await inFlightStart.catch(() => undefined)
+    await this.shutdown(normalizedProjectId)
+    return this.start(normalizedProjectId, cwd, name, win, channels, trimmedKey)
   }
 
   /**
