@@ -875,6 +875,9 @@ export const pearMock: PearAPI = {
       const project = state.projects.find((entry) => entry.id === projectId)
       if (project) project.channels = Array.from(new Set(channels))
     },
+    joinWorkspace: async (projectId: string) => {
+      emitBrokerStatus({ projectId, status: 'connected' })
+    },
     autoFixRuntime: async () => ({ removed: [] }),
     connectCloud: async () => 'mock-cloud',
     spawnAgent: async (projectId: string, input: BrokerSpawnAgentInput): Promise<BrokerSpawnAgentResult> => {
