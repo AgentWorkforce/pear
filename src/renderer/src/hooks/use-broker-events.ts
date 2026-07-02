@@ -1,5 +1,6 @@
 import { useCallback, useEffect } from 'react'
 import { pear, type BrokerListAgent } from '@/lib/ipc'
+import { applyObserverChatUpdate } from '@/lib/observer-chat'
 import { getAgentKey, getAgentKeyForAgent, useAgentStore } from '@/stores/agent-store'
 import { appendPtyChunk } from '@/stores/pty-buffer-store'
 import { useProjectStore } from '@/stores/project-store'
@@ -91,6 +92,14 @@ export function useBrokerEvents(): void {
       }
     })
 
+    // Observer-stream chat updates (main process, PEAR_OBSERVER_STREAM —
+    // default OFF, so this channel is silent unless the flag is set). Updates
+    // merge through the same reconcileMessages store path the REST polling
+    // reconciliation uses; the optional call keeps older preloads harmless.
+    const unsubObserverChat = pear.broker.onObserverChatUpdate?.((update) => {
+      applyObserverChatUpdate(update)
+    })
+
     // Menu handlers
     const unsubNewWs = pear.onMenu('menu:new-project', () => openDialog('add-project'))
     const unsubSpawn = pear.onMenu('menu:spawn-agent', () => openDialog('spawn-agent'))
@@ -132,6 +141,7 @@ export function useBrokerEvents(): void {
       unsubEvent()
       unsubPtyChunk()
       unsubStatus()
+      unsubObserverChat?.()
       unsubNewWs()
       unsubSpawn()
       unsubCloseTab()

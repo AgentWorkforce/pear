@@ -60,6 +60,7 @@ import type {
   IntegrationEventTelemetrySnapshot,
   IntegrationOption,
   IntegrationsEvent,
+  ObserverChatUpdate,
   ObserverTokenResult,
   PearAPI,
   PendingRelayMessage,
@@ -115,6 +116,7 @@ interface MockState {
   brokerEventListeners: Set<Listener<unknown>>
   brokerStatusListeners: Set<Listener<BrokerStatusEvent>>
   brokerDiagnosticListeners: Set<Listener<BrokerEventStreamDiagnostic>>
+  observerChatUpdateListeners: Set<Listener<ObserverChatUpdate>>
   ptyChunkListeners: Set<(
     projectId: string,
     name: string,
@@ -240,6 +242,7 @@ function createState(): MockState {
     brokerEventListeners: new Set(),
     brokerStatusListeners: new Set(),
     brokerDiagnosticListeners: new Set(),
+    observerChatUpdateListeners: new Set(),
     ptyChunkListeners: new Set(),
     menuListeners: new Map(),
     cloudAgentListeners: new Set(),
@@ -996,6 +999,8 @@ export const pearMock: PearAPI = {
     onEvent: (callback: (event: unknown) => void) => noopUnsubscribe(state.brokerEventListeners, callback),
     onEventStreamDiagnostic: (callback: (event: BrokerEventStreamDiagnostic) => void) =>
       noopUnsubscribe(state.brokerDiagnosticListeners, callback),
+    onObserverChatUpdate: (callback: (update: ObserverChatUpdate) => void) =>
+      noopUnsubscribe(state.observerChatUpdateListeners, callback),
     onPtyChunk: (callback: (
       projectId: string,
       name: string,

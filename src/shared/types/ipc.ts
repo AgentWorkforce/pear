@@ -236,6 +236,40 @@ export interface BrokerReconcileMessagesInput {
   limit?: number
 }
 
+/**
+ * A batch of chat updates produced by the main-process observer-stream
+ * consumer (`src/main/observer-stream.ts`, behind PEAR_OBSERVER_STREAM).
+ * Delivered over the `observer:chat-update` IPC channel and merged by the
+ * renderer through the exact same `reconcileMessages` store path the REST
+ * polling reconciliation uses — deliberately no parallel message store.
+ */
+export interface ObserverChatUpdate {
+  projectId: string
+  /** Channel messages, fully resolved (`to` is the `#channel` target). */
+  messages: BrokerReconciledChatMessage[]
+  /**
+   * DM / group-DM messages. The observer event only carries the sender and
+   * conversation id, so `message.to` is the conversation id placeholder; the
+   * renderer bridge resolves it to participant names before merging.
+   */
+  directMessages: Array<{
+    conversationId: string
+    message: BrokerReconciledChatMessage
+  }>
+  /** Thread replies, keyed by the parent message id. */
+  threadReplies: Array<{
+    parentId: string
+    reply: {
+      id: string
+      from: string
+      body: string
+      timestamp: number
+      isHuman: boolean
+      projectId?: string
+    }
+  }>
+}
+
 export interface BrokerEventStreamDiagnostic {
   projectId: string
   status: 'received' | 'rebind-started' | 'rebound' | 'rebind-skipped' | 'rebind-error'
@@ -1002,6 +1036,7 @@ export interface PearAPI {
     shutdown: () => Promise<void>
     onEvent: (callback: (event: unknown) => void) => () => void
     onEventStreamDiagnostic: (callback: (event: BrokerEventStreamDiagnostic) => void) => () => void
+    onObserverChatUpdate: (callback: (update: ObserverChatUpdate) => void) => () => void
     onPtyChunk: (
       callback: (
         projectId: string,

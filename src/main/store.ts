@@ -165,6 +165,38 @@ export function setRelayWorkspaceRecord(record: RelayWorkspaceRecord | null): vo
   saveStore(data)
 }
 
+// Per-workspace observer-stream cursors (highest processed `seq` from the
+// relaycast observer plane — see src/main/observer-stream.ts). Stored as a
+// top-level `observerStreamCursors: Record<workspaceId, seq>` key; the store
+// schema parses with `.passthrough()`, so the key survives load/save
+// round-trips without a schema change.
+const OBSERVER_STREAM_CURSORS_KEY = 'observerStreamCursors'
+
+function readObserverStreamCursors(data: StoreData): Record<string, number> {
+  const raw = (data as Record<string, unknown>)[OBSERVER_STREAM_CURSORS_KEY]
+  if (!isRecord(raw)) return {}
+  const cursors: Record<string, number> = {}
+  for (const [workspaceId, seq] of Object.entries(raw)) {
+    if (typeof seq === 'number' && Number.isFinite(seq)) {
+      cursors[workspaceId] = seq
+    }
+  }
+  return cursors
+}
+
+export function getObserverStreamCursor(workspaceId: string): number | undefined {
+  return readObserverStreamCursors(loadStore())[workspaceId]
+}
+
+export function setObserverStreamCursor(workspaceId: string, seq: number): void {
+  if (!workspaceId || !Number.isFinite(seq)) return
+  const data = loadStore()
+  const cursors = readObserverStreamCursors(data)
+  cursors[workspaceId] = seq
+  ;(data as Record<string, unknown>)[OBSERVER_STREAM_CURSORS_KEY] = cursors
+  saveStore(data)
+}
+
 export function addProject(name: string, rootPath: string): Project {
   const data = loadStore()
   const id = crypto.randomUUID()
