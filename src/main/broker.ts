@@ -17,6 +17,7 @@ import {
   type PendingRelayMessage
 } from '@agent-relay/harness-driver'
 import { AgentRelay, type RelayMessage } from '@agent-relay/sdk'
+import { WsClient } from '@relaycast/sdk'
 import { getAccessToken, getApiUrl } from './auth'
 import { assertDirectory } from './path-utils'
 import { toErrorMessage } from './errors'
@@ -672,6 +673,104 @@ function normalizeRelayMessageForChat(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Relaycast observer stream
+//
+// The local broker's own dashboard WS (`attachClient` below) is fed by only
+// two narrow paths: the broker's own send handler (a human sending via
+// Pear's UI) and node-controlled PTY delivery. Neither covers a message an
+// agent's own MCP server posts straight to Relaycast (bypassing the broker's
+// send path entirely) or a channel with no locally-attached worker (node
+// delivery to THIS broker never fires). Pear's main process closes that gap
+// by opening a second, direct-to-Relaycast `/v1/ws` subscription per open
+// project, scoped to an observer token (`mintObserverToken`) — the exact
+// mechanism the hosted observer dashboard already uses to see everything
+// live. Matching frames are synthesized into the same `relay_inbound` shape
+// and fed through the same `publishBrokerEvent` ingestion point ordinary
+// broker events use, so the renderer's existing dedup/store logic needs no
+// changes.
+//
+// Message-class wire event `type`s worth forwarding. The first four are the
+// actual wire types `@relaycast/sdk`'s `WsClientEventSchema` currently
+// declares — confirmed against `packages/observer-dashboard` in the
+// relaycast repo, which already consumes this exact stream as an observer.
+// The rest mirror the broader forward-compat alias set relay's
+// `classify_fleet_delivery` (crates/broker/src/runtime/fleet.rs) already uses
+// for the analogous broker-side purpose, so a future Relaycast release that
+// adds one of those aliases to `/v1/ws` doesn't silently stop working here.
+const OBSERVER_STREAM_MESSAGE_EVENT_TYPES: ReadonlySet<string> = new Set([
+  'message.created',
+  'thread.reply',
+  'dm.received',
+  'group_dm.received',
+  'message.received',
+  'message.new',
+  'message.sent',
+  'message.delivered',
+  'thread.message.created',
+  'thread.message.sent',
+  'dm.created',
+  'dm.new',
+  'dm.sent',
+  'dm.message.created',
+  'direct_message.received',
+  'direct_message.created',
+  'direct_message.new',
+  'direct_message.sent',
+  'group_dm.created',
+  'group_dm.new',
+  'group_dm.sent'
+])
+
+interface ObserverStreamHandle {
+  ws: WsClient
+  off: () => void
+}
+
+function extractObserverStreamMessage(raw: unknown): { id: string; from: string; body: string } | null {
+  if (!isRecord(raw)) return null
+  const id = typeof raw.id === 'string' ? raw.id : undefined
+  const from = typeof raw.agentName === 'string' ? raw.agentName : undefined
+  const body = typeof raw.text === 'string' ? raw.text : undefined
+  if (!id || !from || !body) return null
+  return { id, from, body }
+}
+
+// Synthesizes the same `relay_inbound`-shaped payload `attachClient` publishes
+// for the local broker's own chat events, from a raw (camelCase, per WsClient's
+// `camelizeKeys`) `/v1/ws` frame. Returns `null` for anything that isn't a
+// genuine chat message (wrong `type`, or a malformed `message` sub-object).
+function observerStreamRelayInboundPayload(event: Record<string, unknown>): BrokerEventRecordPayload | null {
+  const type = typeof event.type === 'string' ? event.type : undefined
+  if (!type || !OBSERVER_STREAM_MESSAGE_EVENT_TYPES.has(type)) return null
+
+  const message = extractObserverStreamMessage(event.message)
+  if (!message) return null
+
+  let target: string | undefined
+  if (typeof event.channel === 'string' && event.channel.trim()) {
+    target = normalizeChatChannelTarget(event.channel)
+  } else if (typeof event.conversationId === 'string' && event.conversationId.trim()) {
+    // Live `/v1/ws` dm.received/group_dm.received frames only carry the
+    // conversation id, not participant names (unlike reconcileMessages' REST
+    // history fetch, which derives an "alice, bob"-style target from
+    // `dms.conversations()`). Fall back to the raw id so the message still
+    // surfaces instead of being silently dropped; the DM room title shows the
+    // conversation id until a follow-up adds a participant-name lookup.
+    target = event.conversationId
+  }
+  if (!target) return null
+
+  return {
+    kind: 'relay_inbound',
+    event_id: message.id,
+    from: message.from,
+    target,
+    body: message.body,
+    ...(typeof event.parentId === 'string' && event.parentId.trim() ? { thread_id: event.parentId } : {})
+  }
+}
+
 function brokerEventSeq(event: BrokerEvent): number | undefined {
   const seq = (event as Record<string, unknown>).seq
   return typeof seq === 'number' && Number.isFinite(seq) ? seq : undefined
@@ -1284,6 +1383,13 @@ export class BrokerManager {
   // stale promise directly (not through `observerTokenMints`) when the drop
   // happens.
   private observerTokenGenerations = new Map<string, number>()
+  // One direct-to-Relaycast `/v1/ws` observer subscription per project with a
+  // live session (see "Relaycast observer stream" above `ensureObserverStream`
+  // for the rationale). Keyed by projectId — not sessionKey — since it's
+  // project-scoped like `observerTokens`, and shared across a project's local
+  // + cloud sessions rather than duplicated per session type. Torn down in
+  // `dropSession()` once no session (local or cloud) remains for the project.
+  private observerStreams = new Map<string, ObserverStreamHandle>()
 
   get cwd(): string | null {
     return this.sessions.values().next().value?.cwd || null
@@ -1407,6 +1513,7 @@ export class BrokerManager {
       await this.syncChannels(normalizedProjectId, nextChannels)
       await this.refreshEventStream(normalizedProjectId, 'existing-session-start', win)
       await this.ensureLocalFleetSidecar(existing)
+      this.ensureObserverStream(normalizedProjectId)
       this.sendStatus(normalizedProjectId, 'connected')
       return false
     }
@@ -1424,6 +1531,7 @@ export class BrokerManager {
         started.name = name
         await this.syncChannels(normalizedProjectId, nextChannels)
         await this.ensureLocalFleetSidecar(started)
+        this.ensureObserverStream(normalizedProjectId)
         this.sendStatus(normalizedProjectId, 'connected')
         return false
       } catch (err) {
@@ -1456,6 +1564,7 @@ export class BrokerManager {
 
         await this.syncChannels(normalizedProjectId, nextChannels)
         await this.ensureLocalFleetSidecar(session)
+        this.ensureObserverStream(normalizedProjectId)
         this.publishBrokerEvent(normalizedProjectId, normalizedProjectId, win, {
           kind: 'broker_initialized',
           name,
@@ -1526,6 +1635,7 @@ export class BrokerManager {
       }
       this.sessions.set(normalizedProjectId, session)
       await this.ensureLocalFleetSidecar(session)
+      this.ensureObserverStream(normalizedProjectId)
 
       this.publishBrokerEvent(normalizedProjectId, normalizedProjectId, win, {
         kind: 'broker_initialized',
@@ -1830,6 +1940,61 @@ export class BrokerManager {
     return result
   }
 
+  // Idempotent: a second call for a project that already has a live observer
+  // stream is a no-op, so callers (both `start()` branches, the cloud attach
+  // path, and the "existing session" re-start branch) can call this
+  // unconditionally without worrying about double-connecting.
+  private ensureObserverStream(projectId: string): void {
+    if (this.observerStreams.has(projectId)) return
+
+    const baseUrl = normalizeRelaycastBaseUrl(process.env.RELAYCAST_BASE_URL || process.env.RELAY_BASE_URL)
+    const ws = new WsClient({
+      // A function (not a string) so every (re)connect — including WsClient's
+      // own built-in exponential-backoff reconnects — mints a fresh token via
+      // the same cached/coalesced `mintObserverToken` path the "Join as
+      // observer" link uses, rather than one token baked in at construction
+      // time.
+      token: async () => (await this.mintObserverToken(projectId)).token,
+      baseUrl,
+      debug: isBrokerDebugEnabled()
+    })
+    const off = ws.on('*', (event) => {
+      // The stream may have been torn down by dropSession() (which disconnects
+      // this exact WsClient instance) between when this handler was queued and
+      // when it runs; disconnect() is synchronous, but this is a belt-and-
+      // suspenders guard against any straggling microtask, same spirit as the
+      // `eventStreamGeneration` check in `attachClient`.
+      if (this.observerStreams.get(projectId)?.ws !== ws) return
+      this.handleObserverStreamEvent(projectId, event as unknown as Record<string, unknown>)
+    })
+    this.observerStreams.set(projectId, { ws, off })
+    ws.connect()
+  }
+
+  private handleObserverStreamEvent(projectId: string, event: Record<string, unknown>): void {
+    const payload = observerStreamRelayInboundPayload(event)
+    if (!payload) return
+
+    // Reuse the exact same ingress validation the local broker's own event
+    // stream goes through in `attachClient`, so a malformed synthesized event
+    // is dropped (and throttled-warned) the same way, rather than bypassing
+    // that guardrail for this second source.
+    const forwarded = this.validateIngressBrokerEvent(payload as unknown as BrokerEvent)
+    if (!forwarded) return
+
+    const [session] = this.sessionsForProject(projectId)
+    if (!session) return
+    this.publishBrokerEvent(sessionKeyFor(session), projectId, session.window, forwarded)
+  }
+
+  private stopObserverStream(projectId: string): void {
+    const handle = this.observerStreams.get(projectId)
+    if (!handle) return
+    this.observerStreams.delete(projectId)
+    handle.off()
+    handle.ws.disconnect()
+  }
+
   private async ensureLocalFleetSidecar(session: BrokerSession): Promise<void> {
     if (session.cloudSandboxId) return
     if (session.fleetSidecar && session.fleetSidecarCwd === session.cwd) return
@@ -2024,6 +2189,7 @@ export class BrokerManager {
         operationQueue: new BrokerOperationQueue(BROKER_OPERATION_CONCURRENCY)
       })
       client.connectEvents()
+      this.ensureObserverStream(normalizedProjectId)
 
       if (workspaceKeyMismatch) {
         this.publishBrokerEvent(sessionKey, normalizedProjectId, win, {
@@ -4267,6 +4433,13 @@ export class BrokerManager {
       if (sessionKeys.size === 0) {
         this.agentSessions.delete(agentName)
       }
+    }
+    // The observer stream is project-scoped (shared across a project's local
+    // + cloud sessions), so only tear it down once neither remains — dropping
+    // just one sibling session type (e.g. detaching a cloud sandbox while the
+    // local broker keeps running) must not kill live coverage for the other.
+    if (!this.sessionsForProject(droppedProjectId).length) {
+      this.stopObserverStream(droppedProjectId)
     }
   }
 

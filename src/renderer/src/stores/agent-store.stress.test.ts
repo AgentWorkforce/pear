@@ -245,6 +245,51 @@ describe('agent-store stress', () => {
     expect(messages[0]!.local).not.toBe(true)
   })
 
+  it('a human send does not double-render when its canonical echo also arrives over the new Relaycast observer stream', () => {
+    // Pear's main process now feeds a second source of relay_inbound events
+    // into this exact reducer — a direct-to-Relaycast observer-stream
+    // subscription (see broker.ts's ensureObserverStream), alongside the
+    // existing local broker dashboard WS. A human's own send can therefore
+    // legitimately echo back TWICE under two different event ids: once from
+    // the local broker's own send-echo, once from the observer stream. This
+    // must never render as two visible messages.
+    const store = useAgentStore.getState()
+    store.addHumanMessage('#general', 'observer-stream-body', 'p1')
+    const optimistic = useAgentStore.getState().messages.find(
+      (m) => m.body === 'observer-stream-body' && m.local === true
+    )
+    expect(optimistic).toBeTruthy()
+
+    // The local broker's own echo arrives first...
+    store.handleBrokerEvent(relayInbound({
+      from: 'human',
+      target: '#general',
+      body: 'observer-stream-body',
+      projectId: 'p1',
+      event_id: 'evt-local-broker-echo'
+    }))
+    // ...then the SAME logical message arrives again over the observer
+    // stream, under Relaycast's own canonical id (necessarily different from
+    // the local broker's echo id in this worst case).
+    store.handleBrokerEvent(relayInbound({
+      from: 'human',
+      target: '#general',
+      body: 'observer-stream-body',
+      projectId: 'p1',
+      event_id: 'evt-observer-stream-echo'
+    }))
+
+    const messages = useAgentStore.getState().messages.filter(
+      (m) => m.body === 'observer-stream-body'
+    )
+    expect(messages.length).toBe(1)
+    // Still the original optimistic record — isCanonicalEchoOfLocalHuman
+    // (which matches on content/time against any `local: true` record,
+    // regardless of which stream produced the echo) suppresses both.
+    expect(messages[0]!.id).toBe(optimistic!.id)
+    expect(messages[0]!.local).toBe(true)
+  })
+
   it('addHumanMessage does not drop a second identical send shortly after the first was reconciled', () => {
     // Regression for review feedback on the race guard above: matching
     // isCanonicalAlreadyPresent against ANY non-local record (including

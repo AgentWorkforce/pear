@@ -184,6 +184,60 @@ const fleetNodeMock = vi.hoisted(() => {
   return { sidecars, startPearFleetSidecar }
 })
 
+// Fake for `@relaycast/sdk`'s `WsClient`, standing in for the direct-to-
+// Relaycast observer stream `ensureObserverStream` opens. Real WsClient
+// handles its own reconnect/backoff/token-refresh internally; these tests
+// only need to observe connect()/disconnect() calls and to synthesize wire
+// frames via `emit()` — they don't need a real socket or the resync/replay
+// machinery, so no `disconnected` guard on `emit()` (tests exercise the
+// production-code teardown path itself, not a re-implementation of it).
+const relaycastSdkMock = vi.hoisted(() => {
+  type WsHandler = (event: Record<string, unknown>) => void
+
+  class FakeWsClient {
+    static instances: FakeWsClient[] = []
+    readonly tokenFn: () => string | Promise<string>
+    private handlers = new Map<string, Set<WsHandler>>()
+    connectCallCount = 0
+    disconnectCallCount = 0
+
+    constructor(options: { token: string | (() => string | Promise<string>) }) {
+      this.tokenFn = typeof options.token === 'function'
+        ? (options.token as () => string | Promise<string>)
+        : () => options.token as string
+      FakeWsClient.instances.push(this)
+    }
+
+    connect(): void {
+      this.connectCallCount += 1
+    }
+
+    disconnect(): void {
+      this.disconnectCallCount += 1
+    }
+
+    on(event: string, handler: WsHandler): () => void {
+      if (!this.handlers.has(event)) this.handlers.set(event, new Set())
+      this.handlers.get(event)!.add(handler)
+      return () => {
+        this.handlers.get(event)?.delete(handler)
+      }
+    }
+
+    emit(event: Record<string, unknown>): void {
+      const type = typeof event.type === 'string' ? event.type : ''
+      this.handlers.get(type)?.forEach((handler) => handler(event))
+      this.handlers.get('*')?.forEach((handler) => handler(event))
+    }
+  }
+
+  return { FakeWsClient }
+})
+
+vi.mock('@relaycast/sdk', () => ({
+  WsClient: relaycastSdkMock.FakeWsClient
+}))
+
 const electronMock = vi.hoisted(() => ({
   app: {
     getAppPath: () => '/tmp/pear-app',
@@ -617,6 +671,7 @@ describe('BrokerManager local + cloud coexistence', () => {
     mock.HarnessDriverClient.connect.mockClear()
     fleetNodeMock.sidecars.length = 0
     fleetNodeMock.startPearFleetSidecar.mockClear()
+    relaycastSdkMock.FakeWsClient.instances.length = 0
   })
 
   afterEach(async () => {
@@ -2479,6 +2534,172 @@ describe('BrokerManager local + cloud coexistence', () => {
       ['broker:pty-chunk', PROJECT_ID, 'claude-1', ' '],
       ['broker:pty-chunk', PROJECT_ID, 'claude-1', '>']
     ])
+
+    await manager.shutdown()
+  })
+
+  it('forwards a message-class observer-stream frame as a single relay_inbound event with the canonical id', async () => {
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    await startLocalWithWindow(manager, win)
+
+    const stream = relaycastSdkMock.FakeWsClient.instances.at(-1)
+    expect(stream).toBeTruthy()
+
+    stream!.emit({
+      type: 'message.created',
+      channel: 'general',
+      message: {
+        id: 'msg-canonical-1',
+        agentId: 'agent-1',
+        agentName: 'agent-q',
+        agentType: 'agent',
+        text: 'hello from the observer stream'
+      }
+    })
+
+    const relayInboundEvents = brokerEventSends(win)
+      .filter((payload) => (payload as { kind?: string }).kind === 'relay_inbound')
+    expect(relayInboundEvents).toHaveLength(1)
+    expect(relayInboundEvents[0]).toMatchObject({
+      kind: 'relay_inbound',
+      event_id: 'msg-canonical-1',
+      from: 'agent-q',
+      target: '#general',
+      body: 'hello from the observer stream'
+    })
+
+    await manager.shutdown()
+  })
+
+  it('forwards a thread.reply frame with its parent id as thread_id', async () => {
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    await startLocalWithWindow(manager, win)
+    const stream = relaycastSdkMock.FakeWsClient.instances.at(-1)!
+
+    stream.emit({
+      type: 'thread.reply',
+      channel: 'general',
+      parentId: 'msg-parent-1',
+      message: {
+        id: 'msg-reply-1',
+        agentId: 'agent-1',
+        agentName: 'agent-q',
+        text: 'a reply'
+      }
+    })
+
+    const relayInboundEvents = brokerEventSends(win)
+      .filter((payload) => (payload as { kind?: string }).kind === 'relay_inbound')
+    expect(relayInboundEvents).toEqual([
+      expect.objectContaining({
+        event_id: 'msg-reply-1',
+        target: '#general',
+        thread_id: 'msg-parent-1'
+      })
+    ])
+
+    await manager.shutdown()
+  })
+
+  it('does not forward a non-message-class observer-stream frame', async () => {
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    await startLocalWithWindow(manager, win)
+    const stream = relaycastSdkMock.FakeWsClient.instances.at(-1)!
+
+    stream.emit({ type: 'message.reacted', messageId: 'msg-1', emoji: '👍', agentName: 'agent-q' })
+    stream.emit({ type: 'agent.status.active', agent: { name: 'agent-q' }, status: 'active' })
+    stream.emit({ type: 'open' })
+    stream.emit({ type: 'pong' })
+
+    // `broker_initialized` (published at start) is expected — assert no
+    // `relay_inbound` snuck in alongside it.
+    expect(
+      brokerEventSends(win).some((payload) => (payload as { kind?: string }).kind === 'relay_inbound')
+    ).toBe(false)
+
+    await manager.shutdown()
+  })
+
+  it('disconnects the observer stream on session drop and opens a fresh one on restart, without leaking the old connection', async () => {
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    await startLocalWithWindow(manager, win)
+
+    const first = relaycastSdkMock.FakeWsClient.instances.at(-1)!
+    expect(first.connectCallCount).toBe(1)
+    expect(first.disconnectCallCount).toBe(0)
+
+    // Session drop (e.g. joinWorkspace's shutdown+restart, or plain shutdown)
+    // must tear this down exactly like the observer-token cache/generation
+    // guard it's tied to (dropSession) — not leave it running against a
+    // workspace this project no longer owns.
+    await manager.shutdown(PROJECT_ID)
+    expect(first.disconnectCallCount).toBe(1)
+
+    await startLocalWithWindow(manager, win)
+    const second = relaycastSdkMock.FakeWsClient.instances.at(-1)!
+    expect(second).not.toBe(first)
+    expect(second.connectCallCount).toBe(1)
+
+    // The old, torn-down stream must not still be wired into dispatch — a
+    // frame it (hypothetically) still emitted must not reach the renderer.
+    first.emit({
+      type: 'message.created',
+      channel: 'general',
+      message: { id: 'stale-msg', agentName: 'agent-q', text: 'stale' }
+    })
+    expect(
+      brokerEventSends(win).some((payload) => (payload as { event_id?: string }).event_id === 'stale-msg')
+    ).toBe(false)
+
+    await manager.shutdown()
+  })
+
+  it('keeps the observer stream alive when only the sibling cloud session for the same project drops', async () => {
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    await startLocalWithWindow(manager, win)
+    await attachCloud(manager, [])
+
+    const stream = relaycastSdkMock.FakeWsClient.instances.at(-1)!
+    expect(relaycastSdkMock.FakeWsClient.instances).toHaveLength(1)
+
+    await manager.detachCloudSandbox(PROJECT_ID)
+    expect(stream.disconnectCallCount).toBe(0)
+
+    stream.emit({
+      type: 'message.created',
+      channel: 'general',
+      message: { id: 'still-alive-msg', agentName: 'agent-q', text: 'still here' }
+    })
+    expect(
+      brokerEventSends(win).some((payload) => (payload as { event_id?: string }).event_id === 'still-alive-msg')
+    ).toBe(true)
+
+    await manager.shutdown()
+  })
+
+  it('mints the observer token lazily via the token function, reusing the cached mintObserverToken path', async () => {
+    const manager = new BrokerManager()
+    await startLocal(manager)
+
+    const fetchMock = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ token: 'ot_live_stream', id: 'obs-stream' }),
+      text: async () => ''
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const stream = relaycastSdkMock.FakeWsClient.instances.at(-1)!
+    await expect(stream.tokenFn()).resolves.toBe('ot_live_stream')
+    // Backs onto the same cached mintObserverToken() the "Join as observer"
+    // link uses — a second call must not mint again.
+    await expect(stream.tokenFn()).resolves.toBe('ot_live_stream')
+    expect(fetchMock).toHaveBeenCalledTimes(1)
 
     await manager.shutdown()
   })
