@@ -1604,6 +1604,17 @@ describe('IntegrationsManager', () => {
     expect(instructions).toContain('.integrations/discovery/slack')
   })
 
+  it('includes visible idle integrations in initial spawn instructions', () => {
+    mock.store.projects[0].integrations = [makeIntegration('slack', ['/slack/channels'])]
+    const manager = new IntegrationsManager()
+
+    const instructions = manager.initialSpawnInstructions('project-1')
+
+    expect(instructions).toContain('<integrations-update>')
+    expect(instructions).toContain('slack')
+    expect(instructions).toContain('select narrower resources before creating local writeback files')
+  })
+
   it('builds prescriptive spawn instructions from the adapter discovery doc', () => {
     // Materialize a discovery .adapter.md on the (mocked) local mount so the
     // generator reads writable resources from adapter data, not hardcoded rows.

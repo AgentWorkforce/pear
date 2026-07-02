@@ -226,7 +226,7 @@ describe('registerIpcHandlers broker:spawn-agent', () => {
     expect(() => structuredClone(result)).not.toThrow()
   })
 
-  it('uses prescriptive instructions for non-claude CLIs', async () => {
+  it('uses prescriptive instructions for opencode', async () => {
     const handler = mock.handlers.get('broker:spawn-agent')
     mock.integrationsManager.prescriptiveSpawnInstructions.mockReturnValueOnce('PRESCRIPTIVE')
     mock.brokerManager.spawnAgent.mockResolvedValueOnce({ name: 'oc-1', runtime: 'pty' })
@@ -242,16 +242,20 @@ describe('registerIpcHandlers broker:spawn-agent', () => {
     expect(mock.integrationsManager.recordSpawnInstructionDelivery).not.toHaveBeenCalled()
   })
 
-  it('uses narrative instructions for claude and records delivery', async () => {
+  it.each([
+    ['claude', 'claude-1'],
+    ['codex', 'codex-1'],
+    ['grok', 'grok-1']
+  ])('uses narrative instructions for %s and records delivery', async (cli, name) => {
     const handler = mock.handlers.get('broker:spawn-agent')
     mock.integrationsManager.initialSpawnInstructions.mockReturnValueOnce('NARRATIVE')
-    mock.brokerManager.spawnAgent.mockResolvedValueOnce({ name: 'claude-1', runtime: 'pty' })
+    mock.brokerManager.spawnAgent.mockResolvedValueOnce({ name, runtime: 'pty' })
 
-    await handler?.({}, 'project-1', { name: 'claude-1', cli: 'claude', task: 'do it' })
+    await handler?.({}, 'project-1', { name, cli, task: 'do it' })
 
     expect(mock.integrationsManager.initialSpawnInstructions).toHaveBeenCalledWith('project-1')
     expect(mock.integrationsManager.prescriptiveSpawnInstructions).not.toHaveBeenCalled()
-    expect(mock.integrationsManager.recordSpawnInstructionDelivery).toHaveBeenCalledWith('project-1', 'claude-1')
+    expect(mock.integrationsManager.recordSpawnInstructionDelivery).toHaveBeenCalledWith('project-1', name)
   })
 })
 

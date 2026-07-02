@@ -692,10 +692,22 @@ export function registerIpcHandlers(): void {
   })
 
   ipcMain.handle('broker:spawn-agent', async (_, projectId: string, input: SpawnPtyInput & { broker?: 'local' | 'cloud' }) => {
-    const usePrescriptive = typeof input.cli === 'string' && input.cli !== 'claude'
+    const cliLabel = typeof input.cli === 'string'
+      ? input.cli.trim().split(/\s+/)[0]?.split(/[\\/]/).pop()?.toLowerCase()
+      : undefined
+    const usePrescriptive = cliLabel === 'opencode'
     const integrationInstructions = usePrescriptive
       ? integrationsManager.prescriptiveSpawnInstructions(projectId)
       : integrationsManager.initialSpawnInstructions(projectId)
+    console.info('[integrations] spawn instruction injection', {
+      projectId,
+      agentName: input.name,
+      cli: input.cli,
+      cliLabel,
+      mode: usePrescriptive ? 'prescriptive' : 'narrative',
+      injected: Boolean(integrationInstructions),
+      taskChars: integrationInstructions?.length ?? 0
+    })
     const result = await brokerManager.spawnAgent(projectId, integrationInstructions
       ? {
           ...input,

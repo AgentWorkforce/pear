@@ -2284,25 +2284,30 @@ export class IntegrationsManager {
 
   // Builds the <integrations-update> narrative via the shared
   // @agent-relay/integration-prompts builder (fullInjectInstructions) instead of
-  // a hand-maintained copy. Returns '' when no integration is currently active
-  // (see buildActiveIntegrationDescriptors) so callers can skip the message
-  // entirely — a visible-but-idle integration adds only noise at spawn.
-  private buildSystemMessageSnippet(integrations: ConnectedIntegration[]): string {
-    const descriptors = this.buildActiveIntegrationDescriptors(integrations)
+  // a hand-maintained copy. Broadcast callers keep idle integrations suppressed
+  // to avoid repeated noise; initial spawns include visible idle integrations so
+  // new agents still learn that discovery exists and narrower resources may be
+  // selected before writeback.
+  private buildSystemMessageSnippet(
+    integrations: ConnectedIntegration[],
+    options: { includeIdle?: boolean } = {}
+  ): string {
+    const descriptors = this.buildActiveIntegrationDescriptors(integrations, options)
     if (descriptors.length === 0) return ''
     return buildIntegrationsUpdateSnippet(descriptors)
   }
 
   // Maps connected integrations to the package's IntegrationDescriptor shape,
-  // keeping only the ones the agent actually needs to know about at spawn:
+  // keeping only the ones the agent needs to hear about in the current context:
   //   - syncing: historical download is enabled, OR
   //   - listening: a registered event subscription exists, OR
   //   - actionable: narrow writeback command roots are mounted.
   // Visible integrations with none of the above (no sync, no events, no narrow
-  // resources) are omitted; if nothing qualifies the caller suppresses the
-  // whole <integrations-update> message.
+  // resources) are omitted from broadcasts; initial spawn context can opt into
+  // including them as idle discovery-only descriptors.
   private buildActiveIntegrationDescriptors(
-    integrations: ConnectedIntegration[]
+    integrations: ConnectedIntegration[],
+    options: { includeIdle?: boolean } = {}
   ): IntegrationDescriptor[] {
     const descriptors: IntegrationDescriptor[] = []
     for (const integration of integrations) {
@@ -2321,7 +2326,7 @@ export class IntegrationsManager {
       const isActive = historyEnabled
         || writebackCommandPaths.length > 0
         || subscriptions.length > 0
-      if (!isActive) continue
+      if (!isActive && !options.includeIdle) continue
 
       const writebackPaths = historyEnabled ? eventScopePaths : writebackCommandPaths
       const liveContextPaths = historyEnabled
@@ -2355,9 +2360,7 @@ export class IntegrationsManager {
   initialSpawnInstructions(projectId: string): string | undefined {
     const integrations = this.visibleIntegrationsForProject(projectId)
     if (integrations.length === 0) return undefined
-    const snippet = this.buildSystemMessageSnippet(integrations)
-    // No integration is currently syncing/listening/actionable — skip the spawn
-    // message entirely rather than inject an empty "- none" narrative.
+    const snippet = this.buildSystemMessageSnippet(integrations, { includeIdle: true })
     if (!snippet) return undefined
     // Remember what this spawn embedded so recordSpawnInstructionDelivery
     // can mark the new agent as already-notified — without it, the next
