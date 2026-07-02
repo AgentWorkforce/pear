@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { lstat, mkdir, mkdtemp, readFile, readlink, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -24,9 +24,14 @@ import {
 describe('integration symlinks', () => {
   let projectRoot: string
   let mountRoot: string
+  let archiveRoot: string
+  let previousArchiveRoot: string | undefined
 
   beforeEach(async () => {
     projectRoot = await mkdtemp(join(tmpdir(), 'pear-project-'))
+    archiveRoot = await mkdtemp(join(tmpdir(), 'pear-stale-integrations-'))
+    previousArchiveRoot = process.env.PEAR_INTEGRATIONS_STALE_ARCHIVE_ROOT
+    process.env.PEAR_INTEGRATIONS_STALE_ARCHIVE_ROOT = archiveRoot
     // Mirror pear's real layout so the safety check in remove() passes.
     mountRoot = join(
       await mkdtemp(join(tmpdir(), 'pear-home-')),
@@ -37,8 +42,14 @@ describe('integration symlinks', () => {
   })
 
   afterEach(async () => {
+    if (previousArchiveRoot === undefined) {
+      delete process.env.PEAR_INTEGRATIONS_STALE_ARCHIVE_ROOT
+    } else {
+      process.env.PEAR_INTEGRATIONS_STALE_ARCHIVE_ROOT = previousArchiveRoot
+    }
     await rm(projectRoot, { recursive: true, force: true })
     await rm(mountRoot, { recursive: true, force: true })
+    await rm(archiveRoot, { recursive: true, force: true })
   })
 
   it('creates the symlink and excludes it from git', async () => {
@@ -92,6 +103,56 @@ describe('integration symlinks', () => {
 
     await removeProjectIntegrationsLink(projectRoot)
     expect(await readFile(join(linkPath, 'user-file.txt'), 'utf8')).toBe('keep me')
+  })
+
+  it('archives an ignored stale integration mirror before linking live mounts', async () => {
+    await execFileAsync('git', ['init'], { cwd: projectRoot })
+    await writeFile(join(projectRoot, '.git', 'info', 'exclude'), `/${PROJECT_INTEGRATIONS_LINK_NAME}\n`)
+    const linkPath = join(projectRoot, PROJECT_INTEGRATIONS_LINK_NAME)
+    await mkdir(join(linkPath, 'slack', 'channels'), { recursive: true })
+    await writeFile(join(linkPath, 'slack', 'channels', 'old-message.json'), 'stale')
+    await writeFile(join(mountRoot, 'probe.txt'), 'live')
+
+    await ensureProjectIntegrationsLink(projectRoot, 'ws-1')
+
+    expect(await readlink(linkPath)).toBe(mountRoot)
+    expect(await readFile(join(linkPath, 'probe.txt'), 'utf8')).toBe('live')
+
+    const archiveProjects = await readdir(archiveRoot)
+    expect(archiveProjects).toHaveLength(1)
+    const archivedEntries = await readdir(join(archiveRoot, archiveProjects[0]))
+    expect(archivedEntries).toHaveLength(1)
+    expect(
+      await readFile(join(archiveRoot, archiveProjects[0], archivedEntries[0], 'slack', 'channels', 'old-message.json'), 'utf8')
+    ).toBe('stale')
+  })
+
+  it('does not archive an ignored real directory with non-integration content', async () => {
+    await execFileAsync('git', ['init'], { cwd: projectRoot })
+    await writeFile(join(projectRoot, '.git', 'info', 'exclude'), `/${PROJECT_INTEGRATIONS_LINK_NAME}\n`)
+    const linkPath = join(projectRoot, PROJECT_INTEGRATIONS_LINK_NAME)
+    await mkdir(join(linkPath, 'custom'), { recursive: true })
+    await writeFile(join(linkPath, 'custom', 'user-file.txt'), 'keep me')
+
+    await ensureProjectIntegrationsLink(projectRoot, 'ws-1')
+
+    expect((await lstat(linkPath)).isDirectory()).toBe(true)
+    expect(await readFile(join(linkPath, 'custom', 'user-file.txt'), 'utf8')).toBe('keep me')
+    expect(await readdir(archiveRoot)).toHaveLength(0)
+  })
+
+  it('rolls back the archive when the live symlink cannot be verified', async () => {
+    await execFileAsync('git', ['init'], { cwd: projectRoot })
+    await writeFile(join(projectRoot, '.git', 'info', 'exclude'), `/${PROJECT_INTEGRATIONS_LINK_NAME}\n`)
+    mock.mountRoot = join(archiveRoot, 'missing-live-target')
+    const linkPath = join(projectRoot, PROJECT_INTEGRATIONS_LINK_NAME)
+    await mkdir(join(linkPath, 'linear', 'teams'), { recursive: true })
+    await writeFile(join(linkPath, 'linear', 'teams', 'old-team.json'), 'stale')
+
+    await ensureProjectIntegrationsLink(projectRoot, 'ws-1')
+
+    expect((await lstat(linkPath)).isDirectory()).toBe(true)
+    expect(await readFile(join(linkPath, 'linear', 'teams', 'old-team.json'), 'utf8')).toBe('stale')
   })
 
   it('leaves foreign symlinks alone on removal', async () => {
