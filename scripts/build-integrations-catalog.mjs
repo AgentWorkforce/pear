@@ -12,7 +12,17 @@ const adaptersPackagesPath = join(repoRoot, '../relayfile-adapters/packages')
 const isDryRun = process.argv.includes('--dry-run')
 const isCheck = process.argv.includes('--check')
 
-const SKIPPED_PACKAGES = new Set(['core', 'webhook-server', 'github-compat', 'linear-compat'])
+// Infrastructure/SDK packages under ../relayfile-adapters/packages that are not
+// user-facing integration providers and must never appear in the catalog:
+// `core` (adapter runtime/generator), `webhook-server` (Hono receiver),
+// `relay-helpers` (provider-client SDK). `*-compat` are legacy shims.
+const SKIPPED_PACKAGES = new Set([
+  'core',
+  'webhook-server',
+  'relay-helpers',
+  'github-compat',
+  'linear-compat'
+])
 
 const REQUIRED_PROVIDERS = [
   'github',
