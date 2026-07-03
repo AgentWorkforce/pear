@@ -652,6 +652,49 @@ describe('IntegrationMountManager', () => {
     expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/threads')).toHaveLength(2)
   })
 
+  it('restarts and clears stale state after an unreadable changed event poisons the cursor', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-06-06T14:08:00.000Z'))
+    const manager = new IntegrationMountManager()
+    mock.readFile.mockImplementation(async (path: string) => {
+      if (path.endsWith('/.relay/mount.log')) {
+        return [
+          '2026/06/06 14:00:00 mount sync cycle failed: changed event for /slack/channels/C123/messages/1787781922.521889/meta.json is not readable yet: not found',
+          '2026/06/06 14:00:45 mount sync cycle failed: changed event for /slack/channels/C123/messages/1787781922.521889/meta.json is not readable yet: not found'
+        ].join('\n')
+      }
+      return JSON.stringify({
+        status: 'syncing',
+        lastSuccessfulReconcileAt: '2026-06-06T14:00:00.000Z',
+        lastError: {
+          message: 'changed event for /slack/channels/C123/messages/1787781922.521889/meta.json is not readable yet: not found',
+          at: '2026-06-06T14:00:45.000Z'
+        }
+      })
+    })
+
+    await manager.ensureMounted([
+      {
+        provider: 'slack',
+        mountPaths: ['/slack/channels/C123/messages']
+      }
+    ])
+
+    await vi.advanceTimersByTimeAsync(45_000)
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(mock.rm).toHaveBeenCalledWith(
+      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/slack/channels/C123/messages/.relayfile-mount-state.json',
+      { force: true }
+    )
+    expect(mock.rm).toHaveBeenCalledWith(
+      '/tmp/pear-home/.agentworkforce/pear/relayfile/workspaces/account-workspace-id/slack/channels/C123/messages/.relay/state.json',
+      { force: true }
+    )
+    expect(mock.mountInputs.filter((input) => input.remotePath === '/slack/channels/C123/messages')).toHaveLength(2)
+  })
+
   it('backs off forced restarts after a replayed auth state error instead of respawning every poll', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(new Date('2026-06-06T14:00:00.000Z'))

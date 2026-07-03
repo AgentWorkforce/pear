@@ -6,6 +6,7 @@ import { burnManager } from './burn'
 import { brokerManager } from './broker'
 import { cloudAgentManager } from './cloud-agent'
 import { integrationsManager } from './integrations'
+import { integrationEventBridge } from './integration-event-bridge'
 import { registerAvatarCacheProtocol } from './avatar-cache'
 import { openProjectForPath, parseOpenCommand, type OpenPathDeps } from './cli'
 import { addProject, loadStore, setActiveProject } from './store'
@@ -266,6 +267,7 @@ function createMenu(): void {
 
 function scheduleIntegrationAgentRefresh(projectId: string): void {
   if (!projectId.trim()) return
+  integrationEventBridge.invalidateProjectAgentCache(projectId)
   const existing = integrationAgentRefreshTimers.get(projectId)
   if (existing) clearTimeout(existing)
 

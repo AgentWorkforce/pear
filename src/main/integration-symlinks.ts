@@ -245,8 +245,10 @@ async function rollbackArchivedIntegrationMirror(linkPath: string, archivePath: 
 }
 
 async function createVerifiedLink(linkPath: string, target: string): Promise<boolean> {
+  let createdLink = false
   try {
     await symlink(target, linkPath, 'dir')
+    createdLink = true
   } catch (error) {
     if (!(isFileAlreadyExistsError(error) && await pointsAtTarget(linkPath, target))) {
       console.warn(
@@ -257,6 +259,9 @@ async function createVerifiedLink(linkPath: string, target: string): Promise<boo
     }
   }
   if (await verifyProjectIntegrationsLink(linkPath, target)) return true
+  if (createdLink) {
+    await rm(linkPath, { force: true }).catch(() => undefined)
+  }
   console.warn(
     `[integration-symlinks] Refusing integration link ${linkPath}; it does not resolve to ${target}`
   )

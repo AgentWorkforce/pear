@@ -1,4 +1,4 @@
-import { mkdirSync, writeFileSync } from 'node:fs'
+import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -21,6 +21,7 @@ function makeIntegration(provider: string, mountPaths: string[]) {
     connectedAt: '2026-06-05T00:00:00.000Z',
     notifyAgent: true,
     subscribeAgent: false,
+    subscribeAgentConfigured: false,
     downloadHistoricalData: false,
     visibleInProject: true
   }
@@ -41,6 +42,7 @@ const mock = vi.hoisted(() => {
     connectedAt: '2026-06-05T00:00:00.000Z',
     notifyAgent: true,
     subscribeAgent: false,
+    subscribeAgentConfigured: false,
     downloadHistoricalData: false,
     visibleInProject: true
   })
@@ -50,7 +52,7 @@ const mock = vi.hoisted(() => {
         id: 'project-1',
         name: 'Project 1',
         rootPath: '/tmp/project-1',
-        roots: [],
+        roots: [{ id: 'root-primary', name: 'primary', path: '/tmp/project-1' }],
         channels: ['general'],
         channelPeople: {},
         integrations: [initialIntegration()]
@@ -237,6 +239,7 @@ const mock = vi.hoisted(() => {
     ensureProjectIntegrationsLink: vi.fn(async () => undefined),
     removeProjectIntegrationsLink: vi.fn(async () => undefined),
     resetStore() {
+      store.projects[0].roots = [{ id: 'root-primary', name: 'primary', path: '/tmp/project-1' }]
       store.projects[0].integrations = [initialIntegration()]
     },
     setMountReconcilePromise(value: Promise<void>) {
@@ -327,6 +330,13 @@ type SystemMessageSnippetBuilder = {
   ): string
 }
 
+const accountWorkspaceMirrorRoot = '/tmp/relayfile/account-workspace-id'
+const secondaryProjectRoot = '/tmp/project-1-secondary'
+
+function createAccountWorkspaceMirror(): void {
+  mkdirSync(accountWorkspaceMirrorRoot, { recursive: true })
+}
+
 function mockConnectSession(connectLink: string): void {
   mock.workspaceHandle.requestJson.mockImplementation(async (request: { path: string }) => {
     if (request.path.endsWith('/status')) {
@@ -385,6 +395,7 @@ describe('IntegrationsManager', () => {
     mock.brokerManager.sendMessageAndWaitForDelivery.mockClear()
     mock.ensureProjectIntegrationsLink.mockClear()
     mock.removeProjectIntegrationsLink.mockClear()
+    rmSync(accountWorkspaceMirrorRoot, { recursive: true, force: true })
     mock.resetStore()
     mock.setMountReconcilePromise(Promise.resolve())
     vi.stubGlobal('fetch', mock.fetch)
@@ -393,6 +404,7 @@ describe('IntegrationsManager', () => {
   afterEach(() => {
     vi.useRealTimers()
     vi.unstubAllGlobals()
+    rmSync(accountWorkspaceMirrorRoot, { recursive: true, force: true })
   })
 
   it('lists integration options through the account workspace API', async () => {
@@ -421,6 +433,63 @@ describe('IntegrationsManager', () => {
 
     expect(mock.fetchCalls.map((call) => new URL(call.url).pathname + new URL(call.url).search)).toContain(
       '/api/v1/workspaces/account-workspace-id/integrations/slack/channels/available?cursor=cursor-2'
+    )
+  })
+
+  it('defaults legacy webhook integrations to event subscription', () => {
+    const manager = new IntegrationsManager()
+
+    expect(manager.listConnected('project-1')).toEqual([
+      expect.objectContaining({
+        provider: 'slack',
+        subscribeAgent: true,
+        subscribeAgentConfigured: false
+      })
+    ])
+  })
+
+  it('preserves an explicit disabled webhook event subscription', () => {
+    mock.store.projects[0].integrations[0] = {
+      ...mock.store.projects[0].integrations[0],
+      subscribeAgent: false,
+      subscribeAgentConfigured: true
+    }
+    const manager = new IntegrationsManager()
+
+    expect(manager.listConnected('project-1')).toEqual([
+      expect.objectContaining({
+        provider: 'slack',
+        subscribeAgent: false,
+        subscribeAgentConfigured: true
+      })
+    ])
+  })
+
+  it('marks event subscription as explicit when the user toggles it', async () => {
+    const manager = new IntegrationsManager()
+
+    await manager.updateSubscription('project-1', 'slack-integration-1', false)
+
+    expect(mock.store.projects[0].integrations[0]).toEqual(
+      expect.objectContaining({
+        subscribeAgent: false,
+        subscribeAgentConfigured: true
+      })
+    )
+  })
+
+  it('subscribes hydrated webhook integrations to events by default', async () => {
+    mock.store.projects[0].integrations = []
+    const manager = new IntegrationsManager()
+
+    await manager.hydrateProjectCloudIntegrations('project-1')
+
+    expect(mock.store.projects[0].integrations[0]).toEqual(
+      expect.objectContaining({
+        provider: 'slack',
+        subscribeAgent: true,
+        subscribeAgentConfigured: false
+      })
     )
   })
 
@@ -516,6 +585,7 @@ describe('IntegrationsManager', () => {
       connectedAt: '2026-06-05T00:00:00.000Z',
       notifyAgent: true,
       subscribeAgent: false,
+      subscribeAgentConfigured: false,
       downloadHistoricalData: false,
       visibleInProject: true
     })
@@ -661,6 +731,98 @@ describe('IntegrationsManager', () => {
 
     finishMountReconcile()
     await Promise.resolve()
+  })
+
+  it('repairs project integration links when mount reconciliation hits a transient failure', async () => {
+    createAccountWorkspaceMirror()
+    mock.store.projects[0].roots = [
+      { id: 'root-primary', name: 'primary', path: '/tmp/project-1' },
+      { id: 'root-secondary', name: 'secondary', path: secondaryProjectRoot }
+    ]
+    mock.integrationMountManager.currentWorkspaceId.mockReturnValue('account-workspace-id')
+    mock.integrationMountManager.ensureMounted.mockRejectedValueOnce(new Error('spawn failed'))
+    const manager = new IntegrationsManager()
+
+    await expect(manager.listConnectedForSettings('project-1')).resolves.toEqual([
+      expect.objectContaining({ provider: 'slack', integrationId: 'slack-integration-1' })
+    ])
+
+    await vi.waitFor(() => expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() => {
+      expect(mock.ensureProjectIntegrationsLink).toHaveBeenCalledWith('/tmp/project-1', 'account-workspace-id')
+      expect(mock.ensureProjectIntegrationsLink).toHaveBeenCalledWith(secondaryProjectRoot, 'account-workspace-id')
+    })
+    expect(mock.ensureProjectIntegrationsLink).toHaveBeenCalledTimes(2)
+    expect(mock.removeProjectIntegrationsLink).not.toHaveBeenCalled()
+  })
+
+  it('does not remove project integration links when workspace id resolution fails during a transient mount failure', async () => {
+    mock.integrationMountManager.ensureMounted.mockRejectedValueOnce(new Error('spawn failed'))
+    mock.getAccountWorkspaceId.mockRejectedValue(new Error('account-workspace-required'))
+    const manager = new IntegrationsManager()
+
+    await expect(manager.listConnectedForSettings('project-1')).resolves.toEqual([
+      expect.objectContaining({ provider: 'slack', integrationId: 'slack-integration-1' })
+    ])
+
+    await vi.waitFor(() => expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalledTimes(1))
+    expect(mock.ensureProjectIntegrationsLink).not.toHaveBeenCalled()
+    expect(mock.removeProjectIntegrationsLink).not.toHaveBeenCalled()
+  })
+
+  it('does not create project integration links until the local mirror exists', async () => {
+    mock.integrationMountManager.currentWorkspaceId.mockReturnValue('account-workspace-id')
+    const manager = new IntegrationsManager()
+
+    await expect(manager.listConnectedForSettings('project-1')).resolves.toEqual([
+      expect.objectContaining({ provider: 'slack', integrationId: 'slack-integration-1' })
+    ])
+
+    await vi.waitFor(() => expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalledTimes(1))
+    expect(mock.ensureProjectIntegrationsLink).not.toHaveBeenCalled()
+    expect(mock.removeProjectIntegrationsLink).not.toHaveBeenCalled()
+  })
+
+  it('removes project integration links after a successful reconcile with no visible integrations', async () => {
+    mock.store.projects[0].integrations = []
+    mock.store.projects[0].roots = [
+      { id: 'root-primary', name: 'primary', path: '/tmp/project-1' },
+      { id: 'root-secondary', name: 'secondary', path: secondaryProjectRoot }
+    ]
+    mock.fetch.mockImplementationOnce(async () => ({
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      json: async () => ({ integrations: [] })
+    }))
+    const manager = new IntegrationsManager()
+
+    await expect(manager.listConnectedForSettings('project-1')).resolves.toEqual([])
+
+    await vi.waitFor(() => expect(mock.integrationMountManager.ensureMounted).toHaveBeenCalledWith([]))
+    await vi.waitFor(() => {
+      expect(mock.removeProjectIntegrationsLink).toHaveBeenCalledWith('/tmp/project-1')
+      expect(mock.removeProjectIntegrationsLink).toHaveBeenCalledWith(secondaryProjectRoot)
+    })
+    expect(mock.removeProjectIntegrationsLink).toHaveBeenCalledTimes(2)
+    expect(mock.ensureProjectIntegrationsLink).not.toHaveBeenCalled()
+  })
+
+  it('removes project integration links from secondary roots on shutdown', async () => {
+    mock.store.projects[0].roots = [
+      { id: 'root-primary', name: 'primary', path: '/tmp/project-1' },
+      { id: 'root-duplicate', name: 'duplicate', path: '/tmp/project-1' },
+      { id: 'root-secondary', name: 'secondary', path: secondaryProjectRoot }
+    ]
+    const manager = new IntegrationsManager()
+
+    await manager.shutdownLocalMounts()
+
+    expect(mock.removeProjectIntegrationsLink).toHaveBeenCalledWith('/tmp/project-1')
+    expect(mock.removeProjectIntegrationsLink).toHaveBeenCalledWith(secondaryProjectRoot)
+    expect(mock.removeProjectIntegrationsLink).toHaveBeenCalledTimes(2)
+    expect(mock.integrationMountManager.stop).toHaveBeenCalledTimes(1)
+    expect(mock.integrationEventBridge.closeAll).toHaveBeenCalledTimes(1)
   })
 
   it('does not throw or raise a banner when background cloud hydration hits a transient failure', async () => {
@@ -1131,6 +1293,7 @@ describe('IntegrationsManager', () => {
       connectedAt: '2026-06-05T00:00:00.000Z',
       notifyAgent: true,
       subscribeAgent: false,
+      subscribeAgentConfigured: false,
       downloadHistoricalData: false,
       visibleInProject: true
     }]
@@ -1294,6 +1457,7 @@ describe('IntegrationsManager', () => {
       connectedAt: '2026-06-05T00:00:00.000Z',
       notifyAgent: true,
       subscribeAgent: true,
+      subscribeAgentConfigured: true,
       downloadHistoricalData: false,
       visibleInProject: true
     }]
@@ -1333,6 +1497,7 @@ describe('IntegrationsManager', () => {
       connectedAt: '2026-06-05T00:00:00.000Z',
       notifyAgent: true,
       subscribeAgent: true,
+      subscribeAgentConfigured: true,
       downloadHistoricalData: false,
       visibleInProject: true
     }]
@@ -1393,6 +1558,7 @@ describe('IntegrationsManager', () => {
       connectedAt: '2026-06-05T00:00:00.000Z',
       notifyAgent: true,
       subscribeAgent: true,
+      subscribeAgentConfigured: true,
       downloadHistoricalData: false,
       visibleInProject: true
     }]

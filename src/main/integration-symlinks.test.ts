@@ -155,6 +155,15 @@ describe('integration symlinks', () => {
     expect(await readFile(join(linkPath, 'linear', 'teams', 'old-team.json'), 'utf8')).toBe('stale')
   })
 
+  it('removes a newly-created symlink when the live target cannot be verified', async () => {
+    mock.mountRoot = join(archiveRoot, 'missing-live-target')
+    const linkPath = join(projectRoot, PROJECT_INTEGRATIONS_LINK_NAME)
+
+    await ensureProjectIntegrationsLink(projectRoot, 'ws-1')
+
+    await expect(lstat(linkPath)).rejects.toThrow()
+  })
+
   it('leaves foreign symlinks alone on removal', async () => {
     const foreignTarget = join(projectRoot, 'foreign')
     await mkdir(foreignTarget)

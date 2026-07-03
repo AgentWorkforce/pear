@@ -3,10 +3,10 @@ import { createHash } from 'node:crypto'
 import { describeError as toErrorMessage } from './errors.ts'
 // @ts-expect-error Node's strip-types test runner requires the explicit .ts extension.
 import { isRecord } from './guards.ts'
-import { existsSync, watch, type FSWatcher } from 'node:fs'
+import { existsSync, mkdirSync, watch, type FSWatcher } from 'node:fs'
 import { appendFile, mkdir, readFile, rm, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import {
   RelayFileClient,
   RelayFileSync,
@@ -82,6 +82,8 @@ const PROJECT_AGENT_RECIPIENT_CACHE_TTL_MS = 2_000
 const MAX_BROKER_SENDS_PER_SECOND = 25
 const DEFAULT_DELIVERY_INJECTED_CONFIRMATION_TIMEOUT_MS = 5_000
 const DEFAULT_DELIVERY_INJECTED_RETRY_DELAYS_MS = [2_000, 5_000]
+const NO_RECIPIENT_RETRY_DELAYS_MS = [2_000, 5_000, 15_000, 30_000, 60_000]
+const REMOTE_STREAM_START_RETRY_DELAYS_MS = [5_000, 30_000, 60_000]
 
 type IntegrationEventCounterName =
   | 'eventsReceived'
@@ -373,6 +375,14 @@ export function integrationRelayFileSyncOptions(
     ...options,
     token: tokenProvider
   }
+}
+
+function remoteStreamStartRetryDelayMs(failureCount: number): number {
+  const index = Math.min(
+    Math.max(0, failureCount - 1),
+    REMOTE_STREAM_START_RETRY_DELAYS_MS.length - 1
+  )
+  return REMOTE_STREAM_START_RETRY_DELAYS_MS[index]
 }
 
 
@@ -800,6 +810,8 @@ export function createWorkspaceScopedEventClient(
     subscribe(globs, onChange, options) {
       let active = true
       let sync: RelayFileSync | null = null
+      let startRetryTimer: ReturnType<typeof setTimeout> | null = null
+      let startFailureCount = 0
       const pendingByPath = new Map<string, ReturnType<typeof setTimeout>>()
       const coalesceMs = Math.max(0, Math.floor(options?.coalesceMs ?? 750))
       const shouldCoalesce = (options?.coalesce ?? 'fire-once') !== 'none'
@@ -852,30 +864,62 @@ export function createWorkspaceScopedEventClient(
         options?.onQueueDepth?.(pendingByPath.size)
       }
 
-      void tokenProvider()
-        .then((token) => {
-          if (!active) return
-          const tokenWorkspaceId = workspaceIdFromJwt(token)
-          if (tokenWorkspaceId && tokenWorkspaceId !== workspaceId) {
-            warnIntegrationEventAggregated(
-              `skipping remote stream with mismatched workspace JWT:${workspaceId}`,
-              'skipping remote stream with mismatched workspace JWT',
-              {
-                workspaceId,
-                tokenWorkspaceId
-              }
-            )
-            return
-          }
-          logIntegrationEvent('remote stream starting', {
-            workspaceId,
-            globs,
-            pathScope: options?.pathScope,
-            relayfilePathFilters,
-            from: options?.from ?? 'now',
-            transport: baseUrl ? 'websocket' : 'polling'
-          })
-          sync = syncFactory(integrationRelayFileSyncOptions({
+      const scheduleRemoteStreamStartRetry = (): void => {
+        if (!active || sync || startRetryTimer) return
+        startFailureCount += 1
+        const delayMs = remoteStreamStartRetryDelayMs(startFailureCount)
+        startRetryTimer = setTimeout(() => {
+          startRetryTimer = null
+          void startRemoteStream()
+        }, delayMs)
+      }
+
+      const startRemoteStream = async (): Promise<void> => {
+        if (!active || sync) return
+        let token: string | undefined
+        try {
+          token = await tokenProvider()
+        } catch (error) {
+          if (!active || sync) return
+          const errorMessage = toErrorMessage(error)
+          warnIntegrationEventAggregated(
+            `remote stream token check failed:${workspaceId}`,
+            'remote stream token check failed',
+            {
+              workspaceId,
+              error: errorMessage
+            }
+          )
+          scheduleRemoteStreamStartRetry()
+          return
+        }
+
+        if (!active || sync) return
+        const tokenWorkspaceId = workspaceIdFromJwt(token)
+        if (tokenWorkspaceId && tokenWorkspaceId !== workspaceId) {
+          warnIntegrationEventAggregated(
+            `skipping remote stream with mismatched workspace JWT:${workspaceId}`,
+            'skipping remote stream with mismatched workspace JWT',
+            {
+              workspaceId,
+              tokenWorkspaceId
+            }
+          )
+          scheduleRemoteStreamStartRetry()
+          return
+        }
+
+        logIntegrationEvent('remote stream starting', {
+          workspaceId,
+          globs,
+          pathScope: options?.pathScope,
+          relayfilePathFilters,
+          from: options?.from ?? 'now',
+          transport: baseUrl ? 'websocket' : 'polling'
+        })
+        let nextSync: RelayFileSync | null = null
+        try {
+          nextSync = syncFactory(integrationRelayFileSyncOptions({
             client,
             workspaceId,
             baseUrl,
@@ -893,6 +937,11 @@ export function createWorkspaceScopedEventClient(
               )
             }
           }))
+          if (!active) {
+            await nextSync.stop().catch(() => undefined)
+            return
+          }
+          sync = nextSync
           sync.on('event', handleEvent)
           sync.on('state', (state) => {
             logIntegrationEvent('remote stream state', {
@@ -918,8 +967,11 @@ export function createWorkspaceScopedEventClient(
             )
           })
           sync.start()
-        })
-        .catch((error) => {
+          startFailureCount = 0
+        } catch (error) {
+          if (sync === nextSync) sync = null
+          await nextSync?.stop().catch(() => undefined)
+          if (!active) return
           const errorMessage = toErrorMessage(error)
           warnIntegrationEventAggregated(
             `remote stream token check failed:${workspaceId}`,
@@ -929,11 +981,19 @@ export function createWorkspaceScopedEventClient(
               error: errorMessage
             }
           )
-        })
+          scheduleRemoteStreamStartRetry()
+        }
+      }
+
+      void startRemoteStream()
 
       return {
         async unsubscribe() {
           active = false
+          if (startRetryTimer) {
+            clearTimeout(startRetryTimer)
+            startRetryTimer = null
+          }
           for (const timer of pendingByPath.values()) clearTimeout(timer)
           pendingByPath.clear()
           await sync?.stop()
@@ -1068,6 +1128,7 @@ export function localWatchRootsFor(
     for (const candidate of dedupeStrings(candidates)) {
       if (!isBoundedLocalCommandRoot(candidate)) continue
       if (!hasWatchableLocalIntegrationFor(watchableIntegrations, candidate)) continue
+      if (Array.from(roots.values()).some((root) => root.remoteRoot === candidate)) continue
       const localRoot = resolve(localPathForRemoteRoot(workspaceId, candidate))
       if (!roots.has(localRoot)) roots.set(localRoot, { localRoot, remoteRoot: candidate })
     }
@@ -1114,7 +1175,12 @@ export function localWatchEventPathsForFilename(
     }
   }
 
-  const localPath = isAbsolute(trimmed) ? resolve(trimmed) : join(localRoot, trimmed)
+  const localRootName = basename(resolve(localRoot))
+  const localSegments = pathSegments(trimmed)
+  const localRelativePath = !isAbsolute(trimmed) && localSegments[0] === localRootName
+    ? join(...localSegments.slice(1))
+    : trimmed
+  const localPath = isAbsolute(trimmed) ? resolve(trimmed) : join(localRoot, localRelativePath)
   const remotePath = remotePathForLocalPath(localRoot, remoteRoot, localPath)
   return remotePath ? { localPath, remotePath } : null
 }
@@ -1202,8 +1268,11 @@ function watchLocalMounts(
   }
 
   for (const { localRoot, remoteRoot } of roots.values()) {
-    if (!existsSync(localRoot)) continue
     try {
+      // The bridge can reconcile before the Relayfile mount process has created
+      // its local root. Create the bounded command root so fs.watch is armed
+      // before the first webhook-backed sync writes records into it.
+      mkdirSync(localRoot, { recursive: true })
       const watcher = watch(localRoot, { recursive: true }, (eventType, filename) => {
         if (!active || !filename) return
         schedule(localRoot, remoteRoot, String(filename), eventType)
@@ -2520,6 +2589,8 @@ export class IntegrationEventBridge {
   private notificationTargetCache = new Map<string, NotificationTargetCacheEntry>()
   private brokerSendPacers = new Map<string, ProjectBrokerSendPacer>()
   private deliveryRetryAbortControllers = new Map<string, AbortController>()
+  private noRecipientRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+  private noRecipientRetryAttempts = new Map<string, number>()
   private readonly deps: IntegrationEventBridgeDeps
 
   constructor(deps: IntegrationEventBridgeDeps = {}) {
@@ -2577,7 +2648,7 @@ export class IntegrationEventBridge {
     if (this.subscriptions.get(projectId)?.signature === signature) return
 
     this.invalidateNotificationTargetCache(projectId)
-    await this.close(projectId)
+    const previousSubscription = this.subscriptions.get(projectId)
     const subscriptions: Subscription[] = []
     try {
       const remoteSubscriptionStartedAtMs = Date.now()
@@ -2724,13 +2795,25 @@ export class IntegrationEventBridge {
         subscriptions.push(slackWritebackCaptureSubscription)
       }
       this.subscriptions.set(projectId, { subscriptions, signature })
+      await this.unsubscribeProjectSubscription(previousSubscription)
     } catch (error) {
       await Promise.all(subscriptions.map((subscription) => subscription.unsubscribe().catch(() => undefined)))
       throw error
     }
   }
 
+  private async unsubscribeProjectSubscription(subscription: ProjectSubscription | undefined): Promise<void> {
+    if (!subscription) return
+    await Promise.all(subscription.subscriptions.map((entry) => entry.unsubscribe().catch(() => undefined)))
+  }
+
   async close(projectId: string): Promise<void> {
+    for (const [key, timer] of Array.from(this.noRecipientRetryTimers.entries())) {
+      if (!key.startsWith(`${projectId}:`)) continue
+      clearTimeout(timer)
+      this.noRecipientRetryTimers.delete(key)
+      this.noRecipientRetryAttempts.delete(key)
+    }
     const subscription = this.subscriptions.get(projectId)
     this.subscriptions.delete(projectId)
     this.dispatchers.get(projectId)?.dispose()
@@ -2746,8 +2829,7 @@ export class IntegrationEventBridge {
     setIntegrationEventGauge(projectId, 'queueDepth', 0)
     setIntegrationEventGauge(projectId, 'mountCount', 0)
     setIntegrationEventGauge(projectId, 'brokerSendQueueDepth', 0)
-    if (!subscription) return
-    await Promise.all(subscription.subscriptions.map((entry) => entry.unsubscribe().catch(() => undefined)))
+    await this.unsubscribeProjectSubscription(subscription)
   }
 
   async closeAll(): Promise<void> {
@@ -3056,7 +3138,19 @@ export class IntegrationEventBridge {
       // local change, coalesced update) must be allowed to retry once a
       // recipient registers; otherwise the event is suppressed for the TTL.
       if (dedupeClaimed) this.releaseDedupeKey(dedupe.key, needsSlackContentAwareDedupe)
-      incrementIntegrationEventCounter(projectId, 'eventsDropped')
+      if (this.scheduleNoRecipientRetry(projectId, event, matchedSpecs, duplicateKey)) {
+        incrementIntegrationEventCounter(projectId, 'brokerSendsDeferred')
+        warnIntegrationEventAggregated(
+          `deferred no recipients:${projectId}`,
+          'deferred no recipients',
+          {
+            projectId,
+            eventId: event.id,
+            path: event.resource.path
+          }
+        )
+        return
+      }
       warnIntegrationEventAggregated(
         `skipped no recipients:${projectId}`,
         'skipped no recipients',
@@ -3066,8 +3160,10 @@ export class IntegrationEventBridge {
           path: event.resource.path
         }
       )
+      incrementIntegrationEventCounter(projectId, 'eventsDropped')
       return
     }
+    this.clearNoRecipientRetry(projectId, duplicateKey)
 
     const eventMetadata = integrationEventMetadata(event)
     const contextPreview = await this.readEventContextPreview(projectId, event, matchedSpecs)
@@ -3382,6 +3478,54 @@ export class IntegrationEventBridge {
     return controller.signal
   }
 
+  private noRecipientRetryKey(projectId: string, duplicateKey: string): string {
+    return `${projectId}:${duplicateKey}`
+  }
+
+  private clearNoRecipientRetry(projectId: string, duplicateKey: string): void {
+    const retryKey = this.noRecipientRetryKey(projectId, duplicateKey)
+    const timer = this.noRecipientRetryTimers.get(retryKey)
+    if (timer) clearTimeout(timer)
+    this.noRecipientRetryTimers.delete(retryKey)
+    this.noRecipientRetryAttempts.delete(retryKey)
+  }
+
+  private scheduleNoRecipientRetry(
+    projectId: string,
+    event: ChangeEvent,
+    matchedSpecs: SubscriptionSpec[],
+    duplicateKey: string
+  ): boolean {
+    const retryKey = this.noRecipientRetryKey(projectId, duplicateKey)
+    if (this.noRecipientRetryTimers.has(retryKey)) return true
+
+    const attempt = this.noRecipientRetryAttempts.get(retryKey) ?? 0
+    const delayMs = NO_RECIPIENT_RETRY_DELAYS_MS[attempt]
+    if (delayMs === undefined) {
+      this.noRecipientRetryAttempts.delete(retryKey)
+      return false
+    }
+
+    this.noRecipientRetryAttempts.set(retryKey, attempt + 1)
+    const timer = setTimeout(() => {
+      this.noRecipientRetryTimers.delete(retryKey)
+      void this.injectEvent(projectId, event, matchedSpecs).catch((error) => {
+        warnIntegrationEventAggregated(
+          `no recipient retry failed:${projectId}`,
+          'no recipient retry failed',
+          {
+            projectId,
+            eventId: event.id,
+            path: event.resource.path,
+            error: toErrorMessage(error)
+          }
+        )
+      })
+    }, delayMs)
+    this.noRecipientRetryTimers.set(retryKey, timer)
+    return true
+  }
+
   private reportSkippedDuplicatePath(projectId: string, event: ChangeEvent, duplicateKey: string): void {
     warnIntegrationEventAggregated(
       `skipped duplicate path:${projectId}`,
@@ -3410,14 +3554,10 @@ export class IntegrationEventBridge {
       const onlineExplicitAgents = projectAgents
         ? targets.agents.filter((agent) => projectAgents.includes(agent))
         : []
-      // An EMPTY live roster is treated as a transient broker-startup race, not
-      // proof the agent is gone — fall back to the configured targets so a real
-      // agent that simply hasn't been listed yet still gets the event. If that
-      // optimism is wrong (agent truly vanished), delivery fails permanently and
-      // confirmInjectedDeliveryWithRetry suppresses it instead of retry-storming.
-      const explicitAgents = projectAgents && projectAgents.length === 0 && targets.agents.length > 0
-        ? targets.agents
-        : onlineExplicitAgents
+      // Empty live rosters are a transient broker-startup race. Defer instead of
+      // optimistically sending to configured names; otherwise webhook events hit
+      // agent_not_found and are lost before worker_ready invalidates the roster.
+      const explicitAgents = onlineExplicitAgents
       const explicitTargets = dedupeStrings([...explicitAgents, ...targets.channels])
       if (explicitTargets.length === 0) {
         recipients.push(...(projectAgents ?? await this.listProjectAgentsCached(projectId, bridge)))

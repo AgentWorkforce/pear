@@ -60,4 +60,37 @@ describe('relay service URL normalization', () => {
     })
     expect(normalized).not.toBe(handle)
   })
+
+  it('preserves workspace handle prototype methods while normalizing info', () => {
+    class FakeWorkspaceHandle {
+      info = {
+        relayfileUrl: 'https://api.relayfile.dev',
+        relaycastBaseUrl: 'https://api.relaycast.dev'
+      }
+
+      refreshToken(): string {
+        return 'refreshed'
+      }
+
+      getToken(): string {
+        return 'token'
+      }
+    }
+
+    const handle = new FakeWorkspaceHandle()
+    const normalized = normalizeRelayWorkspaceInfo(handle)
+
+    expect(normalized).not.toBe(handle)
+    expect(normalized).toBeInstanceOf(FakeWorkspaceHandle)
+    expect(normalized.refreshToken()).toBe('refreshed')
+    expect(normalized.getToken()).toBe('token')
+    expect(normalized.info).toEqual({
+      relayfileUrl: RELAYFILE_BASE_URL,
+      relaycastBaseUrl: RELAYCAST_BASE_URL
+    })
+    expect(handle.info).toEqual({
+      relayfileUrl: 'https://api.relayfile.dev',
+      relaycastBaseUrl: 'https://api.relaycast.dev'
+    })
+  })
 })

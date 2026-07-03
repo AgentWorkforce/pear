@@ -150,6 +150,56 @@ async function waitForDispatcherTick(): Promise<void> {
   await new Promise((resolve) => setImmediate(resolve))
 }
 
+async function flushMicrotasks(): Promise<void> {
+  await Promise.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+}
+
+type FakeTimeout = {
+  active: boolean
+  callback: () => void
+  delayMs: number
+}
+
+async function withMockedTimeouts<T>(fn: (timers: FakeTimeout[]) => Promise<T>): Promise<T> {
+  const originalSetTimeout = globalThis.setTimeout
+  const originalClearTimeout = globalThis.clearTimeout
+  const timers: FakeTimeout[] = []
+  globalThis.setTimeout = ((callback: (...args: unknown[]) => void, delayMs?: number, ...args: unknown[]) => {
+    const timer: FakeTimeout = {
+      active: true,
+      callback: () => callback(...args),
+      delayMs: typeof delayMs === 'number' ? delayMs : 0
+    }
+    timers.push(timer)
+    return timer as unknown as ReturnType<typeof setTimeout>
+  }) as typeof setTimeout
+  globalThis.clearTimeout = ((timer?: ReturnType<typeof setTimeout>) => {
+    const fake = timer as unknown as FakeTimeout | undefined
+    if (fake) fake.active = false
+  }) as typeof clearTimeout
+
+  try {
+    return await fn(timers)
+  } finally {
+    globalThis.setTimeout = originalSetTimeout
+    globalThis.clearTimeout = originalClearTimeout
+  }
+}
+
+function runNextActiveTimer(timers: FakeTimeout[]): void {
+  const timer = timers.find((entry) => entry.active)
+  assert.ok(timer, 'expected an active timer')
+  timer.active = false
+  timer.callback()
+}
+
+function workspaceJwt(workspaceId: string): string {
+  const encode = (value: Record<string, unknown>) => Buffer.from(JSON.stringify(value)).toString('base64url')
+  return `${encode({ alg: 'none' })}.${encode({ workspace_id: workspaceId })}.signature`
+}
+
 async function waitUntil(predicate: () => boolean, timeoutMs = 2_000): Promise<void> {
   const deadline = Date.now() + timeoutMs
   while (Date.now() <= deadline) {
@@ -197,6 +247,7 @@ function makeHarness(
   readFileCalls: Array<{ workspaceId: string; path: string }>
   sent: SentMessage[]
   listAgentsCalls: string[]
+  subscriptionLifecycle: string[]
   deliveryConfirmationCalls: SentMessage[]
   injectedConfirmationCalls: SentMessage[]
   pendingInjectedConfirmations: PendingInjectedConfirmation[]
@@ -207,6 +258,7 @@ function makeHarness(
   const readFileCalls: Array<{ workspaceId: string; path: string }> = []
   const sent: SentMessage[] = []
   const listAgentsCalls: string[] = []
+  const subscriptionLifecycle: string[] = []
   const deliveryConfirmationCalls: SentMessage[] = []
   const injectedConfirmationCalls: SentMessage[] = []
   const pendingInjectedConfirmations: PendingInjectedConfirmation[] = []
@@ -222,7 +274,14 @@ function makeHarness(
       client: () => ({
         subscribe(globs, onChange, options) {
           subscribeCalls.push({ globs: [...globs], onChange, options })
-          const subscription = { unsubscribe: async () => { unsubscribedCount += 1 } }
+          const subscriptionIndex = subscriptions.length + 1
+          subscriptionLifecycle.push(`subscribe:${subscriptionIndex}`)
+          const subscription = {
+            unsubscribe: async () => {
+              subscriptionLifecycle.push(`unsubscribe:${subscriptionIndex}`)
+              unsubscribedCount += 1
+            }
+          }
           subscriptions.push(subscription)
           return subscription
         },
@@ -304,6 +363,7 @@ function makeHarness(
     readFileCalls,
     sent,
     listAgentsCalls,
+    subscriptionLifecycle,
     deliveryConfirmationCalls,
     injectedConfirmationCalls,
     pendingInjectedConfirmations,
@@ -384,6 +444,155 @@ test('integration event remote stream keeps a refreshable relayfile token provid
   })
 
   assert.equal(options.token, tokenProvider)
+})
+
+test('integration event remote stream retries token start failures and delivers after recovery', async () => {
+  await withMockedTimeouts(async (timers) => {
+    const syncs: FakeRelayFileSync[] = []
+    const received: ChangeEvent[] = []
+    let tokenAttempts = 0
+    const client = {
+      async getResourceAtEvent() {
+        throw new Error('not used')
+      }
+    }
+    const eventClient = createWorkspaceScopedEventClient(
+      client as never,
+      'workspace-id',
+      async () => {
+        tokenAttempts += 1
+        if (tokenAttempts <= 2) throw new Error(`token unavailable ${tokenAttempts}`)
+        return 'workspace-token'
+      },
+      'https://relayfile.example',
+      () => {
+        const sync = new FakeRelayFileSync()
+        syncs.push(sync)
+        return sync as never
+      }
+    )
+
+    const subscription = eventClient.subscribe(
+      ['/slack/channels/C123/**'],
+      (event) => {
+        received.push(event)
+      },
+      { coalesce: 'none', from: 'legacy', pathScope: ['/slack/channels/C123/**'] }
+    )
+
+    await flushMicrotasks()
+    assert.equal(tokenAttempts, 1)
+    assert.equal(syncs.length, 0)
+    assert.equal(timers.filter((timer) => timer.active).length, 1)
+    assert.equal(timers[0].delayMs, 5_000)
+
+    runNextActiveTimer(timers)
+    await flushMicrotasks()
+    assert.equal(tokenAttempts, 2)
+    assert.equal(syncs.length, 0)
+    assert.equal(timers.filter((timer) => timer.active).length, 1)
+    assert.equal(timers[1].delayMs, 30_000)
+
+    runNextActiveTimer(timers)
+    await flushMicrotasks()
+    assert.equal(tokenAttempts, 3)
+    assert.equal(syncs.length, 1)
+    assert.equal(syncs[0].started, true)
+
+    syncs[0].emit('event', {
+      eventId: 'ws:file.created:/slack/channels/C123/messages/1780735200_000000/meta.json:rev-1:2026-06-06T08:40:00.000Z',
+      type: 'file.created',
+      path: '/slack/channels/C123/messages/1780735200_000000/meta.json',
+      revision: 'rev-1',
+      timestamp: '2026-06-06T08:40:00.000Z'
+    })
+    assert.equal(received.length, 1)
+    assert.equal(received[0].resource.path, '/slack/channels/C123/messages/1780735200_000000/meta.json')
+
+    await subscription.unsubscribe()
+  })
+})
+
+test('integration event remote stream retries mismatched workspace JWTs', async () => {
+  await withMockedTimeouts(async (timers) => {
+    const syncs: FakeRelayFileSync[] = []
+    let tokenAttempts = 0
+    const eventClient = createWorkspaceScopedEventClient(
+      { async getResourceAtEvent() { throw new Error('not used') } } as never,
+      'workspace-id',
+      async () => {
+        tokenAttempts += 1
+        return tokenAttempts === 1 ? workspaceJwt('other-workspace') : workspaceJwt('workspace-id')
+      },
+      'https://relayfile.example',
+      () => {
+        const sync = new FakeRelayFileSync()
+        syncs.push(sync)
+        return sync as never
+      }
+    )
+
+    const subscription = eventClient.subscribe(
+      ['/slack/channels/C123/**'],
+      () => undefined,
+      { coalesce: 'none', from: 'legacy', pathScope: ['/slack/channels/C123/**'] }
+    )
+
+    await flushMicrotasks()
+    assert.equal(tokenAttempts, 1)
+    assert.equal(syncs.length, 0)
+    assert.equal(timers.filter((timer) => timer.active).length, 1)
+
+    runNextActiveTimer(timers)
+    await flushMicrotasks()
+    assert.equal(tokenAttempts, 2)
+    assert.equal(syncs.length, 1)
+    assert.equal(syncs[0].started, true)
+
+    await subscription.unsubscribe()
+  })
+})
+
+test('integration event remote stream unsubscribe cancels pending token-start retry', async () => {
+  await withMockedTimeouts(async (timers) => {
+    const syncs: FakeRelayFileSync[] = []
+    let tokenAttempts = 0
+    const eventClient = createWorkspaceScopedEventClient(
+      { async getResourceAtEvent() { throw new Error('not used') } } as never,
+      'workspace-id',
+      async () => {
+        tokenAttempts += 1
+        throw new Error('token unavailable')
+      },
+      'https://relayfile.example',
+      () => {
+        const sync = new FakeRelayFileSync()
+        syncs.push(sync)
+        return sync as never
+      }
+    )
+
+    const subscription = eventClient.subscribe(
+      ['/slack/channels/C123/**'],
+      () => undefined,
+      { coalesce: 'none', from: 'legacy', pathScope: ['/slack/channels/C123/**'] }
+    )
+
+    await flushMicrotasks()
+    assert.equal(tokenAttempts, 1)
+    assert.equal(syncs.length, 0)
+    assert.equal(timers.length, 1)
+    assert.equal(timers[0].active, true)
+
+    await subscription.unsubscribe()
+    assert.equal(timers[0].active, false)
+    assert.equal(timers.filter((timer) => timer.active).length, 0)
+
+    timers[0].callback()
+    await flushMicrotasks()
+    assert.equal(tokenAttempts, 1)
+    assert.equal(syncs.length, 0)
+  })
 })
 
 test('integration event remote stream leaves transport recovery to the SDK on repeated stream errors', async () => {
@@ -699,6 +908,37 @@ test('can close stale project subscriptions while keeping the active project str
 
   await harness.bridge.close('active-project')
   assert.equal(harness.unsubscribedCount(), 2)
+})
+
+test('signature-change resubscribe arms replacement before old teardown and preserves queued events', async () => {
+  const harness = makeHarness(['alice', 'bob'])
+
+  await harness.bridge.reconcile('project-1', [
+    integration({
+      provider: 'github',
+      integrationId: 'github-1',
+      mountPaths: ['/github/repos'],
+      scope: { notifyAgents: ['alice'] }
+    })
+  ])
+
+  harness.subscribeCalls[0].onChange(changeEvent(
+    '/github/repos/acme/widgets.json',
+    'github'
+  ))
+
+  await harness.bridge.reconcile('project-1', [
+    integration({
+      provider: 'github',
+      integrationId: 'github-1',
+      mountPaths: ['/github/repos'],
+      scope: { notifyAgents: ['bob'] }
+    })
+  ])
+
+  assert.deepEqual(harness.subscriptionLifecycle, ['subscribe:1', 'subscribe:2', 'unsubscribe:1'])
+  await waitForSent(harness, 1)
+  assert.equal(harness.sent[0].input.to, 'alice')
 })
 
 test('channel notification targets do not fall back to all project agents', async () => {
@@ -1228,6 +1468,62 @@ test('slack local context fallback rejects traversal outside matched mount root'
         path: localRemotePath
       }
     ])
+  } finally {
+    await rm(tempRoot, { recursive: true, force: true })
+  }
+})
+
+test('local Slack message watcher arms missing mount root before first Relayfile sync', async () => {
+  const tempRoot = await mkdtemp(join(tmpdir(), 'pear-slack-missing-local-root-'))
+  const localRoot = join(tempRoot, 'workspace-id', 'slack', 'channels', 'C123ABC', 'messages')
+  const slackTs = (Date.now() / 1000).toFixed(6)
+  const messageSlug = slackTs.replace('.', '_')
+  const messageDir = join(localRoot, messageSlug)
+
+  try {
+    const harness = makeHarness(['alice'], {
+      failReadFile: true,
+      localMountWorkspaceId: 'workspace-id'
+    })
+
+    await harness.bridge.reconcile('project-1', [
+      integration({
+        provider: 'slack',
+        integrationId: 'slack-1',
+        mountPaths: ['/slack/channels/C123ABC/messages'],
+        localMountPaths: [localRoot],
+        downloadHistoricalData: true,
+        scope: { notifyAgents: ['alice'] }
+      })
+    ])
+
+    assert.equal((await stat(localRoot)).isDirectory(), true)
+
+    await mkdir(messageDir, { recursive: true })
+    await writeFile(
+      join(messageDir, 'meta.json'),
+      JSON.stringify({
+        id: `C123ABC:${slackTs}`,
+        channel: 'C123ABC',
+        ts: slackTs,
+        text: '<@U0B2596R7EZ> test',
+        user: 'U0ADJH4P83T',
+        _webhook: {
+          eventType: 'message.created',
+          action: 'created',
+          receivedAt: new Date(Number(slackTs) * 1000).toISOString()
+        },
+        channelName: 'epic-hyperagent-demo-day'
+      })
+    )
+
+    await waitForSent(harness, 1, 3_000)
+
+    assert.equal(harness.sent[0].input.to, 'alice')
+    assert.match(harness.sent[0].input.text, /Message:\n<@U0B2596R7EZ> test/u)
+    assert.ok(
+      harness.sent[0].input.text.includes(`Path: .integrations/slack/channels/C123ABC/messages/${messageSlug}/meta.json`)
+    )
   } finally {
     await rm(tempRoot, { recursive: true, force: true })
   }
@@ -3040,7 +3336,7 @@ test('failed deliveries release the dedupe key so duplicate events retry', async
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['alice'])
 })
 
-test('no-recipient drops release the dedupe key so duplicates deliver after an agent registers', async () => {
+test('no-recipient events are deferred until an agent registers', async () => {
   const agents: string[] = []
   const harness = makeHarness(agents)
   const warnCalls: unknown[][] = []
@@ -3062,16 +3358,15 @@ test('no-recipient drops release the dedupe key so duplicates deliver after an a
 
     const path = '/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json'
     await harness.emit(changeEvent(path, 'slack'))
-    await waitForDropped('project-1', 1)
     assert.equal(harness.sent.length, 0)
-    assert.ok(warnCalls.some((call) => call[0] === '[integration-events] skipped no recipients'))
+    assert.ok(warnCalls.some((call) => call[0] === '[integration-events] deferred no recipients'))
+    assert.equal(getIntegrationEventTelemetrySnapshot().projects['project-1']?.brokerSendsDeferred, 1)
 
-    // The configured recipient registers and a duplicate of the event arrives:
-    // the earlier no-recipient drop must not suppress delivery.
+    // The recipient registers after the webhook event arrives. The original
+    // event should be retried rather than requiring Relayfile to emit a duplicate.
     agents.push('claude-1')
     harness.bridge.invalidateProjectAgentCache('project-1')
-    await harness.emit(changeEvent(path, 'slack'))
-    await waitForSent(harness, 1)
+    await waitForSent(harness, 1, 2_500)
   } finally {
     console.warn = originalWarn
   }
@@ -3079,8 +3374,9 @@ test('no-recipient drops release the dedupe key so duplicates deliver after an a
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['claude-1'])
 })
 
-test('explicit notification agents are used while project roster is still empty', async () => {
-  const harness = makeHarness([])
+test('explicit notification agents wait for a non-empty project roster', async () => {
+  const agents: string[] = []
+  const harness = makeHarness(agents)
 
   await withMockedNow('2026-06-05T14:00:00.000Z', async () => {
     await harness.bridge.reconcile('project-1', [
@@ -3094,10 +3390,15 @@ test('explicit notification agents are used while project roster is still empty'
   })
 
   await harness.emit(changeEvent('/slack/channels/C123ABC__proj-cloud/messages/1780668000_000000/meta.json', 'slack'))
-  await waitForSent(harness, 1)
+  await waitForDispatcherTick()
+  assert.deepEqual(harness.sent, [])
+
+  agents.push('claude-1')
+  harness.bridge.invalidateProjectAgentCache('project-1')
+  await waitForSent(harness, 1, 2_500)
 
   assert.deepEqual(harness.sent.map((message) => message.input.to), ['claude-1'])
-  assert.deepEqual(harness.listAgentsCalls, ['project-1'])
+  assert.deepEqual(harness.listAgentsCalls, ['project-1', 'project-1'])
 })
 
 test('integration event dispatcher compacts large bursts into a bounded summary', async () => {
