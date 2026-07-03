@@ -5,6 +5,7 @@ import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { integrationMountRootForWorkspace } from './integration-mounts'
+import { INTEGRATION_MIRROR_TOP_LEVELS } from './integration-providers'
 import { toErrorMessage } from './errors'
 
 const execFileAsync = promisify(execFile)
@@ -17,53 +18,6 @@ const gitDirCache = new Map<string, Promise<string | null>>()
 export const PROJECT_INTEGRATIONS_LINK_NAME = '.integrations'
 
 const GIT_EXCLUDE_MARKER = '# pear: integration mount symlink (auto-managed)'
-
-const INTEGRATION_MIRROR_TOP_LEVELS = new Set([
-  'airtable',
-  'asana',
-  'azure-blob',
-  'box',
-  'calendly',
-  'clickup',
-  'confluence',
-  'discovery',
-  'docker-hub',
-  'dropbox',
-  'fathom',
-  'gcs',
-  'github',
-  'gitlab',
-  'gmail',
-  'google-calendar',
-  'google-drive',
-  'google-mail',
-  'granola',
-  'hubspot',
-  'intercom',
-  'jira',
-  'linear',
-  'mailgun',
-  'mixpanel',
-  'neon',
-  'notion',
-  'onedrive',
-  'pipedrive',
-  'postgres',
-  'recall',
-  'redis',
-  's3',
-  'salesforce',
-  'segment',
-  'sendgrid',
-  'sharepoint',
-  'shopify',
-  'slack',
-  'stripe',
-  'teams',
-  'x',
-  'zendesk'
-])
-
 
 function isFileAlreadyExistsError(error: unknown): boolean {
   return !!error &&

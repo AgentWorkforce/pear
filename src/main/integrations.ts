@@ -36,6 +36,7 @@ import {
   removeProjectIntegrationsLink
 } from './integration-symlinks'
 import { INTEGRATIONS_CATALOG } from './integrations.catalog'
+import { ACTIVE_PROVIDERS } from './integration-providers'
 import { slackWritebackCommandMountPathFor } from './slack-writeback-command-roots'
 import { getRelayWorkspaceManager } from './relay-workspace'
 import { normalizeRelayWorkspaceInfo } from './relay-service-urls'
@@ -262,30 +263,6 @@ const LOCAL_INTEGRATION_WORKSPACE_ID_RETRY_MS = 60_000
 const CATALOG_PATH = '/api/v1/integrations/catalog'
 const MAX_REMOTE_DIRECTORY_ENTRIES = 5_000
 const MAX_REMOTE_FILE_PREVIEW_BYTES = 1024 * 1024
-
-// Only providers currently active in ../cloud are surfaced. This mirrors the
-// non-deprecated relayfile providers in
-// cloud/packages/web/lib/integrations/providers.ts
-// (WORKSPACE_INTEGRATION_PROVIDER_DEFINITIONS). Both id spellings for Google
-// Mail are included because the live cloud catalog uses `google-mail` while
-// pear's static catalog uses `gmail`. Keep this in sync when cloud adds/removes
-// a relayfile integration.
-const ACTIVE_PROVIDERS = new Set([
-  'github',
-  'gitlab',
-  'slack',
-  'notion',
-  'linear',
-  'jira',
-  'confluence',
-  'gmail',
-  'google-mail',
-  'google-calendar',
-  'hubspot',
-  'granola',
-  'fathom',
-  'docker-hub'
-])
 
 function isActiveProvider(provider: string): boolean {
   return ACTIVE_PROVIDERS.has(provider.trim().toLowerCase())
