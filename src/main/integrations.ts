@@ -760,7 +760,7 @@ function normalizeConnectedIntegration(value: unknown): ConnectedIntegration | n
 
   if (!provider || !integrationId) return null
 
-  const subscription = normalizeSubscribeAgent(provider, value)
+  const subscription = normalizeSubscribeAgent(value)
 
   return {
     provider,
@@ -822,12 +822,7 @@ function visibleFromScope(scope: Record<string, unknown>): boolean {
   return typeof visible === 'boolean' ? visible : true
 }
 
-function integrationSupportsWebhook(provider: string): boolean {
-  const staticEntry = STATIC_METADATA_BY_PROVIDER.get(toRelayfileProvider(provider))
-  return staticEntry?.capabilities.webhook === true
-}
-
-function normalizeSubscribeAgent(provider: string, value: Record<string, unknown>): {
+function normalizeSubscribeAgent(value: Record<string, unknown>): {
   subscribeAgent: boolean
   subscribeAgentConfigured?: boolean
 } {
@@ -840,7 +835,7 @@ function normalizeSubscribeAgent(provider: string, value: Record<string, unknown
   if (typeof value.subscribeAgent === 'boolean' && value.subscribeAgent === true) {
     return { subscribeAgent: true, subscribeAgentConfigured: true }
   }
-  return { subscribeAgent: integrationSupportsWebhook(provider), subscribeAgentConfigured: false }
+  return { subscribeAgent: false, subscribeAgentConfigured: false }
 }
 
 function getPayloadMessage(payload: unknown, fallback: string): string {
@@ -1557,10 +1552,6 @@ export class IntegrationsManager {
     const integrationId = session.integrationId
     if (!integrationId) throw new Error('Integration connect session has no integration id')
 
-    const catalog = await this.listCatalog().catch(() => [])
-    const adapter = catalog.find((entry) => toRelayfileProvider(entry.provider) === toRelayfileProvider(provider))
-    const subscribeAgent = adapter?.capabilities.webhook === true || integrationSupportsWebhook(provider)
-
     const integration: ConnectedIntegration = {
       provider,
       integrationId,
@@ -1568,7 +1559,10 @@ export class IntegrationsManager {
       mountPaths,
       connectedAt: new Date().toISOString(),
       notifyAgent,
-      subscribeAgent,
+      // Event injection is opt-in: a newly connected integration never
+      // auto-subscribes an agent, regardless of webhook support. The user
+      // must explicitly enable it via updateSubscription.
+      subscribeAgent: false,
       subscribeAgentConfigured: false,
       downloadHistoricalData: false
     }
@@ -1965,7 +1959,8 @@ export class IntegrationsManager {
           readString(payloadEntry.updatedAt) ||
           new Date(0).toISOString(),
         notifyAgent: true,
-        subscribeAgent: adapter?.capabilities.webhook === true,
+        // Opt-in only — see completeConnect.
+        subscribeAgent: false,
         subscribeAgentConfigured: false,
         ...(lastError ? { lastError } : {})
       })

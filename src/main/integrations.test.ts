@@ -436,13 +436,13 @@ describe('IntegrationsManager', () => {
     )
   })
 
-  it('defaults legacy webhook integrations to event subscription', () => {
+  it('does not auto-subscribe an unconfigured webhook integration to events', () => {
     const manager = new IntegrationsManager()
 
     expect(manager.listConnected('project-1')).toEqual([
       expect.objectContaining({
         provider: 'slack',
-        subscribeAgent: true,
+        subscribeAgent: false,
         subscribeAgentConfigured: false
       })
     ])
@@ -478,7 +478,7 @@ describe('IntegrationsManager', () => {
     )
   })
 
-  it('subscribes hydrated webhook integrations to events by default', async () => {
+  it('does not auto-subscribe hydrated webhook integrations to events', async () => {
     mock.store.projects[0].integrations = []
     const manager = new IntegrationsManager()
 
@@ -487,7 +487,7 @@ describe('IntegrationsManager', () => {
     expect(mock.store.projects[0].integrations[0]).toEqual(
       expect.objectContaining({
         provider: 'slack',
-        subscribeAgent: true,
+        subscribeAgent: false,
         subscribeAgentConfigured: false
       })
     )

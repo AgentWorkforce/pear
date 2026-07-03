@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process'
-import { lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import type { Dirent } from 'node:fs'
+import { cp, lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
@@ -26,7 +27,9 @@ const INTEGRATION_MIRROR_TOP_LEVELS = new Set([
   'clickup',
   'confluence',
   'discovery',
+  'docker-hub',
   'dropbox',
+  'fathom',
   'gcs',
   'github',
   'gitlab',
@@ -66,6 +69,33 @@ function isFileAlreadyExistsError(error: unknown): boolean {
   return !!error &&
     typeof error === 'object' &&
     (error as { code?: unknown }).code === 'EEXIST'
+}
+
+function isCrossDeviceError(error: unknown): boolean {
+  return !!error &&
+    typeof error === 'object' &&
+    (error as { code?: unknown }).code === 'EXDEV'
+}
+
+/**
+ * Move a directory, falling back to copy+remove when `rename` fails with
+ * EXDEV (source and destination on different filesystems/mounts — e.g. the
+ * project lives on an external volume while the archive root is under the
+ * user's home directory).
+ */
+async function safeMove(src: string, dest: string): Promise<void> {
+  try {
+    await rename(src, dest)
+  } catch (error) {
+    if (!isCrossDeviceError(error)) throw error
+    try {
+      await cp(src, dest, { recursive: true })
+    } catch (cpError) {
+      await rm(dest, { recursive: true, force: true }).catch(() => undefined)
+      throw cpError
+    }
+    await rm(src, { recursive: true, force: true })
+  }
 }
 
 async function resolveGitDir(projectRoot: string): Promise<string | null> {
@@ -175,12 +205,23 @@ async function looksLikeIntegrationMirrorDirectory(linkPath: string): Promise<bo
   }
   if (!stats.isDirectory()) return false
 
-  const entries = await readdir(linkPath, { withFileTypes: true }).catch(() => [])
+  let entries: Dirent[]
+  try {
+    entries = await readdir(linkPath, { withFileTypes: true })
+  } catch (error) {
+    // An unreadable directory's contents can't be verified as mirror-shaped —
+    // treating that like "empty" would risk archiving unknown user content.
+    console.warn(
+      `[integration-symlinks] Failed to inspect ${linkPath}; leaving it untouched:`,
+      toErrorMessage(error)
+    )
+    return false
+  }
   // Empty gitignored `.integrations` directories carry no user data and block
   // the managed symlink just like stale mirrors, so they are safe to archive.
   if (entries.length === 0) return true
   return entries.every((entry) =>
-    entry.name.startsWith('.') || INTEGRATION_MIRROR_TOP_LEVELS.has(entry.name)
+    entry.name.startsWith('.') || (entry.isDirectory() && INTEGRATION_MIRROR_TOP_LEVELS.has(entry.name))
   )
 }
 
@@ -199,7 +240,7 @@ async function archiveStaleIntegrationMirror(projectRoot: string, linkPath: stri
   let archivePath = join(archiveRoot, `${PROJECT_INTEGRATIONS_LINK_NAME}.stale-bak.${stamp}`)
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     try {
-      await rename(linkPath, archivePath)
+      await safeMove(linkPath, archivePath)
       console.warn(
         `[integration-symlinks] Archived gitignored integration-shaped directory ${linkPath} -> ${archivePath}`
       )
@@ -232,7 +273,7 @@ async function rollbackArchivedIntegrationMirror(linkPath: string, archivePath: 
     if (existing !== null && existing !== 'not-a-symlink') {
       await rm(linkPath, { force: true })
     }
-    await rename(archivePath, linkPath)
+    await safeMove(archivePath, linkPath)
     console.warn(
       `[integration-symlinks] Restored archived integration directory ${archivePath} -> ${linkPath}`
     )

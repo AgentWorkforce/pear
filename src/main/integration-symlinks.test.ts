@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -8,12 +8,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const execFileAsync = promisify(execFile)
 
 const mock = vi.hoisted(() => ({
-  mountRoot: ''
+  mountRoot: '',
+  renameOverride: null as ((src: string, dest: string) => Promise<void>) | null
 }))
 
 vi.mock('./integration-mounts', () => ({
   integrationMountRootForWorkspace: vi.fn(() => mock.mountRoot)
 }))
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  return {
+    ...actual,
+    rename: async (src: string, dest: string) => {
+      if (mock.renameOverride) return mock.renameOverride(src, dest)
+      return actual.rename(src, dest)
+    }
+  }
+})
 
 import {
   ensureProjectIntegrationsLink,
@@ -39,9 +51,11 @@ describe('integration symlinks', () => {
     )
     await mkdir(mountRoot, { recursive: true })
     mock.mountRoot = mountRoot
+    mock.renameOverride = null
   })
 
   afterEach(async () => {
+    mock.renameOverride = null
     if (previousArchiveRoot === undefined) {
       delete process.env.PEAR_INTEGRATIONS_STALE_ARCHIVE_ROOT
     } else {
@@ -173,5 +187,63 @@ describe('integration symlinks', () => {
 
     await removeProjectIntegrationsLink(projectRoot)
     expect((await lstat(linkPath)).isSymbolicLink()).toBe(true)
+  })
+
+  it('falls back to copy+remove when archiving hits a cross-device rename error', async () => {
+    await execFileAsync('git', ['init'], { cwd: projectRoot })
+    await writeFile(join(projectRoot, '.git', 'info', 'exclude'), `/${PROJECT_INTEGRATIONS_LINK_NAME}\n`)
+    const linkPath = join(projectRoot, PROJECT_INTEGRATIONS_LINK_NAME)
+    await mkdir(join(linkPath, 'slack'), { recursive: true })
+    await writeFile(join(linkPath, 'slack', 'old-message.json'), 'stale')
+    await writeFile(join(mountRoot, 'probe.txt'), 'live')
+
+    mock.renameOverride = async () => {
+      const error = new Error('EXDEV: cross-device link not permitted') as NodeJS.ErrnoException
+      error.code = 'EXDEV'
+      throw error
+    }
+
+    await ensureProjectIntegrationsLink(projectRoot, 'ws-1')
+
+    expect(await readlink(linkPath)).toBe(mountRoot)
+    const archiveProjects = await readdir(archiveRoot)
+    expect(archiveProjects).toHaveLength(1)
+    const archivedEntries = await readdir(join(archiveRoot, archiveProjects[0]))
+    expect(
+      await readFile(join(archiveRoot, archiveProjects[0], archivedEntries[0], 'slack', 'old-message.json'), 'utf8')
+    ).toBe('stale')
+  })
+
+  it('does not archive a directory whose contents cannot be read', async () => {
+    await execFileAsync('git', ['init'], { cwd: projectRoot })
+    await writeFile(join(projectRoot, '.git', 'info', 'exclude'), `/${PROJECT_INTEGRATIONS_LINK_NAME}\n`)
+    const linkPath = join(projectRoot, PROJECT_INTEGRATIONS_LINK_NAME)
+    await mkdir(join(linkPath, 'slack'), { recursive: true })
+    await writeFile(join(linkPath, 'slack', 'old-message.json'), 'stale')
+    await chmod(linkPath, 0o000)
+
+    try {
+      await ensureProjectIntegrationsLink(projectRoot, 'ws-1')
+    } finally {
+      await chmod(linkPath, 0o755)
+    }
+
+    expect((await lstat(linkPath)).isDirectory()).toBe(true)
+    expect(await readdir(archiveRoot)).toHaveLength(0)
+  })
+
+  it('does not archive when a top-level entry is a regular file shaped like a provider name', async () => {
+    await execFileAsync('git', ['init'], { cwd: projectRoot })
+    await writeFile(join(projectRoot, '.git', 'info', 'exclude'), `/${PROJECT_INTEGRATIONS_LINK_NAME}\n`)
+    const linkPath = join(projectRoot, PROJECT_INTEGRATIONS_LINK_NAME)
+    await mkdir(linkPath, { recursive: true })
+    // A file (not a directory) named "slack" must not pass mirror-shape detection.
+    await writeFile(join(linkPath, 'slack'), 'not a mirror directory')
+
+    await ensureProjectIntegrationsLink(projectRoot, 'ws-1')
+
+    expect((await lstat(linkPath)).isDirectory()).toBe(true)
+    expect(await readFile(join(linkPath, 'slack'), 'utf8')).toBe('not a mirror directory')
+    expect(await readdir(archiveRoot)).toHaveLength(0)
   })
 })
