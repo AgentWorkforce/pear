@@ -36,6 +36,7 @@ const MOUNT_RESTART_CONSECUTIVE_CAP = 5
 // coalesce into one restart instead of racing it.
 const MOUNT_HEALTH_POLL_INTERVAL_MS = 45_000
 const MOUNT_SYNC_WEDGE_FAILURES = 3
+const UNREADABLE_CHANGED_EVENT_LOG_SCAN_LINES = 120
 // A mount whose state.json still reports status:ready / no error but whose
 // lastSuccessfulReconcileAt has not advanced past this window has a wedged
 // reconcile loop the auth/sync-wedge/stalled-revision checks can't see (they all
@@ -489,6 +490,29 @@ export class IntegrationMountManager {
           )
         } else {
           this.handledHealthErrorKeys.set(remotePath, healthErrorKey)
+        }
+      }
+
+      const unreadableChangedEvent = state
+        ? await readUnreadableChangedEventStall(handle.localDir, state)
+        : null
+      if (unreadableChangedEvent) {
+        const healthErrorKey = [
+          'unreadable-changed-event',
+          unreadableChangedEvent.lastFailureAt,
+          unreadableChangedEvent.message
+        ].join('|')
+        if (this.handledHealthErrorKeys.get(remotePath) === healthErrorKey) continue
+        const queued = this.queueForcedRestart(remotePath, 'unreadable changed event', { clearState: true })
+        this.handledHealthErrorKeys.set(remotePath, healthErrorKey)
+        if (queued) {
+          console.warn(
+            `[integration-mounts] Mount replay cursor hit unreadable changed event for ${remotePath}; restarting with fresh full pull`,
+            {
+              lastFailureAt: unreadableChangedEvent.lastFailureAt,
+              error: unreadableChangedEvent.message
+            }
+          )
         }
       }
 
@@ -948,6 +972,66 @@ async function readMountSyncWedge(localDir: string): Promise<MountSyncWedge | nu
 
 function isMountSyncWedgeOutput(text: string): boolean {
   return /context deadline exceeded|i\/o timeout|Client\.Timeout exceeded/i.test(text)
+}
+
+type UnreadableChangedEventStall = {
+  lastFailureAt: string
+  message: string
+}
+
+async function readUnreadableChangedEventStall(
+  localDir: string,
+  state: Record<string, unknown>
+): Promise<UnreadableChangedEventStall | null> {
+  if (!mountReconcileIsStale(state)) return null
+
+  const stateError = unreadableChangedEventFromState(state)
+  if (stateError) return stateError
+
+  return readUnreadableChangedEventFromLog(localDir)
+}
+
+function unreadableChangedEventFromState(state: Record<string, unknown>): UnreadableChangedEventStall | null {
+  const lastError = asRecord(state.lastError)
+  const message = typeof lastError?.message === 'string' ? lastError.message : ''
+  if (!isUnreadableChangedEventOutput(message)) return null
+  const errorAt = parseTimestamp(typeof lastError?.at === 'string' ? lastError.at : null)
+  const lastSuccessAt = parseTimestamp(
+    typeof state.lastSuccessfulReconcileAt === 'string' ? state.lastSuccessfulReconcileAt : null
+  )
+  if (errorAt !== null && lastSuccessAt !== null && errorAt <= lastSuccessAt) return null
+
+  return {
+    lastFailureAt: typeof lastError?.at === 'string' ? lastError.at : 'unknown',
+    message
+  }
+}
+
+async function readUnreadableChangedEventFromLog(localDir: string): Promise<UnreadableChangedEventStall | null> {
+  let logText: string
+  try {
+    logText = await readFile(join(localDir, '.relay', 'mount.log'), 'utf8')
+  } catch {
+    return null
+  }
+
+  for (const line of logText.trim().split(/\r?\n/u).slice(-UNREADABLE_CHANGED_EVENT_LOG_SCAN_LINES).reverse()) {
+    if (line.includes('mount sync cycle completed')) break
+    const failed = line.match(/^(\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}:\d{2}) mount sync cycle failed: (.+)$/u)
+    if (!failed) continue
+    const failedMessage = failed[2] || ''
+    if (!isUnreadableChangedEventOutput(failedMessage)) continue
+    return {
+      lastFailureAt: failed[1]?.replace(/\//gu, '-').replace(' ', 'T') ?? 'unknown',
+      message: failedMessage
+    }
+  }
+
+  return null
+}
+
+function isUnreadableChangedEventOutput(text: string): boolean {
+  return /changed event for .+ is not readable yet: not found/i.test(text)
 }
 
 type StalledInjectedRevisions = {

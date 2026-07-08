@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { invokeNodeHandler, nodeInfo, nodeManifest } from '@agent-relay/fleet'
-import { createPearFleetNodeDefinition, PEAR_LOCAL_SPAWN_HARNESSES } from './pear-fleet-node'
+import { createPearFleetNodeDefinition, PEAR_LOCAL_SPAWN_HARNESSES, reconnectDelayMs } from './pear-fleet-node'
 
 const expectedCapabilities = Object.keys(PEAR_LOCAL_SPAWN_HARNESSES).map((cli) => `spawn:${cli}`)
 
@@ -107,5 +107,29 @@ describe('Pear local fleet node', () => {
       },
       spawnAgent: vi.fn(async () => undefined)
     })).rejects.toThrow('checkout path is not advertised by this node')
+  })
+})
+
+describe('reconnectDelayMs', () => {
+  it('caps transient reconnects (already registered) at the fast ceiling', () => {
+    expect(reconnectDelayMs(1, true)).toBe(500)
+    expect(reconnectDelayMs(2, true)).toBe(1_000)
+    expect(reconnectDelayMs(4, true)).toBe(4_000)
+    // 500 * 2**4 = 8000 -> clamped to the 5s ceiling
+    expect(reconnectDelayMs(5, true)).toBe(5_000)
+    expect(reconnectDelayMs(50, true)).toBe(5_000)
+  })
+
+  it('backs off much harder while the node has never registered', () => {
+    // Grows past the registered ceiling so a wedged broker is not stormed.
+    expect(reconnectDelayMs(5, false)).toBe(8_000)
+    expect(reconnectDelayMs(6, false)).toBe(16_000)
+    expect(reconnectDelayMs(8, false)).toBe(60_000)
+    expect(reconnectDelayMs(50, false)).toBe(60_000)
+  })
+
+  it('never returns a negative or sub-base delay for the first attempt', () => {
+    expect(reconnectDelayMs(0, false)).toBe(500)
+    expect(reconnectDelayMs(1, false)).toBe(500)
   })
 })

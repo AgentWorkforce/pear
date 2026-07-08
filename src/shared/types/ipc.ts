@@ -743,6 +743,7 @@ export type ConnectedIntegration = {
   connectedAt: string
   notifyAgent: boolean
   subscribeAgent?: boolean
+  subscribeAgentConfigured?: boolean
   downloadHistoricalData?: boolean
   visibleInProject?: boolean
   localMountPaths?: string[]

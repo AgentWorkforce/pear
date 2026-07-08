@@ -36,6 +36,7 @@ import {
   removeProjectIntegrationsLink
 } from './integration-symlinks'
 import { INTEGRATIONS_CATALOG } from './integrations.catalog'
+import { ACTIVE_PROVIDERS } from './integration-providers'
 import { slackWritebackCommandMountPathFor } from './slack-writeback-command-roots'
 import { getRelayWorkspaceManager } from './relay-workspace'
 import { normalizeRelayWorkspaceInfo } from './relay-service-urls'
@@ -69,6 +70,7 @@ export type ConnectedIntegration = {
   connectedAt: string
   notifyAgent: boolean
   subscribeAgent?: boolean
+  subscribeAgentConfigured?: boolean
   downloadHistoricalData?: boolean
   visibleInProject?: boolean
   localMountPaths?: string[]
@@ -257,33 +259,10 @@ const LOCAL_MOUNT_CLOUD_HYDRATION_THROTTLE_MS = 30_000
 // cannot spin a fetch loop, short enough that reopening the page re-checks cloud.
 const PROJECT_CLOUD_HYDRATION_THROTTLE_MS = 30_000
 const AUTH_RECOVERY_RETRY_INTERVAL_MS = 30_000
+const LOCAL_INTEGRATION_WORKSPACE_ID_RETRY_MS = 60_000
 const CATALOG_PATH = '/api/v1/integrations/catalog'
 const MAX_REMOTE_DIRECTORY_ENTRIES = 5_000
 const MAX_REMOTE_FILE_PREVIEW_BYTES = 1024 * 1024
-
-// Only providers currently active in ../cloud are surfaced. This mirrors the
-// non-deprecated relayfile providers in
-// cloud/packages/web/lib/integrations/providers.ts
-// (WORKSPACE_INTEGRATION_PROVIDER_DEFINITIONS). Both id spellings for Google
-// Mail are included because the live cloud catalog uses `google-mail` while
-// pear's static catalog uses `gmail`. Keep this in sync when cloud adds/removes
-// a relayfile integration.
-const ACTIVE_PROVIDERS = new Set([
-  'github',
-  'gitlab',
-  'slack',
-  'notion',
-  'linear',
-  'jira',
-  'confluence',
-  'gmail',
-  'google-mail',
-  'google-calendar',
-  'hubspot',
-  'granola',
-  'fathom',
-  'docker-hub'
-])
 
 function isActiveProvider(provider: string): boolean {
   return ACTIVE_PROVIDERS.has(provider.trim().toLowerCase())
@@ -758,6 +737,8 @@ function normalizeConnectedIntegration(value: unknown): ConnectedIntegration | n
 
   if (!provider || !integrationId) return null
 
+  const subscription = normalizeSubscribeAgent(value)
+
   return {
     provider,
     integrationId,
@@ -767,7 +748,10 @@ function normalizeConnectedIntegration(value: unknown): ConnectedIntegration | n
       ? value.connectedAt.trim()
       : new Date(0).toISOString(),
     notifyAgent: typeof value.notifyAgent === 'boolean' ? value.notifyAgent : true,
-    subscribeAgent: typeof value.subscribeAgent === 'boolean' ? value.subscribeAgent : false,
+    subscribeAgent: subscription.subscribeAgent,
+    ...(subscription.subscribeAgentConfigured !== undefined
+      ? { subscribeAgentConfigured: subscription.subscribeAgentConfigured }
+      : {}),
     downloadHistoricalData: typeof value.downloadHistoricalData === 'boolean'
       ? value.downloadHistoricalData
       : typeof value.syncHistoricalData === 'boolean'
@@ -800,6 +784,7 @@ function toStoredIntegration(integration: ConnectedIntegration, displayName?: st
     connectedAt: integration.connectedAt,
     notifyAgent: integration.notifyAgent,
     subscribeAgent: integration.subscribeAgent === true,
+    subscribeAgentConfigured: integration.subscribeAgentConfigured === true,
     downloadHistoricalData: integration.downloadHistoricalData === true,
     visibleInProject: integration.visibleInProject !== false,
     ...(integration.lastSyncAt ? { lastSyncAt: integration.lastSyncAt } : {}),
@@ -812,6 +797,22 @@ function visibleFromScope(scope: Record<string, unknown>): boolean {
   if (!visibility || typeof visibility !== 'object' || Array.isArray(visibility)) return true
   const visible = (visibility as Record<string, unknown>).visible
   return typeof visible === 'boolean' ? visible : true
+}
+
+function normalizeSubscribeAgent(value: Record<string, unknown>): {
+  subscribeAgent: boolean
+  subscribeAgentConfigured?: boolean
+} {
+  const configured = typeof value.subscribeAgentConfigured === 'boolean'
+    ? value.subscribeAgentConfigured
+    : false
+  if (configured && typeof value.subscribeAgent === 'boolean') {
+    return { subscribeAgent: value.subscribeAgent, subscribeAgentConfigured: true }
+  }
+  if (typeof value.subscribeAgent === 'boolean' && value.subscribeAgent === true) {
+    return { subscribeAgent: true, subscribeAgentConfigured: true }
+  }
+  return { subscribeAgent: false, subscribeAgentConfigured: false }
 }
 
 function getPayloadMessage(payload: unknown, fallback: string): string {
@@ -919,6 +920,9 @@ export class IntegrationsManager {
   private projectCloudHydrationPromises = new Map<string, Promise<void>>()
   private authRecoveryState: IntegrationAuthRecoveryState | null = null
   private authRecoveryRetryTimer: ReturnType<typeof setTimeout> | null = null
+  private cachedLocalIntegrationWorkspaceId: string | null = null
+  private localIntegrationWorkspaceIdPromise: Promise<string | null> | null = null
+  private localIntegrationWorkspaceIdFailedAt = 0
 
   constructor() {
     // Surface mount auth stalls (expired token + queued writeback) to the
@@ -1413,8 +1417,10 @@ export class IntegrationsManager {
     // Unlink the per-project `.integrations` symlinks before stopping the
     // mounts so a closed app leaves no dangling links in project trees.
     await Promise.all(
-      loadStore().projects.map((project) =>
-        removeProjectIntegrationsLink(project.rootPath).catch(() => undefined)
+      loadStore().projects.flatMap((project) =>
+        this.projectIntegrationRootPaths(project).map((rootPath) =>
+          removeProjectIntegrationsLink(rootPath).catch(() => undefined)
+        )
       )
     )
     await Promise.all([
@@ -1530,7 +1536,11 @@ export class IntegrationsManager {
       mountPaths,
       connectedAt: new Date().toISOString(),
       notifyAgent,
+      // Event injection is opt-in: a newly connected integration never
+      // auto-subscribes an agent, regardless of webhook support. The user
+      // must explicitly enable it via updateSubscription.
       subscribeAgent: false,
+      subscribeAgentConfigured: false,
       downloadHistoricalData: false
     }
 
@@ -1553,6 +1563,7 @@ export class IntegrationsManager {
       mountPaths,
       notifyAgent: existing.notifyAgent,
       subscribeAgent: existing.subscribeAgent === true,
+      subscribeAgentConfigured: existing.subscribeAgentConfigured === true,
       downloadHistoricalData: existing.downloadHistoricalData === true,
       visibleInProject: visibleFromScope(scope)
     }
@@ -1571,7 +1582,8 @@ export class IntegrationsManager {
     const existing = this.requireConnectedIntegration(projectId, integrationId)
     const integration: ConnectedIntegration = {
       ...existing,
-      subscribeAgent
+      subscribeAgent,
+      subscribeAgentConfigured: true
     }
 
     await this.persistIntegration(projectId, integration)
@@ -1924,6 +1936,9 @@ export class IntegrationsManager {
           readString(payloadEntry.updatedAt) ||
           new Date(0).toISOString(),
         notifyAgent: true,
+        // Opt-in only — see completeConnect.
+        subscribeAgent: false,
+        subscribeAgentConfigured: false,
         ...(lastError ? { lastError } : {})
       })
     }
@@ -2072,6 +2087,7 @@ export class IntegrationsManager {
               : existingIntegration.mountPaths,
             notifyAgent: existingIntegration.notifyAgent,
             subscribeAgent: existingIntegration.subscribeAgent === true,
+            subscribeAgentConfigured: existingIntegration.subscribeAgentConfigured === true,
             downloadHistoricalData: existingIntegration.downloadHistoricalData === true,
             visibleInProject: existingVisible,
             connectedAt: existingIntegration.connectedAt || cloudIntegration.connectedAt,
@@ -2827,35 +2843,114 @@ export class IntegrationsManager {
           integrationAuthRecoveryReason(error),
           integrationAuthRecoveryFailureClass(error)
         )
+        void this.syncProjectIntegrationLinksForCurrentState({ allowRemove: false })
         throw error
       }
+      await this.syncProjectIntegrationLinksForCurrentState({ allowRemove: false })
       console.warn('[integrations] Failed to reconcile local integration mount:', toErrorMessage(error))
       return
     }
     this.clearAuthRecoveryState()
-    await this.syncProjectIntegrationLinks(integrations.length > 0)
+    await this.syncProjectIntegrationLinksForCurrentState({ allowRemove: true })
   }
 
   // Mirror the workspace's integration data into each project via a
   // git-ignored `.integrations` symlink so local agents can read it from
   // their cwd. Removed on app shutdown (see shutdownLocalMounts).
-  private async syncProjectIntegrationLinks(hasIntegrations: boolean): Promise<void> {
-    const workspaceId = integrationMountManager.currentWorkspaceId()
+  private async resolveLocalIntegrationWorkspaceId(): Promise<string | null> {
+    const currentWorkspaceId = integrationMountManager.currentWorkspaceId()
+    if (currentWorkspaceId) {
+      this.cachedLocalIntegrationWorkspaceId = currentWorkspaceId
+      return currentWorkspaceId
+    }
+    if (this.cachedLocalIntegrationWorkspaceId) return this.cachedLocalIntegrationWorkspaceId
+
+    const now = Date.now()
+    if (this.localIntegrationWorkspaceIdFailedAt > 0 &&
+      now - this.localIntegrationWorkspaceIdFailedAt < LOCAL_INTEGRATION_WORKSPACE_ID_RETRY_MS) {
+      return null
+    }
+
+    if (!this.localIntegrationWorkspaceIdPromise) {
+      const pending = getAccountWorkspaceId({ retryAttempts: 1, retryDelayMs: 0 })
+        .then((workspaceId) => {
+          this.cachedLocalIntegrationWorkspaceId = workspaceId
+          this.localIntegrationWorkspaceIdFailedAt = 0
+          return workspaceId
+        })
+        .catch(() => {
+          this.localIntegrationWorkspaceIdFailedAt = Date.now()
+          return null
+        })
+        .finally(() => {
+          if (this.localIntegrationWorkspaceIdPromise === pending) {
+            this.localIntegrationWorkspaceIdPromise = null
+          }
+        })
+      this.localIntegrationWorkspaceIdPromise = pending
+    }
+
+    return this.localIntegrationWorkspaceIdPromise
+  }
+
+  private projectHasVisibleIntegrations(project: ReturnType<typeof loadStore>['projects'][number]): boolean {
+    return project.integrations
+      .map((integration) => normalizeConnectedIntegration(integration))
+      .some((integration) => integration !== null && integration.visibleInProject !== false)
+  }
+
+  private projectIntegrationRootPaths(project: ReturnType<typeof loadStore>['projects'][number]): string[] {
+    const paths = [
+      project.rootPath,
+      ...project.roots.map((root) => root.path)
+    ]
+    const seen = new Set<string>()
+    const deduped: string[] = []
+    for (const path of paths) {
+      const trimmed = path.trim()
+      if (!trimmed) continue
+      const key = resolve(trimmed)
+      if (seen.has(key)) continue
+      seen.add(key)
+      deduped.push(trimmed)
+    }
+    return deduped
+  }
+
+  private async syncProjectIntegrationLinksForCurrentState(options: { allowRemove: boolean }): Promise<void> {
     const projects = loadStore().projects
-    await Promise.all(projects.map(async (project) => {
-      try {
-        if (hasIntegrations && workspaceId) {
-          await ensureProjectIntegrationsLink(project.rootPath, workspaceId)
-        } else {
-          await removeProjectIntegrationsLink(project.rootPath)
+    const hasIntegrations = projects.some((project) => this.projectHasVisibleIntegrations(project))
+    if (!hasIntegrations) {
+      if (!options.allowRemove) return
+      await Promise.all(projects.flatMap((project) => this.projectIntegrationRootPaths(project).map(async (rootPath) => {
+        try {
+          await removeProjectIntegrationsLink(rootPath)
+        } catch (error) {
+          console.warn(
+            `[integrations] Failed to remove integration symlink for ${rootPath}:`,
+            toErrorMessage(error)
+          )
         }
+      })))
+      return
+    }
+
+    const workspaceId = await this.resolveLocalIntegrationWorkspaceId()
+    if (!workspaceId) return
+
+    const mountRoot = integrationMountRootForWorkspace(workspaceId)
+    if (!existsSync(mountRoot)) return
+
+    await Promise.all(projects.flatMap((project) => this.projectIntegrationRootPaths(project).map(async (rootPath) => {
+      try {
+        await ensureProjectIntegrationsLink(rootPath, workspaceId)
       } catch (error) {
         console.warn(
-          `[integrations] Failed to sync integration symlink for ${project.rootPath}:`,
+          `[integrations] Failed to sync integration symlink for ${rootPath}:`,
           toErrorMessage(error)
         )
       }
-    }))
+    })))
   }
 
   private withCurrentLocalMountPaths(integrations: ConnectedIntegration[]): ConnectedIntegration[] {

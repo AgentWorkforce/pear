@@ -1,8 +1,11 @@
 import { execFile } from 'node:child_process'
-import { lstat, mkdir, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promises'
+import type { Dirent } from 'node:fs'
+import { cp, lstat, mkdir, readFile, readdir, readlink, realpath, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { homedir } from 'node:os'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { promisify } from 'node:util'
 import { integrationMountRootForWorkspace } from './integration-mounts'
+import { INTEGRATION_MIRROR_TOP_LEVELS } from './integration-providers'
 import { toErrorMessage } from './errors'
 
 const execFileAsync = promisify(execFile)
@@ -16,11 +19,37 @@ export const PROJECT_INTEGRATIONS_LINK_NAME = '.integrations'
 
 const GIT_EXCLUDE_MARKER = '# pear: integration mount symlink (auto-managed)'
 
-
 function isFileAlreadyExistsError(error: unknown): boolean {
   return !!error &&
     typeof error === 'object' &&
     (error as { code?: unknown }).code === 'EEXIST'
+}
+
+function isCrossDeviceError(error: unknown): boolean {
+  return !!error &&
+    typeof error === 'object' &&
+    (error as { code?: unknown }).code === 'EXDEV'
+}
+
+/**
+ * Move a directory, falling back to copy+remove when `rename` fails with
+ * EXDEV (source and destination on different filesystems/mounts — e.g. the
+ * project lives on an external volume while the archive root is under the
+ * user's home directory).
+ */
+async function safeMove(src: string, dest: string): Promise<void> {
+  try {
+    await rename(src, dest)
+  } catch (error) {
+    if (!isCrossDeviceError(error)) throw error
+    try {
+      await cp(src, dest, { recursive: true })
+    } catch (cpError) {
+      await rm(dest, { recursive: true, force: true }).catch(() => undefined)
+      throw cpError
+    }
+    await rm(src, { recursive: true, force: true })
+  }
 }
 
 async function resolveGitDir(projectRoot: string): Promise<string | null> {
@@ -96,10 +125,150 @@ async function pointsAtTarget(linkPath: string, target: string): Promise<boolean
   return resolve(dirname(linkPath), existing) === resolve(target)
 }
 
+async function isGitIgnored(projectRoot: string, projectRelativePath: string): Promise<boolean> {
+  try {
+    await execFileAsync('git', ['check-ignore', '-q', '--', projectRelativePath], { cwd: projectRoot })
+    return true
+  } catch {
+    return false
+  }
+}
+
+function sanitizeArchiveSegment(value: string): string {
+  return value
+    .trim()
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(-120) || 'project'
+}
+
+function staleIntegrationsArchiveRoot(projectRoot: string): string {
+  return join(
+    process.env.PEAR_INTEGRATIONS_STALE_ARCHIVE_ROOT ||
+      join(homedir(), '.agentworkforce', 'pear', 'stale-project-integrations'),
+    sanitizeArchiveSegment(resolve(projectRoot))
+  )
+}
+
+async function looksLikeIntegrationMirrorDirectory(linkPath: string): Promise<boolean> {
+  let stats: Awaited<ReturnType<typeof lstat>>
+  try {
+    stats = await lstat(linkPath)
+  } catch {
+    return false
+  }
+  if (!stats.isDirectory()) return false
+
+  let entries: Dirent[]
+  try {
+    entries = await readdir(linkPath, { withFileTypes: true })
+  } catch (error) {
+    // An unreadable directory's contents can't be verified as mirror-shaped —
+    // treating that like "empty" would risk archiving unknown user content.
+    console.warn(
+      `[integration-symlinks] Failed to inspect ${linkPath}; leaving it untouched:`,
+      toErrorMessage(error)
+    )
+    return false
+  }
+  // Empty gitignored `.integrations` directories carry no user data and block
+  // the managed symlink just like stale mirrors, so they are safe to archive.
+  if (entries.length === 0) return true
+  return entries.every((entry) =>
+    entry.name.startsWith('.') || (entry.isDirectory() && INTEGRATION_MIRROR_TOP_LEVELS.has(entry.name))
+  )
+}
+
+async function archiveStaleIntegrationMirror(projectRoot: string, linkPath: string): Promise<string | null> {
+  if (!await isGitIgnored(projectRoot, PROJECT_INTEGRATIONS_LINK_NAME)) return null
+  if (!await looksLikeIntegrationMirrorDirectory(linkPath)) {
+    console.warn(
+      `[integration-symlinks] ${linkPath} is gitignored but not shaped like an integration mirror; leaving it untouched`
+    )
+    return null
+  }
+
+  const archiveRoot = staleIntegrationsArchiveRoot(projectRoot)
+  await mkdir(archiveRoot, { recursive: true })
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-')
+  let archivePath = join(archiveRoot, `${PROJECT_INTEGRATIONS_LINK_NAME}.stale-bak.${stamp}`)
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    try {
+      await safeMove(linkPath, archivePath)
+      console.warn(
+        `[integration-symlinks] Archived gitignored integration-shaped directory ${linkPath} -> ${archivePath}`
+      )
+      return archivePath
+    } catch (error) {
+      if (!isFileAlreadyExistsError(error)) {
+        console.warn(
+          `[integration-symlinks] Failed to archive stale integration directory ${linkPath}:`,
+          toErrorMessage(error)
+        )
+        return null
+      }
+      archivePath = join(archiveRoot, `${PROJECT_INTEGRATIONS_LINK_NAME}.stale-bak.${stamp}.${attempt}`)
+    }
+  }
+  return null
+}
+
+async function verifyProjectIntegrationsLink(linkPath: string, target: string): Promise<boolean> {
+  try {
+    return await realpath(linkPath) === await realpath(target)
+  } catch {
+    return false
+  }
+}
+
+async function rollbackArchivedIntegrationMirror(linkPath: string, archivePath: string): Promise<void> {
+  try {
+    const existing = await currentLinkTarget(linkPath)
+    if (existing !== null && existing !== 'not-a-symlink') {
+      await rm(linkPath, { force: true })
+    }
+    await safeMove(archivePath, linkPath)
+    console.warn(
+      `[integration-symlinks] Restored archived integration directory ${archivePath} -> ${linkPath}`
+    )
+  } catch (error) {
+    console.warn(
+      `[integration-symlinks] Failed to restore archived integration directory ${archivePath}:`,
+      toErrorMessage(error)
+    )
+  }
+}
+
+async function createVerifiedLink(linkPath: string, target: string): Promise<boolean> {
+  let createdLink = false
+  try {
+    await symlink(target, linkPath, 'dir')
+    createdLink = true
+  } catch (error) {
+    if (!(isFileAlreadyExistsError(error) && await pointsAtTarget(linkPath, target))) {
+      console.warn(
+        `[integration-symlinks] Failed to link ${linkPath} -> ${target}:`,
+        toErrorMessage(error)
+      )
+      return false
+    }
+  }
+  if (await verifyProjectIntegrationsLink(linkPath, target)) return true
+  if (createdLink) {
+    await rm(linkPath, { force: true }).catch(() => undefined)
+  }
+  console.warn(
+    `[integration-symlinks] Refusing integration link ${linkPath}; it does not resolve to ${target}`
+  )
+  return false
+}
+
 /**
  * Symlink `<projectRoot>/.integrations` → the workspace's local integration
  * mirror, and git-ignore it via info/exclude. Existing non-symlink entries
- * (a user's real `.integrations` directory) are left untouched.
+ * are left untouched unless they are ignored, integration-shaped legacy mirrors;
+ * those are archived before linking so stale local data cannot shadow live
+ * integration mounts.
  */
 export async function ensureProjectIntegrationsLink(
   projectRoot: string,
@@ -110,6 +279,20 @@ export async function ensureProjectIntegrationsLink(
 
   const existing = await currentLinkTarget(linkPath)
   if (existing === 'not-a-symlink') {
+    const archivePath = await archiveStaleIntegrationMirror(projectRoot, linkPath)
+    if (archivePath) {
+      await ensureGitExclude(projectRoot).catch((error) => {
+        console.warn(
+          `[integration-symlinks] Failed to update git exclude for ${projectRoot}:`,
+          toErrorMessage(error)
+        )
+      })
+      if (await createVerifiedLink(linkPath, target)) {
+        return
+      }
+      await rollbackArchivedIntegrationMirror(linkPath, archivePath)
+      return
+    }
     console.warn(
       `[integration-symlinks] ${linkPath} exists and is not a symlink; leaving it untouched`
     )
@@ -127,17 +310,7 @@ export async function ensureProjectIntegrationsLink(
   if (existing !== null) {
     await rm(linkPath, { force: true })
   }
-  try {
-    await symlink(target, linkPath, 'dir')
-  } catch (error) {
-    if (isFileAlreadyExistsError(error) && await pointsAtTarget(linkPath, target)) {
-      return
-    }
-    console.warn(
-      `[integration-symlinks] Failed to link ${linkPath} -> ${target}:`,
-      toErrorMessage(error)
-    )
-  }
+  await createVerifiedLink(linkPath, target)
 }
 
 /**

@@ -38,14 +38,14 @@ export function normalizeRelayWorkspaceInfo<T extends {
   if (!handle.info) {
     return handle
   }
-  return {
-    ...handle,
+
+  return Object.assign(Object.create(Object.getPrototypeOf(handle)) as T, handle, {
     info: {
       ...handle.info,
       relayfileUrl: normalizeRelayfileBaseUrl(handle.info.relayfileUrl),
       relaycastBaseUrl: normalizeRelaycastBaseUrl(handle.info.relaycastBaseUrl)
     }
-  }
+  })
 }
 
 function normalizeHostedServiceUrl(

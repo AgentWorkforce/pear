@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { lstat, mkdir, mkdtemp, readFile, readlink, rm, writeFile } from 'node:fs/promises'
+import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { promisify } from 'node:util'
@@ -8,12 +8,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 const execFileAsync = promisify(execFile)
 
 const mock = vi.hoisted(() => ({
-  mountRoot: ''
+  mountRoot: '',
+  renameOverride: null as ((src: string, dest: string) => Promise<void>) | null
 }))
 
 vi.mock('./integration-mounts', () => ({
   integrationMountRootForWorkspace: vi.fn(() => mock.mountRoot)
 }))
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>()
+  return {
+    ...actual,
+    rename: async (src: string, dest: string) => {
+      if (mock.renameOverride) return mock.renameOverride(src, dest)
+      return actual.rename(src, dest)
+    }
+  }
+})
 
 import {
   ensureProjectIntegrationsLink,
@@ -24,9 +36,14 @@ import {
 describe('integration symlinks', () => {
   let projectRoot: string
   let mountRoot: string
+  let archiveRoot: string
+  let previousArchiveRoot: string | undefined
 
   beforeEach(async () => {
     projectRoot = await mkdtemp(join(tmpdir(), 'pear-project-'))
+    archiveRoot = await mkdtemp(join(tmpdir(), 'pear-stale-integrations-'))
+    previousArchiveRoot = process.env.PEAR_INTEGRATIONS_STALE_ARCHIVE_ROOT
+    process.env.PEAR_INTEGRATIONS_STALE_ARCHIVE_ROOT = archiveRoot
     // Mirror pear's real layout so the safety check in remove() passes.
     mountRoot = join(
       await mkdtemp(join(tmpdir(), 'pear-home-')),
@@ -34,11 +51,19 @@ describe('integration symlinks', () => {
     )
     await mkdir(mountRoot, { recursive: true })
     mock.mountRoot = mountRoot
+    mock.renameOverride = null
   })
 
   afterEach(async () => {
+    mock.renameOverride = null
+    if (previousArchiveRoot === undefined) {
+      delete process.env.PEAR_INTEGRATIONS_STALE_ARCHIVE_ROOT
+    } else {
+      process.env.PEAR_INTEGRATIONS_STALE_ARCHIVE_ROOT = previousArchiveRoot
+    }
     await rm(projectRoot, { recursive: true, force: true })
     await rm(mountRoot, { recursive: true, force: true })
+    await rm(archiveRoot, { recursive: true, force: true })
   })
 
   it('creates the symlink and excludes it from git', async () => {
@@ -94,6 +119,65 @@ describe('integration symlinks', () => {
     expect(await readFile(join(linkPath, 'user-file.txt'), 'utf8')).toBe('keep me')
   })
 
+  it('archives an ignored stale integration mirror before linking live mounts', async () => {
+    await execFileAsync('git', ['init'], { cwd: projectRoot })
+    await writeFile(join(projectRoot, '.git', 'info', 'exclude'), `/${PROJECT_INTEGRATIONS_LINK_NAME}\n`)
+    const linkPath = join(projectRoot, PROJECT_INTEGRATIONS_LINK_NAME)
+    await mkdir(join(linkPath, 'slack', 'channels'), { recursive: true })
+    await writeFile(join(linkPath, 'slack', 'channels', 'old-message.json'), 'stale')
+    await writeFile(join(mountRoot, 'probe.txt'), 'live')
+
+    await ensureProjectIntegrationsLink(projectRoot, 'ws-1')
+
+    expect(await readlink(linkPath)).toBe(mountRoot)
+    expect(await readFile(join(linkPath, 'probe.txt'), 'utf8')).toBe('live')
+
+    const archiveProjects = await readdir(archiveRoot)
+    expect(archiveProjects).toHaveLength(1)
+    const archivedEntries = await readdir(join(archiveRoot, archiveProjects[0]))
+    expect(archivedEntries).toHaveLength(1)
+    expect(
+      await readFile(join(archiveRoot, archiveProjects[0], archivedEntries[0], 'slack', 'channels', 'old-message.json'), 'utf8')
+    ).toBe('stale')
+  })
+
+  it('does not archive an ignored real directory with non-integration content', async () => {
+    await execFileAsync('git', ['init'], { cwd: projectRoot })
+    await writeFile(join(projectRoot, '.git', 'info', 'exclude'), `/${PROJECT_INTEGRATIONS_LINK_NAME}\n`)
+    const linkPath = join(projectRoot, PROJECT_INTEGRATIONS_LINK_NAME)
+    await mkdir(join(linkPath, 'custom'), { recursive: true })
+    await writeFile(join(linkPath, 'custom', 'user-file.txt'), 'keep me')
+
+    await ensureProjectIntegrationsLink(projectRoot, 'ws-1')
+
+    expect((await lstat(linkPath)).isDirectory()).toBe(true)
+    expect(await readFile(join(linkPath, 'custom', 'user-file.txt'), 'utf8')).toBe('keep me')
+    expect(await readdir(archiveRoot)).toHaveLength(0)
+  })
+
+  it('rolls back the archive when the live symlink cannot be verified', async () => {
+    await execFileAsync('git', ['init'], { cwd: projectRoot })
+    await writeFile(join(projectRoot, '.git', 'info', 'exclude'), `/${PROJECT_INTEGRATIONS_LINK_NAME}\n`)
+    mock.mountRoot = join(archiveRoot, 'missing-live-target')
+    const linkPath = join(projectRoot, PROJECT_INTEGRATIONS_LINK_NAME)
+    await mkdir(join(linkPath, 'linear', 'teams'), { recursive: true })
+    await writeFile(join(linkPath, 'linear', 'teams', 'old-team.json'), 'stale')
+
+    await ensureProjectIntegrationsLink(projectRoot, 'ws-1')
+
+    expect((await lstat(linkPath)).isDirectory()).toBe(true)
+    expect(await readFile(join(linkPath, 'linear', 'teams', 'old-team.json'), 'utf8')).toBe('stale')
+  })
+
+  it('removes a newly-created symlink when the live target cannot be verified', async () => {
+    mock.mountRoot = join(archiveRoot, 'missing-live-target')
+    const linkPath = join(projectRoot, PROJECT_INTEGRATIONS_LINK_NAME)
+
+    await ensureProjectIntegrationsLink(projectRoot, 'ws-1')
+
+    await expect(lstat(linkPath)).rejects.toThrow()
+  })
+
   it('leaves foreign symlinks alone on removal', async () => {
     const foreignTarget = join(projectRoot, 'foreign')
     await mkdir(foreignTarget)
@@ -103,5 +187,63 @@ describe('integration symlinks', () => {
 
     await removeProjectIntegrationsLink(projectRoot)
     expect((await lstat(linkPath)).isSymbolicLink()).toBe(true)
+  })
+
+  it('falls back to copy+remove when archiving hits a cross-device rename error', async () => {
+    await execFileAsync('git', ['init'], { cwd: projectRoot })
+    await writeFile(join(projectRoot, '.git', 'info', 'exclude'), `/${PROJECT_INTEGRATIONS_LINK_NAME}\n`)
+    const linkPath = join(projectRoot, PROJECT_INTEGRATIONS_LINK_NAME)
+    await mkdir(join(linkPath, 'slack'), { recursive: true })
+    await writeFile(join(linkPath, 'slack', 'old-message.json'), 'stale')
+    await writeFile(join(mountRoot, 'probe.txt'), 'live')
+
+    mock.renameOverride = async () => {
+      const error = new Error('EXDEV: cross-device link not permitted') as NodeJS.ErrnoException
+      error.code = 'EXDEV'
+      throw error
+    }
+
+    await ensureProjectIntegrationsLink(projectRoot, 'ws-1')
+
+    expect(await readlink(linkPath)).toBe(mountRoot)
+    const archiveProjects = await readdir(archiveRoot)
+    expect(archiveProjects).toHaveLength(1)
+    const archivedEntries = await readdir(join(archiveRoot, archiveProjects[0]))
+    expect(
+      await readFile(join(archiveRoot, archiveProjects[0], archivedEntries[0], 'slack', 'old-message.json'), 'utf8')
+    ).toBe('stale')
+  })
+
+  it('does not archive a directory whose contents cannot be read', async () => {
+    await execFileAsync('git', ['init'], { cwd: projectRoot })
+    await writeFile(join(projectRoot, '.git', 'info', 'exclude'), `/${PROJECT_INTEGRATIONS_LINK_NAME}\n`)
+    const linkPath = join(projectRoot, PROJECT_INTEGRATIONS_LINK_NAME)
+    await mkdir(join(linkPath, 'slack'), { recursive: true })
+    await writeFile(join(linkPath, 'slack', 'old-message.json'), 'stale')
+    await chmod(linkPath, 0o000)
+
+    try {
+      await ensureProjectIntegrationsLink(projectRoot, 'ws-1')
+    } finally {
+      await chmod(linkPath, 0o755)
+    }
+
+    expect((await lstat(linkPath)).isDirectory()).toBe(true)
+    expect(await readdir(archiveRoot)).toHaveLength(0)
+  })
+
+  it('does not archive when a top-level entry is a regular file shaped like a provider name', async () => {
+    await execFileAsync('git', ['init'], { cwd: projectRoot })
+    await writeFile(join(projectRoot, '.git', 'info', 'exclude'), `/${PROJECT_INTEGRATIONS_LINK_NAME}\n`)
+    const linkPath = join(projectRoot, PROJECT_INTEGRATIONS_LINK_NAME)
+    await mkdir(linkPath, { recursive: true })
+    // A file (not a directory) named "slack" must not pass mirror-shape detection.
+    await writeFile(join(linkPath, 'slack'), 'not a mirror directory')
+
+    await ensureProjectIntegrationsLink(projectRoot, 'ws-1')
+
+    expect((await lstat(linkPath)).isDirectory()).toBe(true)
+    expect(await readFile(join(linkPath, 'slack'), 'utf8')).toBe('not a mirror directory')
+    expect(await readdir(archiveRoot)).toHaveLength(0)
   })
 })

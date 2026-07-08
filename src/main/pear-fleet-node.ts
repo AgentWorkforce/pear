@@ -39,6 +39,15 @@ export const PEAR_LOCAL_SPAWN_HARNESSES = {
 
 const RECONNECT_BASE_DELAY_MS = 500
 const RECONNECT_MAX_DELAY_MS = 5_000
+// When the sidecar has never completed a registration handshake, the broker is
+// either wedged (accepts the WS upgrade but never answers `hello`) or does not
+// accept this fleet node at all. Reconnecting on the normal 5s ceiling in that
+// state produces a tight storm — leaked sockets plus a flood of "hello request
+// timed out; reconnecting" warnings — that never self-resolves. Back off much
+// harder while unregistered so we keep probing for recovery without hammering
+// the broker. A transient drop after a healthy registration keeps the fast
+// ceiling so we recover quickly from ordinary reconnects.
+const RECONNECT_UNREGISTERED_MAX_DELAY_MS = 60_000
 const REQUEST_TIMEOUT_MS = 5_000
 const DEREGISTER_TIMEOUT_MS = 1_000
 
@@ -272,8 +281,20 @@ async function runPearFleetSidecarLoop(options: PearFleetSidecarOptions & {
 
     if (options.signal.aborted) return
     attempt += 1
-    await delay(Math.min(RECONNECT_MAX_DELAY_MS, RECONNECT_BASE_DELAY_MS * 2 ** (attempt - 1)), options.signal)
+    await delay(reconnectDelayMs(attempt, registeredOnce), options.signal)
   }
+}
+
+/**
+ * Backoff between reconnect attempts. Once the node has registered at least
+ * once, transient drops recover quickly on the normal ceiling; while it has
+ * never registered (wedged/unsupported broker) the ceiling widens so we probe
+ * for recovery instead of storming the broker every few seconds.
+ */
+export function reconnectDelayMs(attempt: number, registeredOnce: boolean): number {
+  const ceiling = registeredOnce ? RECONNECT_MAX_DELAY_MS : RECONNECT_UNREGISTERED_MAX_DELAY_MS
+  const exponent = Math.max(0, attempt - 1)
+  return Math.min(ceiling, RECONNECT_BASE_DELAY_MS * 2 ** exponent)
 }
 
 function runPearFleetSidecarConnection(options: PearFleetSidecarOptions & {
