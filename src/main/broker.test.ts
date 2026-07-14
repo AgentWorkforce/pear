@@ -1,4 +1,5 @@
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { execFileSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -233,6 +234,7 @@ import {
   parseBrokerInitCliFlags,
   resolveBundledBrokerBinary
 } from './broker-binary'
+import { resolvePackageBin } from './mcp-command'
 import {
   classifyBrokerEvent,
   KNOWN_BROKER_EVENT_KINDS
@@ -1359,8 +1361,10 @@ describe('BrokerManager local + cloud coexistence', () => {
     })
 
     const result = await manager.spawnPersona(PROJECT_ID, 'autonomous-actor')
+    const binaryName = process.platform === 'win32' ? 'agentworkforce.cmd' : 'agentworkforce'
 
     expect(local.spawnPty).toHaveBeenCalledWith(expect.objectContaining({
+      cli: join(personaTempDir, 'node_modules', '.bin', binaryName),
       args: ['agent', 'autonomous-actor']
     }))
     expect(local.spawnPty).not.toHaveBeenCalledWith(expect.objectContaining({
@@ -1380,6 +1384,79 @@ describe('BrokerManager local + cloud coexistence', () => {
     expect(() => structuredClone(result)).not.toThrow()
 
     await manager.shutdown()
+  })
+
+  it('uses Pear pinned Workforce 4.1.16 when the project has no local CLI', async () => {
+    personaTempDir = await mkdtemp(join(tmpdir(), 'pear-clean-persona-spawn-'))
+    const packageCommand = resolvePackageBin('agentworkforce', 'agentworkforce')
+    expect(packageCommand).toBeTruthy()
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(personaTempDir)
+    const manager = new BrokerManager()
+
+    try {
+      mock.state.nextLocalAgents = []
+      await manager.start(PROJECT_ID, personaTempDir, 'pear-project-1', undefined as never, [])
+      const local = lastSpawned()
+      local.spawnPty.mockImplementationOnce(async (input: { name: string }) => {
+        local.agentNames.push(input.name)
+        setImmediate(() => emitPersonaHarnessReady(local, input.name))
+        return { name: input.name, runtime: 'pty', cli: 'agentworkforce' }
+      })
+
+      await manager.spawnPersona(PROJECT_ID, 'persona-maker')
+
+      expect(local.spawnPty).toHaveBeenCalledWith(expect.objectContaining({
+        cli: packageCommand,
+        args: ['agent', 'persona-maker']
+      }))
+      expect(execFileSync(packageCommand!, ['--version'], { encoding: 'utf8' }).trim()).toBe('4.1.16')
+    } finally {
+      cwdSpy.mockRestore()
+      await manager.shutdown()
+    }
+  })
+
+  it('executes Pear packaged Workforce runtime with broker-first MCP precedence', () => {
+    if (process.platform === 'win32') return
+    const probe = execFileSync(process.execPath, [
+      '--input-type=module',
+      '--eval',
+      `
+        import { createRequire } from 'node:module';
+        import { pathToFileURL } from 'node:url';
+        const rootRequire = createRequire(import.meta.url);
+        const cliPackagePath = rootRequire.resolve('@agentworkforce/cli/package.json');
+        const cliRequire = createRequire(cliPackagePath);
+        const runtime = await import(pathToFileURL(cliRequire.resolve('@agentworkforce/runtime')).href);
+        const logs = [];
+        await runtime.resolveAgentRelayBrokerMcpArgs({
+          cli: 'codex',
+          env: {
+            BROKER_BINARY_PATH: '/usr/bin/true',
+            AGENT_RELAY_BIN: '/usr/bin/false'
+          },
+          relayMcp: { agentName: 'pear-consumption-smoke', apiKey: 'redacted' },
+          cwd: process.cwd(),
+          existingArgs: [],
+          log: (level, message, attrs) => logs.push({ level, message, attrs })
+        });
+        process.stdout.write(JSON.stringify({
+          runtimeVersion: cliRequire('@agentworkforce/runtime/package.json').version,
+          log: logs.at(-1)
+        }));
+      `
+    ], {
+      cwd: process.cwd(),
+      encoding: 'utf8'
+    })
+    const result = JSON.parse(probe) as {
+      runtimeVersion: string
+      log: { message: string; attrs?: { broker?: string } }
+    }
+
+    expect(result.log.message).toBe('harness.relay_mcp.broker_args_invalid_json')
+    expect(result.log.attrs?.broker).toBe('/usr/bin/true')
+    expect(result.runtimeVersion).toBe('4.1.16')
   })
 
   it('lists workforce personas from a project root before the relay workspace starts', async () => {
