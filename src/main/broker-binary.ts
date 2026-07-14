@@ -19,10 +19,13 @@ import { app } from 'electron'
 import { canExecute } from './mcp-command'
 
 function resolveBrokerBinaryOverride(): string | null {
-  const configured = process.env.AGENT_RELAY_BIN?.trim()
+  const brokerOverride = process.env.BROKER_BINARY_PATH?.trim()
+  const legacyOverride = process.env.AGENT_RELAY_BIN?.trim()
+  const configured = brokerOverride || legacyOverride
   if (!configured) return null
   if (canExecute(configured)) return configured
-  console.warn('[broker] Ignoring AGENT_RELAY_BIN because it is not executable:', configured)
+  const variable = brokerOverride ? 'BROKER_BINARY_PATH' : 'AGENT_RELAY_BIN'
+  console.warn(`[broker] Ignoring ${variable} because it is not executable:`, configured)
   return null
 }
 
@@ -105,6 +108,29 @@ function inspectBrokerInitCliFlags(binaryPath: string): Promise<BrokerInitCliFla
       resolve(parseBrokerInitCliFlags(stdout))
     })
   })
+}
+
+function inspectAgentRelayCloudCLI(binaryPath: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    execFile(binaryPath, ['cloud', 'session', '--help'], {
+      encoding: 'utf8',
+      timeout: 2_000,
+      windowsHide: true,
+      // npm exposes global CLIs as .cmd wrappers on Windows.
+      shell: process.platform === 'win32'
+    }, (_err, stdout, stderr) => {
+      // Help may be written to stderr and some wrappers exit non-zero after
+      // printing it. The command signature, not the exit code, is the
+      // capability contract we need to establish.
+      resolve(/agent-relay cloud session/i.test(`${stdout || ''}${stderr || ''}`))
+    })
+  })
+}
+
+async function resolveWorkerAgentRelayCLIOverride(brokerBinaryPath: string): Promise<string | undefined> {
+  const configured = process.env.AGENT_RELAY_BIN?.trim()
+  if (!configured || configured === brokerBinaryPath || !canExecute(configured)) return undefined
+  return await inspectAgentRelayCloudCLI(configured) ? configured : undefined
 }
 
 function brokerBinaryCompatShimSource(): string {
@@ -203,9 +229,15 @@ async function ensureBrokerBinaryCompatShim(): Promise<string> {
 // `binaryPath` is what Pear launches (possibly the legacy compat shim);
 // `realBinaryPath` is always the actual broker binary, for callers that hand
 // the binary itself to other processes.
-export async function resolveHarnessBrokerBinary(workspaceKey?: string): Promise<{ binaryPath: string; realBinaryPath: string; env: NodeJS.ProcessEnv }> {
+export async function resolveHarnessBrokerBinary(workspaceKey?: string): Promise<{
+  binaryPath: string
+  realBinaryPath: string
+  agentRelayCLIPath: string | undefined
+  env: NodeJS.ProcessEnv
+}> {
   const binaryPath = resolveBundledBrokerBinary()
   const flags = await inspectBrokerInitCliFlags(binaryPath)
+  const agentRelayCLIPath = await resolveWorkerAgentRelayCLIOverride(binaryPath)
 
   if (workspaceKey && !flags.supportsWorkspaceKey) {
     throw new Error(
@@ -214,7 +246,7 @@ export async function resolveHarnessBrokerBinary(workspaceKey?: string): Promise
   }
 
   if (flags.supportsInstanceName) {
-    return { binaryPath, realBinaryPath: binaryPath, env: {} }
+    return { binaryPath, realBinaryPath: binaryPath, agentRelayCLIPath, env: {} }
   }
 
   if (!flags.supportsName) {
@@ -226,6 +258,7 @@ export async function resolveHarnessBrokerBinary(workspaceKey?: string): Promise
   return {
     binaryPath: shimPath,
     realBinaryPath: binaryPath,
+    agentRelayCLIPath,
     env: {
       PEAR_AGENT_RELAY_BROKER_BINARY: binaryPath,
       PEAR_AGENT_RELAY_BROKER_SUPPORTS_INSTANCE_NAME: flags.supportsInstanceName ? '1' : '0',
