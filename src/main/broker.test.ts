@@ -1409,7 +1409,10 @@ describe('BrokerManager local + cloud coexistence', () => {
         cli: packageCommand,
         args: ['agent', 'persona-maker']
       }))
-      expect(execFileSync(packageCommand!, ['--version'], { encoding: 'utf8' }).trim()).toBe('4.1.16')
+      expect(execFileSync(packageCommand!, ['--version'], {
+        encoding: 'utf8',
+        shell: process.platform === 'win32'
+      }).trim()).toBe('4.1.16')
     } finally {
       cwdSpy.mockRestore()
       await manager.shutdown()
