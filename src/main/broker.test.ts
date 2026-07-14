@@ -859,7 +859,8 @@ exit 0
         env?: NodeJS.ProcessEnv
       } | undefined
       expect(spawnOptions?.env?.BROKER_BINARY_PATH).toBe(brokerPath)
-      expect(spawnOptions?.env?.AGENT_RELAY_BIN).toBe('')
+      expect(spawnOptions?.env).not.toHaveProperty('AGENT_RELAY_BIN')
+      expect(spawnOptions?.env?.AGENT_RELAY_BIN).toBeUndefined()
     } finally {
       await manager.shutdown()
       await rm(tempDir, { recursive: true, force: true })

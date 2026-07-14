@@ -1497,7 +1497,7 @@ export class BrokerManager {
           // session refresh. Passing the broker there makes delegated-token
           // re-mint execute `agent-relay-broker cloud session` and fail.
           BROKER_BINARY_PATH: brokerBinary.realBinaryPath,
-          AGENT_RELAY_BIN: brokerBinary.agentRelayCLIPath,
+          ...(brokerBinary.agentRelayCLIPath ? { AGENT_RELAY_BIN: brokerBinary.agentRelayCLIPath } : {}),
           ...(agentRelayMcpCommand ? { AGENT_RELAY_MCP_COMMAND: agentRelayMcpCommand } : {})
         },
         onStderr: (line: string) => {

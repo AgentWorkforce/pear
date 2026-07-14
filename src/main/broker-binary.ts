@@ -127,10 +127,10 @@ function inspectAgentRelayCloudCLI(binaryPath: string): Promise<boolean> {
   })
 }
 
-async function resolveWorkerAgentRelayCLIOverride(brokerBinaryPath: string): Promise<string> {
+async function resolveWorkerAgentRelayCLIOverride(brokerBinaryPath: string): Promise<string | undefined> {
   const configured = process.env.AGENT_RELAY_BIN?.trim()
-  if (!configured || configured === brokerBinaryPath || !canExecute(configured)) return ''
-  return await inspectAgentRelayCloudCLI(configured) ? configured : ''
+  if (!configured || configured === brokerBinaryPath || !canExecute(configured)) return undefined
+  return await inspectAgentRelayCloudCLI(configured) ? configured : undefined
 }
 
 function brokerBinaryCompatShimSource(): string {
@@ -232,7 +232,7 @@ async function ensureBrokerBinaryCompatShim(): Promise<string> {
 export async function resolveHarnessBrokerBinary(workspaceKey?: string): Promise<{
   binaryPath: string
   realBinaryPath: string
-  agentRelayCLIPath: string
+  agentRelayCLIPath: string | undefined
   env: NodeJS.ProcessEnv
 }> {
   const binaryPath = resolveBundledBrokerBinary()
