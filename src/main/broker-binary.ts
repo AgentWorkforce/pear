@@ -115,9 +115,14 @@ function inspectAgentRelayCloudCLI(binaryPath: string): Promise<boolean> {
     execFile(binaryPath, ['cloud', 'session', '--help'], {
       encoding: 'utf8',
       timeout: 2_000,
-      windowsHide: true
-    }, (err, stdout) => {
-      resolve(!err && /agent-relay cloud session/i.test(stdout))
+      windowsHide: true,
+      // npm exposes global CLIs as .cmd wrappers on Windows.
+      shell: process.platform === 'win32'
+    }, (_err, stdout, stderr) => {
+      // Help may be written to stderr and some wrappers exit non-zero after
+      // printing it. The command signature, not the exit code, is the
+      // capability contract we need to establish.
+      resolve(/agent-relay cloud session/i.test(`${stdout || ''}${stderr || ''}`))
     })
   })
 }

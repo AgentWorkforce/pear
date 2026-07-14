@@ -878,8 +878,8 @@ exit 0
 `)
     await writeFile(cliPath, `#!/bin/sh
 if [ "$*" = "cloud session --help" ]; then
-  echo "Usage: agent-relay cloud session [options]"
-  exit 0
+  echo "Usage: agent-relay cloud session [options]" >&2
+  exit 2
 fi
 exit 2
 `)
