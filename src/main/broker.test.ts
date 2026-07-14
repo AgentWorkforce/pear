@@ -243,6 +243,7 @@ import {
 const PROJECT_ID = 'project-1'
 const originalMcpCommand = process.env.AGENT_RELAY_MCP_COMMAND
 const originalAgentRelayBin = process.env.AGENT_RELAY_BIN
+const originalBrokerBinaryPath = process.env.BROKER_BINARY_PATH
 const originalResourcesPathDescriptor = Object.getOwnPropertyDescriptor(process, 'resourcesPath')
 const originalPlatformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')
 const originalPublicEnv = process.env.PUBLIC
@@ -508,6 +509,7 @@ describe('resolveBundledBrokerBinary', () => {
 
   beforeEach(() => {
     electronMock.app.isPackaged = false
+    delete process.env.BROKER_BINARY_PATH
     if (originalAgentRelayBin === undefined) {
       delete process.env.AGENT_RELAY_BIN
     } else {
@@ -517,6 +519,11 @@ describe('resolveBundledBrokerBinary', () => {
 
   afterEach(async () => {
     electronMock.app.isPackaged = false
+    if (originalBrokerBinaryPath === undefined) {
+      delete process.env.BROKER_BINARY_PATH
+    } else {
+      process.env.BROKER_BINARY_PATH = originalBrokerBinaryPath
+    }
     if (originalAgentRelayBin === undefined) {
       delete process.env.AGENT_RELAY_BIN
     } else {
@@ -560,6 +567,7 @@ describe('resolveBundledBrokerBinary', () => {
   })
 
   it('checks the packaged optional broker binary in app.asar.unpacked', async () => {
+    delete process.env.AGENT_RELAY_BIN
     tempDir = await mkdtemp(join(tmpdir(), 'pear-broker-asar-'))
     const baseDir = join(tempDir, 'Resources', 'app.asar', 'out', 'main')
     const brokerPath = join(
@@ -601,6 +609,7 @@ describe('BrokerManager local + cloud coexistence', () => {
       Object.defineProperty(process, 'platform', originalPlatformDescriptor)
     }
     delete process.env.AGENT_RELAY_WORKSPACE_KEY
+    delete process.env.BROKER_BINARY_PATH
     if (originalAgentRelayBin === undefined) {
       delete process.env.AGENT_RELAY_BIN
     } else {
@@ -633,6 +642,16 @@ describe('BrokerManager local + cloud coexistence', () => {
       delete process.env.AGENT_RELAY_WORKSPACE_KEY
     } else {
       process.env.AGENT_RELAY_WORKSPACE_KEY = inheritedWorkspaceKey
+    }
+    if (originalAgentRelayBin === undefined) {
+      delete process.env.AGENT_RELAY_BIN
+    } else {
+      process.env.AGENT_RELAY_BIN = originalAgentRelayBin
+    }
+    if (originalBrokerBinaryPath === undefined) {
+      delete process.env.BROKER_BINARY_PATH
+    } else {
+      process.env.BROKER_BINARY_PATH = originalBrokerBinaryPath
     }
     electronMock.app.isPackaged = false
     if (originalPlatformDescriptor) {
@@ -816,6 +835,71 @@ describe('BrokerManager local + cloud coexistence', () => {
         process.env.AGENT_RELAY_WORKSPACE_KEY = previousWorkspaceKey
       }
       await manager.shutdown()
+    }
+  })
+
+  it('does not expose the native broker as the spawned worker Agent Relay CLI', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'pear-worker-broker-env-'))
+    const brokerPath = join(tempDir, 'agent-relay-broker')
+    await writeFile(brokerPath, `#!/bin/sh
+if [ "$*" = "init --help" ]; then
+  echo "--instance-name --workspace-key"
+fi
+exit 0
+`)
+    await chmod(brokerPath, 0o755)
+    process.env.AGENT_RELAY_BIN = brokerPath
+    delete process.env.BROKER_BINARY_PATH
+    const manager = new BrokerManager()
+
+    try {
+      await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', undefined as never, [])
+
+      const spawnOptions = mock.HarnessDriverClient.spawn.mock.calls[0]?.[0] as {
+        env?: NodeJS.ProcessEnv
+      } | undefined
+      expect(spawnOptions?.env?.BROKER_BINARY_PATH).toBe(brokerPath)
+      expect(spawnOptions?.env?.AGENT_RELAY_BIN).toBe('')
+    } finally {
+      await manager.shutdown()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('preserves an intentional Agent Relay CLI override separately from the broker', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'pear-worker-cli-env-'))
+    const brokerPath = join(tempDir, 'agent-relay-broker')
+    const cliPath = join(tempDir, 'agent-relay')
+    await writeFile(brokerPath, `#!/bin/sh
+if [ "$*" = "init --help" ]; then
+  echo "--instance-name --workspace-key"
+fi
+exit 0
+`)
+    await writeFile(cliPath, `#!/bin/sh
+if [ "$*" = "cloud session --help" ]; then
+  echo "Usage: agent-relay cloud session [options]"
+  exit 0
+fi
+exit 2
+`)
+    await chmod(brokerPath, 0o755)
+    await chmod(cliPath, 0o755)
+    process.env.BROKER_BINARY_PATH = brokerPath
+    process.env.AGENT_RELAY_BIN = cliPath
+    const manager = new BrokerManager()
+
+    try {
+      await manager.start(PROJECT_ID, '/tmp/project-1', 'pear-project-1', undefined as never, [])
+
+      const spawnOptions = mock.HarnessDriverClient.spawn.mock.calls[0]?.[0] as {
+        env?: NodeJS.ProcessEnv
+      } | undefined
+      expect(spawnOptions?.env?.BROKER_BINARY_PATH).toBe(brokerPath)
+      expect(spawnOptions?.env?.AGENT_RELAY_BIN).toBe(cliPath)
+    } finally {
+      await manager.shutdown()
+      await rm(tempDir, { recursive: true, force: true })
     }
   })
 

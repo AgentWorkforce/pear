@@ -1491,13 +1491,13 @@ export class BrokerManager {
         env: {
           PATH: augmentedPath(),
           ...brokerBinary.env,
-          // Spawned workers inherit the broker's env. AGENT_RELAY_BIN is the
-          // ecosystem-standard broker-binary override (harness-driver
-          // broker-path, workforce runtime relay-mcp); it lets the workforce
-          // CLI's `mcp-args --register` relay-MCP injection find the same
-          // broker binary Pear runs — a PATH lookup fails in packaged
-          // installs and can hit a version-skewed global binary in dev.
-          AGENT_RELAY_BIN: brokerBinary.realBinaryPath,
+          // Spawned workers inherit the broker's env. Keep the native broker
+          // on its unambiguous override: Relayfile separately defines
+          // AGENT_RELAY_BIN as the external Agent Relay CLI that owns cloud
+          // session refresh. Passing the broker there makes delegated-token
+          // re-mint execute `agent-relay-broker cloud session` and fail.
+          BROKER_BINARY_PATH: brokerBinary.realBinaryPath,
+          AGENT_RELAY_BIN: brokerBinary.agentRelayCLIPath,
           ...(agentRelayMcpCommand ? { AGENT_RELAY_MCP_COMMAND: agentRelayMcpCommand } : {})
         },
         onStderr: (line: string) => {
