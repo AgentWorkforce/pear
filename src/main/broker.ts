@@ -145,6 +145,9 @@ function executableCliPath(input: SpawnPtyInput): string {
 
 function resolveAgentWorkforceCommand(cwd: string): { cli: string; args: string[] } {
   const binaryName = process.platform === 'win32' ? 'agentworkforce.cmd' : 'agentworkforce'
+  // Project-local is intentionally first: repositories may pin a Workforce
+  // release for their persona/runtime contract. Pear's packaged dependency is
+  // the clean-project fallback, followed by PATH and the exact npx version.
   const localCandidates = [
     join(cwd, 'node_modules', '.bin', binaryName),
     join(process.cwd(), 'node_modules', '.bin', binaryName)
@@ -416,7 +419,7 @@ const PERSONA_READY_PROBE_RETRY_DELAY_MS = 1_000
 // skill install calls process.exit) would otherwise burn the entire
 // PERSONA_HARNESS_READY_TIMEOUT_MS before surfacing an error.
 const PERSONA_LIVENESS_POLL_MS = 2_000
-const AGENTWORKFORCE_CLI_VERSION = '4.0.2'
+const AGENTWORKFORCE_CLI_VERSION = '4.1.16'
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
