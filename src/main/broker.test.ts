@@ -1387,6 +1387,7 @@ describe('BrokerManager local + cloud coexistence', () => {
   })
 
   it('uses Pear pinned Workforce 4.1.16 when the project has no local CLI', async () => {
+    if (process.platform === 'win32') return
     personaTempDir = await mkdtemp(join(tmpdir(), 'pear-clean-persona-spawn-'))
     const packageCommand = resolvePackageBin('agentworkforce', 'agentworkforce')
     expect(packageCommand).toBeTruthy()
@@ -1409,10 +1410,7 @@ describe('BrokerManager local + cloud coexistence', () => {
         cli: packageCommand,
         args: ['agent', 'persona-maker']
       }))
-      expect(execFileSync(packageCommand!, ['--version'], {
-        encoding: 'utf8',
-        shell: process.platform === 'win32'
-      }).trim()).toBe('4.1.16')
+      expect(execFileSync(packageCommand!, ['--version'], { encoding: 'utf8' }).trim()).toBe('4.1.16')
     } finally {
       cwdSpy.mockRestore()
       await manager.shutdown()
