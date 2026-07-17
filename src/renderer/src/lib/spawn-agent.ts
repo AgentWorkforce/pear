@@ -115,6 +115,63 @@ export async function spawnProjectAgent(
   return name
 }
 
+export interface PlaceAgentUiResult {
+  name: string
+  node: string
+  /** True when the agent landed on this machine (has a local terminal). */
+  local: boolean
+}
+
+/**
+ * Place an agent on a fleet node via the relay placement engine (#411). `node`
+ * omitted/'' → any eligible least-loaded node (may resolve to this Mac); a node
+ * name targets that node; 'self' targets this machine. A local landing is
+ * integrated exactly like a direct spawn (terminal attached + tracked); a remote
+ * landing has no local PTY — its raw terminal has no relay transport yet
+ * (acceptance #2b), so it is surfaced chat-first and no terminal tab is opened.
+ * Placement failures throw with a clear, user-facing message (never a hang).
+ */
+export async function placeProjectAgent(
+  project: Project,
+  cli: SpawnAgentCli,
+  node: string | undefined,
+  customName?: string,
+  customModel?: string,
+  rootOverride?: ProjectRoot
+): Promise<PlaceAgentUiResult> {
+  await ensureLocalBroker(project, rootOverride)
+  const root = rootOverride ?? useProjectStore.getState().getActiveRoot()
+  if (!root?.pathExists) {
+    throw new Error(`Project root not found: ${root?.path || project.rootPath}`)
+  }
+
+  const outcome = await pear.broker.placeAgent(project.id, {
+    cli,
+    ...(node && node.trim() ? { node: node.trim() } : {}),
+    ...(customName?.trim() ? { name: customName.trim() } : {}),
+    ...(customModel?.trim() ? { model: customModel.trim() } : {})
+  })
+  if (outcome.status === 'error') {
+    // A clear per-code message from the main process — surface it verbatim.
+    throw new Error(outcome.message)
+  }
+
+  const { result } = outcome
+  const agentStore = useAgentStore.getState()
+  if (result.local) {
+    // Landed on this Mac — same integration as a direct local spawn.
+    await pear.broker.attachTerminal({ projectId: project.id, name: result.name, mode: 'passthrough' })
+    agentStore.trackSpawnedAgent(result.name, project.id, root.id, cli, root.path)
+    agentStore.setActiveAgentKey(getAgentKey(project.id, result.name))
+    useUIStore.getState().openTab({ kind: 'agents', projectId: project.id })
+  } else {
+    // Remote landing — no local PTY. Reachable over relay chat; do NOT open a
+    // (would-be broken) terminal tab. The caller surfaces a chat-first message.
+    useUIStore.getState().openTab({ kind: 'agents', projectId: project.id })
+  }
+  return { name: result.name, node: result.node, local: result.local }
+}
+
 export async function listProjectPersonas(project: Project, rootOverride?: ProjectRoot): Promise<WorkforcePersona[]> {
   if (rootOverride && !rootOverride.pathExists) {
     return []
