@@ -3004,3 +3004,65 @@ describe('isCommandAvailableWithAugmentedPath', () => {
     expect(isCommandAvailableWithAugmentedPath('   ')).toBe(false)
   })
 })
+
+// The PTY fast path is the highest-volume IPC in the app and the one the
+// terminal-fidelity work traced a renderer/broker screen divergence to. Two
+// invariants matter here and neither had a test:
+//   1. one worker_stream event must produce exactly one broker:pty-chunk send
+//      (a doubled chunk is not cosmetic — a duplicated non-idempotent append
+//      puts a row on the grid the PTY never emitted, and a diff-painting TUI
+//      then frames every later repaint against the wrong row, which is the
+//      stale-panel / whole-screen row-shift corruption class), and
+//   2. a stale event-stream listener must not survive a rebind and re-send.
+describe('broker:pty-chunk delivery', () => {
+  it('sends exactly one IPC per worker_stream event', async () => {
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    const local = await startLocalWithWindow(manager, win, ['pty-agent'])
+    const send = win.webContents.send as ReturnType<typeof vi.fn>
+    send.mockClear()
+
+    local.emitEvent({ kind: 'worker_stream', name: 'pty-agent', stream: 'stdout', chunk: 'hello' })
+
+    const ptyChunks = send.mock.calls.filter((call) => call[0] === 'broker:pty-chunk')
+    expect(ptyChunks).toHaveLength(1)
+    expect(ptyChunks[0]).toEqual(['broker:pty-chunk', PROJECT_ID, 'pty-agent', 'hello'])
+
+    await manager.shutdown()
+  })
+
+  it('does not double-send when the same project is started twice', async () => {
+    // The real trigger: the app can start a project whose broker is already
+    // running (Pear reconnects to an existing daemon on reload/restart). If
+    // that re-attached a second live listener to the same window, every PTY
+    // byte would arrive twice.
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    await startLocalWithWindow(manager, win, ['pty-agent'])
+    const second = await startLocalWithWindow(manager, win, ['pty-agent'])
+    const send = win.webContents.send as ReturnType<typeof vi.fn>
+    send.mockClear()
+
+    second.emitEvent({ kind: 'worker_stream', name: 'pty-agent', stream: 'stdout', chunk: 'x' })
+
+    expect(send.mock.calls.filter((call) => call[0] === 'broker:pty-chunk')).toHaveLength(1)
+    await manager.shutdown()
+  })
+
+  it('delivers byte-identical consecutive chunks (repaint frames are not duplicates)', async () => {
+    // Guards the AGENTS.md invariant from the other side: a TUI legitimately
+    // emits byte-identical repaint frames and repeated keystroke echoes.
+    // Suppressing on content would drop real bytes and mangle the screen.
+    const manager = new BrokerManager()
+    const win = createMockWindow()
+    const local = await startLocalWithWindow(manager, win, ['pty-agent'])
+    const send = win.webContents.send as ReturnType<typeof vi.fn>
+    send.mockClear()
+
+    local.emitEvent({ kind: 'worker_stream', name: 'pty-agent', stream: 'stdout', chunk: 'frame' })
+    local.emitEvent({ kind: 'worker_stream', name: 'pty-agent', stream: 'stdout', chunk: 'frame' })
+
+    expect(send.mock.calls.filter((call) => call[0] === 'broker:pty-chunk')).toHaveLength(2)
+    await manager.shutdown()
+  })
+})
