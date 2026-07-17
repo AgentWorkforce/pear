@@ -72,6 +72,12 @@ import {
   resolvePackageBin
 } from './mcp-command'
 import { startPearFleetSidecar, type RunningPearFleetSidecar } from './pear-fleet-node'
+import {
+  isObserverStreamEnabled,
+  ObserverStreamManager,
+  ObserverStreamUnsupportedError
+} from './observer-stream'
+import { getObserverStreamCursor, setObserverStreamCursor } from './store'
 
 function isShellLikeCommand(cli: string): boolean {
   const normalized = basename(cli).toLowerCase()
@@ -1289,6 +1295,10 @@ export class BrokerManager {
   // stale promise directly (not through `observerTokenMints`) when the drop
   // happens.
   private observerTokenGenerations = new Map<string, number>()
+  // Observer-stream consumers keyed by sessionKey (see observer-stream.ts).
+  // Only populated when PEAR_OBSERVER_STREAM is enabled; stopped and removed
+  // in dropSession() alongside the observer-token cache.
+  private observerStreams = new Map<string, ObserverStreamManager>()
 
   get cwd(): string | null {
     return this.sessions.values().next().value?.cwd || null
@@ -1412,6 +1422,7 @@ export class BrokerManager {
       await this.syncChannels(normalizedProjectId, nextChannels)
       await this.refreshEventStream(normalizedProjectId, 'existing-session-start', win)
       await this.ensureLocalFleetSidecar(existing)
+      this.maybeStartObserverStream(normalizedProjectId)
       this.sendStatus(normalizedProjectId, 'connected')
       return false
     }
@@ -1461,6 +1472,7 @@ export class BrokerManager {
 
         await this.syncChannels(normalizedProjectId, nextChannels)
         await this.ensureLocalFleetSidecar(session)
+        this.maybeStartObserverStream(normalizedProjectId)
         this.publishBrokerEvent(normalizedProjectId, normalizedProjectId, win, {
           kind: 'broker_initialized',
           name,
@@ -1531,6 +1543,7 @@ export class BrokerManager {
       }
       this.sessions.set(normalizedProjectId, session)
       await this.ensureLocalFleetSidecar(session)
+      this.maybeStartObserverStream(normalizedProjectId)
 
       this.publishBrokerEvent(normalizedProjectId, normalizedProjectId, win, {
         kind: 'broker_initialized',
@@ -1835,6 +1848,69 @@ export class BrokerManager {
     return result
   }
 
+  /**
+   * Start the feature-flagged relaycast observer-stream consumer for a
+   * session (PEAR_OBSERVER_STREAM, default OFF). Idempotent per sessionKey.
+   *
+   * The manager degrades silently to the existing polling reconciliation in
+   * every failure mode (endpoint missing, WS auth failure, older engine) —
+   * see observer-stream.ts — so this never gates or delays session startup.
+   */
+  private maybeStartObserverStream(sessionKey: string): void {
+    if (!isObserverStreamEnabled()) return
+    if (this.observerStreams.has(sessionKey)) return
+    const session = this.sessions.get(sessionKey)
+    if (!session) return
+    const projectId = session.projectId
+
+    const manager = new ObserverStreamManager({
+      projectId,
+      relayBaseUrl: normalizeRelaycastBaseUrl(process.env.RELAYCAST_BASE_URL || process.env.RELAY_BASE_URL),
+      mintToken: async ({ forceFresh }) => {
+        if (forceFresh) this.observerTokens.delete(projectId)
+        try {
+          return (await this.mintObserverToken(projectId)).token
+        } catch (err) {
+          // mintObserverTokenUncached maps a broker 404 (route predates
+          // /api/observer-token) to this message — translate it into the
+          // manager's permanent-disable signal instead of a retryable error.
+          if (err instanceof Error && /newer broker version/i.test(err.message)) {
+            throw new ObserverStreamUnsupportedError(err.message)
+          }
+          throw err
+        }
+      },
+      getWorkspaceId: async () => {
+        const current = this.sessions.get(sessionKey)
+        if (!current) return undefined
+        const metadata = await current.client.getSession().catch(() => undefined)
+        return metadata?.default_workspace_id || undefined
+      },
+      loadCursor: getObserverStreamCursor,
+      saveCursor: setObserverStreamCursor,
+      emit: (update) => {
+        const win = this.windowForSession(sessionKey)
+        if (win) {
+          win.webContents.send('observer:chat-update', update)
+        }
+      },
+      log: (message) => {
+        if (isBrokerDebugEnabled()) console.info(`[broker:observer-stream:${projectId}]`, message)
+      },
+      warn: (message) => console.warn(`[broker:observer-stream:${projectId}]`, message)
+    })
+    this.observerStreams.set(sessionKey, manager)
+    manager.start()
+  }
+
+  private stopObserverStream(sessionKey: string): void {
+    const manager = this.observerStreams.get(sessionKey)
+    if (manager) {
+      manager.stop()
+      this.observerStreams.delete(sessionKey)
+    }
+  }
+
   private async ensureLocalFleetSidecar(session: BrokerSession): Promise<void> {
     if (session.cloudSandboxId) return
     if (session.fleetSidecar && session.fleetSidecarCwd === session.cwd) return
@@ -2020,6 +2096,7 @@ export class BrokerManager {
         operationQueue: new BrokerOperationQueue(BROKER_OPERATION_CONCURRENCY)
       })
       client.connectEvents()
+      this.maybeStartObserverStream(sessionKey)
 
       if (workspaceKeyMismatch) {
         this.publishBrokerEvent(sessionKey, normalizedProjectId, win, {
@@ -4245,6 +4322,9 @@ export class BrokerManager {
   private dropSession(sessionKey: string, options: { disconnectOnly: boolean }): void {
     this.inputStreamManager.closeInputStreamsForSession(sessionKey)
     this.clearBrokerTimeoutCountsForProject(projectIdFromSessionKey(sessionKey))
+    // The observer stream is scoped to this session's workspace + token —
+    // stop it with the session; a restarted session starts a fresh one.
+    this.stopObserverStream(sessionKey)
     // A dropped session may be reconnecting to a different workspace (e.g.
     // joinWorkspace's shutdown+restart), so any cached observer token for
     // this project would be scoped to the wrong workspace afterward. Also

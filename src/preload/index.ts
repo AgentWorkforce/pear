@@ -60,6 +60,7 @@ import type {
   IntegrationEventTelemetrySnapshot,
   IntegrationOption,
   IntegrationsEvent,
+  ObserverChatUpdate,
   ObserverTokenResult,
   PearAPI,
   PendingRelayMessage,
@@ -157,6 +158,7 @@ export type {
   IntegrationEventTelemetrySnapshot,
   IntegrationsEvent,
   MessageInjectionMode,
+  ObserverChatUpdate,
   PearAPI,
   PendingRelayMessage,
   ProactiveAgentBinding,
@@ -300,6 +302,8 @@ const api = {
     onEvent: (callback: (event: unknown) => void) => subscribe<unknown>('broker:event', callback),
     onEventStreamDiagnostic: (callback: (event: BrokerEventStreamDiagnostic) => void) =>
       subscribe<BrokerEventStreamDiagnostic>('broker:event-stream-diagnostic', callback),
+    onObserverChatUpdate: (callback: (update: ObserverChatUpdate) => void) =>
+      subscribe<ObserverChatUpdate>('observer:chat-update', callback),
     onPtyChunk: (
       callback: (
         projectId: string,
