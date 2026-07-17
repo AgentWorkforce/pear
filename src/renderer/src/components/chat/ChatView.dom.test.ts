@@ -195,11 +195,24 @@ beforeAll(() => {
 })
 
 beforeEach(() => {
+  // Fake timers so the @tanstack/react-virtual scroll debounce (a setTimeout
+  // it schedules on every scroll to reset `isScrolling`, and does NOT clear on
+  // unmount) is created in a registry we control. `shouldAdvanceTime` keeps the
+  // clock progressing with real time so React Testing Library's `waitFor` and
+  // async `act` still resolve normally. See afterEach for why this matters.
+  vi.useFakeTimers({ shouldAdvanceTime: true })
   seedChat(makeMessages(1000))
 })
 
 afterEach(() => {
   cleanup()
+  // Drain and drop any timer react-virtual left pending BEFORE the DOM env is
+  // torn down. Its scroll debounce survives unmount; if it fired after teardown
+  // it threw `ReferenceError: window is not defined` inside Timeout._onTimeout,
+  // an unhandled error that false-red CI even though every assertion passed
+  // (#406). Clearing while the env still exists closes the race deterministically.
+  vi.clearAllTimers()
+  vi.useRealTimers()
   useAgentStore.getState().clearAll()
   useProjectStore.setState({
     projects: [],
