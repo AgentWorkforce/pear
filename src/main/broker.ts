@@ -2587,7 +2587,7 @@ export class BrokerManager {
         'name' in event && typeof event.name === 'string' &&
         'chunk' in event && typeof event.chunk === 'string'
       ) {
-        if (this.ptyDeduper.isDuplicatePtyChunk(sessionKey, event.name, event)) {
+        if (this.ptyDeduper.isDuplicatePtyChunk(sessionKey, event.name, event, eventStreamGeneration)) {
           return
         }
         const targetWindow = this.windowForSession(sessionKey, win)
