@@ -16,7 +16,7 @@ import {
   type InboundDeliveryMode,
   type PendingRelayMessage
 } from '@agent-relay/harness-driver'
-import { AgentRelay, RelayPlacementError, type RelayMessage, type RelayNode } from '@agent-relay/sdk'
+import { AgentRelay, RelayPlacementError, type RelayMessage } from '@agent-relay/sdk'
 import { getAccessToken, getApiUrl } from './auth'
 import { assertDirectory } from './path-utils'
 import { toErrorMessage } from './errors'
@@ -78,12 +78,19 @@ import {
   ObserverStreamUnsupportedError
 } from './observer-stream'
 import { getObserverStreamCursor, setObserverStreamCursor } from './store'
+import {
+  BrokerPlacementError,
+  buildPlacementMessage,
+  placementRequesterName,
+  toBrokerNodeSummary
+} from './placement'
 import type {
   BrokerPlaceAgentInput,
   BrokerPlaceAgentResult,
-  BrokerPlacementErrorCode,
   BrokerNodeSummary
 } from '../shared/types/ipc'
+
+export { BrokerPlacementError } from './placement'
 
 function isShellLikeCommand(cli: string): boolean {
   const normalized = basename(cli).toLowerCase()
@@ -1043,77 +1050,6 @@ function buildSpawnFailureError(err: unknown, input: SpawnPtyInput, kind: 'local
   return new Error(
     `Failed to spawn ${kind} agent "${input.name}" with ${input.cli} in ${input.cwd || process.cwd()}: ${toErrorMessage(err)}${detail}`
   )
-}
-
-// Placement (issue #411, requester side) — a placed agent is dispatched via the
-// relay placement engine (`messaging.placement.spawn`) rather than the local
-// broker's PTY driver. These helpers translate the SDK's RelayPlacementError
-// into a user-facing message and shape the node roster for the picker UI.
-export class BrokerPlacementError extends Error {
-  readonly code: BrokerPlacementErrorCode
-  readonly capability?: string
-  readonly node?: string
-  readonly repo?: string
-
-  constructor(
-    code: BrokerPlacementErrorCode,
-    message: string,
-    ctx: { capability?: string; node?: string; repo?: string } = {}
-  ) {
-    super(message)
-    this.name = 'BrokerPlacementError'
-    this.code = code
-    this.capability = ctx.capability
-    this.node = ctx.node
-    this.repo = ctx.repo
-  }
-}
-
-export function placementRequesterName(projectId: string): string {
-  const raw = `pear-requester-${projectId}`
-  return raw.replace(/[^\w.-]+/gu, '-').replace(/^-+|-+$/gu, '').slice(0, 64) || 'pear-requester'
-}
-
-function humanCapability(capability: string): string {
-  return capability.startsWith('spawn:') ? capability.slice('spawn:'.length) : capability
-}
-
-// The four RelayPlacementError codes each map to a clear, actionable message so
-// the spawn UI never shows a raw SDK string or — worse — hangs silently (#411
-// fallback requirement).
-export function buildPlacementMessage(err: RelayPlacementError): string {
-  switch (err.code) {
-    case 'capability_mismatch':
-      return err.node
-        ? `Node "${err.node}" can't run ${humanCapability(err.capability)}.`
-        : `No node can run ${humanCapability(err.capability)}.`
-    case 'placement_queue_full':
-      return 'Too many pending placements right now — try again in a moment.'
-    case 'placement_ttl_expired':
-      return `No node advertises ${humanCapability(err.capability)} right now.`
-    case 'unmapped_repo':
-      return err.repo
-        ? `No node has repo "${err.repo}" checked out.`
-        : 'No node maps the requested repo.'
-    default:
-      return err.message
-  }
-}
-
-export function toBrokerNodeSummary(node: RelayNode, selfNodeName: string): BrokerNodeSummary {
-  const nodeId = node.nodeId ?? node.id
-  return {
-    name: node.name,
-    ...(nodeId ? { nodeId } : {}),
-    live: Boolean(node.live),
-    ...(typeof node.load === 'number' ? { load: node.load } : {}),
-    ...(typeof node.activeAgents === 'number' ? { activeAgents: node.activeAgents } : {}),
-    ...(typeof node.maxAgents === 'number' ? { maxAgents: node.maxAgents } : {}),
-    capabilities: node.capabilities.map((cap) => cap.name),
-    ...(node.repoKeys ? { repoKeys: node.repoKeys } : {}),
-    ...(node.tags ? { tags: node.tags } : {}),
-    isSelf: node.name === selfNodeName
-  }
 }
 
 function normalizeCloudSpawnInput(input: SpawnPtyInput): SpawnPtyInput {

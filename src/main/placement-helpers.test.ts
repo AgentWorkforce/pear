@@ -4,7 +4,7 @@ import {
   buildPlacementMessage,
   placementRequesterName,
   toBrokerNodeSummary
-} from './broker'
+} from './placement'
 
 function placementError(code: RelayPlacementError['code'], ctx: { capability?: string; node?: string; repo?: string } = {}): RelayPlacementError {
   return new RelayPlacementError(code, `raw ${code}`, {
