@@ -137,14 +137,27 @@ export function isSlackDmListablePath(remotePath: string): boolean {
   return false
 }
 
-// The adapter-linear `states` resource materializes the team's workflow
-// states at /linear/states, but Linear integrations configure mount scopes
-// like /linear/issues — the states subtree is reference data alongside those
-// mounts, not a configurable mount of its own, so the mount-path scope checks
-// above reject it. Recognize exactly that subtree so list/read (never write)
-// can be allowed when a Linear integration is visible, mirroring the Slack DM
-// carve-out.
+// Linear integrations configure mount scopes at the team level — e.g.
+// /linear/teams or /linear/teams/AR (see integrations.catalog.ts
+// defaultMountPaths) — but the adapter materializes the team's workflow
+// states at the sibling /linear/states subtree, which is reference data, not
+// a configurable mount of its own, so the mount-path scope checks above reject
+// it. Recognize exactly that subtree so list/read (never write) can be allowed
+// when a Linear integration is visible, mirroring the Slack DM carve-out.
 export function isLinearStatesListablePath(remotePath: string): boolean {
   const segments = (remotePath || '').trim().replace(/\/+$/, '').split('/').filter(Boolean)
   return segments[0] === 'linear' && segments[1] === 'states'
+}
+
+// The Issues tab (issues-store.ts) lists /linear/issues and reads/writes the
+// issue records beneath it (status writeback, comments), but — exactly like
+// /linear/states above — the adapter materializes /linear/issues as a sibling
+// of the team-level mount scope (/linear/teams...), so the mount-path checks
+// reject it. Recognize the /linear/issues subtree so list/read AND write are
+// allowed when a Linear integration is visible. Unlike states, this carve-out
+// permits writes: issue status changes and comments are the whole point of the
+// Issues control center.
+export function isLinearIssuesListablePath(remotePath: string): boolean {
+  const segments = (remotePath || '').trim().replace(/\/+$/, '').split('/').filter(Boolean)
+  return segments[0] === 'linear' && segments[1] === 'issues'
 }

@@ -26,6 +26,7 @@ import {
   canShowRemoteDirectoryEntryForMountPaths,
   isRelayfilePathWithinRoot,
   isLinearStatesListablePath,
+  isLinearIssuesListablePath,
   isSlackDmListablePath,
   normalizeRemoteDirectoryPath,
   remotePathName
@@ -1198,10 +1199,11 @@ export class IntegrationsManager {
     if (!path || path === '/') throw new Error('Integration remote file path is required')
     const mountPaths = this.listableRemoteMountPaths(projectId)
     const allowSlackDms = this.slackDmListingEnabledForProject(projectId)
+    const allowLinearReference = this.linearListingEnabledForProject(projectId)
     const withinScope =
       mountPaths.some((mountPath) => isRelayfilePathWithinRoot(mountPath, path)) ||
       (allowSlackDms && isSlackDmListablePath(path)) ||
-      (this.linearStatesListingEnabledForProject(projectId) && isLinearStatesListablePath(path))
+      (allowLinearReference && (isLinearStatesListablePath(path) || isLinearIssuesListablePath(path)))
     if (!withinScope) {
       throw new Error('Integration remote file is outside this project integration scope')
     }
@@ -1235,9 +1237,14 @@ export class IntegrationsManager {
     if (!path || path === '/') throw new Error('Integration remote file path is required')
     const mountPaths = this.listableRemoteMountPaths(projectId)
     const allowSlackDms = this.slackDmListingEnabledForProject(projectId)
+    // /linear/issues writes (status writeback, comments) are permitted under a
+    // visible Linear integration — the Issues control center's whole purpose.
+    // /linear/states stays read-only, so it is deliberately NOT included here.
+    const allowLinearIssues = this.linearListingEnabledForProject(projectId)
     const withinScope =
       mountPaths.some((mountPath) => isRelayfilePathWithinRoot(mountPath, path)) ||
-      (allowSlackDms && isSlackDmListablePath(path))
+      (allowSlackDms && isSlackDmListablePath(path)) ||
+      (allowLinearIssues && isLinearIssuesListablePath(path))
     if (!withinScope) {
       throw new Error('Integration remote file is outside this project integration scope')
     }
@@ -1276,11 +1283,11 @@ export class IntegrationsManager {
     if (!path || path === '/') throw new Error('Integration remote directory path is required')
     const mountPaths = this.listableRemoteMountPaths(projectId)
     const allowSlackDms = this.slackDmListingEnabledForProject(projectId)
-    const allowLinearStates = this.linearStatesListingEnabledForProject(projectId)
+    const allowLinearReference = this.linearListingEnabledForProject(projectId)
     if (
       !canListRemoteDirectoryForMountPaths(path, mountPaths) &&
       !(allowSlackDms && isSlackDmListablePath(path)) &&
-      !(allowLinearStates && isLinearStatesListablePath(path))
+      !(allowLinearReference && (isLinearStatesListablePath(path) || isLinearIssuesListablePath(path)))
     ) {
       throw new Error('Integration remote directory is outside this project integration scope')
     }
@@ -1301,7 +1308,7 @@ export class IntegrationsManager {
           if (
             !canShowRemoteDirectoryEntryForMountPaths(entry.path, mountPaths) &&
             !(allowSlackDms && isSlackDmListablePath(entry.path)) &&
-            !(allowLinearStates && isLinearStatesListablePath(entry.path))
+            !(allowLinearReference && (isLinearStatesListablePath(entry.path) || isLinearIssuesListablePath(entry.path)))
           ) {
             continue
           }
@@ -2538,9 +2545,10 @@ export class IntegrationsManager {
   }
 
   // True when any visible Linear integration exists for the project. The
-  // /linear/states reference subtree is listable/readable (never writable)
-  // under exactly this condition — see isLinearStatesListablePath.
-  private linearStatesListingEnabledForProject(projectId: string): boolean {
+  // /linear/states reference subtree is listable/readable (never writable) and
+  // the /linear/issues subtree is listable/readable/writable under exactly this
+  // condition — see isLinearStatesListablePath and isLinearIssuesListablePath.
+  private linearListingEnabledForProject(projectId: string): boolean {
     return this.visibleIntegrationsForProject(projectId).some(
       (integration) => toRelayfileProvider(integration.provider) === 'linear'
     )

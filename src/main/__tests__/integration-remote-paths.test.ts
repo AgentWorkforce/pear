@@ -6,6 +6,8 @@ import {
   canListRemoteDirectoryForMountPaths,
   linearIssueCommentCreatePayload,
   linearIssueCommentRemotePath,
+  isLinearIssuesListablePath,
+  isLinearStatesListablePath,
   isSlackDmListablePath,
   normalizeRemoteDirectoryPath,
   remotePathName
@@ -151,4 +153,18 @@ test('Linear issue comment create payload includes issue context', () => {
       issueId: '04ef067e-35b6-4ec4-81e7-66acc1f2e31f'
     }
   )
+})
+
+test('isLinearIssuesListablePath recognizes the /linear/issues subtree only', () => {
+  assert.equal(isLinearIssuesListablePath('/linear/issues'), true)
+  assert.equal(isLinearIssuesListablePath('/linear/issues/'), true)
+  assert.equal(isLinearIssuesListablePath('/linear/issues/AR-1__abc.json'), true)
+  assert.equal(isLinearIssuesListablePath('/linear/issues/AR-1__abc.json/comments/c.json'), true)
+  // Sibling subtrees and other providers stay out of scope.
+  assert.equal(isLinearIssuesListablePath('/linear/states'), false)
+  assert.equal(isLinearIssuesListablePath('/linear/teams/AR'), false)
+  assert.equal(isLinearIssuesListablePath('/linear'), false)
+  assert.equal(isLinearIssuesListablePath('/github/issues'), false)
+  // The issues and states carve-outs are disjoint.
+  assert.equal(isLinearStatesListablePath('/linear/issues'), false)
 })

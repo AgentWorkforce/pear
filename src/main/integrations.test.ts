@@ -616,6 +616,59 @@ describe('IntegrationsManager', () => {
     expect(mock.relayClient.listTree).not.toHaveBeenCalled()
   })
 
+  it('allows /linear/issues list + read + write under a team-scoped Linear mount', async () => {
+    // Mirrors the operator's real config: the mount is team-scoped
+    // (/linear/teams/AR), which does NOT contain /linear/issues, yet the Issues
+    // tab lists /linear/issues and writes status/comments beneath it.
+    mock.store.projects[0].integrations.push({
+      id: 'linear-integration-1',
+      name: 'Linear',
+      type: 'linear',
+      provider: 'linear',
+      integrationId: 'linear-integration-1',
+      scope: {},
+      mountPaths: ['/linear/teams/AR'],
+      connectedAt: '2026-06-05T00:00:00.000Z',
+      notifyAgent: true,
+      subscribeAgent: false,
+      subscribeAgentConfigured: false,
+      downloadHistoricalData: false,
+      visibleInProject: true
+    })
+    mock.relayClient.listTree.mockResolvedValueOnce({
+      entries: [
+        { path: '/linear/issues/AR-1__00000000-0000-0000-0000-000000000000.json', type: 'file' }
+      ],
+      nextCursor: null
+    })
+    const manager = new IntegrationsManager()
+
+    await expect(manager.listRemoteDirectory('project-1', '/linear/issues')).resolves.toEqual([
+      {
+        name: 'AR-1__00000000-0000-0000-0000-000000000000.json',
+        path: '/linear/issues/AR-1__00000000-0000-0000-0000-000000000000.json',
+        type: 'file'
+      }
+    ])
+    await expect(
+      manager.readRemoteFile('project-1', '/linear/issues/AR-1__00000000-0000-0000-0000-000000000000.json')
+    ).resolves.toMatchObject({ kind: 'text' })
+    // Unlike /linear/states, issue writes ARE permitted: status writeback + comments.
+    await expect(
+      manager.writeRemoteFile('project-1', '/linear/issues/AR-1__00000000-0000-0000-0000-000000000000.json', '{}')
+    ).resolves.toBeUndefined()
+    expect(mock.writeFileCalls).toHaveLength(1)
+    expect(mock.writeFileCalls[0]?.path).toBe('/linear/issues/AR-1__00000000-0000-0000-0000-000000000000.json')
+  })
+
+  it('rejects /linear/issues listing without a visible Linear integration', async () => {
+    const manager = new IntegrationsManager()
+
+    await expect(manager.listRemoteDirectory('project-1', '/linear/issues'))
+      .rejects.toThrow('Integration remote directory is outside this project integration scope')
+    expect(mock.relayClient.listTree).not.toHaveBeenCalled()
+  })
+
   it('rejects remote writes outside the configured project scope', async () => {
     const manager = new IntegrationsManager()
 
