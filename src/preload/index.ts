@@ -21,6 +21,9 @@ import type {
   BrokerSetTerminalModeResult,
   BrokerSpawnAgentInput,
   BrokerSpawnAgentResult,
+  BrokerPlaceAgentInput,
+  BrokerPlaceAgentOutcome,
+  BrokerNodeSummary,
   BrokerStatusEvent,
   BrokerTerminalSnapshot,
   BrokerTerminalSnapshotFormat,
@@ -257,6 +260,10 @@ const api = {
     connectCloud: () => invoke<string>('broker:connect-cloud'),
     spawnAgent: (projectId: string, input: BrokerSpawnAgentInput) =>
       invoke<BrokerSpawnAgentResult>('broker:spawn-agent', projectId, input),
+    placeAgent: (projectId: string, input: BrokerPlaceAgentInput) =>
+      invoke<BrokerPlaceAgentOutcome>('broker:place-agent', projectId, input),
+    listNodes: (projectId: string, capability?: string) =>
+      invoke<BrokerNodeSummary[]>('broker:list-nodes', projectId, capability),
     listPersonas: (projectId: string, cwd?: string) =>
       invoke<WorkforcePersona[]>('broker:list-personas', projectId, cwd),
     spawnPersona: (projectId: string, personaId: string) =>

@@ -16,7 +16,7 @@ import {
   type InboundDeliveryMode,
   type PendingRelayMessage
 } from '@agent-relay/harness-driver'
-import { AgentRelay, type RelayMessage } from '@agent-relay/sdk'
+import { AgentRelay, RelayPlacementError, type RelayMessage } from '@agent-relay/sdk'
 import { getAccessToken, getApiUrl } from './auth'
 import { assertDirectory } from './path-utils'
 import { toErrorMessage } from './errors'
@@ -71,13 +71,26 @@ import {
   resolveCommandOnPath,
   resolvePackageBin
 } from './mcp-command'
-import { startPearFleetSidecar, type RunningPearFleetSidecar } from './pear-fleet-node'
+import { startPearFleetSidecar, pearFleetProviderName, type RunningPearFleetSidecar } from './pear-fleet-node'
 import {
   isObserverStreamEnabled,
   ObserverStreamManager,
   ObserverStreamUnsupportedError
 } from './observer-stream'
 import { getObserverStreamCursor, setObserverStreamCursor } from './store'
+import {
+  BrokerPlacementError,
+  buildPlacementMessage,
+  placementRequesterName,
+  toBrokerNodeSummary
+} from './placement'
+import type {
+  BrokerPlaceAgentInput,
+  BrokerPlaceAgentResult,
+  BrokerNodeSummary
+} from '../shared/types/ipc'
+
+export { BrokerPlacementError } from './placement'
 
 function isShellLikeCommand(cli: string): boolean {
   const normalized = basename(cli).toLowerCase()
@@ -1089,6 +1102,11 @@ interface BrokerSession {
   leaseTimer?: ReturnType<typeof setInterval>
   fleetSidecar?: RunningPearFleetSidecar
   fleetSidecarCwd?: string
+  // Agent-scoped relay client used to invoke placement (#411). Lazily created on
+  // first placeAgent/listNodes: workspace key from the broker session + a
+  // dedicated `pear-requester-<projectId>` agent identity (placement.spawn ->
+  // commands.invoke requires an agent-scoped connection). Cleared in dropSession.
+  placementRelay?: AgentRelay
   operationQueue: BrokerOperationQueue
 }
 
@@ -2542,6 +2560,131 @@ export class BrokerManager {
     }
 
     return normalized
+  }
+
+  // Lazily build (and cache on the session) an agent-scoped relay client for
+  // placement. placement.spawn -> commands.invoke requires an agent-scoped
+  // connection, so a workspace-key-only client (as reconcileMessages uses) is
+  // insufficient: register/rotate a dedicated `pear-requester-<projectId>`
+  // identity and construct the client with its agent token.
+  private async getPlacementRelay(session: BrokerSession): Promise<AgentRelay> {
+    if (session.placementRelay) return session.placementRelay
+
+    const meta = await session.client.getSession()
+    const workspaceKey = meta.workspace_key
+    if (!workspaceKey) {
+      throw new Error('Broker session does not expose a Relay workspace key')
+    }
+    const baseUrl = normalizeRelaycastBaseUrl(process.env.RELAYCAST_BASE_URL || process.env.RELAY_BASE_URL)
+    const workspaceRelay = new AgentRelay({ workspaceKey, ...(baseUrl ? { baseUrl } : {}) })
+    const requesterName = placementRequesterName(session.projectId)
+    // registerOrRotate adopts an existing `pear-requester-<projectId>` identity
+    // (rotating its token) so restarts don't strand orphan agents; fall back to
+    // register on backends without rotation support.
+    const register = workspaceRelay.agents.registerOrRotate ?? workspaceRelay.agents.register
+    const registration = await register.call(workspaceRelay.agents, {
+      name: requesterName,
+      type: 'agent',
+      metadata: { pearRequester: true, projectId: session.projectId }
+    })
+    const relay = new AgentRelay({
+      workspaceKey,
+      agentToken: registration.token,
+      ...(baseUrl ? { baseUrl } : {})
+    })
+    session.placementRelay = relay
+    return relay
+  }
+
+  private localFleetNodeName(session: BrokerSession): string {
+    return pearFleetProviderName({
+      projectId: session.projectId,
+      cwd: session.cwd,
+      brokerName: session.name
+    })
+  }
+
+  /**
+   * Placement requester (#411). Dispatch a spawn onto an eligible fleet node via
+   * the relay placement engine. `input.node` omitted → any eligible least-loaded
+   * node; set → that exact node ('self' = this machine). Returns the node the
+   * agent landed on and whether this machine owns its PTY (`local`). A remote
+   * placement is reachable over relay chat only — its raw terminal has no relay
+   * transport yet (acceptance #2b, upstream-blocked).
+   */
+  async placeAgent(projectId: string, input: BrokerPlaceAgentInput): Promise<BrokerPlaceAgentResult> {
+    const normalizedProjectId = projectId.trim()
+    if (!normalizedProjectId) throw new Error('Project id is required')
+    const cli = spawnCliLabel(input.cli)
+    if (!cli) throw new Error('cli is required for placement')
+
+    const session = this.getSessionForProject(normalizedProjectId)
+    const relay = await this.getPlacementRelay(session)
+    const capability = `spawn:${cli}`
+    const selfNodeName = this.localFleetNodeName(session)
+    const requestedNode = input.node?.trim() || undefined
+
+    // Dedupe the placed name against the shared workspace roster — a remote
+    // landing shares the workspace, so a name collision there is workspace-wide
+    // even though a single broker would accept it locally.
+    const existingNames = new Set(
+      (await relay.agents.list().catch(() => [])).map((agent) => agent.name)
+    )
+    const name = getAvailableAgentName(input.name?.trim() || `${cli}-1`, existingNames)
+    // Any-node placement fails fast (a clear message, never a silent hang);
+    // an explicit target queues up to the TTL so a briefly-offline node recovers.
+    const failFast = input.failFast ?? !requestedNode
+
+    try {
+      const ack = await relay.messaging.placement.spawn({
+        capability,
+        ...(requestedNode ? { node: requestedNode } : {}),
+        ...(requestedNode === 'self' ? { selfNodeName } : {}),
+        ...(input.repo?.trim() ? { repo: input.repo.trim() } : {}),
+        input: {
+          name,
+          ...(input.task?.trim() ? { task: input.task.trim() } : {}),
+          ...(input.model?.trim() ? { model: input.model.trim() } : {})
+        },
+        failFast
+      })
+      const landedNode = ack.node.name
+      const nodeId = ack.node.nodeId ?? ack.node.id
+      return {
+        name,
+        node: landedNode,
+        ...(nodeId ? { nodeId } : {}),
+        invocationId: ack.invocationId,
+        queued: ack.placement.queued,
+        local: landedNode === selfNodeName
+      }
+    } catch (err) {
+      if (err instanceof RelayPlacementError) {
+        throw new BrokerPlacementError(err.code, buildPlacementMessage(err), {
+          capability: err.capability,
+          node: err.node,
+          repo: err.repo
+        })
+      }
+      throw err
+    }
+  }
+
+  /**
+   * Fleet node roster for the spawn/node-picker UI (#411). Lists nodes visible
+   * in the project's relay workspace, optionally filtered to those advertising a
+   * capability (e.g. `spawn:claude`), flagging this machine's own node.
+   */
+  async listNodes(projectId: string, capability?: string): Promise<BrokerNodeSummary[]> {
+    const normalizedProjectId = projectId.trim()
+    if (!normalizedProjectId) throw new Error('Project id is required')
+    const session = this.getSessionForProject(normalizedProjectId)
+    const relay = await this.getPlacementRelay(session)
+    const selfNodeName = this.localFleetNodeName(session)
+    const nodes = await relay.nodes.list(
+      capability?.trim() ? { capability: capability.trim() } : undefined
+    )
+    return nodes.map((node) => toBrokerNodeSummary(node, selfNodeName))
   }
 
   private attachClient(
@@ -4342,6 +4485,10 @@ export class BrokerManager {
 
     session.unsubEvent()
     if (session.leaseTimer) clearInterval(session.leaseTimer)
+    // Drop the cached placement requester client; a session reconnecting to a
+    // different workspace would otherwise reuse an agent token scoped to the old
+    // workspace (mirrors the observer-token invalidation above).
+    session.placementRelay = undefined
     void this.stopSessionFleetSidecar(session)
     if (options.disconnectOnly) {
       const disconnect = (session.client as { disconnect?: () => void }).disconnect

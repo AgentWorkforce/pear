@@ -25,6 +25,9 @@ import type {
   BrokerSetTerminalModeResult,
   BrokerSpawnAgentInput,
   BrokerSpawnAgentResult,
+  BrokerPlaceAgentInput,
+  BrokerPlaceAgentOutcome,
+  BrokerNodeSummary,
   BrokerStatusEvent,
   BurnAgentBreakdown,
   BurnAgentInput,
@@ -925,6 +928,36 @@ export const pearMock: PearAPI = {
       } satisfies AgentSpawnedEvent)
       return { name: agent.name, runtime: agent.runtime || 'mock', cli: agent.cli }
     },
+    placeAgent: async (projectId: string, input: BrokerPlaceAgentInput): Promise<BrokerPlaceAgentOutcome> => {
+      // Mock placement lands the agent locally so the spawn UI can be exercised
+      // without a real fleet; a real cross-node landing needs the isolated E2E.
+      const result = await pearMock.broker.spawnAgent(projectId, {
+        name: input.name || `${input.cli}-1`,
+        cli: input.cli,
+        ...(input.model ? { model: input.model } : {}),
+        ...(input.task ? { task: input.task } : {})
+      })
+      return {
+        status: 'placed',
+        result: {
+          name: result.name,
+          node: input.node && input.node !== 'self' ? input.node : 'mock-local-node',
+          invocationId: `mock-inv-${result.name}`,
+          queued: false,
+          local: !input.node || input.node === 'self'
+        }
+      }
+    },
+    listNodes: async (): Promise<BrokerNodeSummary[]> => [
+      {
+        name: 'mock-local-node',
+        live: true,
+        load: 0,
+        activeAgents: 0,
+        capabilities: ['spawn:claude', 'spawn:codex', 'spawn:opencode', 'spawn:grok'],
+        isSelf: true
+      }
+    ],
     listPersonas: async (): Promise<WorkforcePersona[]> => [],
     spawnPersona: async (projectId: string, personaId: string) =>
       pearMock.broker.spawnAgent(projectId, { name: personaId, cli: 'codex' }),

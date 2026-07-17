@@ -2,10 +2,14 @@ import type React from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Loader2, X } from 'lucide-react'
 import { ClaudeIcon, CodexIcon, GrokIcon, OpenCodeIcon } from '@/components/common/AgentIcons'
-import { SPAWN_AGENT_CLI_INSTALL_COMMANDS, listProjectPersonas, spawnProjectAgent, spawnProjectPersona, type SpawnAgentCli } from '@/lib/spawn-agent'
-import { pear, type WorkforcePersona } from '@/lib/ipc'
+import { SPAWN_AGENT_CLI_INSTALL_COMMANDS, listProjectPersonas, spawnProjectAgent, spawnProjectPersona, placeProjectAgent, type SpawnAgentCli } from '@/lib/spawn-agent'
+import { pear, type WorkforcePersona, type BrokerNodeSummary } from '@/lib/ipc'
 import { useProjectStore, type ProjectRoot } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
+
+// Sentinel for the "any eligible node" placement option (distinct from '' =
+// this Mac, and from a concrete node name).
+const ANY_NODE = '__any__'
 
 const AGENT_OPTIONS: Array<{ cli: SpawnAgentCli; label: string; Icon: typeof ClaudeIcon }> = [
   { cli: 'claude', label: 'Claude', Icon: ClaudeIcon },
@@ -25,6 +29,12 @@ export function SpawnAgentDialog(): React.ReactNode {
   const [error, setError] = useState<string | null>(null)
   const [cliAvailability, setCliAvailability] = useState<Partial<Record<SpawnAgentCli, boolean>>>({})
   const [selectedRootId, setSelectedRootId] = useState<string | null>(null)
+  // Placement (#411): '' = this Mac (direct local spawn), ANY_NODE = any eligible
+  // least-loaded node, or a specific remote node name. Only remote/any go through
+  // the placement engine; the local default stays on the proven direct path.
+  const [nodes, setNodes] = useState<BrokerNodeSummary[]>([])
+  const [selectedNode, setSelectedNode] = useState<string>('')
+  const [remoteNotice, setRemoteNotice] = useState<string | null>(null)
   const project = useProjectStore((s) => s.getActiveProject())
   const defaultRoot = useProjectStore((s) => s.getActiveRoot())
   const selectedRoot = project?.roots.find((r) => r.id === selectedRootId)
@@ -48,6 +58,18 @@ export function SpawnAgentDialog(): React.ReactNode {
       setSelectedRootId(root?.id ?? null)
     }
   }, [project, root?.id, selectedRootId])
+
+  // Load the fleet node roster for the placement picker. Best-effort: a broker
+  // that isn't up yet just yields an empty list (local-only spawn still works).
+  useEffect(() => {
+    if (!project) return
+    let cancelled = false
+    void pear.broker.listNodes(project.id).then(
+      (roster) => { if (!cancelled) setNodes(roster) },
+      () => { if (!cancelled) setNodes([]) }
+    )
+    return () => { cancelled = true }
+  }, [project?.id])
 
   useEffect(() => {
     let cancelled = false
@@ -128,10 +150,27 @@ export function SpawnAgentDialog(): React.ReactNode {
 
     spawnRequestRef.current = true
     setError(null)
+    setRemoteNotice(null)
     setSpawningCli(cli)
     try {
-      await spawnProjectAgent(project, cli, customName, root, customModel)
-      closeDialog()
+      if (selectedNode === '') {
+        // This Mac — proven direct local spawn path (unchanged).
+        await spawnProjectAgent(project, cli, customName, root, customModel)
+        closeDialog()
+      } else {
+        // Placement engine: any eligible node, or a specific remote node.
+        const targetNode = selectedNode === ANY_NODE ? undefined : selectedNode
+        const placed = await placeProjectAgent(project, cli, targetNode, customName, customModel, root)
+        if (placed.local) {
+          closeDialog()
+        } else {
+          // Remote landing — no terminal view yet (upstream gap). Keep the dialog
+          // open with a clear chat-first message rather than opening a broken pane.
+          setRemoteNotice(
+            `Placed “${placed.name}” on ${placed.node}. It’s reachable via chat — a terminal view for remote nodes isn’t available yet (upstream gap).`
+          )
+        }
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err))
     } finally {
@@ -207,6 +246,31 @@ export function SpawnAgentDialog(): React.ReactNode {
                 </div>
               )}
               <div className="truncate text-xs text-[var(--pear-text-faint)]">{root?.path || project.rootPath}</div>
+              <div>
+                <label htmlFor="spawn-node-select" className="mb-1 block text-xs font-medium text-[var(--pear-text-dim)]">
+                  Run on
+                </label>
+                <select
+                  id="spawn-node-select"
+                  value={selectedNode}
+                  onChange={(e) => { setSelectedNode(e.target.value); setRemoteNotice(null) }}
+                  disabled={spawning}
+                  className="h-9 w-full rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 text-sm text-[var(--pear-text)] outline-none focus:border-[var(--pear-accent-dim)] disabled:opacity-50"
+                >
+                  <option value="">This Mac</option>
+                  <option value={ANY_NODE}>Any available node (may include this Mac)</option>
+                  {nodes.filter((n) => !n.isSelf && n.live).map((n) => (
+                    <option key={n.name} value={n.name}>
+                      {n.name}{typeof n.load === 'number' ? ` · load ${n.load}` : ''}
+                    </option>
+                  ))}
+                </select>
+                {selectedNode !== '' && (
+                  <p className="mt-1 text-[11px] leading-snug text-[var(--pear-text-faint)]">
+                    Remote agents run on another node and are reachable via chat; a terminal view for remote nodes isn’t available yet.
+                  </p>
+                )}
+              </div>
               <div>
                 <label htmlFor="spawn-agent-name" className="mb-1 block text-xs font-medium text-[var(--pear-text-dim)]">
                   Name <span className="text-[var(--pear-text-faint)]">(optional)</span>
@@ -322,6 +386,12 @@ export function SpawnAgentDialog(): React.ReactNode {
           {error && (
             <p className="mt-3 rounded-md border border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 px-3 py-2 text-xs text-[var(--pear-red)]">
               {error}
+            </p>
+          )}
+
+          {remoteNotice && (
+            <p className="mt-3 rounded-md border border-[var(--pear-accent-dim)]/30 bg-[var(--pear-accent)]/10 px-3 py-2 text-xs text-[var(--pear-text-dim)]">
+              {remoteNotice}
             </p>
           )}
         </div>

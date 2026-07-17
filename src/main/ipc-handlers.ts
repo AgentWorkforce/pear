@@ -21,7 +21,7 @@ import {
   addProjectIntegration,
   removeProjectIntegration
 } from './store'
-import { brokerManager, isCommandAvailableWithAugmentedPath } from './broker'
+import { brokerManager, isCommandAvailableWithAugmentedPath, BrokerPlacementError } from './broker'
 import * as git from './git'
 import * as filesystem from './filesystem'
 import * as auth from './auth'
@@ -37,6 +37,9 @@ import { findProjectForPath, projectContainsPath } from './cli'
 import type {
   BrokerReconcileMessagesInput,
   BrokerSpawnAgentResult,
+  BrokerPlaceAgentInput,
+  BrokerPlaceAgentOutcome,
+  BrokerNodeSummary,
   FactoryAgentStatus,
   FactoryConfigReadResult,
   FactoryIssueStatus,
@@ -760,6 +763,33 @@ export function registerIpcHandlers(): void {
     }
     integrationEventBridge.invalidateProjectAgentCache(projectId)
     return toBrokerSpawnAgentResult(result)
+  })
+
+  // Placement requester (#411): dispatch a spawn onto an eligible fleet node.
+  // Placement errors (no eligible node, capability mismatch, queue full, unmapped
+  // repo) are returned as structured outcomes so the UI can show a clear message
+  // and never hang; unexpected failures still reject.
+  ipcMain.handle('broker:place-agent', async (_, projectId: string, input: BrokerPlaceAgentInput): Promise<BrokerPlaceAgentOutcome> => {
+    try {
+      const result = await brokerManager.placeAgent(projectId, input)
+      integrationEventBridge.invalidateProjectAgentCache(projectId)
+      return { status: 'placed', result }
+    } catch (err) {
+      if (err instanceof BrokerPlacementError) {
+        return {
+          status: 'error',
+          code: err.code,
+          message: err.message,
+          ...(err.node ? { node: err.node } : {}),
+          ...(err.repo ? { repo: err.repo } : {})
+        }
+      }
+      throw err
+    }
+  })
+
+  ipcMain.handle('broker:list-nodes', async (_, projectId: string, capability?: string): Promise<BrokerNodeSummary[]> => {
+    return brokerManager.listNodes(projectId, capability)
   })
 
   ipcMain.handle('broker:list-personas', async (_, projectId: string, cwd?: string) => {

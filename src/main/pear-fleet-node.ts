@@ -377,7 +377,7 @@ export function startPearFleetSidecar(options: PearFleetSidecarOptions): Running
   }
 }
 
-function pearFleetProviderName(options: PearFleetNodeOptions): string {
+export function pearFleetProviderName(options: PearFleetNodeOptions): string {
   const rawName = `${options.brokerName || options.projectId || 'pear'}-local-fleet`
   return rawName.replace(/[^\w.-]+/gu, '-').replace(/^-+|-+$/gu, '') || 'pear-local-fleet'
 }
