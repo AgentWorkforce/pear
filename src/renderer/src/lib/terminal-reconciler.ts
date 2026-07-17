@@ -259,8 +259,7 @@ export function createTerminalReconciler(deps: TerminalReconcilerDeps): Terminal
       viewport: { ...viewport, lines: [...viewport.lines] },
       telemetryLines: [
         `[terminal] viewport diverged from broker screen; confirmed after ` +
-        `${mismatchStreak} quiet checks at ${viewport.rows}x${viewport.cols} ` +
-        `(divergence #${divergenceCount})`
+        `${mismatchStreak} quiet checks at ${viewport.rows}x${viewport.cols}`
       ]
     }
 
