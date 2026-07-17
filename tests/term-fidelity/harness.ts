@@ -34,6 +34,9 @@ export interface FidelityHarness {
   relayVersions: Record<string, string>
   telemetry: TelemetryRecord[]
   mainLogs: string[]
+  // Renderer console lines tagged [terminal]/[diag], captured to trace which
+  // reflow/scroll/repair path fires during a divergence.
+  rendererConsole: string[]
   currentWorkload: string | null
   // Playwright retry index (0 = first attempt). Divergence + telemetry bundles
   // are written under `attempt-<n>/` so a retry never overwrites the prior
@@ -124,6 +127,13 @@ async function installActivityProbe(page: Page): Promise<void> {
     type Activity = { lastOutputAt: number; chunks: number; bytes: number }
     type Probe = {
       activity: Record<string, Activity>
+      // The full concatenated raw byte stream the renderer received from the
+      // broker IPC (post main-process dedup, pre renderer buffer store / echo
+      // router). Replaying THIS through a fresh headless xterm and diffing it
+      // against the broker snapshot discriminates delivery loss from
+      // renderer-internal (echo-router / predictive-echo / reconciler)
+      // divergence. Read-only tap; no production code patched.
+      raw: Record<string, string>
       unsubscribe: () => void
     }
     type PearWindow = Window & {
@@ -138,6 +148,7 @@ async function installActivityProbe(page: Page): Promise<void> {
     const win = window as unknown as PearWindow
     win.__termFidelityProbe?.unsubscribe()
     const activity: Record<string, Activity> = {}
+    const raw: Record<string, string> = {}
     const unsubscribe = win.pear.broker.onPtyChunk((_projectId, name, chunk) => {
       const previous = activity[name] || { lastOutputAt: 0, chunks: 0, bytes: 0 }
       activity[name] = {
@@ -145,8 +156,9 @@ async function installActivityProbe(page: Page): Promise<void> {
         chunks: previous.chunks + 1,
         bytes: previous.bytes + new TextEncoder().encode(chunk).byteLength
       }
+      raw[name] = (raw[name] || '') + chunk
     })
-    win.__termFidelityProbe = { activity, unsubscribe }
+    win.__termFidelityProbe = { activity, raw, unsubscribe }
   })
 }
 
@@ -228,6 +240,7 @@ export async function launchFidelityHarness(
 
     const telemetry: TelemetryRecord[] = []
     const mainLogs: string[] = []
+    const rendererConsole: string[] = []
     const harnessState = { currentWorkload: null as string | null }
     const recordMain = (source: 'main:stdout' | 'main:stderr', value: Buffer | string): void => {
       const text = value.toString()
@@ -263,8 +276,20 @@ export async function launchFidelityHarness(
     }
 
     const page = await electronApp.firstWindow({ timeout: 60_000 })
+    // Enable the renderer's per-chunk [diag:pty-append] byte diagnostic
+    // (localStorage-gated) so it survives the reload below. Read-only.
+    await page.addInitScript(() => {
+      try {
+        localStorage.setItem('PEAR_DIAG_PTY', '1')
+      } catch {
+        /* ignore */
+      }
+    })
     page.on('console', (message) => {
       const line = message.text()
+      if (line.includes('[terminal]') || line.includes('[diag')) {
+        rendererConsole.push(`${new Date().toISOString()} [${harnessState.currentWorkload || 'setup'}] ${line}`)
+      }
       if (line.includes(RECONCILER_REPAIR_LINE)) {
         telemetry.push({
           at: new Date().toISOString(),
@@ -326,6 +351,7 @@ export async function launchFidelityHarness(
       telemetry,
       mainLogs,
       attempt,
+      rendererConsole,
       get currentWorkload() {
         return harnessState.currentWorkload
       },
@@ -364,5 +390,16 @@ export async function getActivity(
       }
     }).__termFidelityProbe
     return probe?.activity[name] || { lastOutputAt: 0, chunks: 0, bytes: 0 }
+  }, agentName)
+}
+
+// The full raw byte stream the renderer received for `agentName` (post main
+// dedup, pre renderer processing). Empty string if nothing captured.
+export async function getRawStream(page: Page, agentName: string): Promise<string> {
+  return await page.evaluate((name) => {
+    const probe = (window as Window & {
+      __termFidelityProbe?: { raw?: Record<string, string> }
+    }).__termFidelityProbe
+    return probe?.raw?.[name] || ''
   }, agentName)
 }
