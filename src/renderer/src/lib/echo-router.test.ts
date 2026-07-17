@@ -110,7 +110,8 @@ interface Harness {
   engine: PredictiveEchoEngine
   model: HeadlessModel
   setSrtt(value: number | null): void
-  dispose(): void
+  disposeEngine(): void
+  dispose(): Promise<void>
 }
 
 function makeHarness(): Harness {
@@ -133,6 +134,13 @@ function makeHarness(): Harness {
     isViewportPinned: () => false,
     scrollToBottom: () => {}
   })
+  let engineDisposed = false
+  let disposePromise: Promise<void> | null = null
+  const disposeEngine = (): void => {
+    if (engineDisposed) return
+    engineDisposed = true
+    engine.reset()
+  }
   return {
     router,
     live,
@@ -141,10 +149,15 @@ function makeHarness(): Harness {
     setSrtt: (value) => {
       srtt = value
     },
+    disposeEngine,
     dispose: () => {
-      router.dispose()
-      engine.reset()
-      live.dispose()
+      if (!disposePromise) {
+        disposePromise = router.dispose().then(() => {
+          disposeEngine()
+          live.dispose()
+        })
+      }
+      return disposePromise
     }
   }
 }
@@ -179,8 +192,8 @@ describe('echo-router — real engine + real parser equivalence', () => {
     harness = makeHarness()
   })
 
-  afterEach(() => {
-    harness.dispose()
+  afterEach(async () => {
+    await harness.dispose()
   })
 
   it('starts on the direct route and passes bytes through byte-for-byte', async () => {
@@ -342,6 +355,27 @@ describe('echo-router — real engine + real parser equivalence', () => {
     expect(readScreen(harness.live)).toBe(await reference(a + b + flood))
   })
 
+  it('drains accepted engine bytes before v10 reset can discard them', async () => {
+    harness.setSrtt(80)
+    harness.router.onUserInput('x')
+    await drain(harness.live)
+    await settle(harness)
+    expect(harness.router.route()).toBe('engine')
+
+    // Back up the real v10 engine tail, enqueue authoritative bytes, then
+    // begin teardown immediately. v10 reset drops a chunk whose processing
+    // has not started, so this assertion fails unless router.dispose waits for
+    // its accepted ordering chain before the owner resets the engine.
+    harness.model.writeDelayMs = 30
+    const chunk = '\x1b[2J\x1b[Hqueued-before-dispose'
+    harness.router.onServerOutput(chunk)
+    await harness.router.dispose()
+    harness.disposeEngine()
+    await drain(harness.live)
+
+    expect(readScreen(harness.live)).toBe(await reference(chunk))
+  })
+
   it('skips optimistic echo while a chunk is mid-flight in the engine tail (stale-cursor strand)', async () => {
     // Get on the engine route with a prompt at row 0.
     harness.router.onServerOutput('\x1b[2J\x1b[H$ ')
@@ -417,7 +451,7 @@ describe('echo-router — reseed capture timeout', () => {
     vi.useRealTimers()
   })
 
-  it('aborts a stalled capture, releases held chunks directly, and stays direct', () => {
+  it('aborts a stalled capture, releases held chunks directly, and stays direct', async () => {
     const written: string[] = []
     const engine = {
       seed: vi.fn(() => Promise.resolve()),
@@ -454,10 +488,10 @@ describe('echo-router — reseed capture timeout', () => {
     // Later output flows normally on the direct route.
     router.onServerOutput('after')
     expect(written).toEqual(['held-1held-2', 'after'])
-    router.dispose()
+    await router.dispose()
   })
 
-  it('releases held chunks directly when the engine changes during the capture', () => {
+  it('releases held chunks directly when the engine changes during the capture', async () => {
     const written: string[] = []
     let captureCallback: (() => void) | null = null
     const makeEngine = (): PredictiveEchoWithStatus => ({
@@ -497,10 +531,10 @@ describe('echo-router — reseed capture timeout', () => {
     expect(router.route()).toBe('direct')
     expect(firstEngine.seed).not.toHaveBeenCalled()
     expect(engine.seed).not.toHaveBeenCalled()
-    router.dispose()
+    await router.dispose()
   })
 
-  it('dispose drops held chunks and cancels the capture timeout', () => {
+  it('dispose flushes held chunks and cancels the capture timeout', async () => {
     const written: string[] = []
     const router = createEchoRouter({
       write: (data) => {
@@ -523,8 +557,8 @@ describe('echo-router — reseed capture timeout', () => {
 
     router.onUserInput('a')
     router.onServerOutput('held')
-    router.dispose()
+    await router.dispose()
     vi.advanceTimersByTime(RESEED_CAPTURE_TIMEOUT_MS * 2)
-    expect(written).toEqual([])
+    expect(written).toEqual(['held'])
   })
 })

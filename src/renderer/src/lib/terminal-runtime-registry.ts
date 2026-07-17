@@ -341,10 +341,13 @@ function createRuntime(
   // real engine + parser).
   const echoRouter = createEchoRouter({
     write: (data, callback) => {
-      if (disposed || !term) return
+      // Teardown marks the public runtime disposed before awaiting the router
+      // drain. Keep this private sink alive until that drain completes so
+      // Relay v10 reset cannot discard already-accepted server output.
+      if (!term) return
       term.write(data, callback)
     },
-    getEngine: () => (disposed ? null : predictiveEcho),
+    getEngine: () => predictiveEcho,
     buildModelSeed: () => (term ? buildModelSeedFromTerminal(term) : '\x1bc'),
     getInputSrtt: () => currentSrttGetter(),
     isViewportPinned: () => (term ? isViewportPinnedToBottom(term) : false),
@@ -732,32 +735,37 @@ function createRuntime(
       cancelPendingInit()
       reconciler.dispose()
       sizeSync.dispose()
-      echoRouter.dispose()
-      clearPtyBuffer(key)
       disposed = true
       currentToken = null
       unsubBuffer?.()
       unsubBuffer = null
-      disposePredictiveEcho?.()
-      disposePredictiveEcho = null
-      predictiveEcho = null
-      try {
-        webglAddon?.dispose()
-      } catch {
-        // Teardown: an already-disposed or context-lost WebGL addon can throw
-        // on dispose; we null it out next regardless, so silence is correct.
-      }
-      webglAddon = null
-      try {
-        term?.dispose()
-      } catch {
-        // Teardown: disposing an xterm instance twice (or after its host was
-        // detached) can throw; we null it out next regardless, so silence is correct.
-      }
-      term = null
-      if (host.parentElement) {
-        host.parentElement.removeChild(host)
-      }
+      clearPtyBuffer(key)
+      // Relay v10 intentionally drops queued engine output after reset. Drain
+      // the router ordering chain first, then reset/dispose the engine, model,
+      // and live terminal. The registry record is already gone, so this old
+      // runtime cannot be reacquired while its accepted bytes finish parsing.
+      void echoRouter.dispose().finally(() => {
+        disposePredictiveEcho?.()
+        disposePredictiveEcho = null
+        predictiveEcho = null
+        try {
+          webglAddon?.dispose()
+        } catch {
+          // Teardown: an already-disposed or context-lost WebGL addon can throw
+          // on dispose; we null it out next regardless, so silence is correct.
+        }
+        webglAddon = null
+        try {
+          term?.dispose()
+        } catch {
+          // Teardown: disposing an xterm instance twice (or after its host was
+          // detached) can throw; we null it out next regardless, so silence is correct.
+        }
+        term = null
+        if (host.parentElement) {
+          host.parentElement.removeChild(host)
+        }
+      })
     },
     isMounted(): boolean {
       return currentToken !== null
@@ -801,7 +809,7 @@ function createRuntime(
       currentSrttGetter = getter
     },
     getPredictiveEcho(): PredictiveEcho | null {
-      return predictiveEcho
+      return disposed ? null : predictiveEcho
     },
     noteUserInput(data: string): void {
       if (disposed || !term) return
