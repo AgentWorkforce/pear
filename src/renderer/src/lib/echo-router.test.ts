@@ -562,3 +562,72 @@ describe('echo-router — reseed capture timeout', () => {
     expect(written).toEqual(['held'])
   })
 })
+
+// pear#403: on the direct route the viewport re-pin must fire from the write
+// COMPLETION callback (after xterm parses the chunk), not synchronously before
+// it. term.write is async: a chunk can scroll the viewport off the bottom
+// during its own parse (a TUI SIGWINCH full-screen redraw rewrites scrollback
+// and resets ydisp). A synchronous scrollToBottom issued before that parse is
+// undone by it; the viewport is then stranded off-bottom, isViewportPinned()
+// reads false, and every later chunk stops re-pinning — the grid freezes in
+// scrollback with byte-correct content (codex resize-mid-stream, viewport
+// [0,baseY] at quiet). These lock the post-parse re-pin, gated on the
+// pre-write follow intent so a deliberate scrollback read is never yanked down.
+describe('echo-router — #403 direct-route viewport re-pin after parse', () => {
+  function makeRepinHarness() {
+    const writes: string[] = []
+    let pendingCb: (() => void) | null = null
+    let pinned = true
+    const scrollToBottom = vi.fn()
+    const router = createEchoRouter({
+      // Defer the completion callback so the test controls the parse boundary,
+      // exactly like xterm's async WriteBuffer.
+      write: (data, callback) => {
+        writes.push(data)
+        pendingCb = callback ?? null
+      },
+      getEngine: () => null,
+      buildModelSeed: () => '\x1bc',
+      getInputSrtt: () => null,
+      isViewportPinned: () => pinned,
+      scrollToBottom
+    })
+    return {
+      router,
+      writes,
+      scrollToBottom,
+      setPinned: (value: boolean) => {
+        pinned = value
+      },
+      completeParse: () => {
+        const cb = pendingCb
+        pendingCb = null
+        cb?.()
+      }
+    }
+  }
+
+  it('re-pins only AFTER the chunk is parsed, never synchronously before it', async () => {
+    const h = makeRepinHarness()
+    // A full-screen redraw: the kind of chunk whose parse moves the viewport.
+    h.router.onServerOutput('\x1b[2J\x1b[Hfull redraw at new size')
+    // Write issued, parse not yet complete → a synchronous (pre-parse) re-pin
+    // would already have fired here. It must not.
+    expect(h.writes).toHaveLength(1)
+    expect(h.scrollToBottom).not.toHaveBeenCalled()
+    // Parse completes (viewport may now be off-bottom); the completion callback
+    // re-pins, so the stranding cascade never starts.
+    h.completeParse()
+    expect(h.scrollToBottom).toHaveBeenCalledTimes(1)
+    await h.router.dispose()
+  })
+
+  it('does not re-pin when the user has scrolled into scrollback', async () => {
+    const h = makeRepinHarness()
+    h.setPinned(false)
+    h.router.onServerOutput('another streamed row\r\n')
+    h.completeParse()
+    expect(h.scrollToBottom).not.toHaveBeenCalled()
+    await h.router.dispose()
+  })
+})

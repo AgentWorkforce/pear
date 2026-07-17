@@ -432,3 +432,59 @@ describe('terminal-runtime-registry — dispose cancels pending init rAF', () =>
     }
   })
 })
+
+// pear#403: a reflow (fitAddon.fit → term.resize) can scroll the viewport off
+// the bottom — a narrower grid rewraps lines into scrollback, bumping baseY
+// past viewportY. tryFit must re-pin a FOLLOWING viewport to the tail on every
+// reflow, so a resize storm never strands the grid in scrollback with
+// byte-correct content. The follow intent is sticky (flipped only by a real
+// user wheel scroll), NOT the instantaneous viewportY===baseY, because that is
+// exactly what a transient reflow poisons.
+describe('terminal-runtime-registry — #403 follow-bottom re-pin across reflow', () => {
+  async function nextFrame(): Promise<void> {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
+  }
+
+  it('re-pins on fit while following, suspends after a wheel-scroll into scrollback, resumes at the bottom', async () => {
+    const runtime = registry.acquireTerminalRuntime({
+      projectId: 'p',
+      agentName: 'a',
+      terminalMode: 'drive',
+      theme: 'dark',
+      getInputSrtt: () => null
+    })
+    const term = createdTerminals[0]
+    // Give the runtime's own host layout so tryFit runs its fit + re-pin.
+    Object.defineProperty(runtime.host, 'clientWidth', { configurable: true, value: 800 })
+    Object.defineProperty(runtime.host, 'clientHeight', { configurable: true, value: 600 })
+    runtime.mount(makeLayoutContainer())
+    await flushAsync()
+
+    const scrollSpy = vi.spyOn(term, 'scrollToBottom')
+
+    // Following by default: a reflow re-pins to the bottom.
+    scrollSpy.mockClear()
+    runtime.fitAndSync()
+    expect(scrollSpy).toHaveBeenCalled()
+
+    // User wheels up into scrollback (viewport off the bottom): following is
+    // suspended, so a subsequent reflow must NOT yank them down.
+    term.buffer.active.viewportY = 40
+    term.buffer.active.baseY = 100
+    runtime.host.dispatchEvent(new Event('wheel'))
+    await nextFrame()
+    scrollSpy.mockClear()
+    runtime.fitAndSync()
+    expect(scrollSpy).not.toHaveBeenCalled()
+
+    // User returns to the bottom: following resumes and reflow re-pins again.
+    term.buffer.active.viewportY = 100
+    runtime.host.dispatchEvent(new Event('wheel'))
+    await nextFrame()
+    scrollSpy.mockClear()
+    runtime.fitAndSync()
+    expect(scrollSpy).toHaveBeenCalled()
+
+    registry.disposeTerminalRuntime(runtime.key)
+  })
+})

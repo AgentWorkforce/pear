@@ -294,6 +294,29 @@ function createRuntime(
   term.loadAddon(fitAddon)
   term.loadAddon(new WebLinksAddon())
 
+  // #403: sticky "user is following the bottom" intent. The instantaneous
+  // `viewportY === baseY` is NOT a reliable follow signal: a width/height
+  // reflow (resize) or a TUI's SIGWINCH full-screen redraw can transiently
+  // scroll the viewport off the bottom, and once it is off, that instantaneous
+  // check reads false, so every subsequent write/fit stops re-pinning and the
+  // grid freezes in scrollback with byte-correct content (codex
+  // resize-mid-stream: viewport ends at [0, baseY] though every cell matches
+  // the broker). `followBottom` is flipped ONLY by a real user wheel scroll, so
+  // reflow/redraw unpins are always corrected while a deliberate scrollback
+  // read is respected. The echo-router and tryFit re-pin against this intent.
+  let followBottom = true
+  host.addEventListener(
+    'wheel',
+    () => {
+      // Read after xterm has applied the scroll, so a wheel-to-bottom re-arms
+      // following and a wheel-up (into scrollback) suspends it.
+      requestAnimationFrame(() => {
+        if (term) followBottom = isViewportPinnedToBottom(term)
+      })
+    },
+    { passive: true }
+  )
+
   let onDataHandler: ((data: string) => void) | null = null
   term.onData((data) => {
     onDataHandler?.(data)
@@ -350,7 +373,12 @@ function createRuntime(
     getEngine: () => predictiveEcho,
     buildModelSeed: () => (term ? buildModelSeedFromTerminal(term) : '\x1bc'),
     getInputSrtt: () => currentSrttGetter(),
-    isViewportPinned: () => (term ? isViewportPinnedToBottom(term) : false),
+    // Re-pin against the sticky follow intent, not the instantaneous viewport
+    // position: a chunk that scrolls the viewport off the bottom during its
+    // own async parse must still be re-pinned by the completion callback
+    // (pear#403). A user who scrolled into scrollback (wheel-up) clears the
+    // intent and is left alone.
+    isViewportPinned: () => followBottom,
     scrollToBottom: () => term?.scrollToBottom()
   })
   // Quiet-time convergence to the broker's authoritative screen. Catches the
@@ -440,6 +468,14 @@ function createRuntime(
     } catch {
       return null
     }
+    // #403: a width/height reflow can scroll the viewport off the bottom (a
+    // narrower grid rewraps lines into scrollback, bumping baseY past
+    // viewportY). Centralize the re-pin here so EVERY reflow site — the
+    // ResizeObserver fit, the reconciler's onPersistentDimsMismatch resync,
+    // init, and refreshOnShow — keeps a following viewport at the tail. Gated
+    // on the sticky follow intent, so a resize while the user is reading
+    // scrollback does not yank them down.
+    if (followBottom) term.scrollToBottom()
     const { rows, cols } = term
     if (rows > 0 && cols > 0) {
       return { rows, cols }
