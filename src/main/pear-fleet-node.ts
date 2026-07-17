@@ -2,11 +2,12 @@ import { basename, resolve } from 'node:path'
 import {
   action,
   defineNode,
-  invokeNodeHandler,
-  nodeInfo,
-  nodeManifest,
+  startServeNode,
   type FleetCapabilityValue,
-  type FleetNodeDefinition
+  type FleetNodeDefinition,
+  type FleetNodeInfo,
+  type NodeEngineConnection,
+  type RunningNode
 } from '@agent-relay/fleet'
 import {
   aider,
@@ -21,8 +22,6 @@ import {
   type PtyHarness
 } from '@agent-relay/harnesses'
 import { resolveStaticHarnessConfig, type RestartPolicy } from '@agent-relay/harness-driver'
-import { PROTOCOL_VERSION, type NodeManifest } from '@agent-relay/harness-driver/protocol'
-import WebSocket from 'ws'
 import { z } from 'zod'
 
 export const PEAR_LOCAL_SPAWN_HARNESSES = {
@@ -37,19 +36,8 @@ export const PEAR_LOCAL_SPAWN_HARNESSES = {
   droid
 } satisfies Record<string, PtyHarness>
 
-const RECONNECT_BASE_DELAY_MS = 500
-const RECONNECT_MAX_DELAY_MS = 5_000
-// When the sidecar has never completed a registration handshake, the broker is
-// either wedged (accepts the WS upgrade but never answers `hello`) or does not
-// accept this fleet node at all. Reconnecting on the normal 5s ceiling in that
-// state produces a tight storm — leaked sockets plus a flood of "hello request
-// timed out; reconnecting" warnings — that never self-resolves. Back off much
-// harder while unregistered so we keep probing for recovery without hammering
-// the broker. A transient drop after a healthy registration keeps the fast
-// ceiling so we recover quickly from ordinary reconnects.
-const RECONNECT_UNREGISTERED_MAX_DELAY_MS = 60_000
-const REQUEST_TIMEOUT_MS = 5_000
-const DEREGISTER_TIMEOUT_MS = 1_000
+const NODE_TOKEN_WAIT_MS = 15_000
+const NODE_TOKEN_POLL_MS = 250
 
 const restartPolicySchema = z.object({
   enabled: z.boolean().optional(),
@@ -92,34 +80,38 @@ export interface PearFleetNodeOptions {
 }
 
 export interface PearFleetSidecarOptions extends PearFleetNodeOptions {
-  connection: {
-    url: string
-    apiKey?: string
-  }
+  readBrokerSession: () => Promise<PearFleetBrokerSession>
   log?: (message: string) => void
   warn?: (message: string) => void
 }
 
+export interface PearFleetBrokerSession {
+  relay_base_url?: string
+  node_id?: string
+  node_name?: string
+  node_token?: string
+}
+
+export interface ResolvedPearFleetConnection {
+  connection: NodeEngineConnection
+  nodeName: string
+}
+
+export interface PearFleetConnectionWaitOptions {
+  timeoutMs?: number
+  pollIntervalMs?: number
+  now?: () => number
+  sleep?: (ms: number, signal: AbortSignal) => Promise<void>
+}
+
 export interface RunningPearFleetSidecar {
-  readonly registered: Promise<NodeManifest>
+  readonly registered: Promise<FleetNodeInfo>
   readonly done: Promise<void>
   stop(): Promise<void>
 }
 
-type BrokerFrame = {
-  type?: string
-  request_id?: string
-  payload?: unknown
-}
-
-type PendingRequest = {
-  resolve: (value: unknown) => void
-  reject: (error: Error) => void
-  timer: ReturnType<typeof setTimeout>
-}
-
 export function createPearFleetNodeDefinition(options: PearFleetNodeOptions): FleetNodeDefinition {
-  const nodeName = pearFleetNodeName(options)
+  const nodeName = pearFleetProviderName(options)
   const clonePathKey = basename(options.cwd) || options.projectId || 'project'
   const clonePaths = { [clonePathKey]: options.cwd }
   const capabilities: Record<string, FleetCapabilityValue> = {}
@@ -207,15 +199,66 @@ function resolvePearSpawnCwd(projectCwd: string, input: SpawnCapabilityInput): s
   return requested
 }
 
+/**
+ * Resolve the broker's v10 fleet identity. The broker publishes `node_id`
+ * before its background token mint can complete, so a single session read can
+ * strand Pear's capability provider for the lifetime of the broker. Poll for a
+ * bounded window and attach to the same engine node once the token appears.
+ */
+export async function resolvePearFleetConnection(
+  readBrokerSession: () => Promise<PearFleetBrokerSession>,
+  signal: AbortSignal,
+  options: PearFleetConnectionWaitOptions = {}
+): Promise<ResolvedPearFleetConnection> {
+  const timeoutMs = options.timeoutMs ?? NODE_TOKEN_WAIT_MS
+  const pollIntervalMs = options.pollIntervalMs ?? NODE_TOKEN_POLL_MS
+  const now = options.now ?? Date.now
+  const sleep = options.sleep ?? delay
+  const deadline = now() + timeoutMs
+  let lastSession: PearFleetBrokerSession | undefined
+  let lastError: unknown
+
+  for (;;) {
+    if (signal.aborted) throw abortError()
+    try {
+      lastSession = await readBrokerSession()
+      lastError = undefined
+      if (lastSession.node_id && lastSession.node_token) {
+        return {
+          connection: {
+            nodeId: lastSession.node_id,
+            nodeToken: lastSession.node_token,
+            ...(lastSession.relay_base_url ? { baseUrl: lastSession.relay_base_url } : {})
+          },
+          nodeName: lastSession.node_name ?? lastSession.node_id
+        }
+      }
+    } catch (error) {
+      lastError = error
+    }
+
+    if (now() >= deadline) break
+    await sleep(Math.min(pollIntervalMs, Math.max(0, deadline - now())), signal)
+  }
+
+  if (signal.aborted) throw abortError()
+  if (!lastSession?.node_id) {
+    const suffix = lastError ? `: ${toError(lastError).message}` : ''
+    throw new Error(`Pear fleet provider could not resolve the broker node id${suffix}`)
+  }
+  throw new Error(`Pear fleet provider timed out waiting for a node token for ${lastSession.node_id}`)
+}
+
 export function startPearFleetSidecar(options: PearFleetSidecarOptions): RunningPearFleetSidecar {
   const controller = new AbortController()
-  let resolveRegistered: (manifest: NodeManifest) => void
-  let rejectRegistered: (error: Error) => void
+  let running: RunningNode | undefined
   let registeredSettled = false
-  const registered = new Promise<NodeManifest>((resolve, reject) => {
-    resolveRegistered = (manifest) => {
+  let resolveRegistered!: (info: FleetNodeInfo) => void
+  let rejectRegistered!: (error: Error) => void
+  const registered = new Promise<FleetNodeInfo>((resolve, reject) => {
+    resolveRegistered = (info) => {
       registeredSettled = true
-      resolve(manifest)
+      resolve(info)
     }
     rejectRegistered = (error) => {
       registeredSettled = true
@@ -224,276 +267,53 @@ export function startPearFleetSidecar(options: PearFleetSidecarOptions): Running
   })
 
   const definition = createPearFleetNodeDefinition(options)
-  const done = runPearFleetSidecarLoop({
-    ...options,
-    definition,
-    signal: controller.signal,
-    onRegistered: (manifest) => {
-      if (!registeredSettled) resolveRegistered(manifest)
-    },
-    onInitialFailure: (error) => {
-      if (!registeredSettled) rejectRegistered(error)
+  const done = (async () => {
+    try {
+      const target = await resolvePearFleetConnection(options.readBrokerSession, controller.signal)
+      if (controller.signal.aborted) throw abortError()
+      running = startServeNode({
+        definition,
+        connection: target.connection,
+        nameOverride: target.nodeName,
+        providerName: definition.name,
+        reconnect: true,
+        signal: controller.signal,
+        log: options.log,
+        warn: options.warn,
+        onRegistered: (info) => {
+          if (!registeredSettled) resolveRegistered(info)
+        }
+      })
+      await running.done
+      if (!registeredSettled) {
+        rejectRegistered(new Error('Pear fleet provider exited before registering'))
+      }
+    } catch (error) {
+      if (!registeredSettled) rejectRegistered(toError(error))
+      if (!controller.signal.aborted) throw error
     }
-  })
+  })()
 
   return {
     registered,
     done,
     stop: async () => {
       controller.abort()
+      await running?.stop().catch(() => undefined)
       await done
     }
   }
 }
 
-function pearFleetNodeName(options: PearFleetNodeOptions): string {
+function pearFleetProviderName(options: PearFleetNodeOptions): string {
   const rawName = `${options.brokerName || options.projectId || 'pear'}-local-fleet`
   return rawName.replace(/[^\w.-]+/gu, '-').replace(/^-+|-+$/gu, '') || 'pear-local-fleet'
 }
 
-async function runPearFleetSidecarLoop(options: PearFleetSidecarOptions & {
-  definition: FleetNodeDefinition
-  signal: AbortSignal
-  onRegistered: (manifest: NodeManifest) => void
-  onInitialFailure: (error: Error) => void
-}): Promise<void> {
-  let attempt = 0
-  let registeredOnce = false
-
-  while (!options.signal.aborted) {
-    try {
-      await runPearFleetSidecarConnection({
-        ...options,
-        onRegistered: (manifest) => {
-          registeredOnce = true
-          options.onRegistered(manifest)
-        }
-      })
-      attempt = 0
-    } catch (error) {
-      const err = toError(error)
-      if (!registeredOnce) {
-        options.onInitialFailure(err)
-      }
-      if (options.signal.aborted) return
-      options.warn?.(`Pear fleet sidecar disconnected: ${err.message}; reconnecting`)
-    }
-
-    if (options.signal.aborted) return
-    attempt += 1
-    await delay(reconnectDelayMs(attempt, registeredOnce), options.signal)
-  }
-}
-
-/**
- * Backoff between reconnect attempts. Once the node has registered at least
- * once, transient drops recover quickly on the normal ceiling; while it has
- * never registered (wedged/unsupported broker) the ceiling widens so we probe
- * for recovery instead of storming the broker every few seconds.
- */
-export function reconnectDelayMs(attempt: number, registeredOnce: boolean): number {
-  const ceiling = registeredOnce ? RECONNECT_MAX_DELAY_MS : RECONNECT_UNREGISTERED_MAX_DELAY_MS
-  const exponent = Math.max(0, attempt - 1)
-  return Math.min(ceiling, RECONNECT_BASE_DELAY_MS * 2 ** exponent)
-}
-
-function runPearFleetSidecarConnection(options: PearFleetSidecarOptions & {
-  definition: FleetNodeDefinition
-  signal: AbortSignal
-  onRegistered: (manifest: NodeManifest) => void
-}): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(fleetWsUrl(options.connection.url), {
-      headers: options.connection.apiKey ? { 'X-API-Key': options.connection.apiKey } : undefined
-    })
-    const pending = new Map<string, PendingRequest>()
-    let requestSeq = 0
-    let settled = false
-    let nodeRegistered = false
-
-    const settle = (fn: () => void): void => {
-      if (settled) return
-      settled = true
-      for (const pendingRequest of pending.values()) {
-        pendingRequest.reject(new Error('Pear fleet sidecar connection closed'))
-      }
-      pending.clear()
-      options.signal.removeEventListener('abort', abort)
-      fn()
-    }
-
-    const sendRequest = (type: string, payload: unknown): Promise<unknown> => {
-      if (ws.readyState !== WebSocket.OPEN) {
-        return Promise.reject(new Error('Pear fleet sidecar websocket is not open'))
-      }
-      const requestId = `pear_fleet_${Date.now()}_${++requestSeq}`
-      const frame = {
-        v: PROTOCOL_VERSION,
-        type,
-        request_id: requestId,
-        payload
-      }
-
-      return new Promise((requestResolve, requestReject) => {
-        const timer = setTimeout(() => {
-          pending.delete(requestId)
-          requestReject(new Error(`Pear fleet sidecar ${type} request timed out after ${REQUEST_TIMEOUT_MS}ms`))
-        }, REQUEST_TIMEOUT_MS)
-        const pendingRequest: PendingRequest = {
-          timer,
-          resolve: (value) => {
-            clearTimeout(timer)
-            requestResolve(value)
-          },
-          reject: (error) => {
-            clearTimeout(timer)
-            requestReject(error)
-          }
-        }
-        pending.set(requestId, pendingRequest)
-        ws.send(JSON.stringify(frame), (error) => {
-          if (!error) return
-          if (!pending.has(requestId)) return
-          pending.delete(requestId)
-          pendingRequest.reject(error)
-        })
-      })
-    }
-
-    const close = async (): Promise<void> => {
-      if (ws.readyState === WebSocket.OPEN && nodeRegistered) {
-        await withTimeout(sendRequest('deregister_node', {}), DEREGISTER_TIMEOUT_MS).catch(() => undefined)
-      }
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-        ws.close()
-      }
-    }
-
-    const ignoreCloseError = (error: unknown): void => {
-      options.warn?.(`Pear fleet sidecar close skipped: ${toError(error).message}`)
-    }
-
-    const abort = (): void => {
-      void close().catch(ignoreCloseError).finally(() => settle(resolve))
-    }
-
-    const sendHandlerResult = async (invocationId: string, output: unknown, error?: unknown): Promise<void> => {
-      const payload = error
-        ? { invocation_id: invocationId, error: toError(error).message }
-        : { invocation_id: invocationId, output: output ?? null }
-      await sendRequest('handler_result', payload)
-    }
-
-    const handleInvoke = async (payload: unknown): Promise<void> => {
-      const record = asRecord(payload)
-      const invocationId = typeof record.invocation_id === 'string' ? record.invocation_id : undefined
-      const name = typeof record.name === 'string' ? record.name : undefined
-      if (!invocationId || !name) return
-
-      try {
-        const output = await invokeNodeHandler(options.definition, name, record.input, {
-          node: nodeInfo(options.definition),
-          invocationId,
-          relay: {
-            sendMessage: (input) => sendRequest('send_message', {
-              to: input.to,
-              text: input.text,
-              from: input.from ?? options.definition.name,
-              ...(input.threadId ? { thread_id: input.threadId } : {}),
-              ...(input.workspaceId ? { workspace_id: input.workspaceId } : {}),
-              ...(input.workspaceAlias ? { workspace_alias: input.workspaceAlias } : {}),
-              ...(input.mode ? { mode: input.mode } : {}),
-              ...(input.data ? { data: input.data } : {})
-            })
-          },
-          spawnAgent: (input) => sendRequest('spawn_agent', {
-            agent: input.agent,
-            ...(input.initialTask !== undefined ? { initial_task: input.initialTask } : {}),
-            skip_relay_prompt: input.skipRelayPrompt ?? false,
-            ...((input.invocationId ?? invocationId) ? { invocation_id: input.invocationId ?? invocationId } : {})
-          })
-        })
-        await sendHandlerResult(invocationId, output)
-      } catch (error) {
-        await sendHandlerResult(invocationId, undefined, error)
-      }
-    }
-
-    options.signal.addEventListener('abort', abort, { once: true })
-
-    ws.on('open', () => {
-      void (async () => {
-        const manifest = nodeManifest(options.definition)
-        await sendRequest('hello', {
-          client_name: 'pear-local-fleet',
-          client_version: '1.0.0'
-        })
-        await sendRequest('register_node', { manifest })
-        nodeRegistered = true
-        await sendRequest('register_handlers', { names: Object.keys(options.definition.capabilities) })
-        options.log?.(`Pear fleet node "${manifest.name}" registered with ${manifest.capabilities.length} capabilities.`)
-        options.onRegistered(manifest)
-      })().catch((error) => {
-        settle(() => reject(toError(error)))
-        void close().catch(ignoreCloseError)
-      })
-    })
-
-    ws.on('message', (data) => {
-      const frame = parseBrokerFrame(data)
-      if (!frame) return
-      if (frame.request_id && pending.has(frame.request_id)) {
-        const pendingRequest = pending.get(frame.request_id)
-        pending.delete(frame.request_id)
-        if (!pendingRequest) return
-        if (frame.type === 'error') {
-          pendingRequest.reject(frameError(frame.payload))
-        } else {
-          pendingRequest.resolve(readOkResult(frame.payload))
-        }
-        return
-      }
-      if (frame.type === 'invoke_handler') {
-        void handleInvoke(frame.payload).catch((error) => options.warn?.(toError(error).message))
-      }
-    })
-
-    ws.on('close', () => settle(resolve))
-    ws.on('error', (error) => settle(() => reject(toError(error))))
-  })
-}
-
-function parseBrokerFrame(data: WebSocket.RawData): BrokerFrame | null {
-  try {
-    const text = Array.isArray(data) ? Buffer.concat(data).toString('utf8') : data.toString()
-    return JSON.parse(text) as BrokerFrame
-  } catch {
-    return null
-  }
-}
-
-function readOkResult(payload: unknown): unknown {
-  return payload && typeof payload === 'object' && 'result' in payload
-    ? (payload as { result: unknown }).result
-    : payload
-}
-
-function frameError(payload: unknown): Error {
-  if (payload && typeof payload === 'object') {
-    const record = payload as Record<string, unknown>
-    const error = new Error(typeof record.message === 'string' ? record.message : 'Pear fleet sidecar request failed')
-    error.name = typeof record.code === 'string' ? record.code : 'PearFleetSidecarError'
-    return error
-  }
-  return new Error('Pear fleet sidecar request failed')
-}
-
-function fleetWsUrl(baseUrl: string): string {
-  return `${baseUrl.replace(/\/+$/u, '').replace(/^http/u, 'ws')}/api/fleet/ws`
-}
-
-function asRecord(value: unknown): Record<string, unknown> {
-  return value && typeof value === 'object' ? value as Record<string, unknown> : {}
+function abortError(): Error {
+  const error = new Error('Pear fleet provider stopped')
+  error.name = 'AbortError'
+  return error
 }
 
 function toError(error: unknown): Error {
@@ -513,15 +333,5 @@ function delay(ms: number, signal: AbortSignal): Promise<void> {
       resolve()
     }, ms)
     signal.addEventListener('abort', onAbort, { once: true })
-  })
-}
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const timeout = new Promise<T>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`Timed out after ${timeoutMs}ms`)), timeoutMs)
-  })
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer) clearTimeout(timer)
   })
 }

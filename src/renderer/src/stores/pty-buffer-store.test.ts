@@ -5,6 +5,7 @@ import {
   flushPtyChunksNow,
   getPtyChunks,
   getPtyChunkTotal,
+  getPtyChunksAfterOffset,
   getPtyChunksSinceTotal,
   subscribePtyBuffer
 } from './pty-buffer-store'
@@ -225,6 +226,31 @@ describe('pty-buffer-store replay baselines', () => {
 
     expect(getPtyChunksSinceTotal(key, baseline)).toEqual(['after-1', 'after-2'])
     expect(getPtyChunksSinceTotal(key, getPtyChunkTotal(key))).toEqual([])
+  })
+
+  it('uses v10 offsets to retain chunks emitted after an attach snapshot', () => {
+    const key = trackedKey('offset')
+    appendPtyChunk(key, 'snapshot-covered-a', 10)
+    appendPtyChunk(key, 'snapshot-covered-b', 20)
+    appendPtyChunk(key, 'after-snapshot-a', 30)
+    appendPtyChunk(key, 'after-snapshot-b', 40)
+
+    expect(getPtyChunksAfterOffset(key, 20)).toEqual([
+      'after-snapshot-a',
+      'after-snapshot-b'
+    ])
+  })
+
+  it('delivers identity-less chunks when offset correlation is uncertain', () => {
+    const key = trackedKey('offset-missing')
+    appendPtyChunk(key, 'known-covered', 10)
+    appendPtyChunk(key, 'legacy-or-reset')
+    appendPtyChunk(key, 'known-fresh', 30)
+
+    expect(getPtyChunksAfterOffset(key, 20)).toEqual([
+      'legacy-or-reset',
+      'known-fresh'
+    ])
   })
 
   it('never replays pre-baseline chunks after the buffer trims', () => {

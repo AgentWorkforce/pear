@@ -35,13 +35,13 @@
     "lint": "eslint ."
   },
   "dependencies": {
-    "@agent-relay/cloud": "^9.2.1",
-    "@agent-relay/factory": "^0.1.13",
-    "@agent-relay/fleet": "^9.2.1",
-    "@agent-relay/harness-driver": "^9.2.1",
-    "@agent-relay/harnesses": "^9.2.1",
-    "@agent-relay/integration-prompts": "^9.2.1",
-    "@agent-relay/sdk": "^9.2.1",
+    "@agent-relay/cloud": "^10.6.3",
+    "@agent-relay/factory": "^0.1.19",
+    "@agent-relay/fleet": "^10.6.3",
+    "@agent-relay/harness-driver": "^10.6.3",
+    "@agent-relay/harnesses": "^10.6.3",
+    "@agent-relay/integration-prompts": "^10.6.3",
+    "@agent-relay/sdk": "^10.6.3",
     "@agentworkforce/deploy": "^4.1.16",
     "@relayburn/sdk": "^4.0.0",
     "@relaycast/sdk": "^5.0.7",
@@ -51,7 +51,7 @@
     "@xterm/addon-web-links": "^0.11.0",
     "@xterm/addon-webgl": "^0.18.0",
     "@xterm/xterm": "^5.5.0",
-    "agent-relay": "^9.2.1",
+    "agent-relay": "^10.6.3",
     "agentworkforce": "^4.1.16",
     "ai-hist": "^0.2.3",
     "allotment": "^1.0.9",
@@ -71,7 +71,7 @@
     "protobufjs": "8.5.0"
   },
   "devDependencies": {
-    "@agent-relay/evals": "^9.2.1",
+    "@agent-relay/evals": "^10.6.3",
     "@playwright/test": "^1.57.0",
     "@tailwindcss/vite": "^4.0.0",
     "@testing-library/react": "^16.3.2",

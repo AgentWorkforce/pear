@@ -363,6 +363,7 @@ export interface AttachTerminalResult {
     cols: number
     cursor: [number, number]
     screen: string
+    offset?: number
   }
 }
 
@@ -1840,20 +1841,11 @@ export class BrokerManager {
       await this.stopSessionFleetSidecar(session)
     }
 
-    const url = getClientBaseUrl(session.client)
-    if (!url) {
-      console.warn(`[broker] Local fleet node skipped for project ${session.projectId}: broker URL unavailable`)
-      return
-    }
-
     const sidecar = startPearFleetSidecar({
       projectId: session.projectId,
       cwd: session.cwd,
       brokerName: session.name,
-      connection: {
-        url,
-        ...(getClientApiKey(session.client) ? { apiKey: getClientApiKey(session.client) } : {})
-      },
+      readBrokerSession: () => session.client.getSession(),
       log: (message) => console.log(`[broker] ${message}`),
       warn: (message) => console.warn(`[broker] ${message}`)
     })
@@ -2522,7 +2514,14 @@ export class BrokerManager {
         }
         const targetWindow = this.windowForSession(sessionKey, win)
         if (targetWindow && !targetWindow.isDestroyed()) {
-          targetWindow.webContents.send('broker:pty-chunk', projectId, event.name, event.chunk)
+          const offset = brokerEventNumber(event, 'offset')
+          targetWindow.webContents.send(
+            'broker:pty-chunk',
+            projectId,
+            event.name,
+            event.chunk,
+            ...(offset !== undefined ? [offset] : [])
+          )
         }
         this.rememberAgentSession(event.name, sessionKey)
         if (this.sessions.get(sessionKey)?.cloudSandboxId) {
@@ -3445,7 +3444,8 @@ export class BrokerManager {
           rows: snapshot.rows,
           cols: snapshot.cols,
           cursor: snapshot.cursor,
-          screen: Buffer.from(snapshot.screen, 'base64').toString('utf-8')
+          screen: Buffer.from(snapshot.screen, 'base64').toString('utf-8'),
+          ...(snapshot.offset !== undefined ? { offset: snapshot.offset } : {})
         }
       }
     } catch (err) {
@@ -3682,7 +3682,8 @@ export class BrokerManager {
             screen:
               format === 'ansi'
                 ? Buffer.from(snapshot.screen, 'base64').toString('utf-8')
-                : snapshot.screen
+                : snapshot.screen,
+            ...(snapshot.offset !== undefined ? { offset: snapshot.offset } : {})
           }
         } catch (err) {
           if (isMissingAgentError(err)) return null

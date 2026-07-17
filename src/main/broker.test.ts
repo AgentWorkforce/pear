@@ -739,9 +739,7 @@ describe('BrokerManager local + cloud coexistence', () => {
       projectId: PROJECT_ID,
       cwd: '/tmp/project-1',
       brokerName: 'pear-project-1',
-      connection: {
-        url: 'http://127.0.0.1:4242'
-      }
+      readBrokerSession: expect.any(Function)
     }))
 
     await manager.shutdown()
@@ -2021,14 +2019,15 @@ exit 2
       kind: 'worker_stream',
       name: 'claude-1',
       chunk: 'pong\n',
-      seq: 22
+      seq: 22,
+      offset: 101
     }
     listener?.(chunkEvent)
     listener?.(chunkEvent)
 
     const ptyCalls = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
       .filter(([channel]) => channel === 'broker:pty-chunk')
-    expect(ptyCalls).toEqual([['broker:pty-chunk', PROJECT_ID, 'claude-1', 'pong\n']])
+    expect(ptyCalls).toEqual([['broker:pty-chunk', PROJECT_ID, 'claude-1', 'pong\n', 101]])
 
     await manager.shutdown()
   })

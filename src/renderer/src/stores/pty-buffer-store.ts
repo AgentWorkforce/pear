@@ -21,6 +21,12 @@ const MAX_PTY_BUFFER_CHUNKS = 10_000
 type Listener = (newChunks: string[]) => void
 
 const buffers = new Map<string, string[]>()
+// Relay v10 attaches a cumulative raw-PTY byte offset to each worker_stream
+// chunk. Keep it aligned with `buffers` so attach seeding can discard only
+// chunks the broker snapshot proves it already contains. Undefined entries
+// are legacy/unknown and are delivered when offset correlation is requested —
+// a possible duplicate repaint is safer than dropping terminal bytes.
+const offsets = new Map<string, Array<number | undefined>>()
 const listeners = new Map<string, Set<Listener>>()
 // Monotonic count of chunks ever flushed into each key's buffer. Unlike
 // `buffers.get(key).length` this never moves backwards on trim, so consumers
@@ -31,7 +37,8 @@ const listeners = new Map<string, Set<Listener>>()
 const totals = new Map<string, number>()
 
 // Chunks staged for the next animation frame, keyed by agent key.
-const pending = new Map<string, string[]>()
+type BufferedPtyChunk = { chunk: string; offset?: number }
+const pending = new Map<string, BufferedPtyChunk[]>()
 // Scheduled rAF handles per key so we can cancel on clear/dispose.
 type FrameHandle =
   | { kind: 'raf'; handle: number }
@@ -74,18 +81,26 @@ function flushPending(key: string): void {
   if (!queued || queued.length === 0) return
 
   const existing = buffers.get(key) ?? []
-  const combined = existing.concat(queued)
+  const existingOffsets = offsets.get(key) ?? []
+  const queuedChunks = queued.map((entry) => entry.chunk)
+  const queuedOffsets = queued.map((entry) => entry.offset)
+  const combined = existing.concat(queuedChunks)
+  const combinedOffsets = existingOffsets.concat(queuedOffsets)
   const trimmed = combined.length > MAX_PTY_BUFFER_CHUNKS
     ? combined.slice(combined.length - MAX_PTY_BUFFER_CHUNKS)
     : combined
+  const trimmedOffsets = combinedOffsets.length > MAX_PTY_BUFFER_CHUNKS
+    ? combinedOffsets.slice(combinedOffsets.length - MAX_PTY_BUFFER_CHUNKS)
+    : combinedOffsets
   buffers.set(key, trimmed)
+  offsets.set(key, trimmedOffsets)
   totals.set(key, (totals.get(key) ?? 0) + queued.length)
 
   const keyListeners = listeners.get(key)
   if (!keyListeners || keyListeners.size === 0) return
   for (const listener of [...keyListeners]) {
     try {
-      listener(queued)
+      listener(queuedChunks)
     } catch (err) {
       console.error('[pty-buffer-store] listener threw', err)
     }
@@ -114,6 +129,19 @@ export function getPtyChunksSinceTotal(key: string, baselineTotal: number): stri
   if (missed <= 0) return []
   if (missed >= buffer.length) return buffer.slice()
   return buffer.slice(buffer.length - missed)
+}
+
+// Return every retained chunk that is not proven to be represented by a v10
+// attach snapshot. `offset > snapshotOffset` is authoritative post-snapshot
+// output. Missing offsets are deliberately delivered (legacy broker or mixed
+// generation): never drop a PTY chunk on uncertain identity/correlation.
+export function getPtyChunksAfterOffset(key: string, snapshotOffset: number): string[] {
+  const buffer = buffers.get(key) ?? []
+  const bufferOffsets = offsets.get(key) ?? []
+  return buffer.filter((_, index) => {
+    const offset = bufferOffsets[index]
+    return offset === undefined || offset > snapshotOffset
+  })
 }
 
 // Synchronously drain any chunks staged for the next rAF into the buffer.
@@ -152,16 +180,23 @@ function __previewChunk(chunk: string): string {
   return chunk.slice(0, 80).replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\x1b/g, '\\e')
 }
 
-export function appendPtyChunk(key: string, chunk: string): void {
+export function appendPtyChunk(key: string, chunk: string, offset?: number): void {
   if (diagPtyEnabled()) {
     __appendSeq += 1
     console.log(`[diag:pty-append] #${__appendSeq} key=${key} bytes=${chunk.length} preview="${__previewChunk(chunk)}"`)
   }
+  const normalizedOffset = typeof offset === 'number' && Number.isFinite(offset) && offset >= 0
+    ? offset
+    : undefined
+  const entry: BufferedPtyChunk = {
+    chunk,
+    ...(normalizedOffset !== undefined ? { offset: normalizedOffset } : {})
+  }
   const queue = pending.get(key)
   if (queue) {
-    queue.push(chunk)
+    queue.push(entry)
   } else {
-    pending.set(key, [chunk])
+    pending.set(key, [entry])
   }
   const subscriberCount = listeners.get(key)?.size ?? 0
   if (subscriberCount === 0) {
@@ -189,6 +224,7 @@ export function appendPtyChunk(key: string, chunk: string): void {
 export function clearPtyBuffer(key: string): void {
   cancelPendingFlush(key)
   buffers.delete(key)
+  offsets.delete(key)
   const keyListeners = listeners.get(key)
   if (keyListeners) {
     for (const listener of [...keyListeners]) {
