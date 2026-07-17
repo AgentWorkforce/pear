@@ -35,6 +35,11 @@ export interface FidelityHarness {
   telemetry: TelemetryRecord[]
   mainLogs: string[]
   currentWorkload: string | null
+  // Playwright retry index (0 = first attempt). Divergence + telemetry bundles
+  // are written under `attempt-<n>/` so a retry never overwrites the prior
+  // attempt's artifacts (retry-then-pass used to erase real first-attempt
+  // divergence data).
+  attempt: number
   close(): Promise<void>
 }
 
@@ -169,7 +174,8 @@ async function validateConnection(
 
 export async function launchFidelityHarness(
   cli: FidelityCli,
-  repoRoot = resolve(__dirname, '../..')
+  repoRoot = resolve(__dirname, '../..'),
+  attempt = 0
 ): Promise<FidelityHarness> {
   // Keep the isolated tree outside the OS temp root. Agent sandboxes commonly
   // grant broad writes beneath TMPDIR, which would make the sibling userData
@@ -319,6 +325,7 @@ export async function launchFidelityHarness(
       relayVersions,
       telemetry,
       mainLogs,
+      attempt,
       get currentWorkload() {
         return harnessState.currentWorkload
       },

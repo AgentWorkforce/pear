@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { Page } from 'playwright'
 import { getActivity, type FidelityHarness } from './harness'
+import { deriveByteAccounting } from './byte-accounting'
 
 export const QUIET_WINDOW_MS = 1_500
 const QUIET_TIMEOUT_MS = 90_000
@@ -384,7 +385,18 @@ async function writeDivergenceBundle(
   quiet: QuietResult,
   options: CheckpointOptions
 ): Promise<string> {
-  const artifactDir = join(harness.repoRoot, 'test-results', 'term-fidelity', harness.cli, workload)
+  // Segregate by Playwright attempt so a retry never overwrites the first
+  // attempt's bundle. A retry-then-pass previously clobbered the diverging
+  // first-attempt data (which twice turned out to be a REAL divergence event),
+  // leaving nothing to examine afterward.
+  const artifactDir = join(
+    harness.repoRoot,
+    'test-results',
+    'term-fidelity',
+    harness.cli,
+    workload,
+    `attempt-${harness.attempt}`
+  )
   await mkdir(artifactDir, { recursive: true })
   const telemetry = harness.telemetry.slice(options.telemetryAtStart)
   const meta = {
@@ -407,7 +419,17 @@ async function writeDivergenceBundle(
       renderer: renderer.cursor,
       broker: broker.cursor
     },
-    brokerOffset: broker.offset,
+    // Self-documenting client-vs-broker byte accounting. Replaces the former
+    // bare `brokerOffset` + `quiet.activity.bytes` pair, whose exact-2.0 reading
+    // in codex bundles was misread as double delivery (it was a derivation
+    // artifact — see byte-accounting.ts / the embedded note). Each figure now
+    // declares its baseline and unit, and the ratio is computed on a shared
+    // agent-start baseline so ~1.0 is the meaningful "one-to-one delivery" value.
+    byteAccounting: deriveByteAccounting({
+      clientBytesReceived: quiet.activity.bytes,
+      clientChunks: quiet.activity.chunks,
+      snapshotOffset: broker.offset
+    }),
     quiet: {
       reached: quiet.reached,
       waitedMs: quiet.waitedMs,
@@ -479,7 +501,8 @@ export async function writeTelemetryArtifact(
     'test-results',
     'term-fidelity',
     harness.cli,
-    'reconciler-telemetry'
+    'reconciler-telemetry',
+    `attempt-${harness.attempt}`
   )
   await mkdir(artifactDir, { recursive: true })
   const screenshot = await harness.page.screenshot({ animations: 'disabled', type: 'png' })
