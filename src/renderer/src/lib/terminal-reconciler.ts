@@ -41,12 +41,38 @@
 // (leading reset + home + erase-display + absolute row addressing + cursor
 // restore), so writing it onto a dirty grid fully replaces the viewport
 // without touching scrollback.
+//
+// Detection is reported separately from repair. This module is two things at
+// once: the convergence backstop (repair) and the only always-on divergence
+// DETECTOR in the app (the signal that a creation vector exists upstream —
+// see AGENTS.md "Terminal Screen Convergence"). Those have different
+// audiences, and gating the only telemetry on a completed repair conflated
+// them: a confirmed divergence whose repair was deferred by the rate limit,
+// or that was observed on a screen that went busy again before the second
+// confirmation, was healed-or-not in silence. Worse, the repair path is slow
+// by design — quiet 1.5s, then up to one check interval to align, then a
+// second confirming check — so any observer sampling a terminal for less
+// than ~10s of quiet could see 100% of a screen diverged and read back zero
+// telemetry, which reads as "the pipeline is clean". So: report at CONFIRMED
+// divergence, before deciding whether to repair, and say why a repair was
+// skipped. Both lines carry the documented `[terminal] viewport diverged
+// from broker screen` prefix, because that string's documented meaning is
+// "a creation vector exists and is worth hunting" — which is true at
+// detection, not only at repair.
 
 export const RECONCILE_CHECK_INTERVAL_MS = 4_000
 export const RECONCILE_QUIET_MS = 1_500
 export const RECONCILE_MIN_REPAIR_GAP_MS = 15_000
 // Confirmations required on consecutive checks before repairing.
 export const RECONCILE_CONFIRM_CHECKS = 2
+// Gap between confirmed-divergence reports. MUST stay strictly below
+// RECONCILE_MIN_REPAIR_GAP_MS: a divergence confirmed inside the repair gap
+// is precisely the case this telemetry exists to surface, so a log gap at or
+// above the repair gap would silence the one state worth hearing about (the
+// first draft of this used 15_000 and did exactly that). The ceiling is one
+// line per gap per diverged terminal, and only while CONFIRMED diverged —
+// a screen that stays broken should keep saying so.
+export const RECONCILE_DIVERGENCE_LOG_GAP_MS = 5_000
 // Consecutive quiet checks with snapshot dims ≠ grid dims before the
 // mismatch counts as persistent rather than a resize in flight (one check
 // interval is ample time for the size-sync loop to settle a real resize).
@@ -113,6 +139,8 @@ export interface TerminalReconciler {
   /** Run one check cycle now (the interval calls this internally). */
   checkNow(): Promise<void>
   repairs(): number
+  /** Confirmed divergences observed, whether or not they were repaired. */
+  divergences(): number
   dispose(): void
 }
 
@@ -128,6 +156,23 @@ export function createTerminalReconciler(deps: TerminalReconcilerDeps): Terminal
   let lastRepairAt = 0
   let repairCount = 0
   let pendingConfirmedDivergence: ConfirmedTerminalDivergence | null = null
+  let divergenceCount = 0
+  let lastDivergenceLogAt = 0
+
+  // Report a confirmed divergence. `outcome` states what happened to the
+  // repair, so a reader can tell "detected and healed" from "detected and
+  // deliberately left alone" without correlating two lines.
+  const reportDivergence = (
+    plain: ReconcileSnapshot,
+    viewport: ReconcileViewport,
+    outcome: string
+  ): void => {
+    const rows = divergentRowCount(plain.screen, viewport.lines)
+    log(
+      `[terminal] viewport diverged from broker screen; ${rows}/${viewport.rows} rows differ ` +
+        `at ${viewport.rows}x${viewport.cols} (divergence #${divergenceCount}, ${outcome})`
+    )
+  }
 
   const timer = setInterval(() => {
     void check()
@@ -199,6 +244,16 @@ export function createTerminalReconciler(deps: TerminalReconcilerDeps): Terminal
     }
     mismatchStreak += 1
     if (mismatchStreak < RECONCILE_CONFIRM_CHECKS) return
+
+    // Confirmed: two consecutive quiet checks at matching dims disagree with
+    // the broker. Count it now — the divergence is a fact about the pipeline
+    // regardless of what the repair does next.
+    divergenceCount += 1
+    const reportable = now() - lastDivergenceLogAt >= RECONCILE_DIVERGENCE_LOG_GAP_MS
+    if (reportable) lastDivergenceLogAt = now()
+
+    // Capture for the corpus dump before any repair branch: a confirmed
+    // divergence is dumped even when the repair is rate-limited or skipped.
     pendingConfirmedDivergence = {
       plain: { ...plain },
       viewport: { ...viewport, lines: [...viewport.lines] },
@@ -207,17 +262,35 @@ export function createTerminalReconciler(deps: TerminalReconcilerDeps): Terminal
         `${mismatchStreak} quiet checks at ${viewport.rows}x${viewport.cols}`
       ]
     }
-    if (now() - lastRepairAt < RECONCILE_MIN_REPAIR_GAP_MS) return
+
+    if (now() - lastRepairAt < RECONCILE_MIN_REPAIR_GAP_MS) {
+      // Deliberate: repairs must never flap. But the screen IS diverged and
+      // the user is looking at it, so this must not be silent.
+      if (reportable) reportDivergence(plain, viewport, 'repair rate-limited')
+      return
+    }
 
     const ansi = await deps.fetchSnapshot('ansi')
-    if (disposed || !ansi) return
-    if (deps.activitySerial() !== serial || !deps.isQuiet()) return
-    if (ansi.rows !== viewport.rows || ansi.cols !== viewport.cols) return
+    if (disposed || !ansi) {
+      if (reportable) reportDivergence(plain, viewport, 'repair skipped: no ansi snapshot')
+      return
+    }
+    if (deps.activitySerial() !== serial || !deps.isQuiet()) {
+      if (reportable) reportDivergence(plain, viewport, 'repair skipped: output raced the snapshot')
+      return
+    }
+    if (ansi.rows !== viewport.rows || ansi.cols !== viewport.cols) {
+      if (reportable) reportDivergence(plain, viewport, 'repair skipped: ansi snapshot dims moved')
+      return
+    }
     // Final gate, synchronous with the write: force any staged chunks out.
     // If one lands, its bytes may already be inside the snapshot we are
     // about to paint — abort and let the next cycle re-verify.
     deps.flushPending()
-    if (disposed || deps.activitySerial() !== serial) return
+    if (disposed || deps.activitySerial() !== serial) {
+      if (reportable) reportDivergence(plain, viewport, 'repair skipped: staged chunk raced the flush')
+      return
+    }
     deps.writeRepair(ansi.screen)
     lastRepairAt = now()
     mismatchStreak = 0
@@ -230,6 +303,7 @@ export function createTerminalReconciler(deps: TerminalReconcilerDeps): Terminal
   return {
     checkNow: check,
     repairs: () => repairCount,
+    divergences: () => divergenceCount,
     dispose(): void {
       disposed = true
       clearInterval(timer)
@@ -241,12 +315,21 @@ export function createTerminalReconciler(deps: TerminalReconcilerDeps): Terminal
 // right-trimmed. Compare row-by-row, right-trimmed, treating absent rows as
 // blank — trailing blank rows are representational noise, not divergence.
 export function screensMatch(plainScreen: string, viewportLines: string[]): boolean {
+  return divergentRowCount(plainScreen, viewportLines) === 0
+}
+
+// How many rows differ, by the same right-trimmed comparison screensMatch
+// uses. Reported with each divergence so a reader can tell a one-row drift
+// from a whole-screen shift (the row-shift signature a diff-painting TUI
+// produces once its model and the grid disagree) without a bundle diff.
+export function divergentRowCount(plainScreen: string, viewportLines: string[]): number {
   const snapshotLines = plainScreen.split('\n')
   const rows = Math.max(snapshotLines.length, viewportLines.length)
+  let divergent = 0
   for (let row = 0; row < rows; row += 1) {
     const expected = (snapshotLines[row] ?? '').replace(/\s+$/, '')
     const actual = (viewportLines[row] ?? '').replace(/\s+$/, '')
-    if (expected !== actual) return false
+    if (expected !== actual) divergent += 1
   }
-  return true
+  return divergent
 }
