@@ -203,7 +203,9 @@ vi.mock('@agent-relay/harness-driver', () => ({
 }))
 
 vi.mock('./pear-fleet-node', () => ({
-  startPearFleetSidecar: fleetNodeMock.startPearFleetSidecar
+  startPearFleetSidecar: fleetNodeMock.startPearFleetSidecar,
+  pearFleetProviderName: (options: { brokerName?: string; projectId?: string }) =>
+    `${options.brokerName || options.projectId || 'pear'}-local-fleet`
 }))
 
 vi.mock('./auth', () => ({

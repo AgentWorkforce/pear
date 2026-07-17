@@ -412,6 +412,81 @@ export type TermFidelityCorpusResult =
   | { dumped: true; path: string }
   | { dumped: false; reason: 'rate-limited' | 'failed' }
 
+/**
+ * Request to place an agent on a fleet node via the relay placement engine
+ * (issue #411 — the requester side). `node` omitted → any eligible, least-loaded
+ * node. `node` set → that exact node ('self' resolves to this machine's fleet
+ * node). A placed agent is reachable over relay messaging (chat); its raw
+ * terminal is owned by the target node's broker (see BrokerPlaceAgentResult).
+ */
+export interface BrokerPlaceAgentInput {
+  cli: string
+  name?: string
+  /** Exact target node name, or 'self' for this machine. Omit for any-node. */
+  node?: string
+  /** Repo label that must be present in the selected node's repo map. */
+  repo?: string
+  model?: string
+  task?: string
+  /**
+   * Fail immediately with a clear error instead of queueing when no eligible
+   * node exists. Defaults to true for any-node placement (no silent hang) and
+   * false for an explicit target (a briefly-offline node queues up to TTL).
+   */
+  failFast?: boolean
+}
+
+export type BrokerPlacementErrorCode =
+  | 'capability_mismatch'
+  | 'placement_queue_full'
+  | 'placement_ttl_expired'
+  | 'unmapped_repo'
+
+export interface BrokerPlaceAgentResult {
+  /** Agent name as placed (may be de-duplicated from the requested name). */
+  name: string
+  /** Node the agent landed on. */
+  node: string
+  nodeId?: string
+  /** Relay action invocation id for the spawn dispatch. */
+  invocationId: string
+  /** True when the placement had to queue before an eligible node appeared. */
+  queued: boolean
+  /**
+   * Whether this machine owns the placed agent's PTY. True only when the agent
+   * landed on the local ('self') node — remote placements have no raw-terminal
+   * transport over relay yet (acceptance #2b, upstream-blocked), so the UI must
+   * present a chat-first surface rather than a terminal pane.
+   */
+  local: boolean
+}
+
+/**
+ * Placement outcome surfaced to the renderer. A placement error is a normal,
+ * expected result (no eligible node, capability mismatch, etc.) — returned as
+ * structured data rather than a thrown IPC error so the spawn UI can render a
+ * clear per-code message and never hang. Unexpected failures still throw.
+ */
+export type BrokerPlaceAgentOutcome =
+  | { status: 'placed'; result: BrokerPlaceAgentResult }
+  | { status: 'error'; code: BrokerPlacementErrorCode; message: string; node?: string; repo?: string }
+
+/** A fleet node as surfaced to the spawn/node-picker UI. */
+export interface BrokerNodeSummary {
+  name: string
+  nodeId?: string
+  live: boolean
+  load?: number
+  activeAgents?: number
+  maxAgents?: number
+  /** Advertised capability names, e.g. 'spawn:claude'. */
+  capabilities: string[]
+  repoKeys?: string[]
+  tags?: string[]
+  /** True when this node is this machine's own local fleet node. */
+  isSelf?: boolean
+}
+
 export interface WorkforcePersona {
   id: string
   description?: string
@@ -1000,6 +1075,8 @@ export interface PearAPI {
     ) => Promise<{ removed: string[] }>
     connectCloud: () => Promise<string>
     spawnAgent: (projectId: string, input: BrokerSpawnAgentInput) => Promise<BrokerSpawnAgentResult>
+    placeAgent: (projectId: string, input: BrokerPlaceAgentInput) => Promise<BrokerPlaceAgentOutcome>
+    listNodes: (projectId: string, capability?: string) => Promise<BrokerNodeSummary[]>
     listPersonas: (projectId: string, cwd?: string) => Promise<WorkforcePersona[]>
     spawnPersona: (projectId: string, personaId: string) => Promise<BrokerSpawnAgentResult>
     attachTerminal: (input: BrokerAttachTerminalInput) => Promise<BrokerAttachTerminalResult>
