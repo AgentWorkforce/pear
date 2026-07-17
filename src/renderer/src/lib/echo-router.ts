@@ -139,6 +139,32 @@ export function createEchoRouter(deps: EchoRouterDeps): EchoRouter {
     if (wasPinned) deps.scrollToBottom()
   }
 
+  // Re-pin to the bottom AFTER xterm has parsed a direct-route chunk, not
+  // before it. `term.write` is asynchronous: a chunk can move the viewport off
+  // the bottom DURING its own parse — a TUI's SIGWINCH full-screen redraw
+  // rewrites scrollback and resets ydisp to the top — so a scrollToBottom
+  // issued synchronously (writePinnedAware, before the parse) is immediately
+  // undone by the parse. Once the viewport is stranded off-bottom,
+  // isViewportPinned() reads false and every subsequent chunk stops re-pinning:
+  // the grid freezes in scrollback showing byte-correct content forever
+  // (pear#403 — codex resize-mid-stream, viewport [0,baseY] at quiet). Firing
+  // the re-pin from the write-completion callback closes that race. Follow
+  // intent is still captured BEFORE the write, so a user who has deliberately
+  // scrolled up (viewportY < baseY) is never yanked back down.
+  const writeDirectRepinned = (data: string, callback?: () => void): void => {
+    if (!deps.isViewportPinned()) {
+      // Viewport is not at the bottom: the user has deliberately scrolled into
+      // scrollback. Leave it there — never yank a reader down — and don't
+      // manufacture a completion callback the caller didn't ask for.
+      deps.write(data, callback)
+      return
+    }
+    deps.write(data, () => {
+      deps.scrollToBottom()
+      callback?.()
+    })
+  }
+
   // Engine route: always enqueued (the engine's tail is asynchronous).
   const writeViaEngine = (engine: PredictiveEchoWithStatus, data: string): void => {
     enqueueOp(() => {
@@ -159,11 +185,11 @@ export function createEchoRouter(deps: EchoRouterDeps): EchoRouter {
   // zero overhead on local sessions), ordered behind it otherwise.
   const writeDirectOrdered = (data: string, callback?: () => void): void => {
     if (queuedOps === 0) {
-      writePinnedAware(data, (chunk) => deps.write(chunk, callback))
+      writeDirectRepinned(data, callback)
       return
     }
     enqueueOp(() => {
-      writePinnedAware(data, (chunk) => deps.write(chunk, callback))
+      writeDirectRepinned(data, callback)
     })
   }
 
