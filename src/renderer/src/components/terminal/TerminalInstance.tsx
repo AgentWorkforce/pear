@@ -5,6 +5,7 @@ import type { TerminalAttachMode } from '@/lib/ipc'
 
 interface Props {
   agentName: string
+  cli?: string
   projectId?: string
   visible: boolean
   active: boolean
@@ -12,9 +13,9 @@ interface Props {
   onActivate?: () => void
 }
 
-export function TerminalInstance({ agentName, projectId, visible, active, mode, onActivate }: Props): React.ReactNode {
+export function TerminalInstance({ agentName, cli, projectId, visible, active, mode, onActivate }: Props): React.ReactNode {
   const containerRef = useRef<HTMLDivElement>(null)
-  useTerminal(containerRef, agentName, projectId, visible, active, mode)
+  useTerminal(containerRef, agentName, projectId, visible, active, mode, cli)
 
   return (
     <div

@@ -359,6 +359,25 @@ export interface BrokerSpawnAgentResult {
   cli?: string
 }
 
+export interface TermFidelityCorpusGrid {
+  rows: number
+  cols: number
+  text: string
+}
+
+export interface TermFidelityCorpusInput {
+  projectId?: string
+  agentName: string
+  cli: string
+  renderer: TermFidelityCorpusGrid
+  broker: TermFidelityCorpusGrid
+  telemetryLines: string[]
+}
+
+export type TermFidelityCorpusResult =
+  | { dumped: true; path: string }
+  | { dumped: false; reason: 'rate-limited' | 'failed' }
+
 export interface WorkforcePersona {
   id: string
   description?: string
@@ -910,6 +929,7 @@ export interface PearAPI {
   app: {
     confirmQuit: () => Promise<boolean>
     notifyCliReady: () => void
+    dumpTermFidelityCorpus: (input: TermFidelityCorpusInput) => Promise<TermFidelityCorpusResult>
   }
   project: {
     list: () => Promise<ProjectListResult>

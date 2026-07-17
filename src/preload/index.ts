@@ -74,6 +74,8 @@ import type {
   ProjectIntegrationResult,
   ProjectRootRecord,
   TerminalAttachMode,
+  TermFidelityCorpusInput,
+  TermFidelityCorpusResult,
   UpdaterState,
   WorkforcePersona
 } from '../shared/types/ipc'
@@ -175,6 +177,9 @@ export type {
   ProjectRootConflict,
   ProjectRootRecord,
   TerminalAttachMode,
+  TermFidelityCorpusGrid,
+  TermFidelityCorpusInput,
+  TermFidelityCorpusResult,
   WorkforcePersona
 } from '../shared/types/ipc'
 
@@ -195,7 +200,9 @@ const api = {
     confirmQuit: () => invoke<boolean>('app:confirm-quit'),
     notifyCliReady: () => {
       ipcRenderer.send('cli:renderer-ready')
-    }
+    },
+    dumpTermFidelityCorpus: (input: TermFidelityCorpusInput) =>
+      invoke<TermFidelityCorpusResult>('term-fidelity:dump-corpus', input)
   },
   project: {
     list: () => invoke<ProjectListResult>('project:list'),
