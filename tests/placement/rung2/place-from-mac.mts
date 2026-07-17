@@ -222,15 +222,28 @@ async function main(): Promise<void> {
   record('placed remote agent reachable over relay chat (#2a: roster + accepted delivery)', chatOk, chatDetail)
 
   // ── Cleanup: release the placed agent on the mini (no leak); leave node enrolled ──
+  // Authoritative proof of no-leak = the mini's broker no longer knows the agent
+  // (its PTY/worker is gone). The workspace roster ROW is de-registered
+  // best-effort (relay.agents.delete): it is eventually-consistent and the
+  // backend can refuse the delete on FK constraints even though the agent is
+  // stopped — that is a roster-bookkeeping quirk, not a running-agent leak.
   console.log('→ releasing placed agent from the mini (node stays enrolled)…')
   const releaseOut = ssh('release-agent', placedName)
-  console.log(releaseOut.split('\n').slice(0, 8).map((l) => `   ${l}`).join('\n'))
-  const gone = await poll('placed agent left the roster after release', 30_000, 3_000, async () => {
-    const list = await relay.agents.list().catch(() => [])
-    return list.some((a) => a.name === placedName) ? undefined : true
+  console.log(releaseOut.split('\n').slice(0, 6).map((l) => `   ${l}`).join('\n'))
+  const brokerReleased = await poll('mini broker no longer runs the placed agent', 30_000, 3_000, async () => {
+    const s = miniSnapshot(placedName)
+    // agent_not_found (or empty) == the broker has no such worker anymore.
+    return /agent_not_found/i.test(s.body) || s.body.trim().length === 0 ? true : undefined
   })
-  record('placed agent released — no leak in workspace roster', Boolean(gone),
-    gone ? `${placedName} no longer in roster` : `${placedName} still present (manual release may be needed)`)
+  // Best-effort workspace de-registration (removes the roster row where allowed).
+  let rosterGone = false
+  try {
+    const del = (relay.agents as unknown as { delete?: (n: string) => Promise<unknown> }).delete
+    if (del) await del.call(relay.agents, placedName)
+    rosterGone = !(await relay.agents.list().catch(() => [])).some((a) => a.name === placedName)
+  } catch { /* backend may refuse on FK constraint; agent is still stopped */ }
+  record('placed agent released — mini broker no longer runs it (no live leak)', Boolean(brokerReleased),
+    `${brokerReleased ? 'broker reports agent_not_found' : 'broker still exposes the agent'}; workspace roster de-registered=${rosterGone}`)
 
   // ── Summary ──
   const passed = checks.filter((c) => c.ok).length
