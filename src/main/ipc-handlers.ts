@@ -41,9 +41,44 @@ import type {
   FactoryConfigReadResult,
   FactoryIssueStatus,
   FactoryNodeConfig,
-  FactoryStatus
+  FactoryStatus,
+  TermFidelityCorpusInput
 } from '../shared/types/ipc'
 import type { ProactiveAgentDraft } from './proactive-agent.types'
+import { TermFidelityCorpusDumper } from './term-fidelity-corpus'
+
+const termFidelityCorpusDumper = new TermFidelityCorpusDumper()
+
+async function termFidelityRelayVersions(projectId?: string): Promise<Record<string, string>> {
+  let declaredRelayVersions: Record<string, string> = {}
+  try {
+    const manifest = JSON.parse(
+      await readFile(join(app.getAppPath(), 'package.json'), 'utf8')
+    ) as { dependencies?: Record<string, unknown> } | null
+    declaredRelayVersions = Object.fromEntries(
+      Object.entries(manifest?.dependencies || {}).filter(
+        ([name, version]) =>
+          (name === 'agent-relay' || name.startsWith('@agent-relay/')) &&
+          typeof version === 'string'
+      )
+    ) as Record<string, string>
+  } catch {
+    // Broker version metadata below still makes the bundle actionable when a
+    // packaged app manifest is unavailable.
+  }
+  const versions: Record<string, string> = {
+    pear: app.getVersion(),
+    ...declaredRelayVersions
+  }
+  const details = await brokerManager.listBrokerDetails().catch(() => [])
+  for (const detail of details) {
+    if (projectId && detail.projectId !== projectId) continue
+    if (detail.session?.brokerVersion) {
+      versions[`broker:${detail.name}`] = detail.session.brokerVersion
+    }
+  }
+  return versions
+}
 
 function toBrokerSpawnAgentResult(result: BrokerSpawnAgentResult): BrokerSpawnAgentResult {
   return {
@@ -514,6 +549,17 @@ export function registerIpcHandlers(): void {
     app.quit()
     return true
   })
+
+  ipcMain.handle(
+    'term-fidelity:dump-corpus',
+    async (event, input: TermFidelityCorpusInput) => {
+      return termFidelityCorpusDumper.dump(input, {
+        rootDir: join(app.getPath('userData'), 'term-fidelity-corpus'),
+        capturePage: async () => (await event.sender.capturePage()).toPNG(),
+        relayVersions: () => termFidelityRelayVersions(input.projectId)
+      })
+    }
+  )
 
   // --- Project ---
   ipcMain.handle('project:list', () => {

@@ -178,6 +178,7 @@ export interface TerminalRuntime {
 interface AcquireOptions {
   projectId: string | undefined
   agentName: string
+  cli?: string
   terminalMode: TerminalAttachMode
   theme: Theme
   getInputSrtt: () => number | null
@@ -374,6 +375,27 @@ function createRuntime(
       // Through the router so the repair is ordered behind any queued engine
       // writes and, on the engine route, also repairs the engine's model.
       echoRouter.onServerOutput(ansi)
+    },
+    onConfirmedDivergence: ({ plain, viewport, telemetryLines }) => {
+      void pear.app.dumpTermFidelityCorpus({
+        projectId: opts.projectId,
+        agentName: opts.agentName,
+        cli: opts.cli?.trim() || 'unknown',
+        renderer: {
+          rows: viewport.rows,
+          cols: viewport.cols,
+          text: viewport.lines.join('\n')
+        },
+        broker: {
+          rows: plain.rows,
+          cols: plain.cols,
+          text: plain.screen
+        },
+        telemetryLines
+      }).catch(() => {
+        // Corpus persistence is best-effort diagnostics. The main process
+        // owns failure reporting; never perturb terminal reconciliation.
+      })
     },
     isQuiet: () => {
       if (disposed || !attachSeeded || currentToken === null || !opened) return false

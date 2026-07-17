@@ -104,6 +104,56 @@ describe('createTerminalReconciler', () => {
     reconciler.dispose()
   })
 
+  it('triggers the corpus hook only after divergence is confirmed', async () => {
+    const { deps, repairs, state } = makeHarness()
+    const order: string[] = []
+    const originalWriteRepair = deps.writeRepair
+    deps.writeRepair = (ansi) => {
+      order.push('repair')
+      originalWriteRepair(ansi)
+    }
+    const onConfirmedDivergence = vi.fn(() => order.push('corpus'))
+    deps.onConfirmedDivergence = onConfirmedDivergence
+    const reconciler = createTerminalReconciler(deps)
+    diverge(state)
+
+    await reconciler.checkNow()
+    expect(onConfirmedDivergence).not.toHaveBeenCalled()
+    await reconciler.checkNow()
+
+    expect(onConfirmedDivergence).toHaveBeenCalledTimes(1)
+    expect(onConfirmedDivergence).toHaveBeenCalledWith({
+      plain: state.plain,
+      viewport: state.viewport,
+      telemetryLines: [
+        '[terminal] viewport diverged from broker screen; confirmed after 2 quiet checks at 2x10'
+      ]
+    })
+    expect(repairs).toHaveLength(1)
+    expect(order).toEqual(['repair', 'corpus'])
+
+    // A still-divergent viewport confirms again inside the repair gap. The
+    // diagnostic hook still fires, but the convergence repair remains gated.
+    await confirmCycles(reconciler)
+    expect(onConfirmedDivergence).toHaveBeenCalledTimes(2)
+    expect(repairs).toHaveLength(1)
+    reconciler.dispose()
+  })
+
+  it('keeps repairing when the corpus hook throws', async () => {
+    const { deps, repairs, state } = makeHarness()
+    deps.onConfirmedDivergence = () => {
+      throw new Error('corpus IPC unavailable')
+    }
+    const reconciler = createTerminalReconciler(deps)
+    diverge(state)
+
+    await confirmCycles(reconciler)
+
+    expect(repairs).toHaveLength(1)
+    reconciler.dispose()
+  })
+
   it('never fetches while not quiet', async () => {
     const { deps, state } = makeHarness()
     const fetches: string[] = []

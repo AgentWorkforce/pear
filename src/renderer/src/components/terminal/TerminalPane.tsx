@@ -187,6 +187,7 @@ function TerminalProject({
       <div className="min-h-0 min-w-0 flex-1">
         <TerminalInstance
           agentName={agent.name}
+          cli={agent.cli}
           projectId={agent.projectId}
           visible={visible}
           active={active}

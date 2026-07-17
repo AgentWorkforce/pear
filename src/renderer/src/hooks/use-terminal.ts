@@ -111,7 +111,8 @@ export function useTerminal(
   projectId: string | undefined,
   visible: boolean,
   active: boolean = visible,
-  terminalMode: TerminalAttachMode = 'drive'
+  terminalMode: TerminalAttachMode = 'drive',
+  cli: string = 'unknown'
 ): Terminal | null {
   const runtimeRef = useRef<TerminalRuntime | null>(null)
   const activeRef = useRef(active)
@@ -175,6 +176,7 @@ export function useTerminal(
     const runtime = acquireTerminalRuntime({
       projectId,
       agentName,
+      cli,
       terminalMode: terminalModeRef.current,
       theme: themeRef.current,
       getInputSrtt: () => inputSrttRef.current
@@ -285,7 +287,7 @@ export function useTerminal(
         runtime.detach(mountToken)
       }
     }
-  }, [containerRef, agentName, projectId, sendInput])
+  }, [containerRef, agentName, projectId, cli, sendInput])
 
   // Dispose the runtime when its owning agent is no longer in the store.
   // Tab switches null-out agentName without removing the agent — we should

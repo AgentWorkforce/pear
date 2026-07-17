@@ -809,7 +809,8 @@ const authStatus: AuthStatus = {
 export const pearMock: PearAPI = {
   app: {
     confirmQuit: async () => true,
-    notifyCliReady: () => undefined
+    notifyCliReady: () => undefined,
+    dumpTermFidelityCorpus: async () => ({ dumped: false, reason: 'rate-limited' })
   },
   project: {
     list: async (): Promise<ProjectListResult> => ({ projects: clone(state.projects), activeId: state.activeId }),

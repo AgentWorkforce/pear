@@ -68,6 +68,12 @@ export interface ReconcileViewport {
   lines: string[]
 }
 
+export interface ConfirmedTerminalDivergence {
+  plain: ReconcileSnapshot
+  viewport: ReconcileViewport
+  telemetryLines: string[]
+}
+
 export interface TerminalReconcilerDeps {
   fetchSnapshot(format: 'plain' | 'ansi'): Promise<ReconcileSnapshot | null>
   readViewport(): ReconcileViewport | null
@@ -93,6 +99,12 @@ export interface TerminalReconcilerDeps {
     grid: { rows: number; cols: number },
     snapshot: { rows: number; cols: number }
   ): void
+  /**
+   * Best-effort observation hook. Its snapshot pair is retained when the
+   * confirm-twice gate is met, then the hook is queued after the repair
+   * decision/write. It must never affect or delay repair.
+   */
+  onConfirmedDivergence?(divergence: ConfirmedTerminalDivergence): void
   log?(message: string): void
   now?(): number
 }
@@ -115,6 +127,7 @@ export function createTerminalReconciler(deps: TerminalReconcilerDeps): Terminal
   let lastErrorLogAt = 0
   let lastRepairAt = 0
   let repairCount = 0
+  let pendingConfirmedDivergence: ConfirmedTerminalDivergence | null = null
 
   const timer = setInterval(() => {
     void check()
@@ -135,6 +148,20 @@ export function createTerminalReconciler(deps: TerminalReconcilerDeps): Terminal
       }
     } finally {
       checking = false
+      const confirmedDivergence = pendingConfirmedDivergence
+      pendingConfirmedDivergence = null
+      if (confirmedDivergence) {
+        // Corpus persistence starts only after the repair decision/write and
+        // is never awaited. A slow capturePage or disk cannot delay
+        // convergence.
+        queueMicrotask(() => {
+          try {
+            deps.onConfirmedDivergence?.(confirmedDivergence)
+          } catch {
+            // Diagnostic observer only: never alter the repair path.
+          }
+        })
+      }
     }
   }
 
@@ -172,6 +199,14 @@ export function createTerminalReconciler(deps: TerminalReconcilerDeps): Terminal
     }
     mismatchStreak += 1
     if (mismatchStreak < RECONCILE_CONFIRM_CHECKS) return
+    pendingConfirmedDivergence = {
+      plain: { ...plain },
+      viewport: { ...viewport, lines: [...viewport.lines] },
+      telemetryLines: [
+        `[terminal] viewport diverged from broker screen; confirmed after ` +
+        `${mismatchStreak} quiet checks at ${viewport.rows}x${viewport.cols}`
+      ]
+    }
     if (now() - lastRepairAt < RECONCILE_MIN_REPAIR_GAP_MS) return
 
     const ansi = await deps.fetchSnapshot('ansi')
