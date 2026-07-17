@@ -1,4 +1,4 @@
-import { test } from '@playwright/test'
+import { test, type TestInfo } from '@playwright/test'
 import {
   launchFidelityHarness,
   SUPPORTED_CLIS,
@@ -18,12 +18,14 @@ function selectedClis(): FidelityCli[] {
 test.describe.configure({ mode: 'serial' })
 
 for (const cli of selectedClis()) {
-  test(`${cli}: real Electron renderer matches isolated broker for all canonical workloads`, async () => {
+  test(`${cli}: real Electron renderer matches isolated broker for all canonical workloads`, async ({}, testInfo: TestInfo) => {
     let harness: FidelityHarness | null = null
     let workloadError: unknown = null
     let agentName = `tf-${cli}`
     try {
-      harness = await launchFidelityHarness(cli)
+      // Thread the retry index so divergence/telemetry bundles land under
+      // attempt-<n>/ and a retry can't overwrite a prior attempt's artifacts.
+      harness = await launchFidelityHarness(cli, undefined, testInfo.retry)
       console.log(
         `[term-fidelity] ${cli}: instance=${harness.instanceName} port=${harness.apiPort} ` +
         `userData=${harness.userDataDir}`

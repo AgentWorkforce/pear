@@ -13,7 +13,18 @@ export default defineConfig({
     timeout: 30_000
   },
   outputDir: 'test-results/term-fidelity/playwright',
+  // Retain every attempt's output on a retry-then-pass. A flaky first attempt is
+  // exactly the REAL divergence event we need to examine; `failures-only` would
+  // delete the whole (eventually-passing) test's dirs, including the failed
+  // attempt's error-context.md and trace. The harness also segregates its own
+  // divergence/telemetry bundles under attempt-<retry>/ (see oracle.ts) so a
+  // retry never overwrites the first attempt's data.
+  preserveOutput: 'always',
   use: {
+    // Records a trace per attempt and keeps it for any attempt that failed
+    // (dropped only for clean passes). On retry-then-pass the failed first
+    // attempt's trace is retained; combined with preserveOutput:'always' its
+    // error-context survives too.
     trace: 'retain-on-failure'
   },
   reporter: [['list']]

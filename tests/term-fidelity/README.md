@@ -109,7 +109,7 @@ reconciler subsequently repairs the visible grid.
 A mismatched checkpoint writes:
 
 ```text
-test-results/term-fidelity/<cli>/<workload>/
+test-results/term-fidelity/<cli>/<workload>/attempt-<retry>/
   renderer.txt
   broker.txt
   diff.txt
@@ -117,8 +117,19 @@ test-results/term-fidelity/<cli>/<workload>/
   meta.json
 ```
 
-`meta.json` includes dimensions, cursors, timestamps, broker offset, quiet-gate
-state, installed Relay package and broker versions, isolated instance details,
-and reconciler telemetry observed during the workload. A telemetry-only failure
-writes its screenshot and metadata under
-`test-results/term-fidelity/<cli>/reconciler-telemetry/`.
+Bundles are segregated by Playwright attempt (`attempt-0/` is the first run,
+`attempt-1/` the first retry, …) so a retry-then-pass never overwrites a real
+first-attempt divergence. The config also sets `preserveOutput: 'always'` +
+`trace: 'retain-on-failure'` so Playwright's own error-context and trace for a
+failed attempt survive even when a later attempt passes.
+
+`meta.json` includes dimensions, cursors, timestamps, quiet-gate state, installed
+Relay package and broker versions, isolated instance details, and reconciler
+telemetry observed during the workload. Byte delivery is recorded under
+`byteAccounting`, which pairs the client-received IPC bytes with the broker's raw
+PTY snapshot offset **on a shared agent-start baseline** and states each figure's
+baseline + unit. Its `clientToBrokerByteRatio` is ~1.0 on a faithful one-to-one
+pipeline; the embedded `note` warns that a near-integer ratio (e.g. the historic
+exact-2.0) is a derivation artifact, never proof of double delivery. A
+telemetry-only failure writes its screenshot and metadata under
+`test-results/term-fidelity/<cli>/reconciler-telemetry/attempt-<retry>/`.
