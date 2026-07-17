@@ -543,8 +543,12 @@ function createRuntime(
         // snapshot instead of treating the entire roundtrip window as covered
         // (which could drop output emitted after snapshot capture).
         flushPtyChunksNow(key)
-        if (result.snapshot.offset !== undefined) {
-          postSnapshotChunks = getPtyChunksAfterOffset(key, result.snapshot.offset)
+        if (typeof result.snapshot.offset === 'number') {
+          postSnapshotChunks = getPtyChunksAfterOffset(
+            key,
+            result.snapshot.offset,
+            result.snapshot.generation
+          )
         }
         writtenTotal = getPtyChunkTotal(key)
         shouldReplay = false

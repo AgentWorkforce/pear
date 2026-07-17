@@ -80,7 +80,7 @@ export interface PearFleetNodeOptions {
 }
 
 export interface PearFleetSidecarOptions extends PearFleetNodeOptions {
-  readBrokerSession: () => Promise<PearFleetBrokerSession>
+  readBrokerSession: () => Promise<PearFleetBrokerSession | null | undefined>
   log?: (message: string) => void
   warn?: (message: string) => void
 }
@@ -103,6 +103,12 @@ export interface PearFleetConnectionWaitOptions {
   now?: () => number
   sleep?: (ms: number, signal: AbortSignal) => Promise<void>
 }
+
+type BrokerSessionReadResult =
+  | { status: 'value'; session: PearFleetBrokerSession | null | undefined }
+  | { status: 'error'; error: unknown }
+  | { status: 'deadline' }
+  | { status: 'aborted' }
 
 export interface RunningPearFleetSidecar {
   readonly registered: Promise<FleetNodeInfo>
@@ -206,7 +212,7 @@ function resolvePearSpawnCwd(projectCwd: string, input: SpawnCapabilityInput): s
  * bounded window and attach to the same engine node once the token appears.
  */
 export async function resolvePearFleetConnection(
-  readBrokerSession: () => Promise<PearFleetBrokerSession>,
+  readBrokerSession: () => Promise<PearFleetBrokerSession | null | undefined>,
   signal: AbortSignal,
   options: PearFleetConnectionWaitOptions = {}
 ): Promise<ResolvedPearFleetConnection> {
@@ -220,10 +226,19 @@ export async function resolvePearFleetConnection(
 
   for (;;) {
     if (signal.aborted) throw abortError()
-    try {
-      lastSession = await readBrokerSession()
+    const remainingMs = Math.max(0, deadline - now())
+    const read = await readBrokerSessionBeforeDeadline(
+      readBrokerSession,
+      signal,
+      remainingMs,
+      sleep
+    )
+    if (read.status === 'aborted') throw abortError()
+    if (read.status === 'deadline') break
+    if (read.status === 'value') {
+      lastSession = read.session ?? undefined
       lastError = undefined
-      if (lastSession.node_id && lastSession.node_token) {
+      if (lastSession?.node_id && lastSession.node_token) {
         return {
           connection: {
             nodeId: lastSession.node_id,
@@ -233,8 +248,8 @@ export async function resolvePearFleetConnection(
           nodeName: lastSession.node_name ?? lastSession.node_id
         }
       }
-    } catch (error) {
-      lastError = error
+    } else {
+      lastError = read.error
     }
 
     if (now() >= deadline) break
@@ -244,9 +259,66 @@ export async function resolvePearFleetConnection(
   if (signal.aborted) throw abortError()
   if (!lastSession?.node_id) {
     const suffix = lastError ? `: ${toError(lastError).message}` : ''
-    throw new Error(`Pear fleet provider could not resolve the broker node id${suffix}`)
+    throw new Error(`Pear fleet provider timed out waiting for the broker node id${suffix}`)
   }
   throw new Error(`Pear fleet provider timed out waiting for a node token for ${lastSession.node_id}`)
+}
+
+// A broker request can wedge independently of the polling clock. Race every
+// session read against both the remaining deadline and stop signal so a hung
+// getSession() cannot strand sidecar shutdown. The read promise itself may not
+// be cancellable, but both of its settlement paths remain observed after the
+// race, avoiding a late unhandled rejection.
+async function readBrokerSessionBeforeDeadline(
+  readBrokerSession: () => Promise<PearFleetBrokerSession | null | undefined>,
+  signal: AbortSignal,
+  remainingMs: number,
+  sleep: (ms: number, signal: AbortSignal) => Promise<void>
+): Promise<BrokerSessionReadResult> {
+  if (signal.aborted) return { status: 'aborted' }
+  if (remainingMs <= 0) return { status: 'deadline' }
+
+  const deadlineController = new AbortController()
+  const onAbort = (): void => deadlineController.abort()
+  signal.addEventListener('abort', onAbort, { once: true })
+  let sessionPromise: Promise<PearFleetBrokerSession | null | undefined>
+  try {
+    sessionPromise = readBrokerSession()
+  } catch (error) {
+    sessionPromise = Promise.reject(error)
+  }
+  // Give already-settled client mocks/caches one microtask to win before
+  // starting the deadline timer. Real in-flight I/O falls through and is
+  // bounded below.
+  const pendingRead = Symbol('pending broker session read')
+  try {
+    const immediate = await Promise.race([sessionPromise, Promise.resolve(pendingRead)])
+    if (immediate !== pendingRead) {
+      signal.removeEventListener('abort', onAbort)
+      deadlineController.abort()
+      return signal.aborted
+        ? { status: 'aborted' }
+        : { status: 'value', session: immediate }
+    }
+  } catch (error) {
+    signal.removeEventListener('abort', onAbort)
+    deadlineController.abort()
+    return signal.aborted ? { status: 'aborted' } : { status: 'error', error }
+  }
+  const read = sessionPromise.then<BrokerSessionReadResult, BrokerSessionReadResult>(
+    (session) => ({ status: 'value', session }),
+    (error) => ({ status: 'error', error })
+  )
+  const timeout = sleep(remainingMs, deadlineController.signal).then<BrokerSessionReadResult>(() =>
+    signal.aborted ? { status: 'aborted' } : { status: 'deadline' }
+  )
+
+  try {
+    return await Promise.race([read, timeout])
+  } finally {
+    signal.removeEventListener('abort', onAbort)
+    deadlineController.abort()
+  }
 }
 
 export function startPearFleetSidecar(options: PearFleetSidecarOptions): RunningPearFleetSidecar {

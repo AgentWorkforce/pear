@@ -3,7 +3,8 @@ import { invokeNodeHandler, nodeInfo } from '@agent-relay/fleet'
 import {
   createPearFleetNodeDefinition,
   PEAR_LOCAL_SPAWN_HARNESSES,
-  resolvePearFleetConnection
+  resolvePearFleetConnection,
+  startPearFleetSidecar
 } from './pear-fleet-node'
 
 const expectedCapabilities = Object.keys(PEAR_LOCAL_SPAWN_HARNESSES).map((cli) => `spawn:${cli}`)
@@ -166,5 +167,35 @@ describe('resolvePearFleetConnection', () => {
         }
       }
     )).rejects.toThrow('timed out waiting for a node token for node-1')
+  })
+
+  it('bounds a broker session read that never settles', async () => {
+    let now = 0
+    await expect(resolvePearFleetConnection(
+      () => new Promise(() => {}),
+      new AbortController().signal,
+      {
+        timeoutMs: 500,
+        now: () => now,
+        sleep: async (ms) => {
+          now += ms
+        }
+      }
+    )).rejects.toThrow('timed out waiting for the broker node id')
+    expect(now).toBe(500)
+  })
+
+  it('stops promptly while a broker session read is hung', async () => {
+    const sidecar = startPearFleetSidecar({
+      projectId: 'project-1',
+      cwd: '/tmp/project-1',
+      brokerName: 'pear-project-1',
+      readBrokerSession: () => new Promise(() => {})
+    })
+    const registered = sidecar.registered.catch((error: unknown) => error)
+
+    await sidecar.stop()
+
+    await expect(registered).resolves.toMatchObject({ name: 'AbortError' })
   })
 })

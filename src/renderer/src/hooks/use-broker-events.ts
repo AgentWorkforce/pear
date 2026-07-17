@@ -77,9 +77,9 @@ export function useBrokerEvents(): void {
 
     // PTY chunks ride a dedicated lightweight channel so per-character typing
     // doesn't pay for the broker:event metadata spread / structured clone.
-    const unsubPtyChunk = pear.broker.onPtyChunk((projectId, name, chunk, offset) => {
+    const unsubPtyChunk = pear.broker.onPtyChunk((projectId, name, chunk, offset, generation) => {
       const key = getAgentKey(projectId, name)
-      appendPtyChunk(key, chunk, offset)
+      appendPtyChunk(key, chunk, offset, generation)
       useTypingStore.getState().noteActivity(key)
       useAgentStore.getState().markAgentActive(projectId, name)
     })

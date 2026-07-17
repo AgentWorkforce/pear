@@ -148,12 +148,7 @@ describe('pty-buffer-store', () => {
     expect(getPtyChunks('k1')).toEqual(['first', 'second'])
   })
 
-  it('duplicate appendPtyChunk replay arrives once at the listener per chunk', () => {
-    // AGENTS.md: "Add regression tests when touching PTY buffering. Include
-    // duplicate/replay cases." Renderer-side guarantee is: every appendPtyChunk
-    // call adds exactly one chunk to the buffer; if the broker sends the same
-    // chunk twice the listener sees two distinct entries — dedup is the
-    // broker/main's responsibility, NOT the renderer buffer's.
+  it('delivers repeated identity-less chunks because identical terminal traffic is valid', () => {
     const listener = vi.fn()
     subscribePtyBuffer('k1', listener)
 
@@ -164,6 +159,24 @@ describe('pty-buffer-store', () => {
     expect(listener).toHaveBeenCalledTimes(1)
     expect(listener).toHaveBeenCalledWith(['dup', 'dup'])
     expect(getPtyChunks('k1')).toEqual(['dup', 'dup'])
+  })
+
+  it('suppresses a replay only when generation, offset, and content all match', () => {
+    const listener = vi.fn()
+    subscribePtyBuffer('k1', listener)
+
+    appendPtyChunk('k1', 'same', 10, 1)
+    appendPtyChunk('k1', 'same', 10, 1)
+    // Same content at a new offset is ordinary repeated terminal traffic.
+    appendPtyChunk('k1', 'same', 20, 1)
+    // Offset counters reset across generations; this is fresh traffic.
+    appendPtyChunk('k1', 'same', 10, 2)
+    // Identity alone is insufficient when content differs.
+    appendPtyChunk('k1', 'different', 10, 1)
+    flushRaf()
+
+    expect(listener).toHaveBeenCalledWith(['same', 'same', 'same', 'different'])
+    expect(getPtyChunks('k1')).toEqual(['same', 'same', 'same', 'different'])
   })
 })
 
@@ -230,12 +243,12 @@ describe('pty-buffer-store replay baselines', () => {
 
   it('uses v10 offsets to retain chunks emitted after an attach snapshot', () => {
     const key = trackedKey('offset')
-    appendPtyChunk(key, 'snapshot-covered-a', 10)
-    appendPtyChunk(key, 'snapshot-covered-b', 20)
-    appendPtyChunk(key, 'after-snapshot-a', 30)
-    appendPtyChunk(key, 'after-snapshot-b', 40)
+    appendPtyChunk(key, 'snapshot-covered-a', 10, 2)
+    appendPtyChunk(key, 'snapshot-covered-b', 20, 2)
+    appendPtyChunk(key, 'after-snapshot-a', 30, 2)
+    appendPtyChunk(key, 'after-snapshot-b', 40, 2)
 
-    expect(getPtyChunksAfterOffset(key, 20)).toEqual([
+    expect(getPtyChunksAfterOffset(key, 20, 2)).toEqual([
       'after-snapshot-a',
       'after-snapshot-b'
     ])
@@ -243,13 +256,28 @@ describe('pty-buffer-store replay baselines', () => {
 
   it('delivers identity-less chunks when offset correlation is uncertain', () => {
     const key = trackedKey('offset-missing')
-    appendPtyChunk(key, 'known-covered', 10)
+    appendPtyChunk(key, 'known-covered', 10, 2)
     appendPtyChunk(key, 'legacy-or-reset')
-    appendPtyChunk(key, 'known-fresh', 30)
+    appendPtyChunk(key, 'known-fresh', 30, 2)
 
-    expect(getPtyChunksAfterOffset(key, 20)).toEqual([
+    expect(getPtyChunksAfterOffset(key, 20, 2)).toEqual([
       'legacy-or-reset',
       'known-fresh'
+    ])
+  })
+
+  it('scopes offsets to the listener generation across broker reconnects', () => {
+    const key = trackedKey('offset-generation')
+    appendPtyChunk(key, 'stale-high-offset', 5_000, 4)
+    appendPtyChunk(key, 'snapshot-covered', 10, 5)
+    appendPtyChunk(key, 'current-fresh', 20, 5)
+    appendPtyChunk(key, 'future-generation', 1, 6)
+    appendPtyChunk(key, 'unknown-generation', 30)
+
+    expect(getPtyChunksAfterOffset(key, 10, 5)).toEqual([
+      'current-fresh',
+      'future-generation',
+      'unknown-generation'
     ])
   })
 

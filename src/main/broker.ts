@@ -364,6 +364,7 @@ export interface AttachTerminalResult {
     cursor: [number, number]
     screen: string
     offset?: number
+    generation?: number
   }
 }
 
@@ -2520,7 +2521,7 @@ export class BrokerManager {
             projectId,
             event.name,
             event.chunk,
-            ...(offset !== undefined ? [offset] : [])
+            ...(offset !== undefined ? [offset, eventStreamGeneration] : [])
           )
         }
         this.rememberAgentSession(event.name, sessionKey)
@@ -3445,7 +3446,10 @@ export class BrokerManager {
           cols: snapshot.cols,
           cursor: snapshot.cursor,
           screen: Buffer.from(snapshot.screen, 'base64').toString('utf-8'),
-          ...(snapshot.offset !== undefined ? { offset: snapshot.offset } : {})
+          ...(typeof snapshot.offset === 'number' && Number.isFinite(snapshot.offset)
+            ? { offset: snapshot.offset }
+            : {}),
+          generation: session.eventStreamGeneration
         }
       }
     } catch (err) {

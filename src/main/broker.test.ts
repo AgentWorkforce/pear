@@ -2027,7 +2027,14 @@ exit 2
 
     const ptyCalls = (win.webContents.send as ReturnType<typeof vi.fn>).mock.calls
       .filter(([channel]) => channel === 'broker:pty-chunk')
-    expect(ptyCalls).toEqual([['broker:pty-chunk', PROJECT_ID, 'claude-1', 'pong\n', 101]])
+    expect(ptyCalls).toEqual([[
+      'broker:pty-chunk',
+      PROJECT_ID,
+      'claude-1',
+      'pong\n',
+      101,
+      expect.any(Number)
+    ]])
 
     await manager.shutdown()
   })

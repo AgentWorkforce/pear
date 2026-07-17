@@ -387,6 +387,8 @@ export interface BrokerAttachTerminalResult {
     screen: string
     /** Cumulative PTY byte offset represented by this snapshot (Relay v10+). */
     offset?: number
+    /** Pear event-listener generation that captured this snapshot. */
+    generation?: number
   }
 }
 
@@ -981,7 +983,13 @@ export interface PearAPI {
     onEvent: (callback: (event: unknown) => void) => () => void
     onEventStreamDiagnostic: (callback: (event: BrokerEventStreamDiagnostic) => void) => () => void
     onPtyChunk: (
-      callback: (projectId: string, name: string, chunk: string, offset?: number) => void
+      callback: (
+        projectId: string,
+        name: string,
+        chunk: string,
+        offset?: number,
+        generation?: number
+      ) => void
     ) => () => void
     onStatus: (callback: (status: BrokerStatusEvent) => void) => () => void
   }

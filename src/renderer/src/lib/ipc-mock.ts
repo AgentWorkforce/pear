@@ -115,7 +115,13 @@ interface MockState {
   brokerEventListeners: Set<Listener<unknown>>
   brokerStatusListeners: Set<Listener<BrokerStatusEvent>>
   brokerDiagnosticListeners: Set<Listener<BrokerEventStreamDiagnostic>>
-  ptyChunkListeners: Set<(projectId: string, name: string, chunk: string, offset?: number) => void>
+  ptyChunkListeners: Set<(
+    projectId: string,
+    name: string,
+    chunk: string,
+    offset?: number,
+    generation?: number
+  ) => void>
   menuListeners: Map<string, Set<(...args: unknown[]) => void>>
   cloudAgentListeners: Set<Listener<CloudAgentEvent>>
   proactiveAgentListeners: Set<Listener<ProactiveAgentEvent>>
@@ -130,7 +136,13 @@ export interface PearMockHarness {
   reset: () => void
   injectBrokerEvent: (event: BrokerEventLike) => void
   injectBrokerEvents: (events: BrokerEventLike[]) => void
-  injectPtyChunk: (projectId: string, name: string, chunk: string, offset?: number) => void
+  injectPtyChunk: (
+    projectId: string,
+    name: string,
+    chunk: string,
+    offset?: number,
+    generation?: number
+  ) => void
   // Rendering-harness knobs: force the input SRTT the renderer polls (so the
   // predictive-echo engine route engages) and echo typed bytes back through
   // the PTY stream after a delay (so predictions reconcile end-to-end).
@@ -983,7 +995,13 @@ export const pearMock: PearAPI = {
     onEvent: (callback: (event: unknown) => void) => noopUnsubscribe(state.brokerEventListeners, callback),
     onEventStreamDiagnostic: (callback: (event: BrokerEventStreamDiagnostic) => void) =>
       noopUnsubscribe(state.brokerDiagnosticListeners, callback),
-    onPtyChunk: (callback: (projectId: string, name: string, chunk: string, offset?: number) => void) =>
+    onPtyChunk: (callback: (
+      projectId: string,
+      name: string,
+      chunk: string,
+      offset?: number,
+      generation?: number
+    ) => void) =>
       noopUnsubscribe(state.ptyChunkListeners, callback),
     onStatus: (callback: (status: BrokerStatusEvent) => void) => noopUnsubscribe(state.brokerStatusListeners, callback),
     checkCliAvailable: async (_cli: string) => true
@@ -1307,10 +1325,12 @@ export const pearMockHarness: PearMockHarness = {
   injectBrokerEvents: (events: BrokerEventLike[]) => {
     for (const event of events) handleInjectedBrokerEvent(event)
   },
-  injectPtyChunk: (projectId: string, name: string, chunk: string, offset?: number) => {
+  injectPtyChunk: (projectId, name, chunk, offset, generation) => {
     const ptyKey = key(projectId, name)
     state.ptyChunks[ptyKey] = [...(state.ptyChunks[ptyKey] || []), chunk]
-    for (const listener of [...state.ptyChunkListeners]) listener(projectId, name, chunk, offset)
+    for (const listener of [...state.ptyChunkListeners]) {
+      listener(projectId, name, chunk, offset, generation)
+    }
   },
   setInputSrtt: (ms: number | null) => {
     mockInputSrttMs = ms

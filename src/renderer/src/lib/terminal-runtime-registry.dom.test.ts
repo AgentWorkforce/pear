@@ -221,8 +221,8 @@ describe('terminal-runtime-registry — v10 snapshot offset seeding', () => {
     vi.mocked(ipc.pear.broker.attachTerminal).mockImplementationOnce(async () => {
       // Both chunks arrive while attach IPC is in flight. The snapshot covers
       // only the first offset; the second must survive the seed baseline.
-      ptyBuffer.appendPtyChunk('p:a', 'covered', 10)
-      ptyBuffer.appendPtyChunk('p:a', 'fresh', 20)
+      ptyBuffer.appendPtyChunk('p:a', 'covered', 10, 7)
+      ptyBuffer.appendPtyChunk('p:a', 'fresh', 20, 7)
       return {
         name: 'a',
         mode: 'auto_inject' as const,
@@ -232,7 +232,8 @@ describe('terminal-runtime-registry — v10 snapshot offset seeding', () => {
           cols: 80,
           cursor: [0, 0] as [number, number],
           screen: 'snapshot',
-          offset: 10
+          offset: 10,
+          generation: 7
         }
       }
     })
