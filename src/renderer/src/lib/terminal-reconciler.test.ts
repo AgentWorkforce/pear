@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   createTerminalReconciler,
+  divergentRowCount,
   screensMatch,
   RECONCILE_CONFIRM_CHECKS,
   RECONCILE_DIMS_KICK_GAP_MS,
+  RECONCILE_DIVERGENCE_LOG_GAP_MS,
   RECONCILE_ERROR_LOG_GAP_MS,
   RECONCILE_MIN_REPAIR_GAP_MS,
   type ReconcileSnapshot,
@@ -11,9 +13,14 @@ import {
   type TerminalReconcilerDeps
 } from './terminal-reconciler'
 
+// The string the fidelity matrix and AGENTS.md treat as "a creation vector
+// exists upstream". Both the detection and the repair line must carry it.
+const DIVERGENCE_SIGNAL = '[terminal] viewport diverged from broker screen'
+
 interface Harness {
   deps: TerminalReconcilerDeps
   repairs: string[]
+  logs: string[]
   state: {
     plain: ReconcileSnapshot | null
     ansi: ReconcileSnapshot | null
@@ -28,6 +35,7 @@ interface Harness {
 
 function makeHarness(): Harness {
   const repairs: string[] = []
+  const logs: string[] = []
   const state: Harness['state'] = {
     plain: { rows: 2, cols: 10, screen: 'row one\nrow two' },
     ansi: { rows: 2, cols: 10, screen: '\x1b[0m\x1b[H\x1b[2J\x1b[1;1Hrow one\x1b[2;1Hrow two' },
@@ -49,9 +57,14 @@ function makeHarness(): Harness {
     flushPending: () => {
       if (state.flushBumpsSerial) state.serial += 1
     },
+    log: (message) => logs.push(message),
     now: () => state.now
   }
-  return { deps, repairs, state }
+  return { deps, repairs, logs, state }
+}
+
+function divergenceReports(logs: string[]): string[] {
+  return logs.filter((line) => line.startsWith(DIVERGENCE_SIGNAL))
 }
 
 function diverge(state: Harness['state']): void {
@@ -77,6 +90,151 @@ describe('screensMatch', () => {
     expect(screensMatch('a\nb', ['a'])).toBe(false)
     // Stale glyphs bleeding through spaces — the real-world signature.
     expect(screensMatch('Do you want to proceed?', ['Do3youowant to proceed?'])).toBe(false)
+  })
+})
+
+// Regression: the reconciler is the app's only always-on divergence DETECTOR,
+// but every telemetry line used to hang off a completed repair. A real
+// divergence whose repair was deferred reported nothing, so an observer could
+// read zero telemetry off a fully corrupted screen and conclude the pipeline
+// was clean. Detection must be reported on its own.
+describe('createTerminalReconciler divergence detection telemetry', () => {
+  it('keeps the log gap below the repair gap so the rate-limited case can report', () => {
+    // If these ever meet, a divergence confirmed inside the repair gap becomes
+    // unreportable — the exact silence this telemetry exists to break.
+    expect(RECONCILE_DIVERGENCE_LOG_GAP_MS).toBeLessThan(RECONCILE_MIN_REPAIR_GAP_MS)
+  })
+
+  it('reports a confirmed divergence even when the repair is rate-limited', async () => {
+    const { deps, repairs, logs, state } = makeHarness()
+    const reconciler = createTerminalReconciler(deps)
+
+    // First divergence repairs and arms the rate limit.
+    diverge(state)
+    await confirmCycles(reconciler)
+    expect(repairs).toHaveLength(1)
+
+    // A second divergence inside the repair gap: deliberately NOT repaired...
+    logs.length = 0
+    state.now += RECONCILE_MIN_REPAIR_GAP_MS - 1
+    state.viewport = { rows: 2, cols: 10, lines: ['CORRUPT', 'ALSO BAD'] }
+    await confirmCycles(reconciler)
+    expect(repairs).toHaveLength(1)
+
+    // ...but it must NOT be silent. This is the whole point of the fix.
+    const reports = divergenceReports(logs)
+    expect(reports).toHaveLength(1)
+    expect(reports[0]).toContain('repair rate-limited')
+    expect(reports[0]).toContain('2/2 rows differ')
+    expect(reconciler.divergences()).toBe(2)
+    reconciler.dispose()
+  })
+
+  it('fires and repairs on a synthetic divergence, and says so', async () => {
+    const { deps, repairs, logs, state } = makeHarness()
+    const reconciler = createTerminalReconciler(deps)
+    diverge(state)
+    await confirmCycles(reconciler)
+
+    expect(repairs).toEqual([state.ansi!.screen])
+    expect(reconciler.repairs()).toBe(1)
+    expect(reconciler.divergences()).toBe(1)
+    // The repair line keeps carrying the documented signal string.
+    expect(divergenceReports(logs)).toEqual([
+      `${DIVERGENCE_SIGNAL}; repainted from snapshot (repair #1)`
+    ])
+    reconciler.dispose()
+  })
+
+  it('stays silent while a divergence is unconfirmed', async () => {
+    const { deps, logs, state } = makeHarness()
+    const reconciler = createTerminalReconciler(deps)
+    diverge(state)
+    await reconciler.checkNow() // one sighting only — not yet confirmed
+    expect(divergenceReports(logs)).toEqual([])
+    expect(reconciler.divergences()).toBe(0)
+    reconciler.dispose()
+  })
+
+  it('stays silent when the screens agree', async () => {
+    const { deps, logs } = makeHarness()
+    const reconciler = createTerminalReconciler(deps)
+    await confirmCycles(reconciler)
+    expect(logs).toEqual([])
+    expect(reconciler.divergences()).toBe(0)
+    reconciler.dispose()
+  })
+
+  it('rate-limits divergence reports without losing the count', async () => {
+    const { deps, logs, state } = makeHarness()
+    const reconciler = createTerminalReconciler(deps)
+    diverge(state)
+    await confirmCycles(reconciler)
+    logs.length = 0
+
+    // Keep it diverged and inside both gaps across several checks.
+    for (let i = 0; i < 4; i += 1) {
+      state.now += 1_000
+      await reconciler.checkNow()
+    }
+    expect(divergenceReports(logs)).toEqual([])
+
+    // Past the log gap it speaks again — a persistent divergence must not go
+    // permanently quiet just because it was reported once.
+    state.now += RECONCILE_DIVERGENCE_LOG_GAP_MS
+    await reconciler.checkNow()
+    expect(divergenceReports(logs)).toHaveLength(1)
+    expect(reconciler.divergences()).toBeGreaterThan(1)
+    reconciler.dispose()
+  })
+
+  it('reports the divergence when output races the ansi fetch', async () => {
+    const { deps, repairs, logs, state } = makeHarness()
+    const reconciler = createTerminalReconciler(deps)
+    diverge(state)
+    state.onFetch = (format) => {
+      if (format === 'ansi') state.serial += 1
+    }
+    await confirmCycles(reconciler)
+
+    expect(repairs).toEqual([])
+    const reports = divergenceReports(logs)
+    expect(reports).toHaveLength(1)
+    expect(reports[0]).toContain('output raced the snapshot')
+    reconciler.dispose()
+  })
+
+  it('reports the divergence when a staged chunk races the final flush', async () => {
+    const { deps, repairs, logs, state } = makeHarness()
+    const reconciler = createTerminalReconciler(deps)
+    diverge(state)
+    state.flushBumpsSerial = true
+    await confirmCycles(reconciler)
+
+    expect(repairs).toEqual([])
+    const reports = divergenceReports(logs)
+    expect(reports).toHaveLength(1)
+    expect(reports[0]).toContain('staged chunk raced the flush')
+    reconciler.dispose()
+  })
+})
+
+describe('divergentRowCount', () => {
+  it('counts only differing rows, right-trimmed, blank tail rows ignored', () => {
+    expect(divergentRowCount('a\nb', ['a', 'b'])).toBe(0)
+    expect(divergentRowCount('a   \nb', ['a', 'b  '])).toBe(0)
+    expect(divergentRowCount('a\nb', ['a', 'b', '', ''])).toBe(0)
+    expect(divergentRowCount('a\nb', ['a', 'x'])).toBe(1)
+    expect(divergentRowCount('a\nb\nc', ['x', 'y', 'z'])).toBe(3)
+  })
+
+  it('reports a whole-screen row shift as such', () => {
+    // The codex permission-panel signature: the renderer holds a stale row the
+    // broker already overwrote, so every row below it is shifted by one. A
+    // one-row drift and a total shift must not read the same in telemetry.
+    const broker = 'settled one\nsettled two\nsettled three'
+    const shifted = ['STALE PANEL', 'settled one', 'settled two']
+    expect(divergentRowCount(broker, shifted)).toBe(3)
   })
 })
 
