@@ -21,6 +21,14 @@ const MAX_PTY_BUFFER_CHUNKS = 10_000
 type Listener = (newChunks: string[]) => void
 
 const buffers = new Map<string, string[]>()
+// Relay v10 attaches a cumulative raw-PTY byte offset to each worker_stream
+// chunk. Keep offset + Pear listener generation aligned with `buffers` so
+// attach seeding can discard only chunks the broker snapshot proves it already
+// contains. Undefined metadata is legacy/unknown and is delivered when
+// correlation is requested — a possible duplicate repaint is safer than
+// dropping terminal bytes.
+const offsets = new Map<string, Array<number | undefined>>()
+const generations = new Map<string, Array<number | undefined>>()
 const listeners = new Map<string, Set<Listener>>()
 // Monotonic count of chunks ever flushed into each key's buffer. Unlike
 // `buffers.get(key).length` this never moves backwards on trim, so consumers
@@ -31,7 +39,18 @@ const listeners = new Map<string, Set<Listener>>()
 const totals = new Map<string, number>()
 
 // Chunks staged for the next animation frame, keyed by agent key.
-const pending = new Map<string, string[]>()
+type BufferedPtyChunk = { chunk: string; offset?: number; generation?: number }
+const pending = new Map<string, BufferedPtyChunk[]>()
+
+// Renderer-side final guard for duplicate IPC/listener delivery. Identity is
+// the broker-listener generation plus Relay raw-PTY offset; content is hashed
+// separately. Never suppress on either component alone.
+const PTY_REPLAY_WINDOW = 512
+interface RendererPtyDedupeState {
+  recentByIdentity: Map<string, string>
+  suppressedReplays: number
+}
+const replayDedupe = new Map<string, RendererPtyDedupeState>()
 // Scheduled rAF handles per key so we can cancel on clear/dispose.
 type FrameHandle =
   | { kind: 'raf'; handle: number }
@@ -74,18 +93,33 @@ function flushPending(key: string): void {
   if (!queued || queued.length === 0) return
 
   const existing = buffers.get(key) ?? []
-  const combined = existing.concat(queued)
+  const existingOffsets = offsets.get(key) ?? []
+  const existingGenerations = generations.get(key) ?? []
+  const queuedChunks = queued.map((entry) => entry.chunk)
+  const queuedOffsets = queued.map((entry) => entry.offset)
+  const queuedGenerations = queued.map((entry) => entry.generation)
+  const combined = existing.concat(queuedChunks)
+  const combinedOffsets = existingOffsets.concat(queuedOffsets)
+  const combinedGenerations = existingGenerations.concat(queuedGenerations)
   const trimmed = combined.length > MAX_PTY_BUFFER_CHUNKS
     ? combined.slice(combined.length - MAX_PTY_BUFFER_CHUNKS)
     : combined
+  const trimmedOffsets = combinedOffsets.length > MAX_PTY_BUFFER_CHUNKS
+    ? combinedOffsets.slice(combinedOffsets.length - MAX_PTY_BUFFER_CHUNKS)
+    : combinedOffsets
+  const trimmedGenerations = combinedGenerations.length > MAX_PTY_BUFFER_CHUNKS
+    ? combinedGenerations.slice(combinedGenerations.length - MAX_PTY_BUFFER_CHUNKS)
+    : combinedGenerations
   buffers.set(key, trimmed)
+  offsets.set(key, trimmedOffsets)
+  generations.set(key, trimmedGenerations)
   totals.set(key, (totals.get(key) ?? 0) + queued.length)
 
   const keyListeners = listeners.get(key)
   if (!keyListeners || keyListeners.size === 0) return
   for (const listener of [...keyListeners]) {
     try {
-      listener(queued)
+      listener(queuedChunks)
     } catch (err) {
       console.error('[pty-buffer-store] listener threw', err)
     }
@@ -114,6 +148,31 @@ export function getPtyChunksSinceTotal(key: string, baselineTotal: number): stri
   if (missed <= 0) return []
   if (missed >= buffer.length) return buffer.slice()
   return buffer.slice(buffer.length - missed)
+}
+
+// Return every retained chunk that is not proven to be represented by a v10
+// attach snapshot. `offset > snapshotOffset` is authoritative post-snapshot
+// output. Missing offsets are deliberately delivered (legacy broker or mixed
+// generation): never drop a PTY chunk on uncertain identity/correlation.
+export function getPtyChunksAfterOffset(
+  key: string,
+  snapshotOffset: number,
+  snapshotGeneration?: number
+): string[] {
+  const buffer = buffers.get(key) ?? []
+  const bufferOffsets = offsets.get(key) ?? []
+  const bufferGenerations = generations.get(key) ?? []
+  return buffer.filter((_, index) => {
+    const generation = bufferGenerations[index]
+    // Offset counters reset with a daemon/PTY generation. Without both sides
+    // of the generation comparison, the numeric offset is not globally safe;
+    // deliver the uncertain chunk instead of risking dropped terminal bytes.
+    if (snapshotGeneration === undefined || generation === undefined) return true
+    if (generation < snapshotGeneration) return false
+    if (generation > snapshotGeneration) return true
+    const offset = bufferOffsets[index]
+    return offset === undefined || offset > snapshotOffset
+  })
 }
 
 // Synchronously drain any chunks staged for the next rAF into the buffer.
@@ -152,16 +211,40 @@ function __previewChunk(chunk: string): string {
   return chunk.slice(0, 80).replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\x1b/g, '\\e')
 }
 
-export function appendPtyChunk(key: string, chunk: string): void {
+export function appendPtyChunk(
+  key: string,
+  chunk: string,
+  offset?: number,
+  generation?: number
+): void {
   if (diagPtyEnabled()) {
     __appendSeq += 1
     console.log(`[diag:pty-append] #${__appendSeq} key=${key} bytes=${chunk.length} preview="${__previewChunk(chunk)}"`)
   }
+  const normalizedOffset = typeof offset === 'number' && Number.isFinite(offset) && offset >= 0
+    ? offset
+    : undefined
+  const normalizedGeneration =
+    typeof generation === 'number' && Number.isSafeInteger(generation) && generation >= 0
+      ? generation
+      : undefined
+  if (
+    normalizedOffset !== undefined &&
+    normalizedGeneration !== undefined &&
+    isDuplicatePtyChunk(key, chunk, normalizedOffset, normalizedGeneration)
+  ) {
+    return
+  }
+  const entry: BufferedPtyChunk = {
+    chunk,
+    ...(normalizedOffset !== undefined ? { offset: normalizedOffset } : {}),
+    ...(normalizedGeneration !== undefined ? { generation: normalizedGeneration } : {})
+  }
   const queue = pending.get(key)
   if (queue) {
-    queue.push(chunk)
+    queue.push(entry)
   } else {
-    pending.set(key, [chunk])
+    pending.set(key, [entry])
   }
   const subscriberCount = listeners.get(key)?.size ?? 0
   if (subscriberCount === 0) {
@@ -189,6 +272,9 @@ export function appendPtyChunk(key: string, chunk: string): void {
 export function clearPtyBuffer(key: string): void {
   cancelPendingFlush(key)
   buffers.delete(key)
+  offsets.delete(key)
+  generations.delete(key)
+  replayDedupe.delete(key)
   const keyListeners = listeners.get(key)
   if (keyListeners) {
     for (const listener of [...keyListeners]) {
@@ -199,6 +285,59 @@ export function clearPtyBuffer(key: string): void {
       }
     }
   }
+}
+
+function isDuplicatePtyChunk(
+  key: string,
+  chunk: string,
+  offset: number,
+  generation: number
+): boolean {
+  let state = replayDedupe.get(key)
+  if (!state) {
+    state = { recentByIdentity: new Map(), suppressedReplays: 0 }
+    replayDedupe.set(key, state)
+  }
+
+  const identity = `${generation}:${offset}`
+  const hash = ptyChunkHash(chunk)
+  if (state.recentByIdentity.get(identity) === hash) {
+    state.suppressedReplays += 1
+    // Exponential debug telemetry keeps replay storms visible without logging
+    // every suppressed terminal chunk.
+    if (
+      diagPtyEnabled() &&
+      (state.suppressedReplays & (state.suppressedReplays - 1)) === 0
+    ) {
+      console.info('[pty-buffer-store] suppressed replayed PTY chunk', {
+        key,
+        generation,
+        offset,
+        suppressedTotal: state.suppressedReplays
+      })
+    }
+    return true
+  }
+
+  // Same identity with different bytes is not a duplicate. Remember the most
+  // recently delivered content, but deliver both: identity alone is never a
+  // safe reason to drop PTY traffic.
+  state.recentByIdentity.delete(identity)
+  state.recentByIdentity.set(identity, hash)
+  if (state.recentByIdentity.size > PTY_REPLAY_WINDOW) {
+    const oldest = state.recentByIdentity.keys().next().value
+    if (oldest !== undefined) state.recentByIdentity.delete(oldest)
+  }
+  return false
+}
+
+function ptyChunkHash(chunk: string): string {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < chunk.length; index += 1) {
+    hash ^= chunk.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return `${chunk.length}:${hash >>> 0}`
 }
 
 export function subscribePtyBuffer(key: string, listener: Listener): () => void {

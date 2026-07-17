@@ -27,6 +27,7 @@ import {
   diagPtyEnabled,
   flushPtyChunksNow,
   getPtyChunkTotal,
+  getPtyChunksAfterOffset,
   getPtyChunksSinceTotal,
   subscribePtyBuffer
 } from '@/stores/pty-buffer-store'
@@ -340,10 +341,13 @@ function createRuntime(
   // real engine + parser).
   const echoRouter = createEchoRouter({
     write: (data, callback) => {
-      if (disposed || !term) return
+      // Teardown marks the public runtime disposed before awaiting the router
+      // drain. Keep this private sink alive until that drain completes so
+      // Relay v10 reset cannot discard already-accepted server output.
+      if (!term) return
       term.write(data, callback)
     },
-    getEngine: () => (disposed ? null : predictiveEcho),
+    getEngine: () => predictiveEcho,
     buildModelSeed: () => (term ? buildModelSeedFromTerminal(term) : '\x1bc'),
     getInputSrtt: () => currentSrttGetter(),
     isViewportPinned: () => (term ? isViewportPinnedToBottom(term) : false),
@@ -472,34 +476,34 @@ function createRuntime(
     })
   }
 
+  const writeChunks = (newChunks: string[]): void => {
+    if (disposed || !term) return
+    if (newChunks.length === 0) return
+    activitySerial += 1
+    lastOutputAt = Date.now()
+    // Optional diagnostic, gated on localStorage.PEAR_DIAG_PTY === '1'.
+    // See pty-buffer-store.ts for the enable instructions. Flag is
+    // cached to avoid a per-batch localStorage read.
+    if (diagPtyEnabled()) {
+      console.log(`[diag:runtime:writeChunks] key=${key} count=${newChunks.length} firstPreview="${newChunks[0]?.slice(0, 80).replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\x1b/g, '\\e')}"`)
+    }
+    // Typing-trace accounting stays per-chunk: recordChunkEchoed consumes
+    // one pending keystroke per call, so coalescing it would under-count.
+    for (const chunk of newChunks) recordChunkEchoed(chunk)
+    // Coalesce the frame's chunks into a single write. xterm's VT parser is
+    // a streaming state machine, so write(a)+write(b) ≡ write(a+b) — for the
+    // live terminal AND the predictive-echo headless model (which parses the
+    // bytes a second time). One write collapses N parser passes + N model
+    // writes + N promise ticks into one. Under heavy TUI redraw streaming
+    // that per-chunk fan-out was the drain hot path: the renderer couldn't
+    // keep up and input lagged. Byte content and order are unchanged, so the
+    // one-write-per-byte invariant holds.
+    const combined = newChunks.length === 1 ? newChunks[0] : newChunks.join('')
+    echoRouter.onServerOutput(combined)
+  }
+
   const seedBufferSubscription = (): void => {
     if (unsubBuffer || !term || disposed) return
-
-    const writeChunks = (newChunks: string[]): void => {
-      if (disposed || !term) return
-      if (newChunks.length === 0) return
-      activitySerial += 1
-      lastOutputAt = Date.now()
-      // Optional diagnostic, gated on localStorage.PEAR_DIAG_PTY === '1'.
-      // See pty-buffer-store.ts for the enable instructions. Flag is
-      // cached to avoid a per-batch localStorage read.
-      if (diagPtyEnabled()) {
-        console.log(`[diag:runtime:writeChunks] key=${key} count=${newChunks.length} firstPreview="${newChunks[0]?.slice(0, 80).replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\x1b/g, '\\e')}"`)
-      }
-      // Typing-trace accounting stays per-chunk: recordChunkEchoed consumes
-      // one pending keystroke per call, so coalescing it would under-count.
-      for (const chunk of newChunks) recordChunkEchoed(chunk)
-      // Coalesce the frame's chunks into a single write. xterm's VT parser is
-      // a streaming state machine, so write(a)+write(b) ≡ write(a+b) — for the
-      // live terminal AND the predictive-echo headless model (which parses the
-      // bytes a second time). One write collapses N parser passes + N model
-      // writes + N promise ticks into one. Under heavy TUI redraw streaming
-      // that per-chunk fan-out was the drain hot path: the renderer couldn't
-      // keep up and input lagged. Byte content and order are unchanged, so the
-      // one-write-per-byte invariant holds.
-      const combined = newChunks.length === 1 ? newChunks[0] : newChunks.join('')
-      echoRouter.onServerOutput(combined)
-    }
 
     unsubBuffer = subscribePtyBuffer(key, writeChunks)
     // Initial replay: pull whatever is already in the buffer past the
@@ -517,6 +521,7 @@ function createRuntime(
     attachInFlight = true
 
     let shouldReplay = true
+    let postSnapshotChunks: string[] = []
     try {
       const result = await pear.broker.attachTerminal({
         projectId: opts.projectId,
@@ -535,11 +540,19 @@ function createRuntime(
       ) {
         term.write(result.snapshot.screen)
         await predictiveEcho?.seed(result.snapshot.screen)
-        // Drain any chunks that arrived during the IPC roundtrip but are
-        // still staged in pending. Without this, the next rAF would push
-        // them into the buffer AFTER we capture writtenChunks, and the
-        // subsequent subscribe would replay them on top of the snapshot.
+        // Drain chunks staged during the IPC roundtrip before capturing the
+        // buffer total. Relay v10 snapshots and worker_stream events share a
+        // cumulative raw-PTY offset, so preserve chunks strictly after the
+        // snapshot instead of treating the entire roundtrip window as covered
+        // (which could drop output emitted after snapshot capture).
         flushPtyChunksNow(key)
+        if (typeof result.snapshot.offset === 'number') {
+          postSnapshotChunks = getPtyChunksAfterOffset(
+            key,
+            result.snapshot.offset,
+            result.snapshot.generation
+          )
+        }
         writtenTotal = getPtyChunkTotal(key)
         shouldReplay = false
       }
@@ -564,6 +577,10 @@ function createRuntime(
       await predictiveEcho?.seed('')
     }
 
+    // These chunks were buffered before `writtenTotal` but landed after the
+    // authoritative v10 snapshot. Write them in byte order before subscribing;
+    // the subscription then catches anything that arrived after the baseline.
+    writeChunks(postSnapshotChunks)
     seedBufferSubscription()
 
     // SIGWINCH bounce: 200ms after attach completes, send a one-pixel
@@ -718,32 +735,37 @@ function createRuntime(
       cancelPendingInit()
       reconciler.dispose()
       sizeSync.dispose()
-      echoRouter.dispose()
-      clearPtyBuffer(key)
       disposed = true
       currentToken = null
       unsubBuffer?.()
       unsubBuffer = null
-      disposePredictiveEcho?.()
-      disposePredictiveEcho = null
-      predictiveEcho = null
-      try {
-        webglAddon?.dispose()
-      } catch {
-        // Teardown: an already-disposed or context-lost WebGL addon can throw
-        // on dispose; we null it out next regardless, so silence is correct.
-      }
-      webglAddon = null
-      try {
-        term?.dispose()
-      } catch {
-        // Teardown: disposing an xterm instance twice (or after its host was
-        // detached) can throw; we null it out next regardless, so silence is correct.
-      }
-      term = null
-      if (host.parentElement) {
-        host.parentElement.removeChild(host)
-      }
+      clearPtyBuffer(key)
+      // Relay v10 intentionally drops queued engine output after reset. Drain
+      // the router ordering chain first, then reset/dispose the engine, model,
+      // and live terminal. The registry record is already gone, so this old
+      // runtime cannot be reacquired while its accepted bytes finish parsing.
+      void echoRouter.dispose().finally(() => {
+        disposePredictiveEcho?.()
+        disposePredictiveEcho = null
+        predictiveEcho = null
+        try {
+          webglAddon?.dispose()
+        } catch {
+          // Teardown: an already-disposed or context-lost WebGL addon can throw
+          // on dispose; we null it out next regardless, so silence is correct.
+        }
+        webglAddon = null
+        try {
+          term?.dispose()
+        } catch {
+          // Teardown: disposing an xterm instance twice (or after its host was
+          // detached) can throw; we null it out next regardless, so silence is correct.
+        }
+        term = null
+        if (host.parentElement) {
+          host.parentElement.removeChild(host)
+        }
+      })
     },
     isMounted(): boolean {
       return currentToken !== null
@@ -787,7 +809,7 @@ function createRuntime(
       currentSrttGetter = getter
     },
     getPredictiveEcho(): PredictiveEcho | null {
-      return predictiveEcho
+      return disposed ? null : predictiveEcho
     },
     noteUserInput(data: string): void {
       if (disposed || !term) return

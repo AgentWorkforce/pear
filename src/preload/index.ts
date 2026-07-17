@@ -293,9 +293,23 @@ const api = {
     onEvent: (callback: (event: unknown) => void) => subscribe<unknown>('broker:event', callback),
     onEventStreamDiagnostic: (callback: (event: BrokerEventStreamDiagnostic) => void) =>
       subscribe<BrokerEventStreamDiagnostic>('broker:event-stream-diagnostic', callback),
-    onPtyChunk: (callback: (projectId: string, name: string, chunk: string) => void) => {
-      const handler = (_: unknown, projectId: string, name: string, chunk: string): void =>
-        callback(projectId, name, chunk)
+    onPtyChunk: (
+      callback: (
+        projectId: string,
+        name: string,
+        chunk: string,
+        offset?: number,
+        generation?: number
+      ) => void
+    ) => {
+      const handler = (
+        _: unknown,
+        projectId: string,
+        name: string,
+        chunk: string,
+        offset?: number,
+        generation?: number
+      ): void => callback(projectId, name, chunk, offset, generation)
       ipcRenderer.on('broker:pty-chunk', handler)
       return () => ipcRenderer.removeListener('broker:pty-chunk', handler)
     },

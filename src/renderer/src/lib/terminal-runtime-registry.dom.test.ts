@@ -215,6 +215,50 @@ describe('terminal-runtime-registry — pty drain coalescing', () => {
   })
 })
 
+describe('terminal-runtime-registry — v10 snapshot offset seeding', () => {
+  it('writes post-snapshot chunks without replaying chunks covered by the snapshot', async () => {
+    const ipc = await import('@/lib/ipc')
+    vi.mocked(ipc.pear.broker.attachTerminal).mockImplementationOnce(async () => {
+      // Both chunks arrive while attach IPC is in flight. The snapshot covers
+      // only the first offset; the second must survive the seed baseline.
+      ptyBuffer.appendPtyChunk('p:a', 'covered', 10, 7)
+      ptyBuffer.appendPtyChunk('p:a', 'fresh', 20, 7)
+      return {
+        name: 'a',
+        mode: 'auto_inject' as const,
+        pending: 0,
+        snapshot: {
+          rows: 24,
+          cols: 80,
+          cursor: [0, 0] as [number, number],
+          screen: 'snapshot',
+          offset: 10,
+          generation: 7
+        }
+      }
+    })
+
+    const runtime = registry.acquireTerminalRuntime({
+      projectId: 'p',
+      agentName: 'a',
+      terminalMode: 'drive',
+      theme: 'dark',
+      getInputSrtt: () => null
+    })
+    const term = createdTerminals[0]
+
+    runtime.mount(makeLayoutContainer())
+    await flushAsync()
+    await flushAsync()
+
+    expect(term.__writes).toContain('snapshot')
+    expect(term.__writes).toContain('fresh')
+    expect(term.__writes).not.toContain('covered')
+
+    registry.disposeTerminalRuntime(runtime.key)
+  })
+})
+
 describe('terminal-runtime-registry — clearOnDataIf identity check', () => {
   it('only clears the on-data handler when the caller still owns the slot', () => {
     const runtime = registry.acquireTerminalRuntime({

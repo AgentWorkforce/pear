@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
-import { invokeNodeHandler, nodeInfo, nodeManifest } from '@agent-relay/fleet'
-import { createPearFleetNodeDefinition, PEAR_LOCAL_SPAWN_HARNESSES, reconnectDelayMs } from './pear-fleet-node'
+import { invokeNodeHandler, nodeInfo } from '@agent-relay/fleet'
+import {
+  createPearFleetNodeDefinition,
+  PEAR_LOCAL_SPAWN_HARNESSES,
+  resolvePearFleetConnection,
+  startPearFleetSidecar
+} from './pear-fleet-node'
 
 const expectedCapabilities = Object.keys(PEAR_LOCAL_SPAWN_HARNESSES).map((cli) => `spawn:${cli}`)
 
@@ -12,16 +17,19 @@ describe('Pear local fleet node', () => {
       brokerName: 'pear-project-1'
     })
 
-    const manifest = nodeManifest(definition)
-    expect(manifest.name).toBe('pear-project-1-local-fleet')
-    expect(manifest.capabilities.map((capability) => capability.name)).toEqual(expectedCapabilities)
-    expect(manifest.capabilities).toEqual(expectedCapabilities.map((name) => expect.objectContaining({
-      name,
-      metadata: expect.objectContaining({
-        pearLocalNode: true,
-        clonePaths: { 'project-1': '/tmp/project-1' }
-      })
-    })))
+    const info = nodeInfo(definition)
+    expect(info.name).toBe('pear-project-1-local-fleet')
+    expect(info.capabilities).toEqual(expectedCapabilities)
+    expect(expectedCapabilities.map((name) => definition.capabilities[name])).toEqual(
+      expectedCapabilities.map(() =>
+        expect.objectContaining({
+          metadata: expect.objectContaining({
+            pearLocalNode: true,
+            clonePaths: { 'project-1': '/tmp/project-1' }
+          })
+        })
+      )
+    )
   })
 
   it('spawns non-Claude/Codex harnesses through the broker', async () => {
@@ -110,26 +118,84 @@ describe('Pear local fleet node', () => {
   })
 })
 
-describe('reconnectDelayMs', () => {
-  it('caps transient reconnects (already registered) at the fast ceiling', () => {
-    expect(reconnectDelayMs(1, true)).toBe(500)
-    expect(reconnectDelayMs(2, true)).toBe(1_000)
-    expect(reconnectDelayMs(4, true)).toBe(4_000)
-    // 500 * 2**4 = 8000 -> clamped to the 5s ceiling
-    expect(reconnectDelayMs(5, true)).toBe(5_000)
-    expect(reconnectDelayMs(50, true)).toBe(5_000)
+describe('resolvePearFleetConnection', () => {
+  it('waits for the broker-minted node token and attaches to the same v10 node', async () => {
+    let now = 0
+    let reads = 0
+    const connection = await resolvePearFleetConnection(async () => {
+      reads += 1
+      if (reads === 1) {
+        return { node_id: 'node-1', node_name: 'pear-project-1' }
+      }
+      return {
+        node_id: 'node-1',
+        node_name: 'pear-project-1',
+        node_token: 'nt_live_test',
+        relay_base_url: 'https://cast.example'
+      }
+    }, new AbortController().signal, {
+      timeoutMs: 1_000,
+      pollIntervalMs: 250,
+      now: () => now,
+      sleep: async (ms) => {
+        now += ms
+      }
+    })
+
+    expect(reads).toBe(2)
+    expect(connection).toEqual({
+      connection: {
+        nodeId: 'node-1',
+        nodeToken: 'nt_live_test',
+        baseUrl: 'https://cast.example'
+      },
+      nodeName: 'pear-project-1'
+    })
   })
 
-  it('backs off much harder while the node has never registered', () => {
-    // Grows past the registered ceiling so a wedged broker is not stormed.
-    expect(reconnectDelayMs(5, false)).toBe(8_000)
-    expect(reconnectDelayMs(6, false)).toBe(16_000)
-    expect(reconnectDelayMs(8, false)).toBe(60_000)
-    expect(reconnectDelayMs(50, false)).toBe(60_000)
+  it('fails clearly instead of silently disabling the provider when the token never arrives', async () => {
+    let now = 0
+    await expect(resolvePearFleetConnection(
+      async () => ({ node_id: 'node-1', node_name: 'pear-project-1' }),
+      new AbortController().signal,
+      {
+        timeoutMs: 500,
+        pollIntervalMs: 250,
+        now: () => now,
+        sleep: async (ms) => {
+          now += ms
+        }
+      }
+    )).rejects.toThrow('timed out waiting for a node token for node-1')
   })
 
-  it('never returns a negative or sub-base delay for the first attempt', () => {
-    expect(reconnectDelayMs(0, false)).toBe(500)
-    expect(reconnectDelayMs(1, false)).toBe(500)
+  it('bounds a broker session read that never settles', async () => {
+    let now = 0
+    await expect(resolvePearFleetConnection(
+      () => new Promise(() => {}),
+      new AbortController().signal,
+      {
+        timeoutMs: 500,
+        now: () => now,
+        sleep: async (ms) => {
+          now += ms
+        }
+      }
+    )).rejects.toThrow('timed out waiting for the broker node id')
+    expect(now).toBe(500)
+  })
+
+  it('stops promptly while a broker session read is hung', async () => {
+    const sidecar = startPearFleetSidecar({
+      projectId: 'project-1',
+      cwd: '/tmp/project-1',
+      brokerName: 'pear-project-1',
+      readBrokerSession: () => new Promise(() => {})
+    })
+    const registered = sidecar.registered.catch((error: unknown) => error)
+
+    await sidecar.stop()
+
+    await expect(registered).resolves.toMatchObject({ name: 'AbortError' })
   })
 })

@@ -385,6 +385,10 @@ export interface BrokerAttachTerminalResult {
     cols: number
     cursor: [number, number]
     screen: string
+    /** Cumulative PTY byte offset represented by this snapshot (Relay v10+). */
+    offset?: number
+    /** Pear event-listener generation that captured this snapshot. */
+    generation?: number
   }
 }
 
@@ -403,6 +407,8 @@ export interface BrokerTerminalSnapshot {
   cursor: [number, number]
   /** Row text for `plain`; decoded ANSI reproduction byte stream for `ansi`. */
   screen: string
+  /** Cumulative PTY byte offset represented by this snapshot (Relay v10+). */
+  offset?: number
 }
 
 export interface BrokerSendMessageInput {
@@ -976,7 +982,15 @@ export interface PearAPI {
     shutdown: () => Promise<void>
     onEvent: (callback: (event: unknown) => void) => () => void
     onEventStreamDiagnostic: (callback: (event: BrokerEventStreamDiagnostic) => void) => () => void
-    onPtyChunk: (callback: (projectId: string, name: string, chunk: string) => void) => () => void
+    onPtyChunk: (
+      callback: (
+        projectId: string,
+        name: string,
+        chunk: string,
+        offset?: number,
+        generation?: number
+      ) => void
+    ) => () => void
     onStatus: (callback: (status: BrokerStatusEvent) => void) => () => void
   }
   factory: {

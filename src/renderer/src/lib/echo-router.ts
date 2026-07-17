@@ -97,7 +97,10 @@ export interface EchoRouter {
   onUserInput(data: string): void
   // Which sink server bytes currently take. Exposed for tests/diagnostics.
   route(): 'direct' | 'engine'
-  dispose(): void
+  // Stop accepting new work and resolve only after every already-accepted
+  // server byte has reached the live terminal. Callers must await this before
+  // resetting the v10 engine, whose reset discards queued server output.
+  dispose(): Promise<void>
 }
 
 export function createEchoRouter(deps: EchoRouterDeps): EchoRouter {
@@ -105,7 +108,9 @@ export function createEchoRouter(deps: EchoRouterDeps): EchoRouter {
   let reseedPending = false
   let heldChunks: string[] = []
   let reseedTimeout: ReturnType<typeof setTimeout> | null = null
+  let closing = false
   let disposed = false
+  let disposePromise: Promise<void> | null = null
 
   // Single ordering domain for everything that reaches the live terminal.
   // Engine writes happen inside the engine's ASYNC tail (its model parse
@@ -222,7 +227,7 @@ export function createEchoRouter(deps: EchoRouterDeps): EchoRouter {
 
   return {
     onServerOutput(combined: string): void {
-      if (disposed || combined.length === 0) return
+      if (closing || disposed || combined.length === 0) return
       if (reseedPending) {
         heldChunks.push(combined)
         return
@@ -257,7 +262,7 @@ export function createEchoRouter(deps: EchoRouterDeps): EchoRouter {
       }
     },
     onUserInput(data: string): void {
-      if (disposed) return
+      if (closing || disposed) return
       // While a reseed capture is in flight predictions stay off — the
       // engine's model isn't authoritative yet. Only the optimistic echo is
       // skipped; the keystroke still reaches the PTY via the send path.
@@ -291,14 +296,21 @@ export function createEchoRouter(deps: EchoRouterDeps): EchoRouter {
     route(): 'direct' | 'engine' {
       return route
     },
-    dispose(): void {
-      disposed = true
+    dispose(): Promise<void> {
+      if (disposePromise) return disposePromise
+      closing = true
       reseedPending = false
-      heldChunks = []
       if (reseedTimeout) {
         clearTimeout(reseedTimeout)
         reseedTimeout = null
       }
+      // A direct→engine capture may be holding accepted server chunks outside
+      // opChain. Queue them on the direct sink before sealing the chain.
+      releaseHeldDirect()
+      disposePromise = opChain.then(() => {
+        disposed = true
+      })
+      return disposePromise
     }
   }
 }
