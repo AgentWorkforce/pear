@@ -1,6 +1,6 @@
 import { _electron as electron, type ElectronApplication, type Page } from 'playwright'
 import { HarnessDriverClient } from '@agent-relay/harness-driver'
-import { mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, readFile, realpath, rm } from 'node:fs/promises'
 import { createServer } from 'node:net'
 import { homedir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
@@ -208,6 +208,29 @@ export async function launchFidelityHarness(
   const instanceName = `term-fidelity-${cli}-${process.pid}-${basename(runRoot).slice(-6)}`
   if (instanceName === 'pear') throw new Error('Refusing to use the live broker instance name')
 
+  // OpenCode keeps its session history in a single SQLite DB under
+  // XDG_DATA_HOME/opencode. By default that resolves to the user's real,
+  // shared ~/.local/share/opencode/opencode.db, which the live app's
+  // ai-history sync opens read/write. When that sync's WAL activity coincides
+  // with the harness agent's boot write, OpenCode's first paint blocks and it
+  // renders an empty frame that never reaches readiness — an intermittent
+  // TF_OPENCODE_READY timeout unrelated to the renderer under test. Give
+  // OpenCode an isolated, empty data dir so its boot never contends with the
+  // shared DB; auth lives in the same dir, so copy the real auth.json across.
+  // The model cache stays in XDG_CACHE_HOME and is untouched.
+  const opencodeDataHome = cli === 'opencode' ? join(runRoot, 'xdg-data') : null
+  if (opencodeDataHome) {
+    await mkdir(join(opencodeDataHome, 'opencode'), { recursive: true })
+    const sourceDataHome = process.env.XDG_DATA_HOME || join(homedir(), '.local', 'share')
+    await copyFile(
+      join(sourceDataHome, 'opencode', 'auth.json'),
+      join(opencodeDataHome, 'opencode', 'auth.json')
+    ).catch(() => {
+      // No auth.json (env-key auth, or never logged in): OpenCode falls back to
+      // its other credential sources. A fresh empty data dir is still correct.
+    })
+  }
+
   let broker: HarnessDriverClient | null = null
   let electronApp: ElectronApplication | null = null
   try {
@@ -221,7 +244,10 @@ export async function launchFidelityHarness(
       OPENCODE_CONFIG_CONTENT: JSON.stringify({
         autoupdate: false,
         permission: { bash: 'ask', external_directory: 'ask' }
-      })
+      }),
+      // Isolate OpenCode's session DB (see opencodeDataHome above). Only set
+      // for the OpenCode matrix leg so other CLIs' data dirs are unaffected.
+      ...(opencodeDataHome ? { XDG_DATA_HOME: opencodeDataHome } : {})
     }
     broker = await spawnBrokerWithoutInheritedIdentity({
       cwd: projectRoot,

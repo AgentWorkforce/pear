@@ -11,6 +11,19 @@ import {
 const MARKER_TIMEOUT_MS = 5 * 60_000
 const AUTOMATIC_PERMISSION_MODE = /(?:bypass permissions|always approve|auto[- ]?approve|auto mode|plan mode|don'?t ask|yolo mode|full access \(current\)).*(?:on|enabled)?/iu
 
+// OpenCode's OpenTUI can take several seconds to accept input after launch
+// (MCP init, filesystem watcher / location services, and a scan of the user's
+// global skill + config trees). The broker injects the readiness task once at
+// spawn; an injection that lands before OpenCode's input is live is silently
+// dropped, and OpenCode then idles at its home screen until the readiness
+// deadline. These bound an OpenCode-only boot re-nudge that re-submits the
+// readiness prompt once the home screen is up and the marker still hasn't
+// appeared. HOME_HINT matches only OpenCode's idle home screen, so the nudge
+// never fires mid-response; GRACE first lets the broker's own injection land.
+const OPENCODE_HOME_HINT = /ask anything|opencode zen|ctrl\+p/iu
+const READINESS_NUDGE_GRACE_MS = 6_000
+const READINESS_NUDGE_INTERVAL_MS = 8_000
+
 interface SpawnedAgent {
   name: string
   terminal: Locator
@@ -93,10 +106,16 @@ async function acceptWorkspaceTrustIfShown(
   harness: FidelityHarness,
   terminal: Locator,
   agentName: string,
-  marker: string
+  marker: string,
+  // OpenCode only: the readiness prompt to re-submit if the broker's spawn-time
+  // injection was dropped by a not-yet-live OpenTUI input. Leave undefined for
+  // CLIs whose readiness injection is reliable so their paths are untouched.
+  readinessNudge?: string
 ): Promise<void> {
   const deadline = Date.now() + 90_000
+  const startedAt = Date.now()
   let acceptedTrust = false
+  let lastNudgeAt = 0
   let lastScreen = ''
   while (Date.now() < deadline) {
     try {
@@ -115,6 +134,21 @@ async function acceptWorkspaceTrustIfShown(
         /(?:not logged in|please (?:run .* )?log in|authentication failed|missing api key|unauthorized)/iu.test(lastScreen)
       ) {
         throw new Error(`${harness.cli} is not authenticated:\n${lastScreen}`)
+      }
+      // Boot re-nudge (see READINESS_NUDGE_* above): only once the home screen
+      // is up, the marker is still absent, the broker's own injection has had
+      // its grace window, and the last nudge has drained. Re-submitting the
+      // idempotent readiness prompt lets a dropped spawn-time injection self-
+      // heal. This runs strictly before any workload and stops the instant the
+      // marker appears, so it cannot bleed into the workload it precedes.
+      if (
+        readinessNudge &&
+        OPENCODE_HOME_HINT.test(lastScreen) &&
+        Date.now() - startedAt >= READINESS_NUDGE_GRACE_MS &&
+        Date.now() - lastNudgeAt >= READINESS_NUDGE_INTERVAL_MS
+      ) {
+        await submitPrompt(terminal, readinessNudge)
+        lastNudgeAt = Date.now()
       }
     } catch (error) {
       if (error instanceof Error && error.message.includes('not authenticated')) throw error
@@ -152,6 +186,7 @@ export async function spawnRealAgent(harness: FidelityHarness): Promise<SpawnedA
 
   const requestedName = `tf-${harness.cli}`
   const marker = `TF_${harness.cli.toUpperCase()}_READY`
+  const readinessTask = `Reply with exactly one token made from the parts "TF", "${harness.cli.toUpperCase()}", "READY", joined with one underscore between adjacent parts. Do not use tools.`
   const spawned = await harness.page.evaluate(async ({ projectId, root, cli, name, task, args }) => {
     const api = (window as unknown as Window & {
       pear: {
@@ -180,7 +215,7 @@ export async function spawnRealAgent(harness: FidelityHarness): Promise<SpawnedA
     root: harness.projectRoot,
     cli: harness.cli,
     name: requestedName,
-    task: `Reply with exactly one token made from the parts "TF", "${harness.cli.toUpperCase()}", "READY", joined with one underscore between adjacent parts. Do not use tools.`,
+    task: readinessTask,
     args: initialArgs(harness.cli)
   })
   const agentName = spawned.name || requestedName
@@ -199,7 +234,15 @@ export async function spawnRealAgent(harness: FidelityHarness): Promise<SpawnedA
     { message: `live xterm runtime should mount for ${agentName}`, timeout: 60_000 }
   ).toBeGreaterThan(0)
 
-  await acceptWorkspaceTrustIfShown(harness, terminal, agentName, marker)
+  await acceptWorkspaceTrustIfShown(
+    harness,
+    terminal,
+    agentName,
+    marker,
+    // OpenCode's slow OpenTUI boot can drop the broker's spawn-time readiness
+    // injection; re-nudge it. Other CLIs inject reliably, so leave them alone.
+    harness.cli === 'opencode' ? readinessTask : undefined
+  )
   if (harness.cli === 'claude') {
     // Normalize while the startup status is still visible. After workload 1,
     // the bypass badge can scroll out even though the mode remains active.
