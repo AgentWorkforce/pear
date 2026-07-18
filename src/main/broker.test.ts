@@ -227,6 +227,33 @@ vi.mock('./burn', () => ({
   getPearBurnAgentKey: vi.fn((projectId: string, name: string) => `${projectId}:${name}`)
 }))
 
+// Placement mints its requester identity through the SDK. Relaycast stores ONE
+// `token_hash` per agent row, so a second registerOrRotate of the same name
+// rotates the first caller's token into a 401 ("Invalid agent token"). Count the
+// registrations so the single-flight guard in getPlacementRelay is enforceable.
+const placementSdkMock = vi.hoisted(() => ({
+  registerCalls: [] as string[],
+  nodes: [] as { name: string; capabilities: string[] }[]
+}))
+
+vi.mock('@agent-relay/sdk', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@agent-relay/sdk')>()
+  class MockAgentRelay {
+    agents = {
+      registerOrRotate: vi.fn(async (input: { name: string }) => {
+        placementSdkMock.registerCalls.push(input.name)
+        // Await a macrotask so concurrent callers overlap here — this is the
+        // window between getPlacementRelay's cache check and its cache write.
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        return { name: input.name, token: `at_live_${placementSdkMock.registerCalls.length}` }
+      }),
+      list: vi.fn(async () => [])
+    }
+    nodes = { list: vi.fn(async () => placementSdkMock.nodes) }
+  }
+  return { ...actual, AgentRelay: MockAgentRelay }
+})
+
 import {
   BrokerManager,
   isCommandAvailableWithAugmentedPath,
@@ -664,6 +691,56 @@ describe('BrokerManager local + cloud coexistence', () => {
     // each test body would leak the stub into later tests if an earlier
     // assertion in that test throws first.
     vi.unstubAllGlobals()
+  })
+
+  // Regression: concurrent placement callers (the spawn dialog's listNodes
+  // effect racing a placeAgent, or a StrictMode double-invoke of that effect)
+  // both missed the `session.placementRelay` cache and each registered the
+  // deterministic `pear-requester-<projectId>` identity. Relaycast keeps one
+  // `token_hash` per agent row, so the second registration rotated the first
+  // caller's token to a dead one -> "Invalid agent token" on the first spawn
+  // after a fresh launch. The cache must be single-flight.
+  it('registers the placement requester once under concurrent callers', async () => {
+    placementSdkMock.registerCalls.length = 0
+    const manager = new BrokerManager()
+    const local = await startLocal(manager)
+    local.getSession.mockResolvedValue({ workspace_key: 'rk_live_test' })
+
+    await Promise.all([
+      manager.listNodes(PROJECT_ID),
+      manager.listNodes(PROJECT_ID),
+      manager.listNodes(PROJECT_ID)
+    ])
+
+    expect(placementSdkMock.registerCalls).toEqual(['pear-requester-project-1'])
+
+    await manager.shutdown()
+  })
+
+  // A failed registration must not poison placement for the session's lifetime,
+  // and the concurrent callers that share a rejecting attempt must not each
+  // re-trigger one: exactly one registration per attempt, evicted on failure so
+  // the next caller retries cleanly.
+  it('evicts a failed placement registration without re-registering per caller', async () => {
+    placementSdkMock.registerCalls.length = 0
+    const manager = new BrokerManager()
+    const local = await startLocal(manager)
+    local.getSession.mockRejectedValueOnce(new Error('broker unreachable'))
+    local.getSession.mockResolvedValue({ workspace_key: 'rk_live_test' })
+
+    const failures = await Promise.allSettled([
+      manager.listNodes(PROJECT_ID),
+      manager.listNodes(PROJECT_ID)
+    ])
+    expect(failures.map((r) => r.status)).toEqual(['rejected', 'rejected'])
+    // The attempt failed before registering, and neither caller retried it.
+    expect(placementSdkMock.registerCalls).toEqual([])
+
+    // Cache evicted -> the next caller registers cleanly, exactly once.
+    await Promise.all([manager.listNodes(PROJECT_ID), manager.listNodes(PROJECT_ID)])
+    expect(placementSdkMock.registerCalls).toEqual(['pear-requester-project-1'])
+
+    await manager.shutdown()
   })
 
   it('keeps the local session alive when a cloud sandbox attaches', async () => {
