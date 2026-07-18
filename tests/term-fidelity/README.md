@@ -63,11 +63,13 @@ the path under test.
 One real agent per selected CLI executes, in order:
 
 1. a multi-kilobyte streaming response;
-2. a real shell-tool approval panel, including selection redraws;
-3. a multi-step Electron window resize/SIGWINCH bounce during output;
-4. human typing while output streams;
-5. window blur/hide during output followed by reveal/focus; and
-6. scroll into the CLI-visible transcript (xterm-native or TUI-owned) during
+2. a long markdown-heavy response followed immediately by a short question
+   after the completion-duration line and next prompt paint;
+3. a real shell-tool approval panel, including selection redraws;
+4. a multi-step Electron window resize/SIGWINCH bounce during output;
+5. human typing while output streams;
+6. window blur/hide during output followed by reveal/focus; and
+7. scroll into the CLI-visible transcript (xterm-native or TUI-owned) during
    output followed by a return to bottom.
 
 The permission case fails if no approval TUI is observed; this prevents a local

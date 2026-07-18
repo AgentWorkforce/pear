@@ -274,6 +274,69 @@ async function longStreamingReply(harness: FidelityHarness, agent: SpawnedAgent)
   await checkpointed(harness, agent, workload, marker, telemetryAtStart)
 }
 
+async function waitForCompletedTurn(
+  harness: FidelityHarness,
+  agentName: string,
+  marker: string
+): Promise<void> {
+  await expect.poll(async () => {
+    const screen = (await readBrokerSnapshot(harness.connectionPath, agentName)).screen
+    const markerAt = screen.lastIndexOf(marker)
+    if (markerAt < 0) return false
+    const afterMarker = screen.slice(markerAt + marker.length)
+    // Claude renders a duration line followed by a fresh input prompt when a
+    // turn is genuinely complete. Current inline Codex replaces its transient
+    // status with the fresh prompt, so that prompt is its completion signal.
+    // Matching only after the marker prevents an old transcript prompt/status
+    // from satisfying this gate while the first response is still streaming.
+    const hasDuration = /\bfor (?:(?:\d+m )?\d+(?:\.\d+)?s)\b/iu.test(afterMarker)
+    const hasFreshPrompt = harness.cli === 'codex'
+      // Codex renders a rotating placeholder after the prompt glyph; the
+      // literal text changes between launches (for example "Implement
+      // {feature}" or "Find and fix a bug in @filename").
+      ? /^\s*›\s+\S.*$/mu.test(afterMarker)
+      : /^\s*❯[\s\u00a0]*$/mu.test(afterMarker)
+    return hasFreshPrompt && (harness.cli !== 'claude' || hasDuration)
+  }, {
+    message: `${harness.cli} should finish the long turn and paint its next input prompt`,
+    timeout: MARKER_TIMEOUT_MS,
+    intervals: [100, 150, 250]
+  }).toBe(true)
+}
+
+// pear#421: the production report is specifically a turn-boundary repaint,
+// not a generic long stream. A markdown-heavy first response settles, the CLI
+// paints its elapsed-time status plus next prompt, and a short question is
+// submitted immediately. The second checkpoint catches stale preview rows
+// interleaved with the new prompt/answer even when all prior matrix workloads
+// were clean.
+async function turnBoundaryFollowUp(
+  harness: FidelityHarness,
+  agent: SpawnedAgent
+): Promise<void> {
+  const workload: WorkloadName = 'turn-boundary-follow-up'
+  const firstMarker = 'TF_TURN_ONE_DONE'
+  const finalMarker = 'TF_FOLLOWUP_DONE'
+  const telemetryAtStart = harness.telemetry.length
+  const rememberedPath = join(harness.projectRoot, 'artifacts', 'term-fidelity-preview.md')
+  harness.currentWorkload = workload
+
+  await submitPrompt(
+    agent.terminal,
+    `Do not use tools. Start with exactly \`FULL_PATH: ${rememberedPath}\`. Then print 60 markdown bullet lines; line N must be \`- **TF-PREVIEW-NNNN** stale-preview-sentinel abcdefghijklmnopqrstuvwxyz0123456789\`, with NNNN increasing from 0001. Do not omit lines. ${finalMarkerInstruction(firstMarker)}`
+  )
+  await waitForCompletedTurn(harness, agent.name, firstMarker)
+
+  // No sleep here: this is the reported transition. Submit as soon as the
+  // completion status and fresh prompt exist, while the just-finished region
+  // is still the one the TUI will erase/repaint for the short second turn.
+  await submitPrompt(
+    agent.terminal,
+    `Give me only the full path from your previous response, then ${finalMarkerInstruction(finalMarker)}`
+  )
+  await checkpointed(harness, agent, workload, finalMarker, telemetryAtStart)
+}
+
 async function permissionPromptRepaint(harness: FidelityHarness, agent: SpawnedAgent): Promise<void> {
   const workload: WorkloadName = 'permission-prompt-repaint'
   const marker = 'TF_PERMISSION_DONE'
@@ -532,6 +595,7 @@ export async function runCanonicalWorkloads(
   const failures: Error[] = []
   const workloads: Array<[WorkloadName, (harness: FidelityHarness, agent: SpawnedAgent) => Promise<void>]> = [
     ['long-streaming-reply', longStreamingReply],
+    ['turn-boundary-follow-up', turnBoundaryFollowUp],
     ['permission-prompt-repaint', permissionPromptRepaint],
     ['resize-mid-stream', resizeMidStream],
     ['typing-during-stream', typingDuringStream],

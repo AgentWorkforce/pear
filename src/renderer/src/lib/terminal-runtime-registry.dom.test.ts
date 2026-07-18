@@ -215,6 +215,48 @@ describe('terminal-runtime-registry — pty drain coalescing', () => {
   })
 })
 
+// pear#421: Claude's idle ESC[?6n loop must not permanently close the
+// reconciler quiet gate. Lock the intentionally tiny safety boundary: exact,
+// complete query-only output is neutral; anything mixed, partial, or merely
+// similar remains activity so snapshot races are gated when in doubt.
+describe('terminal-runtime-registry — reconciler-neutral PTY queries', () => {
+  it('accepts one or repeated complete DEC-private cursor-position queries', () => {
+    expect(registry.isReconcilerNeutralPtyOutput('\x1b[?6n')).toBe(true)
+    expect(registry.isReconcilerNeutralPtyOutput('\x1b[?6n\x1b[?6n\x1b[?6n')).toBe(true)
+  })
+
+  it('rejects mixed, partial, non-private, and empty output', () => {
+    expect(registry.isReconcilerNeutralPtyOutput('\x1b[?6npaint')).toBe(false)
+    expect(registry.isReconcilerNeutralPtyOutput('paint\x1b[?6n')).toBe(false)
+    expect(registry.isReconcilerNeutralPtyOutput('\x1b[?6')).toBe(false)
+    expect(registry.isReconcilerNeutralPtyOutput('n')).toBe(false)
+    expect(registry.isReconcilerNeutralPtyOutput('\x1b[6n')).toBe(false)
+    expect(registry.isReconcilerNeutralPtyOutput('')).toBe(false)
+  })
+
+  it('still delivers a neutral query byte-for-byte to xterm', async () => {
+    const runtime = registry.acquireTerminalRuntime({
+      projectId: 'p',
+      agentName: 'query-agent',
+      terminalMode: 'drive',
+      theme: 'dark',
+      getInputSrtt: () => null
+    })
+    const term = createdTerminals[0]
+    runtime.mount(makeLayoutContainer())
+    await flushAsync()
+    await flushAsync()
+
+    const before = term.__writes.length
+    ptyBuffer.appendPtyChunk(runtime.key, '\x1b[?6n')
+    ptyBuffer.flushPtyChunksNow(runtime.key)
+
+    expect(term.__writes).toHaveLength(before + 1)
+    expect(term.__writes[before]).toBe('\x1b[?6n')
+    registry.disposeTerminalRuntime(runtime.key)
+  })
+})
+
 describe('terminal-runtime-registry — v10 snapshot offset seeding', () => {
   it('writes post-snapshot chunks without replaying chunks covered by the snapshot', async () => {
     const ipc = await import('@/lib/ipc')

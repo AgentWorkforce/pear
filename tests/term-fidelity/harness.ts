@@ -124,7 +124,13 @@ async function packageVersion(repoRoot: string, packageName: string): Promise<st
 async function installActivityProbe(page: Page): Promise<void> {
   await page.waitForFunction(() => Boolean((window as Window & { pear?: unknown }).pear))
   await page.evaluate(() => {
-    type Activity = { lastOutputAt: number; chunks: number; bytes: number }
+    type Activity = {
+      lastOutputAt: number
+      lastVisualOutputAt: number
+      visualChunks: number
+      chunks: number
+      bytes: number
+    }
     type Probe = {
       activity: Record<string, Activity>
       // The full concatenated raw byte stream the renderer received from the
@@ -150,9 +156,24 @@ async function installActivityProbe(page: Page): Promise<void> {
     const activity: Record<string, Activity> = {}
     const raw: Record<string, string> = {}
     const unsubscribe = win.pear.broker.onPtyChunk((_projectId, name, chunk) => {
-      const previous = activity[name] || { lastOutputAt: 0, chunks: 0, bytes: 0 }
+      const previous = activity[name] || {
+        lastOutputAt: 0,
+        lastVisualOutputAt: 0,
+        visualChunks: 0,
+        chunks: 0,
+        bytes: 0
+      }
+      const now = Date.now()
+      // Claude periodically emits DEC-private cursor-position queries while
+      // otherwise idle. CSI ? 6 n does not paint, erase, scroll, resize, or
+      // move the cursor in either emulator, so it must not keep the fidelity
+      // quiet gate closed forever. Retain it in raw/byte accounting and count
+      // the chunk; only the screen-activity timestamp ignores query-only data.
+      const visuallyInert = chunk.replace(/\x1b\[\?6n/gu, '').length === 0
       activity[name] = {
-        lastOutputAt: Date.now(),
+        lastOutputAt: now,
+        lastVisualOutputAt: visuallyInert ? previous.lastVisualOutputAt : now,
+        visualChunks: previous.visualChunks + (visuallyInert ? 0 : 1),
         chunks: previous.chunks + 1,
         bytes: previous.bytes + new TextEncoder().encode(chunk).byteLength
       }
@@ -408,14 +429,32 @@ export async function launchFidelityHarness(
 export async function getActivity(
   page: Page,
   agentName: string
-): Promise<{ lastOutputAt: number; chunks: number; bytes: number }> {
+): Promise<{
+  lastOutputAt: number
+  lastVisualOutputAt: number
+  visualChunks: number
+  chunks: number
+  bytes: number
+}> {
   return await page.evaluate((name) => {
     const probe = (window as Window & {
       __termFidelityProbe?: {
-        activity: Record<string, { lastOutputAt: number; chunks: number; bytes: number }>
+        activity: Record<string, {
+          lastOutputAt: number
+          lastVisualOutputAt: number
+          visualChunks: number
+          chunks: number
+          bytes: number
+        }>
       }
     }).__termFidelityProbe
-    return probe?.activity[name] || { lastOutputAt: 0, chunks: 0, bytes: 0 }
+    return probe?.activity[name] || {
+      lastOutputAt: 0,
+      lastVisualOutputAt: 0,
+      visualChunks: 0,
+      chunks: 0,
+      bytes: 0
+    }
   }, agentName)
 }
 
