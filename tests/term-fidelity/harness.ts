@@ -169,7 +169,8 @@ async function installActivityProbe(page: Page): Promise<void> {
       // move the cursor in either emulator, so it must not keep the fidelity
       // quiet gate closed forever. Retain it in raw/byte accounting and count
       // the chunk; only the screen-activity timestamp ignores query-only data.
-      const visuallyInert = chunk.replace(/\x1b\[\?6n/gu, '').length === 0
+      const visuallyInert = chunk.length > 0 &&
+        chunk.replace(/\x1b\[\?6n/gu, '').length === 0
       activity[name] = {
         lastOutputAt: now,
         lastVisualOutputAt: visuallyInert ? previous.lastVisualOutputAt : now,

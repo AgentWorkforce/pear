@@ -24,9 +24,10 @@
 // convergence layered over the existing event stream.
 //
 // Safety invariants (each guards a real re-corruption vector):
-// - Only check while quiet: no server output for RECONCILE_QUIET_MS, window
-//   visible (a hidden window stalls the rAF chunk flush, so "no output" is
-//   not trustworthy there), no outstanding optimistic-echo predictions.
+// - Only check while quiet: no screen-mutating server output for
+//   RECONCILE_QUIET_MS, window visible (a hidden window stalls the rAF chunk
+//   flush, so "no output" is not trustworthy there), no outstanding
+//   optimistic-echo predictions.
 // - A repair write only lands if the activity serial is unchanged across
 //   the snapshot fetch AND after a forced flush of staged chunks — a chunk
 //   that raced the fetch may already be inside the snapshot; replaying it on
@@ -107,9 +108,9 @@ export interface TerminalReconcilerDeps {
   writeRepair(ansi: string): void
   /** All quiet-gate conditions: see module doc. */
   isQuiet(): boolean
-  /** Monotonic counter, bumped once per server-output delivery. */
+  /** Monotonic counter, bumped once per screen-mutating server-output delivery. */
   activitySerial(): number
-  /** Force rAF-staged chunks out so the serial reflects everything received. */
+  /** Force rAF-staged chunks out so the serial reflects all screen-mutating output received. */
   flushPending(): void
   /**
    * The PTY and the rendered grid have disagreed on dimensions for

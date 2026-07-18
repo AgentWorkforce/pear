@@ -357,9 +357,10 @@ function createRuntime(
   // attach snapshot was painted. Chunks at or below this total are already
   // on screen (inside the snapshot); only chunks past it get replayed.
   let writtenTotal = 0
-  // Reconciler activity tracking: serial bumps once per server-output
-  // delivery; lastOutputAt gates the quiet window. Both are read by the
-  // quiet-time screen reconciler below.
+  // Reconciler activity tracking: serial bumps once per screen-mutating
+  // server-output delivery; lastOutputAt gates the visual quiet window. Both
+  // are read by the quiet-time screen reconciler below. Exact query-only
+  // output is delivered but excluded below so it cannot disable the gate.
   let activitySerial = 0
   let lastOutputAt = 0
   let attachSeeded = false
