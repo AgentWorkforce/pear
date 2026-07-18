@@ -1106,7 +1106,10 @@ interface BrokerSession {
   // first placeAgent/listNodes: workspace key from the broker session + a
   // dedicated `pear-requester-<projectId>` agent identity (placement.spawn ->
   // commands.invoke requires an agent-scoped connection). Cleared in dropSession.
-  placementRelay?: AgentRelay
+  // In-flight or resolved placement client. Held as a promise so concurrent
+  // callers share one `pear-requester-<projectId>` registration (see
+  // getPlacementRelay) instead of rotating each other's token.
+  placementRelay?: Promise<AgentRelay>
   operationQueue: BrokerOperationQueue
 }
 
@@ -2568,8 +2571,22 @@ export class BrokerManager {
   // insufficient: register/rotate a dedicated `pear-requester-<projectId>`
   // identity and construct the client with its agent token.
   private async getPlacementRelay(session: BrokerSession): Promise<AgentRelay> {
+    // Single-flight: cache the in-flight promise, not the resolved client. The
+    // requester name is deterministic and relaycast stores one `token_hash` per
+    // agent row, so two callers racing this (dialog listNodes vs placeAgent)
+    // would each registerOrRotate the same identity and the second would rotate
+    // the first's token into a 401. Drop the cache on failure so a transient
+    // registration error doesn't poison placement for the session's lifetime.
     if (session.placementRelay) return session.placementRelay
+    const pending = this.buildPlacementRelay(session).catch((error: unknown) => {
+      if (session.placementRelay === pending) session.placementRelay = undefined
+      throw error
+    })
+    session.placementRelay = pending
+    return pending
+  }
 
+  private async buildPlacementRelay(session: BrokerSession): Promise<AgentRelay> {
     const meta = await session.client.getSession()
     const workspaceKey = meta.workspace_key
     if (!workspaceKey) {
@@ -2592,7 +2609,6 @@ export class BrokerManager {
       agentToken: registration.token,
       ...(baseUrl ? { baseUrl } : {})
     })
-    session.placementRelay = relay
     return relay
   }
 
