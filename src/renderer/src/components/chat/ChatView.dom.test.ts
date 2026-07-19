@@ -32,8 +32,11 @@ vi.mock('@/lib/ipc', () => ({
 }))
 
 const ROW_HEIGHT = 88
+const MESSAGE_LINE_HEIGHT = 20
 const VIEWPORT_HEIGHT = 100
 const VIEWPORT_WIDTH = 800
+
+const resizeObserverHeights = new WeakMap<Element, number>()
 
 class TestResizeObserver {
   private readonly callback: ResizeObserverCallback
@@ -45,6 +48,7 @@ class TestResizeObserver {
   observe(target: Element): void {
     const height = target instanceof HTMLElement ? target.offsetHeight : ROW_HEIGHT
     const width = target instanceof HTMLElement ? target.offsetWidth : VIEWPORT_WIDTH
+    resizeObserverHeights.set(target, height)
     queueMicrotask(() => {
       this.callback([{
         target,
@@ -79,6 +83,27 @@ function getVirtualRows(container: HTMLElement = document.body): HTMLElement[] {
   return Array.from(container.querySelectorAll<HTMLElement>('[data-testid="chat-virtual-row"]'))
 }
 
+function getVirtualRowStart(row: HTMLElement): number {
+  const match = row.style.transform.match(/^translateY\((-?[\d.]+)px\)$/)
+  return match ? Number(match[1]) : Number.NaN
+}
+
+function expectMountedRowsNotToOverlap(container: HTMLElement): void {
+  const rows = getVirtualRows(container).sort(
+    (left, right) => Number(left.dataset.index) - Number(right.dataset.index)
+  )
+
+  for (let index = 1; index < rows.length; index += 1) {
+    const previous = rows[index - 1]
+    const current = rows[index]
+    if (Number(current.dataset.index) !== Number(previous.dataset.index) + 1) continue
+
+    expect(getVirtualRowStart(current)).toBeGreaterThanOrEqual(
+      getVirtualRowStart(previous) + previous.offsetHeight
+    )
+  }
+}
+
 function getMountedIndexes(container: HTMLElement = document.body): number[] {
   return getVirtualRows(container)
     .map((row) => Number(row.dataset.index))
@@ -97,6 +122,16 @@ function makeMessages(count: number): ChatMessage[] {
     isHuman: false,
     projectId: 'project-1'
   }))
+}
+
+function makeLargeToolCallPayload(lines = 24): string {
+  return [
+    'Called agent_relay.post_message({ channel: "term-fidelity", result: {',
+    ...Array.from({ length: lines - 2 }, (_, index) =>
+      `  chunk_${index}: "status-${index}-sha-0123456789abcdef"`
+    ),
+    '} })'
+  ].join('\n')
 }
 
 function seedChat(messages: ChatMessage[]): void {
@@ -156,6 +191,9 @@ beforeAll(() => {
       get() {
         const element = this as HTMLElement
         if (element.classList.contains('overflow-y-auto')) return VIEWPORT_HEIGHT
+        if (element.dataset.testid === 'chat-virtual-row') {
+          return ROW_HEIGHT + element.querySelectorAll('br').length * MESSAGE_LINE_HEIGHT
+        }
         return getStyledHeight(element) ?? ROW_HEIGHT
       }
     },
@@ -263,6 +301,59 @@ describe('ChatView virtualization', () => {
       expect(after.length).toBeGreaterThan(0)
       expect(after[0]).toBeGreaterThan(200)
       expect(after).not.toEqual(before)
+    })
+  })
+
+  it('uses the observed layout height for an initially large tool-call result', async () => {
+    const messages = makeMessages(3)
+    messages[0] = { ...messages[0], body: makeLargeToolCallPayload() }
+    seedChat(messages)
+
+    const { container } = render(React.createElement(ChatView))
+
+    await waitFor(() => {
+      const rows = getVirtualRows(container)
+      expect(rows).toHaveLength(messages.length)
+      expect(rows[0].offsetHeight).toBeGreaterThan(ROW_HEIGHT)
+      expect(resizeObserverHeights.get(rows[0])).toBe(rows[0].offsetHeight)
+      expectMountedRowsNotToOverlap(container)
+    })
+  })
+
+  it('remeasures a live-growing tool-call result before the next row can overlap', async () => {
+    const messages = makeMessages(3)
+    seedChat(messages)
+
+    const { container } = render(React.createElement(ChatView))
+    let firstRowBeforeGrowth: HTMLElement | null = null
+
+    await waitFor(() => {
+      const rows = getVirtualRows(container)
+      expect(rows).toHaveLength(messages.length)
+      expect(resizeObserverHeights.get(rows[0])).toBe(rows[0].offsetHeight)
+      expectMountedRowsNotToOverlap(container)
+      firstRowBeforeGrowth = rows[0]
+    })
+
+    // The test observer deliberately has not delivered a follow-up entry yet,
+    // reproducing the pre-paint window where the DOM has grown but the
+    // virtualizer would otherwise retain the mounted row's cached 88px size.
+    act(() => {
+      useAgentStore.setState((state) => ({
+        messages: state.messages.map((message, index) =>
+          index === 0
+            ? { ...message, body: makeLargeToolCallPayload(36) }
+            : message
+        )
+      }))
+    })
+
+    await waitFor(() => {
+      const firstRow = getVirtualRows(container)[0]
+      expect(firstRow).toBe(firstRowBeforeGrowth)
+      expect(firstRow.offsetHeight).toBeGreaterThan(ROW_HEIGHT)
+      expect(resizeObserverHeights.get(firstRow)).toBe(ROW_HEIGHT)
+      expectMountedRowsNotToOverlap(container)
     })
   })
 })
