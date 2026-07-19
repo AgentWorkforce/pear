@@ -104,6 +104,26 @@ const IDLE_SWEEP_MS = 30_000
 // arrives later repaints the characters authoritatively.
 export const STRANDED_PREDICTION_ROLLBACK_MS = 10_000
 
+// Claude Code can issue DEC-private cursor-position queries continuously while
+// its rendered screen is otherwise idle (observed as one exact ESC[?6n about
+// every 200ms). The query asks the emulator for state but does not paint,
+// erase, scroll, resize, or move the cursor. Treating it as screen activity
+// keeps the reconciler's quiet gate closed forever, silently disabling the
+// convergence detector/repair backstop on an idle, potentially corrupted
+// screen (pear#421).
+//
+// This predicate is deliberately exact and conservative. Only one or more
+// COMPLETE query sequences are neutral. Mixed query+paint data, partial/split
+// sequences, the non-private CSI 6 n form, and empty output all remain
+// activity. Every byte is still delivered through echoRouter below; this only
+// controls the reconciler's visual-activity clock + race serial.
+const DEC_PRIVATE_CURSOR_POSITION_QUERY = '\x1b[?6n'
+
+export function isReconcilerNeutralPtyOutput(output: string): boolean {
+  return output.length > 0 &&
+    output.replaceAll(DEC_PRIVATE_CURSOR_POSITION_QUERY, '').length === 0
+}
+
 // Default-on, demoted to DOM after the first webgl failure for the rest of
 // the session. We don't recover: if webgl construction blew up once we
 // assume the context is unhealthy.
@@ -337,9 +357,10 @@ function createRuntime(
   // attach snapshot was painted. Chunks at or below this total are already
   // on screen (inside the snapshot); only chunks past it get replayed.
   let writtenTotal = 0
-  // Reconciler activity tracking: serial bumps once per server-output
-  // delivery; lastOutputAt gates the quiet window. Both are read by the
-  // quiet-time screen reconciler below.
+  // Reconciler activity tracking: serial bumps once per screen-mutating
+  // server-output delivery; lastOutputAt gates the visual quiet window. Both
+  // are read by the quiet-time screen reconciler below. Exact query-only
+  // output is delivered but excluded below so it cannot disable the gate.
   let activitySerial = 0
   let lastOutputAt = 0
   let attachSeeded = false
@@ -537,8 +558,15 @@ function createRuntime(
   const writeChunks = (newChunks: string[]): void => {
     if (disposed || !term) return
     if (newChunks.length === 0) return
-    activitySerial += 1
-    lastOutputAt = Date.now()
+    // Coalesce first so the activity classifier sees the exact batch xterm
+    // will parse. Query-only batches are safe to overlap a screen snapshot:
+    // neither the broker emulator nor xterm changes visible/cursor state.
+    // Everything else bumps both gates; when in doubt, treat output as active.
+    const combined = newChunks.length === 1 ? newChunks[0] : newChunks.join('')
+    if (!isReconcilerNeutralPtyOutput(combined)) {
+      activitySerial += 1
+      lastOutputAt = Date.now()
+    }
     // Optional diagnostic, gated on localStorage.PEAR_DIAG_PTY === '1'.
     // See pty-buffer-store.ts for the enable instructions. Flag is
     // cached to avoid a per-batch localStorage read.
@@ -556,7 +584,6 @@ function createRuntime(
     // that per-chunk fan-out was the drain hot path: the renderer couldn't
     // keep up and input lagged. Byte content and order are unchanged, so the
     // one-write-per-byte invariant holds.
-    const combined = newChunks.length === 1 ? newChunks[0] : newChunks.join('')
     echoRouter.onServerOutput(combined)
   }
 

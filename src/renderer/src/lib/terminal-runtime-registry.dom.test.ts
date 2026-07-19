@@ -2,6 +2,10 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  RECONCILE_QUIET_MS,
+  type TerminalReconcilerDeps
+} from './terminal-reconciler'
+import {
   Terminal as MockTerminal,
   FitAddon as MockFitAddon,
   WebLinksAddon as MockWebLinksAddon,
@@ -18,6 +22,30 @@ vi.mock('@xterm/addon-webgl', () => ({ WebglAddon: MockWebglAddon }))
 vi.mock('@/lib/font-settle', () => ({
   awaitFontSettle: vi.fn(async () => {})
 }))
+
+const reconcilerHarness = vi.hoisted(() => ({
+  deps: null as TerminalReconcilerDeps | null
+}))
+
+// Capture the production runtime's reconciler wiring. These DOM tests are for
+// runtime behavior, not the reconciler state machine itself (covered in
+// terminal-reconciler.test.ts), so a passive handle makes the activity serial
+// and quiet clock directly assertable without a live polling interval.
+vi.mock('@/lib/terminal-reconciler', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./terminal-reconciler')>()
+  return {
+    ...actual,
+    createTerminalReconciler: vi.fn((deps: TerminalReconcilerDeps) => {
+      reconcilerHarness.deps = deps
+      return {
+        checkNow: vi.fn(async () => {}),
+        repairs: () => 0,
+        divergences: () => 0,
+        dispose: vi.fn()
+      }
+    })
+  }
+})
 
 vi.mock('@/lib/ipc', () => ({
   pear: {
@@ -69,6 +97,7 @@ let ptyBuffer: typeof import('@/stores/pty-buffer-store')
 
 beforeEach(async () => {
   resetXtermMock()
+  reconcilerHarness.deps = null
   vi.resetModules()
   registry = await import('./terminal-runtime-registry')
   ptyBuffer = await import('@/stores/pty-buffer-store')
@@ -210,6 +239,100 @@ describe('terminal-runtime-registry — pty drain coalescing', () => {
     const afterDuplicates = term.__writes.length
     ptyBuffer.flushPtyChunksNow(runtime.key)
     expect(term.__writes.length).toBe(afterDuplicates)
+
+    registry.disposeTerminalRuntime(runtime.key)
+  })
+})
+
+// pear#421: Claude's idle ESC[?6n loop must not permanently close the
+// reconciler quiet gate. Lock the intentionally tiny safety boundary: exact,
+// complete query-only output is neutral; anything mixed, partial, or merely
+// similar remains activity so snapshot races are gated when in doubt.
+describe('terminal-runtime-registry — reconciler-neutral PTY queries', () => {
+  it('accepts one or repeated complete DEC-private cursor-position queries', () => {
+    expect(registry.isReconcilerNeutralPtyOutput('\x1b[?6n')).toBe(true)
+    expect(registry.isReconcilerNeutralPtyOutput('\x1b[?6n\x1b[?6n\x1b[?6n')).toBe(true)
+  })
+
+  it('rejects mixed, partial, non-private, and empty output', () => {
+    expect(registry.isReconcilerNeutralPtyOutput('\x1b[?6npaint')).toBe(false)
+    expect(registry.isReconcilerNeutralPtyOutput('paint\x1b[?6n')).toBe(false)
+    expect(registry.isReconcilerNeutralPtyOutput('\x1b[?6')).toBe(false)
+    expect(registry.isReconcilerNeutralPtyOutput('n')).toBe(false)
+    expect(registry.isReconcilerNeutralPtyOutput('\x1b[6n')).toBe(false)
+    expect(registry.isReconcilerNeutralPtyOutput('')).toBe(false)
+  })
+
+  it('still delivers a neutral query byte-for-byte to xterm', async () => {
+    const runtime = registry.acquireTerminalRuntime({
+      projectId: 'p',
+      agentName: 'query-agent',
+      terminalMode: 'drive',
+      theme: 'dark',
+      getInputSrtt: () => null
+    })
+    const term = createdTerminals[0]
+    runtime.mount(makeLayoutContainer())
+    await flushAsync()
+    await flushAsync()
+
+    const before = term.__writes.length
+    ptyBuffer.appendPtyChunk(runtime.key, '\x1b[?6n')
+    ptyBuffer.flushPtyChunksNow(runtime.key)
+
+    expect(term.__writes).toHaveLength(before + 1)
+    expect(term.__writes[before]).toBe('\x1b[?6n')
+    registry.disposeTerminalRuntime(runtime.key)
+  })
+
+  it('keeps the reconciler quiet through queries but closes it for paint and mixed batches', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-01T00:00:00.000Z'))
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      value: 'visible'
+    })
+    const runtime = registry.acquireTerminalRuntime({
+      projectId: 'p',
+      agentName: 'activity-agent',
+      terminalMode: 'drive',
+      theme: 'dark',
+      getInputSrtt: () => null
+    })
+    Object.defineProperty(runtime.host, 'clientWidth', { configurable: true, value: 800 })
+    Object.defineProperty(runtime.host, 'clientHeight', { configurable: true, value: 600 })
+    runtime.mount(makeLayoutContainer())
+    await flushAsync()
+    await flushAsync()
+
+    const deps = reconcilerHarness.deps
+    expect(deps).not.toBeNull()
+    const baselineSerial = deps!.activitySerial()
+    expect(deps!.isQuiet()).toBe(true)
+
+    // One rAF drain containing repeated exact queries: bytes still flow, but
+    // visible state is unchanged, so the serial/quiet gate must stay open.
+    ptyBuffer.appendPtyChunk(runtime.key, '\x1b[?6n')
+    ptyBuffer.appendPtyChunk(runtime.key, '\x1b[?6n')
+    ptyBuffer.flushPtyChunksNow(runtime.key)
+    expect(deps!.activitySerial()).toBe(baselineSerial)
+    expect(deps!.isQuiet()).toBe(true)
+
+    ptyBuffer.appendPtyChunk(runtime.key, 'paint')
+    ptyBuffer.flushPtyChunksNow(runtime.key)
+    expect(deps!.activitySerial()).toBe(baselineSerial + 1)
+    expect(deps!.isQuiet()).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(RECONCILE_QUIET_MS)
+    expect(deps!.isQuiet()).toBe(true)
+
+    // Query + paint in the same coalesced write is activity. This prevents a
+    // query prefix from laundering a real repaint through the race guard.
+    ptyBuffer.appendPtyChunk(runtime.key, '\x1b[?6n')
+    ptyBuffer.appendPtyChunk(runtime.key, 'fresh paint')
+    ptyBuffer.flushPtyChunksNow(runtime.key)
+    expect(deps!.activitySerial()).toBe(baselineSerial + 2)
+    expect(deps!.isQuiet()).toBe(false)
 
     registry.disposeTerminalRuntime(runtime.key)
   })

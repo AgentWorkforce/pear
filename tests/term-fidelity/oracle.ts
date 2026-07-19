@@ -10,6 +10,7 @@ const QUIET_TIMEOUT_MS = 90_000
 
 export const WORKLOAD_NAMES = [
   'long-streaming-reply',
+  'turn-boundary-follow-up',
   'permission-prompt-repaint',
   'resize-mid-stream',
   'typing-during-stream',
@@ -420,12 +421,16 @@ async function waitForQuiet(
       lastBroker = broker
       lastActivity = activityAfter
 
-      const activityStable = activityBefore.lastOutputAt === activityAfter.lastOutputAt &&
-        activityBefore.bytes === activityAfter.bytes
-      const quietFor = Date.now() - activityAfter.lastOutputAt
+      const activityStable =
+        activityBefore.lastVisualOutputAt === activityAfter.lastVisualOutputAt &&
+        activityBefore.visualChunks === activityAfter.visualChunks
+      // Byte/chunk totals intentionally include screen-neutral terminal
+      // queries for delivery accounting. Quietness follows only bytes that can
+      // mutate the visible grid; see installActivityProbe in harness.ts.
+      const quietFor = Date.now() - activityAfter.lastVisualOutputAt
       const dimsMatch = renderer.rows === broker.rows && renderer.cols === broker.cols
       const atBottom = renderer.viewportY === renderer.baseY
-      const quiet = activityAfter.lastOutputAt > 0 &&
+      const quiet = activityAfter.lastVisualOutputAt > 0 &&
         quietFor >= QUIET_WINDOW_MS &&
         activityStable &&
         !renderer.hasPredictions &&
@@ -584,6 +589,33 @@ export async function captureCheckpoint(
   const { renderer, broker } = quiet
   const screenshot = await harness.page.screenshot({ animations: 'disabled', type: 'png' })
   const { differences, total: differingCells } = await cellDiff(renderer, broker)
+  // Emit the byte-level discriminator on clean checkpoints too. Previously it
+  // was calculated only after a cell mismatch, which meant a passing real-CLI
+  // regression could establish visual equality but could not leave explicit
+  // evidence that the exact delivered byte stream also reproduces the broker
+  // screen. Keep this diagnostic non-mutating and retain the richer scroll
+  // probe/artifact write in the divergence branch below.
+  try {
+    const raw = await getRawStream(harness.page, agentName)
+    const rawReplay = await replayRawToGrid(raw, broker.rows, broker.cols)
+    const brokerCells = await brokerCellGrid(broker)
+    const rawVsBroker = countCellDiffs(rawReplay.cells, brokerCells, broker.rows, broker.cols)
+    const rawVsRenderer = countCellDiffs(rawReplay.cells, renderer.cells, broker.rows, broker.cols)
+    const cursorMatch =
+      renderer.cursor[0] === broker.cursor[0] - 1 &&
+      renderer.cursor[1] === broker.cursor[1] - 1
+    console.log(
+      `[term-fidelity] checkpoint evidence ${harness.cli}/${workload}: ` +
+      `bufferType=${renderer.bufferType} viewport=[${renderer.viewportY},${renderer.baseY}] ` +
+      `cursorMatch=${cursorMatch} rawBytes=${raw.length} ` +
+      `rawVsBroker=${rawVsBroker} rawVsRenderer=${rawVsRenderer}`
+    )
+  } catch (error) {
+    console.warn(
+      `[term-fidelity] checkpoint byte evidence unavailable for ${harness.cli}/${workload}: ` +
+      `${error instanceof Error ? error.message : String(error)}`
+    )
+  }
   if (!quiet.reached) {
     differences.unshift(`quiet gate timeout after ${quiet.waitedMs}ms: ${quiet.reason || 'unknown'}`)
   }
