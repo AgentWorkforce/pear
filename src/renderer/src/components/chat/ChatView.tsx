@@ -1,5 +1,5 @@
 import type React from 'react'
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { useStickToBottom, type StickToBottomInstance } from 'use-stick-to-bottom'
 import {
@@ -117,6 +117,75 @@ interface VirtualizedMessageListProps {
   onReact: (messageId: string, emoji: string) => void
 }
 
+interface VirtualizedMessageRowProps {
+  index: number
+  start: number
+  message: ChatMessageType
+  showDateDivider: boolean
+  showRoute: boolean
+  canInteractWithMessages: boolean
+  activeThread: boolean
+  authUser?: AuthUser | null
+  measureElement: (node: HTMLDivElement | null) => void
+  resizeItem: (index: number, size: number) => void
+  onReply: (message: ChatMessageType) => void
+  onReact: (messageId: string, emoji: string) => void
+}
+
+function VirtualizedMessageRow({
+  index,
+  start,
+  message,
+  showDateDivider,
+  showRoute,
+  canInteractWithMessages,
+  activeThread,
+  authUser,
+  measureElement,
+  resizeItem,
+  onReply,
+  onReact
+}: VirtualizedMessageRowProps): React.ReactNode {
+  const rowRef = useRef<HTMLDivElement | null>(null)
+  const setRowRef = useCallback((node: HTMLDivElement | null) => {
+    rowRef.current = node
+    measureElement(node)
+  }, [measureElement])
+
+  // ResizeObserver remains the general guard for font, viewport, and width
+  // changes. A live message body can grow during an already-mounted row,
+  // though, and waiting for the observer leaves one paint where the following
+  // row still uses the old start. Measure just that changed row during the
+  // layout commit so react-virtual moves its successors before paint.
+  useLayoutEffect(() => {
+    const row = rowRef.current
+    if (!row) return
+    resizeItem(index, row.offsetHeight)
+  }, [canInteractWithMessages, index, message, resizeItem, showDateDivider, showRoute])
+
+  return (
+    <div
+      ref={setRowRef}
+      data-index={index}
+      data-testid="chat-virtual-row"
+      className="absolute left-0 top-0 w-full overflow-visible"
+      style={{ transform: `translateY(${start}px)` }}
+    >
+      {showDateDivider && <DateDivider timestamp={message.timestamp} />}
+      <ChatMessage
+        message={message}
+        authUser={authUser}
+        showRoute={showRoute}
+        showActions={canInteractWithMessages}
+        showThreadSummary={canInteractWithMessages}
+        activeThread={activeThread}
+        onReply={canInteractWithMessages ? onReply : undefined}
+        onReact={canInteractWithMessages ? onReact : undefined}
+      />
+    </div>
+  )
+}
+
 function VirtualizedMessageList({
   messages,
   authUser,
@@ -171,26 +240,21 @@ function VirtualizedMessageList({
         const showDateDivider = !previousMessage || !isSameDay(previousMessage.timestamp, message.timestamp)
 
         return (
-          <div
+          <VirtualizedMessageRow
             key={virtualRow.key}
-            ref={messageVirtualizer.measureElement}
-            data-index={index}
-            data-testid="chat-virtual-row"
-            className="absolute left-0 top-0 w-full overflow-visible"
-            style={{ transform: `translateY(${virtualRow.start}px)` }}
-          >
-            {showDateDivider && <DateDivider timestamp={message.timestamp} />}
-            <ChatMessage
-              message={message}
-              authUser={authUser}
-              showRoute={!activeChannelName && !directMessageParticipants}
-              showActions={canInteractWithMessages}
-              showThreadSummary={canInteractWithMessages}
-              activeThread={activeThreadMessageId === message.id}
-              onReply={canInteractWithMessages ? onReply : undefined}
-              onReact={canInteractWithMessages ? onReact : undefined}
-            />
-          </div>
+            index={index}
+            start={virtualRow.start}
+            message={message}
+            authUser={authUser}
+            showDateDivider={showDateDivider}
+            showRoute={!activeChannelName && !directMessageParticipants}
+            canInteractWithMessages={canInteractWithMessages}
+            activeThread={activeThreadMessageId === message.id}
+            measureElement={messageVirtualizer.measureElement}
+            resizeItem={messageVirtualizer.resizeItem}
+            onReply={onReply}
+            onReact={onReact}
+          />
         )
       })}
     </div>
