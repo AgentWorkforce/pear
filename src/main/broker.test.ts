@@ -256,6 +256,7 @@ vi.mock('@agent-relay/sdk', async (importOriginal) => {
 
 import {
   BrokerManager,
+  commonUserBinDirs,
   isCommandAvailableWithAugmentedPath,
   resolveAgentRelayMcpCommand
 } from './broker'
@@ -3056,6 +3057,14 @@ describe('isCommandAvailableWithAugmentedPath', () => {
 
   it('returns false for blank commands', () => {
     expect(isCommandAvailableWithAugmentedPath('   ')).toBe(false)
+  })
+
+  it('prefers the official OpenCode install directory over Homebrew fallbacks', () => {
+    const dirs = commonUserBinDirs('/tmp/pear-test-home')
+    const opencodeBin = join('/tmp/pear-test-home', '.opencode', 'bin')
+
+    expect(dirs).toContain(opencodeBin)
+    expect(dirs.indexOf(opencodeBin)).toBeLessThan(dirs.indexOf('/opt/homebrew/bin'))
   })
 })
 

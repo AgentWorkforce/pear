@@ -11,7 +11,7 @@ type PackageLock = {
   packages?: Record<string, LockPackage>
 }
 
-const MINIMUM_SHIM_SAFE_BROKER_VERSION = '10.6.4'
+const MINIMUM_RELAY_VERSION = '11.0.0'
 const BROKER_PACKAGES = [
   '@agent-relay/broker-darwin-arm64',
   '@agent-relay/broker-darwin-x64',
@@ -37,7 +37,7 @@ function compareVersions(left: string, right: string): number {
   return 0
 }
 
-test('release lock keeps the shim-safe broker aligned with the harness driver', () => {
+test('release lock keeps the Relay v11 broker aligned with the harness driver', () => {
   const lock = JSON.parse(
     readFileSync(new URL('../../../package-lock.json', import.meta.url), 'utf8')
   ) as PackageLock
@@ -45,8 +45,8 @@ test('release lock keeps the shim-safe broker aligned with the harness driver', 
   const driver = packages['node_modules/@agent-relay/harness-driver']
   assert.ok(driver?.version, 'package-lock must include @agent-relay/harness-driver')
   assert.ok(
-    compareVersions(driver.version, MINIMUM_SHIM_SAFE_BROKER_VERSION) >= 0,
-    `@agent-relay/harness-driver ${driver.version} predates the mise/asdf shim spawn fix in ${MINIMUM_SHIM_SAFE_BROKER_VERSION}`
+    compareVersions(driver.version, MINIMUM_RELAY_VERSION) >= 0,
+    `@agent-relay/harness-driver ${driver.version} must stay on Relay v11 or newer`
   )
 
   for (const packageName of BROKER_PACKAGES) {

@@ -18,10 +18,13 @@ import {
   gemini,
   goose,
   grok,
-  opencode,
-  type PtyHarness
+  opencode
 } from '@agent-relay/harnesses'
-import { resolveStaticHarnessConfig, type RestartPolicy } from '@agent-relay/harness-driver'
+import {
+  resolveStaticHarnessConfig,
+  type RestartPolicy,
+  type StaticPtyHarnessDefinition
+} from '@agent-relay/harness-driver'
 import { z } from 'zod'
 
 export const PEAR_LOCAL_SPAWN_HARNESSES = {
@@ -34,7 +37,7 @@ export const PEAR_LOCAL_SPAWN_HARNESSES = {
   goose,
   cursor,
   droid
-} satisfies Record<string, PtyHarness>
+} satisfies Record<string, StaticPtyHarnessDefinition>
 
 const NODE_TOKEN_WAIT_MS = 15_000
 const NODE_TOKEN_POLL_MS = 250

@@ -218,7 +218,7 @@ describe('registerIpcHandlers term-fidelity:dump-corpus', () => {
         expect(await options.capturePage()).toEqual(png)
         expect(await options.relayVersions()).toMatchObject({
           pear: '1.0.0-test',
-          'agent-relay': '^10.6.3',
+          'agent-relay': '^11.0.2',
           'broker:pear-project-1': '10.6.3'
         })
         return { dumped: true, path: '/tmp/bundle' }
