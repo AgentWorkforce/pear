@@ -114,10 +114,10 @@ function resolveShellCommand(): string {
   return '/bin/zsh'
 }
 
-function commonUserBinDirs(): string[] {
-  const home = homedir()
+export function commonUserBinDirs(home = homedir()): string[] {
   return [
     join(home, '.local', 'bin'),
+    join(home, '.opencode', 'bin'),
     join(home, '.local', 'share', 'mise', 'shims'),
     join(home, '.asdf', 'shims'),
     '/opt/homebrew/bin',
