@@ -34,7 +34,6 @@ const mock = vi.hoisted(() => {
       shutdown: vi.fn(async () => undefined),
       syncChannels: vi.fn(async () => undefined),
       autoFixRuntime: vi.fn(),
-      connectCloud: vi.fn(),
       spawnAgent: vi.fn(),
       listPersonas: vi.fn(),
       spawnPersona: vi.fn(),

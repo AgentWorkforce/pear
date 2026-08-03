@@ -17,7 +17,6 @@ import {
   type PendingRelayMessage
 } from '@agent-relay/harness-driver'
 import { AgentRelay, RelayPlacementError, type RelayMessage } from '@agent-relay/sdk'
-import { getAccessToken, getApiUrl } from './auth'
 import { assertDirectory } from './path-utils'
 import { toErrorMessage } from './errors'
 import { isRecord } from './guards'
@@ -2008,8 +2007,7 @@ export class BrokerManager {
 
   /**
    * Attach to an already-provisioned cloud sandbox (used by CloudAgentManager
-   * which warms the box via the cloud-agents/{id}/box endpoint). connectCloud
-   * is the legacy ad-hoc path that creates a sandbox here.
+   * which warms the box via the cloud-agents/{id}/box endpoint).
    */
   async attachCloudSandbox(
     projectId: string,
@@ -2147,62 +2145,6 @@ export class BrokerManager {
         this.startPromises.delete(sessionKey)
       }
     }
-  }
-
-  /**
-   * Connect to a broker running in a remote Daytona sandbox.
-   * Creates an ad-hoc sandbox via the cloud API, then attaches through the
-   * same SDK path used by CloudAgentManager-provisioned sandboxes.
-   */
-  async connectCloud(projectId: string, win: BrowserWindow): Promise<string> {
-    const normalizedProjectId = projectId.trim()
-    if (!normalizedProjectId) {
-      throw new Error('Project id is required')
-    }
-
-    // Provisioning errors (sandbox create / terminal fetch) are handled here;
-    // attachCloudSandbox handles its own error reporting (console.error +
-    // broker:status). Splitting the try/catch keeps the two paths from
-    // double-logging the same failure to the renderer.
-    let sandboxId: string
-    let httpUrl: string
-    let apiKey: string
-    try {
-      const token = await getAccessToken()
-      if (!token) throw new Error('Not logged in — sign in first')
-
-      const apiUrl = getApiUrl()
-
-      // 1. Create sandbox with broker
-      console.log('[broker] Creating cloud sandbox...')
-      const createRes = await fetch(`${apiUrl}/api/v1/sandboxes`, {
-        method: 'POST',
-        headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-        body: JSON.stringify({})
-      })
-      if (!createRes.ok) {
-        const err = await createRes.json().catch(() => ({ error: createRes.statusText }))
-        throw new Error(`Failed to create sandbox: ${(err as { error: string }).error}`)
-      }
-      ;({ sandboxId } = await createRes.json() as { sandboxId: string })
-      console.log('[broker] Sandbox created:', sandboxId)
-
-      // 2. Get terminal connection info
-      const termRes = await fetch(`${apiUrl}/api/v1/sandboxes/${sandboxId}/terminal`, {
-        headers: { Authorization: `Bearer ${token}` }
-      })
-      if (!termRes.ok) {
-        throw new Error('Failed to get terminal connection info')
-      }
-      ;({ httpUrl, apiKey } = await termRes.json() as { httpUrl: string; apiKey: string })
-    } catch (err) {
-      console.error(`[broker] Failed to connect cloud broker for project ${normalizedProjectId}:`, err)
-      this.sendStatusToWindow(win, normalizedProjectId, 'error', String(err))
-      throw err
-    }
-
-    // attachCloudSandbox owns its own error reporting; let its errors propagate.
-    return this.attachCloudSandbox(normalizedProjectId, { sandboxId, execUrl: httpUrl, apiKey }, win)
   }
 
   // Local session first, then the cloud session — local stays the default

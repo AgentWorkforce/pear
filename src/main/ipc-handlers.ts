@@ -829,12 +829,6 @@ export function registerIpcHandlers(): void {
     return brokerManager.attachTerminal(input.projectId, input)
   })
 
-  ipcMain.handle('broker:connect-cloud', async (event) => {
-    const win = BrowserWindow.fromWebContents(event.sender)
-    if (!win) throw new Error('No window')
-    return brokerManager.connectCloud('cloud', win)
-  })
-
   ipcMain.handle('broker:send-input', async (_, projectId: string | undefined, name: string, data: string) => {
     return brokerManager.sendInput(projectId, name, data)
   })
