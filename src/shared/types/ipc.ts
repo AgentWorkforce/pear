@@ -1073,7 +1073,6 @@ export interface PearAPI {
       channels?: string[],
       errorMessage?: string
     ) => Promise<{ removed: string[] }>
-    connectCloud: () => Promise<string>
     spawnAgent: (projectId: string, input: BrokerSpawnAgentInput) => Promise<BrokerSpawnAgentResult>
     placeAgent: (projectId: string, input: BrokerPlaceAgentInput) => Promise<BrokerPlaceAgentOutcome>
     listNodes: (projectId: string, capability?: string) => Promise<BrokerNodeSummary[]>

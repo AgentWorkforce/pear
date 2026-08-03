@@ -257,7 +257,6 @@ const api = {
         channels,
         errorMessage
       ),
-    connectCloud: () => invoke<string>('broker:connect-cloud'),
     spawnAgent: (projectId: string, input: BrokerSpawnAgentInput) =>
       invoke<BrokerSpawnAgentResult>('broker:spawn-agent', projectId, input),
     placeAgent: (projectId: string, input: BrokerPlaceAgentInput) =>

@@ -913,7 +913,6 @@ export const pearMock: PearAPI = {
       id: `mock-observer-token-${projectId}`
     }),
     autoFixRuntime: async () => ({ removed: [] }),
-    connectCloud: async () => 'mock-cloud',
     spawnAgent: async (projectId: string, input: BrokerSpawnAgentInput): Promise<BrokerSpawnAgentResult> => {
       const agent = upsertAgent({ ...input, projectId, runtime: 'mock', current_state: 'idle' })
       handleInjectedBrokerEvent({
