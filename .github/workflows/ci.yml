@@ -9,7 +9,6 @@ on:
 
 jobs:
   checks:
-    if: (github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.head_ref == 'trunk'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -33,7 +32,6 @@ jobs:
       - run: npm run build
 
   playwright:
-    if: (github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.head_ref == 'trunk'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -66,7 +64,6 @@ jobs:
           if-no-files-found: ignore
 
   packaged-mcp-smoke:
-    if: (github.event_name != 'pull_request' && github.event_name != 'pull_request_target') || github.head_ref == 'trunk'
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
