@@ -26,9 +26,6 @@ const mock = vi.hoisted(() => {
       fromWebContents: vi.fn(() => mockWindow),
       getAllWindows: vi.fn(() => [mockWindow])
     },
-    termFidelityCorpusDumper: {
-      dump: vi.fn()
-    },
     brokerManager: {
       start: vi.fn(),
       shutdown: vi.fn(async () => undefined),
@@ -37,9 +34,6 @@ const mock = vi.hoisted(() => {
       spawnAgent: vi.fn(),
       listPersonas: vi.fn(),
       spawnPersona: vi.fn(),
-      attachTerminal: vi.fn(),
-      sendInputFireAndForget: vi.fn(),
-      setTerminalMode: vi.fn(),
       getPending: vi.fn(),
       flushPending: vi.fn(),
       sendMessage: vi.fn(),
@@ -127,14 +121,6 @@ vi.mock('./broker', () => ({
   isCommandAvailableWithAugmentedPath: mock.isCommandAvailableWithAugmentedPath
 }))
 
-vi.mock('./term-fidelity-corpus', () => ({
-  TermFidelityCorpusDumper: class {
-    dump(...args: unknown[]): unknown {
-      return mock.termFidelityCorpusDumper.dump(...args)
-    }
-  }
-}))
-
 vi.mock('./git', () => ({
   getSelectedDiff: vi.fn()
 }))
@@ -181,56 +167,6 @@ import type { FactoryConfigReadResult, FactoryStatus } from '../shared/types/ipc
 
 const asConfigResult = (value: unknown): FactoryConfigReadResult => value as FactoryConfigReadResult
 const asStatus = (value: unknown): FactoryStatus => value as FactoryStatus
-
-describe('registerIpcHandlers term-fidelity:dump-corpus', () => {
-  beforeEach(() => {
-    mock.handlers.clear()
-    mock.ipcMain.handle.mockClear()
-    mock.ipcMain.on.mockClear()
-    mock.termFidelityCorpusDumper.dump.mockReset()
-    mock.brokerManager.listBrokerDetails.mockReset()
-    registerIpcHandlers()
-  })
-
-  it('captures the sender page and supplies production metadata to the corpus writer', async () => {
-    const input = {
-      projectId: 'project-1',
-      agentName: 'codex-1',
-      cli: 'codex',
-      renderer: { rows: 2, cols: 10, text: 'renderer' },
-      broker: { rows: 2, cols: 10, text: 'broker' },
-      telemetryLines: ['confirmed']
-    }
-    const png = Buffer.from('png')
-    const capturePage = vi.fn(async () => ({ toPNG: () => png }))
-    mock.brokerManager.listBrokerDetails.mockResolvedValueOnce([
-      {
-        projectId: 'project-1',
-        name: 'pear-project-1',
-        session: { brokerVersion: '10.6.3' }
-      }
-    ])
-    mock.termFidelityCorpusDumper.dump.mockImplementationOnce(
-      async (receivedInput, options) => {
-        expect(receivedInput).toEqual(input)
-        expect(options.rootDir).toBe('/tmp/pear-test-user-data/term-fidelity-corpus')
-        expect(await options.capturePage()).toEqual(png)
-        expect(await options.relayVersions()).toMatchObject({
-          pear: '1.0.0-test',
-          'agent-relay': '^11.0.2',
-          'broker:pear-project-1': '10.6.3'
-        })
-        return { dumped: true, path: '/tmp/bundle' }
-      }
-    )
-
-    const handler = mock.handlers.get('term-fidelity:dump-corpus')
-    const result = await handler?.({ sender: { capturePage } }, input)
-
-    expect(result).toEqual({ dumped: true, path: '/tmp/bundle' })
-    expect(capturePage).toHaveBeenCalledTimes(1)
-  })
-})
 
 describe('registerIpcHandlers broker:start', () => {
   beforeEach(() => {

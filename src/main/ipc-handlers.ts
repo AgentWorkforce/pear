@@ -34,54 +34,28 @@ import { burnManager, type BurnAgentInput, type BurnProjectInput, type BurnSessi
 import { resetRelayWorkspaceManager } from './relay-workspace'
 import { isDirectory } from './path-utils'
 import { findProjectForPath, projectContainsPath } from './cli'
+import { hostname } from 'os'
+import { RelayChatClient, RelayChatPoller, RELAY_CHAT_POLL_INTERVAL_MS } from './relay-chat-client'
+import { normalizeRelaycastBaseUrl } from './relay-service-urls'
 import type {
   BrokerReconcileMessagesInput,
   BrokerSpawnAgentResult,
   BrokerPlaceAgentInput,
   BrokerPlaceAgentOutcome,
   BrokerNodeSummary,
+  ChatHistoryInput,
+  ChatInvalidatedEvent,
+  ChatMessageEvent,
+  ChatSendInput,
+  ChatUploadInput,
   FactoryAgentStatus,
   FactoryConfigReadResult,
   FactoryIssueStatus,
   FactoryNodeConfig,
   FactoryStatus,
-  TermFidelityCorpusInput
+  RelayChatMessage
 } from '../shared/types/ipc'
 import type { ProactiveAgentDraft } from './proactive-agent.types'
-import { TermFidelityCorpusDumper } from './term-fidelity-corpus'
-
-const termFidelityCorpusDumper = new TermFidelityCorpusDumper()
-
-async function termFidelityRelayVersions(projectId?: string): Promise<Record<string, string>> {
-  let declaredRelayVersions: Record<string, string> = {}
-  try {
-    const manifest = JSON.parse(
-      await readFile(join(app.getAppPath(), 'package.json'), 'utf8')
-    ) as { dependencies?: Record<string, unknown> } | null
-    declaredRelayVersions = Object.fromEntries(
-      Object.entries(manifest?.dependencies || {}).filter(
-        ([name, version]) =>
-          (name === 'agent-relay' || name.startsWith('@agent-relay/')) &&
-          typeof version === 'string'
-      )
-    ) as Record<string, string>
-  } catch {
-    // Broker version metadata below still makes the bundle actionable when a
-    // packaged app manifest is unavailable.
-  }
-  const versions: Record<string, string> = {
-    pear: app.getVersion(),
-    ...declaredRelayVersions
-  }
-  const details = await brokerManager.listBrokerDetails().catch(() => [])
-  for (const detail of details) {
-    if (projectId && detail.projectId !== projectId) continue
-    if (detail.session?.brokerVersion) {
-      versions[`broker:${detail.name}`] = detail.session.brokerVersion
-    }
-  }
-  return versions
-}
 
 function toBrokerSpawnAgentResult(result: BrokerSpawnAgentResult): BrokerSpawnAgentResult {
   return {
@@ -522,6 +496,183 @@ function factoryStatus(): Promise<FactoryStatus> {
   return factoryStatusInFlight
 }
 
+// --- Chat companion (Relaycast) ---
+// Credentials reuse the Cloud sign-in + safeStorage pattern from `auth.ts`
+// (resolveCloudAuth / getAccountWorkspaceId); no new secret storage. The
+// workspace key is resolved through Cloud
+// `GET /api/v1/workspaces/{id}/resolve` (its `relaycastApiKey`), and the
+// agent token is minted via register-or-rotate and held in memory — like the
+// placement `pear-requester-*` identity, restarts re-register rather than
+// persisting a secret.
+let chatClient: RelayChatClient | null = null
+let chatClientPromise: Promise<RelayChatClient> | null = null
+let chatWorkspaceKey: string | null = null
+let chatAgentToken: string | null = null
+let chatAgentName: string | null = null
+let chatPoller: RelayChatPoller | null = null
+
+/** Per-machine companion identity so two hosts never rotate each other's token. */
+function chatAgentIdentityName(): string {
+  let host = 'local'
+  try {
+    host = hostname().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'local'
+  } catch {
+    // ignore — fall back to 'local'
+  }
+  return `pear-chat-${host}`.slice(0, 64)
+}
+
+function readResolveRelaycastApiKey(payload: unknown): string | null {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return null
+  const value = (payload as Record<string, unknown>).relaycastApiKey
+  return typeof value === 'string' && value.trim() ? value.trim() : null
+}
+
+async function resolveChatWorkspaceKey(): Promise<string> {
+  if (chatWorkspaceKey) return chatWorkspaceKey
+  const cloudAuth = await auth.resolveCloudAuth()
+  if (!cloudAuth) throw new Error('cloud-auth-required')
+  const workspaceId = await auth.getAccountWorkspaceId(auth.accountWorkspaceReadyRetryOptions())
+  const res = await fetch(
+    `${cloudAuth.apiUrl.replace(/\/+$/u, '')}/api/v1/workspaces/${encodeURIComponent(workspaceId)}/resolve`,
+    { headers: { Authorization: `Bearer ${cloudAuth.accessToken}`, Accept: 'application/json' } }
+  ).catch((error: unknown) => {
+    throw new Error(`Workspace resolve failed: ${toErrorMessage(error)}`)
+  })
+  if (res.status === 401 || res.status === 403) throw new Error('cloud-auth-required:workspace-resolve')
+  if (!res.ok) throw new Error(`Workspace resolve failed: ${res.status}`)
+  const payload = await res.json().catch(() => null) as unknown
+  const key = readResolveRelaycastApiKey(payload)
+  if (!key) throw new Error('account-workspace-required:missing-relaycast-key')
+  chatWorkspaceKey = key
+  return key
+}
+
+async function rotateChatWorkspaceKey(): Promise<string | null> {
+  chatWorkspaceKey = null
+  try {
+    return await resolveChatWorkspaceKey()
+  } catch {
+    return null
+  }
+}
+
+async function buildChatClient(): Promise<RelayChatClient> {
+  await resolveChatWorkspaceKey()
+  const baseUrl = normalizeRelaycastBaseUrl(process.env.RELAYCAST_BASE_URL || process.env.RELAY_BASE_URL)
+  const client = new RelayChatClient({
+    baseUrl,
+    getWorkspaceKey: () => chatWorkspaceKey,
+    getAgentToken: () => chatAgentToken,
+    setWorkspaceKey: (key: string) => {
+      chatWorkspaceKey = key
+    },
+    rotateWorkspaceKey: rotateChatWorkspaceKey,
+    selfName: () => chatAgentName
+  })
+  const identity = await client.ensureAgent(chatAgentIdentityName())
+  chatAgentName = identity.name
+  chatAgentToken = identity.token
+  return client
+}
+
+async function getChatClient(): Promise<RelayChatClient> {
+  if (chatClient) return chatClient
+  if (!chatClientPromise) {
+    chatClientPromise = buildChatClient().then((client) => {
+      chatClient = client
+      return client
+    }).catch((error: unknown) => {
+      chatClientPromise = null
+      throw error
+    })
+  }
+  return chatClientPromise
+}
+
+function broadcastChatInvalidated(reason: ChatInvalidatedEvent['reason']): void {
+  const event: ChatInvalidatedEvent = { reason }
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send('chat:invalidated', event)
+  }
+}
+
+function broadcastChatMessage(conversationId: string, message: RelayChatMessage): void {
+  const event: ChatMessageEvent = { conversationId, message }
+  for (const win of BrowserWindow.getAllWindows()) {
+    win.webContents.send('chat:message', event)
+  }
+}
+
+function ensureChatPoller(client: RelayChatClient): RelayChatPoller {
+  if (!chatPoller) {
+    chatPoller = new RelayChatPoller(
+      {
+        pollRoster: async () => {
+          await client.listAgents()
+          await client.listNodes()
+        },
+        pollMessages: async () => {
+          await client.listDMConversations()
+        },
+        pollChannels: async () => {
+          await client.listChannels()
+        },
+        loadOpenChannelHistory: undefined,
+        onRefreshed: (reason) => {
+          broadcastChatInvalidated(reason === 'interval' ? 'poll' : reason)
+        },
+        onError: (error) => {
+          console.warn('[chat] Poll refresh failed:', toErrorMessage(error))
+        }
+      },
+      { intervalMs: RELAY_CHAT_POLL_INTERVAL_MS }
+    )
+    chatPoller.start()
+  }
+  return chatPoller
+}
+
+/** Drop cached chat credentials (e.g. on sign-out) so the next use re-resolves. */
+export function resetChatClient(): void {
+  chatPoller?.stop()
+  chatPoller = null
+  chatClient = null
+  chatClientPromise = null
+  chatWorkspaceKey = null
+  chatAgentToken = null
+  chatAgentName = null
+}
+
+function normalizeChatSendInput(input: ChatSendInput): ChatSendInput {
+  if (!input || typeof input !== 'object') throw new Error('Chat send input is required')
+  if (input.kind !== 'dm' && input.kind !== 'channel') throw new Error('Chat send kind must be "dm" or "channel"')
+  const to = input.to?.trim()
+  const text = input.text
+  if (!to) throw new Error('Chat send target is required')
+  if (!text?.trim()) throw new Error('Message text is required')
+  return {
+    kind: input.kind,
+    to,
+    text,
+    ...(input.attachments ? { attachments: input.attachments } : {}),
+    ...(input.idempotencyKey ? { idempotencyKey: input.idempotencyKey } : {})
+  }
+}
+
+function normalizeChatHistoryInput(input: ChatHistoryInput): ChatHistoryInput {
+  if (!input || typeof input !== 'object') throw new Error('Chat history input is required')
+  if (input.kind !== 'dm' && input.kind !== 'channel') throw new Error('Chat history kind must be "dm" or "channel"')
+  const id = input.id?.trim()
+  if (!id) throw new Error('Chat history id is required')
+  return {
+    kind: input.kind,
+    id,
+    ...(input.limit !== undefined ? { limit: input.limit } : {}),
+    ...(input.withDelivery !== undefined ? { withDelivery: input.withDelivery } : {})
+  }
+}
+
 export function registerIpcHandlers(): void {
   // Fan proactive-agent events out to all renderer windows.
   proactiveAgentManager.onEvent((event) => {
@@ -552,17 +703,6 @@ export function registerIpcHandlers(): void {
     app.quit()
     return true
   })
-
-  ipcMain.handle(
-    'term-fidelity:dump-corpus',
-    async (event, input: TermFidelityCorpusInput) => {
-      return termFidelityCorpusDumper.dump(input, {
-        rootDir: join(app.getPath('userData'), 'term-fidelity-corpus'),
-        capturePage: async () => (await event.sender.capturePage()).toPNG(),
-        relayVersions: () => termFidelityRelayVersions(input.projectId)
-      })
-    }
-  )
 
   // --- Project ---
   ipcMain.handle('project:list', () => {
@@ -819,46 +959,12 @@ export function registerIpcHandlers(): void {
     }
   })
 
-  ipcMain.handle('broker:attach-terminal', async (_, input: {
-    projectId?: string
-    name: string
-    rows?: number
-    cols?: number
-    mode?: 'view' | 'drive' | 'passthrough'
-  }) => {
-    return brokerManager.attachTerminal(input.projectId, input)
-  })
-
-  ipcMain.handle('broker:send-input', async (_, projectId: string | undefined, name: string, data: string) => {
-    return brokerManager.sendInput(projectId, name, data)
-  })
-
-  ipcMain.on('broker:send-input-fast', (_, projectId: string | undefined, name: string, data: string) => {
-    brokerManager.sendInputFireAndForget(projectId, name, data)
-  })
-
-  ipcMain.handle('broker:set-terminal-mode', async (_, projectId: string | undefined, name: string, mode: 'view' | 'drive' | 'passthrough') => {
-    return brokerManager.setTerminalMode(projectId, name, mode)
-  })
-
   ipcMain.handle('broker:get-pending', async (_, projectId: string | undefined, name: string) => {
     return brokerManager.getPendingMessages(projectId, name)
   })
 
   ipcMain.handle('broker:flush-pending', async (_, projectId: string | undefined, name: string) => {
     return brokerManager.flushPending(projectId, name)
-  })
-
-  ipcMain.handle('broker:resize-pty', async (_, projectId: string | undefined, name: string, rows: number, cols: number) => {
-    await brokerManager.resizePty(projectId, name, rows, cols)
-  })
-
-  ipcMain.handle('broker:snapshot-terminal', async (_, projectId: string | undefined, name: string, format: 'plain' | 'ansi') => {
-    return brokerManager.snapshotTerminal(projectId, name, format)
-  })
-
-  ipcMain.handle('broker:input-srtt', (_, projectId: string | undefined, name: string) => {
-    return brokerManager.getInputSrtt(projectId, name)
   })
 
   ipcMain.handle('broker:send-message', async (_, projectId: string | undefined, input: SendMessageInput) => {
@@ -907,6 +1013,71 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('broker:shutdown', async () => {
     await brokerManager.shutdown()
+  })
+
+  // --- Chat companion (Relaycast) ---
+  ipcMain.handle('chat.listConversations', async () => {
+    const client = await getChatClient()
+    ensureChatPoller(client)
+    return client.listConversations()
+  })
+
+  ipcMain.handle('chat.getHistory', async (_, input: ChatHistoryInput) => {
+    const client = await getChatClient()
+    const poller = ensureChatPoller(client)
+    const normalized = normalizeChatHistoryInput(input)
+    // Per-open history load + foreground refresh target. The background tick
+    // never pulls full channel history — only open/foreground/manual does.
+    poller.setOpenChannel(normalized.kind === 'channel' ? normalized.id : null)
+    return client.getHistory(normalized)
+  })
+
+  ipcMain.handle('chat.send', async (_, input: ChatSendInput) => {
+    const client = await getChatClient()
+    const normalized = normalizeChatSendInput(input)
+    // A throw here rejects the IPC call with a RelayChatError so the
+    // renderer can roll back its optimistic row — nothing is fabricated.
+    const message = normalized.kind === 'dm'
+      ? await client.sendDM(normalized)
+      : await client.sendChannelMessage(normalized.to, normalized)
+    const conversationId = normalized.kind === 'dm'
+      ? message.conversationId ?? `conversation:${normalized.to}`
+      : `channel:${normalized.to.replace(/^#+/, '')}`
+    broadcastChatMessage(conversationId, message)
+    broadcastChatInvalidated('send')
+    return message
+  })
+
+  ipcMain.handle('chat.markRead', async (_, messageId: string) => {
+    const client = await getChatClient()
+    if (typeof messageId !== 'string' || !messageId.trim()) throw new Error('Message id is required')
+    await client.markRead(messageId)
+  })
+
+  ipcMain.handle('chat.joinChannel', async (_, channel: string) => {
+    const client = await getChatClient()
+    if (typeof channel !== 'string' || !channel.trim()) throw new Error('Channel name is required')
+    const result = await client.joinChannel(channel)
+    broadcastChatInvalidated('join')
+    return result
+  })
+
+  ipcMain.handle('chat.uploadFile', async (_, input: ChatUploadInput) => {
+    const client = await getChatClient()
+    if (!input || typeof input !== 'object') throw new Error('Chat upload input is required')
+    if (!input.filename?.trim()) throw new Error('Filename is required')
+    if (typeof input.base64 !== 'string' || !input.base64) throw new Error('File bytes are required')
+    let bytes: Buffer
+    try {
+      bytes = Buffer.from(input.base64, 'base64')
+    } catch {
+      throw new Error('File bytes are not valid base64')
+    }
+    return client.uploadFile({
+      filename: input.filename.trim(),
+      contentType: input.contentType?.trim() || 'application/octet-stream',
+      bytes: new Uint8Array(bytes)
+    })
   })
 
   // --- Factory ---
@@ -1100,6 +1271,7 @@ export function registerIpcHandlers(): void {
     const status = await auth.ensureAuthenticated(input?.apiUrl)
     if (status.loggedIn) {
       resetRelayWorkspaceManager()
+      resetChatClient()
       // Re-run the cloud auth check so a stale "Cloud sign-in required" banner
       // clears now that we have fresh tokens. Fire-and-forget: the banner
       // clears via the `integration-auth-recovered` event when this resolves,
@@ -1111,6 +1283,7 @@ export function registerIpcHandlers(): void {
 
   ipcMain.handle('auth:logout', () => {
     resetRelayWorkspaceManager()
+    resetChatClient()
     auth.logout()
   })
 

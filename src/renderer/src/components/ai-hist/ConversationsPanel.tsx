@@ -150,7 +150,7 @@ function resumeAgentSpec(
       // two processes can't dual-attach the same session log. The resumed
       // conversation gets a fresh session id; the original is untouched.
       // Claude exits immediately on the bad invocation, so the broker never
-      // registers a worker → attachTerminal sees agent_not_found.
+      // registers a worker → the spawn resolves as agent_not_found.
       return {
         cli: 'claude',
         args: ['--resume', session.sessionId, '--fork-session'],

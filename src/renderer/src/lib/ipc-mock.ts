@@ -13,8 +13,6 @@ import type {
   AiHistStatusResponse,
   AuthLoginInput,
   AuthStatus,
-  BrokerAttachTerminalInput,
-  BrokerAttachTerminalResult,
   BrokerDetails,
   BrokerEventRecord,
   BrokerEventStreamDiagnostic,
@@ -22,7 +20,6 @@ import type {
   BrokerReconciledChatMessage,
   BrokerReconcileMessagesInput,
   BrokerSendMessageInput,
-  BrokerSetTerminalModeResult,
   BrokerSpawnAgentInput,
   BrokerSpawnAgentResult,
   BrokerPlaceAgentInput,
@@ -38,6 +35,11 @@ import type {
   BurnSessionBreakdown,
   BurnSessionBreakdownInput,
   BurnSessionLookup,
+  ChatHistoryInput,
+  ChatInvalidatedEvent,
+  ChatMessageEvent,
+  ChatSendInput,
+  ChatUploadInput,
   CloudAgentBinding,
   CloudAgentEvent,
   CloudAgentRecord,
@@ -66,6 +68,9 @@ import type {
   ObserverChatUpdate,
   ObserverTokenResult,
   PearAPI,
+  RelayChatAttachment,
+  RelayChatConversation,
+  RelayChatMessage,
   PendingRelayMessage,
   ProactiveAgentBinding,
   ProactiveAgentDeployResult,
@@ -77,11 +82,9 @@ import type {
   ProjectIntegrationResult,
   ProjectListResult,
   ProjectRootRecord,
-  TerminalAttachMode,
   UpdaterState,
   WorkforcePersona
 } from '@shared/types/ipc'
-import { getTerminalRuntime } from '@/lib/terminal-runtime-registry'
 
 type BrokerEventLike = Record<string, unknown> & {
   kind: string
@@ -113,20 +116,11 @@ interface MockState {
   agents: BrokerListAgent[]
   events: BrokerEventRecord[]
   messages: BrokerReconciledChatMessage[]
-  ptyChunks: Record<string, string[]>
   startedProjects: Set<string>
-  terminalModes: Map<string, TerminalAttachMode>
   brokerEventListeners: Set<Listener<unknown>>
   brokerStatusListeners: Set<Listener<BrokerStatusEvent>>
   brokerDiagnosticListeners: Set<Listener<BrokerEventStreamDiagnostic>>
   observerChatUpdateListeners: Set<Listener<ObserverChatUpdate>>
-  ptyChunkListeners: Set<(
-    projectId: string,
-    name: string,
-    chunk: string,
-    offset?: number,
-    generation?: number
-  ) => void>
   menuListeners: Map<string, Set<(...args: unknown[]) => void>>
   cloudAgentListeners: Set<Listener<CloudAgentEvent>>
   proactiveAgentListeners: Set<Listener<ProactiveAgentEvent>>
@@ -135,40 +129,24 @@ interface MockState {
   updateProgressListeners: Set<Listener<{ percent: number }>>
   updateDownloadedListeners: Set<Listener<{ version: string }>>
   updateErrorListeners: Set<Listener<{ message: string }>>
+  chatConversations: RelayChatConversation[]
+  chatHistory: Record<string, RelayChatMessage[]>
+  chatInvalidatedListeners: Set<Listener<ChatInvalidatedEvent>>
+  chatMessageListeners: Set<Listener<ChatMessageEvent>>
 }
 
 export interface PearMockHarness {
   reset: () => void
   injectBrokerEvent: (event: BrokerEventLike) => void
   injectBrokerEvents: (events: BrokerEventLike[]) => void
-  injectPtyChunk: (
-    projectId: string,
-    name: string,
-    chunk: string,
-    offset?: number,
-    generation?: number
-  ) => void
-  // Rendering-harness knobs: force the input SRTT the renderer polls (so the
-  // predictive-echo engine route engages) and echo typed bytes back through
-  // the PTY stream after a delay (so predictions reconcile end-to-end).
-  setInputSrtt: (ms: number | null) => void
-  setInputEcho: (options: { delayMs: number } | null) => void
-  // Model a DECSET ?1004 (focus-reporting) TUI like Claude Code's Ink UI:
-  // when set, every focus report the renderer emits to the PTY (\x1b[I focus-in
-  // or \x1b[O focus-out) makes the program re-commit `frame` to the stream.
-  // Spurious focus reports therefore stack duplicate frames — the exact
-  // terminal-duplication vector under test. Pass null to disable.
-  setFocusRedraw: (frame: string | null) => void
   spawnAgents: (count: number, options?: { projectId?: string; channel?: string; namePrefix?: string }) => void
   openChannel: (projectId: string, channelName: string) => void
   openAgents: (projectId?: string) => void
-  getTerminalBufferText: (projectId: string, name: string) => string | null
   getState: () => {
     activeId: string | null
     agents: BrokerListAgent[]
     events: BrokerEventRecord[]
     messages: BrokerReconciledChatMessage[]
-    ptyChunks: Record<string, string[]>
   }
 }
 
@@ -187,6 +165,12 @@ const defaultProject: MockProject = {
   channels: ['general'],
   channelPeople: {},
   integrations: []
+}
+
+const mockNow = new Date('2026-06-09T09:42:00.000Z').getTime()
+
+function isoMinutesAgo(minutes: number): string {
+  return new Date(mockNow - minutes * 60_000).toISOString()
 }
 
 function createState(): MockState {
@@ -239,14 +223,11 @@ function createState(): MockState {
     ],
     events: [],
     messages: [],
-    ptyChunks: {},
     startedProjects: new Set(),
-    terminalModes: new Map(),
     brokerEventListeners: new Set(),
     brokerStatusListeners: new Set(),
     brokerDiagnosticListeners: new Set(),
     observerChatUpdateListeners: new Set(),
-    ptyChunkListeners: new Set(),
     menuListeners: new Map(),
     cloudAgentListeners: new Set(),
     proactiveAgentListeners: new Set(),
@@ -254,24 +235,76 @@ function createState(): MockState {
     updateAvailableListeners: new Set(),
     updateProgressListeners: new Set(),
     updateDownloadedListeners: new Set(),
-    updateErrorListeners: new Set()
+    updateErrorListeners: new Set(),
+    chatConversations: [
+      {
+        kind: 'dm',
+        id: 'conversation:thread-1',
+        name: 'alice@macbook',
+        participants: ['alice@macbook'],
+        lastMessageAt: isoMinutesAgo(2),
+        unreadCount: 1
+      },
+      {
+        kind: 'dm',
+        id: 'conversation:thread-2',
+        name: 'bob@linuxbox',
+        participants: ['bob@linuxbox'],
+        lastMessageAt: isoMinutesAgo(60),
+        unreadCount: 0
+      },
+      {
+        kind: 'channel',
+        id: 'channel:general',
+        name: '#general',
+        isMember: true
+      }
+    ],
+    chatHistory: {
+      'thread-1': [
+        {
+          id: 'mock-msg-1',
+          conversationId: 'thread-1',
+          from: 'alice@macbook',
+          text: 'Status update is ready',
+          createdAt: isoMinutesAgo(3),
+          mine: false,
+          hasServerID: true,
+          attachments: []
+        },
+        {
+          id: 'mock-msg-2',
+          conversationId: 'thread-1',
+          from: 'pear-companion',
+          text: 'Thanks, reviewing now https://example.com/review',
+          createdAt: isoMinutesAgo(2),
+          mine: true,
+          hasServerID: true,
+          delivered: true,
+          attachments: []
+        }
+      ],
+      'thread-2': [
+        {
+          id: 'mock-msg-3',
+          conversationId: 'thread-2',
+          from: 'bob@linuxbox',
+          text: 'Deploy finished',
+          createdAt: isoMinutesAgo(60),
+          mine: false,
+          hasServerID: true,
+          attachments: []
+        }
+      ],
+      general: []
+    },
+    chatInvalidatedListeners: new Set(),
+    chatMessageListeners: new Set()
   }
 }
 
 let state = createState()
 let seq = 0
-// Rendering-harness knobs (setInputSrtt / setInputEcho): survive reset() so
-// a spec can configure them before booting agents.
-let mockInputSrttMs: number | null = null
-let mockInputEchoDelayMs: number | null = null
-// See PearMockHarness.setFocusRedraw. Null = no focus-reactive TUI modeled.
-let mockFocusRedrawFrame: string | null = null
-
-const mockNow = new Date('2026-06-09T09:42:00.000Z').getTime()
-
-function isoMinutesAgo(minutes: number): string {
-  return new Date(mockNow - minutes * 60_000).toISOString()
-}
 
 const mockLinearIssues: Array<Record<string, unknown>> = [
   {
@@ -669,10 +702,6 @@ function normalizeMockRemotePath(path: string): string {
   return `/${segments.join('/')}`
 }
 
-function key(projectId: string | undefined, name: string): string {
-  return `${projectId || 'unknown'}:${name}`
-}
-
 function emit<T>(listeners: Set<Listener<T>>, payload: T): void {
   for (const listener of [...listeners]) listener(payload)
 }
@@ -815,8 +844,7 @@ const authStatus: AuthStatus = {
 export const pearMock: PearAPI = {
   app: {
     confirmQuit: async () => true,
-    notifyCliReady: () => undefined,
-    dumpTermFidelityCorpus: async () => ({ dumped: false, reason: 'rate-limited' })
+    notifyCliReady: () => undefined
   },
   project: {
     list: async (): Promise<ProjectListResult> => ({ projects: clone(state.projects), activeId: state.activeId }),
@@ -960,41 +988,8 @@ export const pearMock: PearAPI = {
     listPersonas: async (): Promise<WorkforcePersona[]> => [],
     spawnPersona: async (projectId: string, personaId: string) =>
       pearMock.broker.spawnAgent(projectId, { name: personaId, cli: 'codex' }),
-    attachTerminal: async (input: BrokerAttachTerminalInput): Promise<BrokerAttachTerminalResult> => ({
-      name: input.name,
-      mode: 'auto_inject',
-      pending: 0,
-      snapshot: { rows: input.rows || 24, cols: input.cols || 80, cursor: [0, 0], screen: '' }
-    }),
-    sendInput: async (_projectId: string | undefined, name: string, data: string) => ({ name, bytes_written: data.length }),
-    sendInputFast: (projectId: string | undefined, name: string, data: string) => {
-      const resolvedProject = projectId || state.activeId || defaultProject.id
-      // Focus-reactive TUI model (setFocusRedraw): re-commit the frame on every
-      // focus report the renderer emits. Synchronous so the stacked frame is in
-      // the buffer by the time the harness reads it; faithful to a ?1004 TUI
-      // that redraws when told "the user just looked at me / away".
-      if (mockFocusRedrawFrame !== null && (data.includes('\x1b[I') || data.includes('\x1b[O'))) {
-        pearMockHarness.injectPtyChunk(resolvedProject, name, mockFocusRedrawFrame)
-      }
-      // Optional raw echo back through the PTY stream (setInputEcho) so the
-      // rendering harnesses can exercise predictive echo end-to-end: type →
-      // optimistic glyph → delayed authoritative echo → reconcile.
-      if (mockInputEchoDelayMs === null) return
-      setTimeout(() => {
-        pearMockHarness.injectPtyChunk(resolvedProject, name, data)
-      }, mockInputEchoDelayMs)
-    },
-    setTerminalMode: async (projectId: string | undefined, name: string, mode: TerminalAttachMode): Promise<BrokerSetTerminalModeResult> => {
-      state.terminalModes.set(key(projectId, name), mode)
-      return { name, mode: mode === 'drive' ? 'manual_flush' : 'auto_inject', flushed: 0, pending: 0 }
-    },
     getPending: async (): Promise<PendingRelayMessage[]> => [],
     flushPending: async () => ({ flushed: 0 }),
-    resizePty: async () => undefined,
-    // No authoritative PTY emulation behind the mock: the reconciler treats
-    // null as "skip this check", so it stays dormant in web/harness builds.
-    snapshotTerminal: async () => null,
-    inputSrtt: async () => mockInputSrttMs,
     sendMessage: async (projectId: string | undefined, input: BrokerSendMessageInput) => {
       handleInjectedBrokerEvent({
         kind: 'relay_inbound',
@@ -1033,14 +1028,6 @@ export const pearMock: PearAPI = {
       noopUnsubscribe(state.brokerDiagnosticListeners, callback),
     onObserverChatUpdate: (callback: (update: ObserverChatUpdate) => void) =>
       noopUnsubscribe(state.observerChatUpdateListeners, callback),
-    onPtyChunk: (callback: (
-      projectId: string,
-      name: string,
-      chunk: string,
-      offset?: number,
-      generation?: number
-    ) => void) =>
-      noopUnsubscribe(state.ptyChunkListeners, callback),
     onStatus: (callback: (status: BrokerStatusEvent) => void) => noopUnsubscribe(state.brokerStatusListeners, callback),
     checkCliAvailable: async (_cli: string) => true
   },
@@ -1334,6 +1321,80 @@ export const pearMock: PearAPI = {
     resumeCommand: async (_entry: AiHistResumeEntry) => null,
     reload: async () => undefined
   },
+  chat: {
+    listConversations: async (): Promise<RelayChatConversation[]> => clone(state.chatConversations),
+    getHistory: async (input: ChatHistoryInput): Promise<RelayChatMessage[]> => {
+      const raw = input.id.replace(/^(conversation|channel):/, '').replace(/^#+/, '')
+      const rows = state.chatHistory[raw] || []
+      const limit = Number.isFinite(input.limit) && (input.limit as number) > 0
+        ? Math.min(input.limit as number, 100)
+        : 100
+      return clone(rows.slice(-limit))
+    },
+    send: async (input: ChatSendInput): Promise<RelayChatMessage> => {
+      seq += 1
+      const createdAt = new Date().toISOString()
+      const isChannel = input.kind === 'channel'
+      const bare = input.to.replace(/^#+/, '')
+      const conversationId = isChannel ? `channel:${bare}` : `conversation:${bare}`
+      const message: RelayChatMessage = {
+        id: `mock-chat-msg-${seq}`,
+        ...(isChannel ? { channelName: bare } : { conversationId: bare }),
+        from: 'pear-companion',
+        text: input.text,
+        createdAt,
+        mine: true,
+        hasServerID: true,
+        attachments: []
+      }
+      const raw = bare
+      state.chatHistory[raw] = [...(state.chatHistory[raw] || []), message]
+      state.chatConversations = state.chatConversations.map((conversation) =>
+        conversation.id === conversationId
+          ? { ...conversation, lastMessageAt: createdAt }
+          : conversation
+      )
+      emit(state.chatMessageListeners, { conversationId, message: clone(message) })
+      emit(state.chatInvalidatedListeners, { reason: 'send' })
+      return clone(message)
+    },
+    markRead: async (messageId: string): Promise<void> => {
+      for (const conversation of state.chatConversations) {
+        const raw = conversation.id.replace(/^(conversation|channel):/, '').replace(/^#+/, '')
+        if ((state.chatHistory[raw] || []).some((message) => message.id === messageId)) {
+          conversation.unreadCount = 0
+        }
+      }
+    },
+    joinChannel: async (channel: string): Promise<{ alreadyMember: boolean }> => {
+      const bare = channel.trim().replace(/^#+/, '')
+      if (!bare) throw new Error('Channel name is required')
+      const id = `channel:${bare}`
+      if (state.chatConversations.some((conversation) => conversation.id === id)) {
+        return { alreadyMember: true }
+      }
+      state.chatConversations.push({ kind: 'channel', id, name: `#${bare}`, isMember: true })
+      state.chatHistory[bare] = []
+      emit(state.chatInvalidatedListeners, { reason: 'join' })
+      return { alreadyMember: false }
+    },
+    uploadFile: async (input: ChatUploadInput): Promise<RelayChatAttachment> => {
+      seq += 1
+      const padding = input.base64.endsWith('==') ? 2 : input.base64.endsWith('=') ? 1 : 0
+      const sizeBytes = Math.max(0, Math.floor((input.base64.length * 3) / 4) - padding)
+      return {
+        file_id: `mock-file-${seq}`,
+        filename: input.filename,
+        content_type: input.contentType || 'application/octet-stream',
+        size_bytes: sizeBytes,
+        downloadUrl: `data:${input.contentType || 'application/octet-stream'};base64,${input.base64}`
+      }
+    },
+    onInvalidated: (callback: (event: ChatInvalidatedEvent) => void) =>
+      noopUnsubscribe(state.chatInvalidatedListeners, callback),
+    onMessage: (callback: (event: ChatMessageEvent) => void) =>
+      noopUnsubscribe(state.chatMessageListeners, callback)
+  },
   update: {
     getState: async (): Promise<UpdaterState | null> => null,
     download: async () => undefined,
@@ -1363,22 +1424,6 @@ export const pearMockHarness: PearMockHarness = {
   injectBrokerEvents: (events: BrokerEventLike[]) => {
     for (const event of events) handleInjectedBrokerEvent(event)
   },
-  injectPtyChunk: (projectId, name, chunk, offset, generation) => {
-    const ptyKey = key(projectId, name)
-    state.ptyChunks[ptyKey] = [...(state.ptyChunks[ptyKey] || []), chunk]
-    for (const listener of [...state.ptyChunkListeners]) {
-      listener(projectId, name, chunk, offset, generation)
-    }
-  },
-  setInputSrtt: (ms: number | null) => {
-    mockInputSrttMs = ms
-  },
-  setInputEcho: (options: { delayMs: number } | null) => {
-    mockInputEchoDelayMs = options ? options.delayMs : null
-  },
-  setFocusRedraw: (frame: string | null) => {
-    mockFocusRedrawFrame = frame
-  },
   spawnAgents: (count: number, options?: { projectId?: string; channel?: string; namePrefix?: string }) => {
     const projectId = options?.projectId || state.activeId || defaultProject.id
     const channel = options?.channel || 'general'
@@ -1407,22 +1452,10 @@ export const pearMockHarness: PearMockHarness = {
     const listeners = state.menuListeners.get('mock:open-agents')
     for (const listener of listeners || []) listener(projectId)
   },
-  getTerminalBufferText: (projectId: string, name: string) => {
-    const runtime = getTerminalRuntime(key(projectId, name))
-    if (!runtime) return null
-
-    const buffer = runtime.term.buffer.active
-    const lines: string[] = []
-    for (let index = 0; index < buffer.length; index += 1) {
-      lines.push(buffer.getLine(index)?.translateToString(true) ?? '')
-    }
-    return lines.join('\n')
-  },
   getState: () => ({
     activeId: state.activeId,
     agents: clone(state.agents),
     events: clone(state.events),
-    messages: clone(state.messages),
-    ptyChunks: clone(state.ptyChunks)
+    messages: clone(state.messages)
   })
 }

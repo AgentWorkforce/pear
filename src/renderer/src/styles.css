@@ -1,5 +1,4 @@
 @import 'tailwindcss';
-@import '@xterm/xterm/css/xterm.css';
 @import 'react-diff-view/style/index.css';
 
 /* ── Dark theme (default) ── */
@@ -176,15 +175,6 @@ body,
   outline: 2px solid var(--pear-focus-ring);
   outline-offset: 2px;
   box-shadow: 0 0 0 3px var(--pear-focus-shadow);
-}
-
-.xterm,
-.xterm * {
-  -webkit-app-region: no-drag;
-}
-
-.xterm {
-  cursor: text;
 }
 
 .diff-view {

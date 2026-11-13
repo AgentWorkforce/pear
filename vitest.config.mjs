@@ -22,9 +22,7 @@ export default {
           include: [
             'src/main/**/*.test.ts',
             'src/renderer/src/**/*.test.ts',
-            'packages/**/*.test.ts',
-            // Dependency-free term-fidelity harness units (e.g. byte-accounting).
-            'tests/term-fidelity/**/*.test.ts'
+            'packages/**/*.test.ts'
           ],
           exclude: [
             '**/node_modules/**',

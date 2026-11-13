@@ -3,8 +3,7 @@ import { useEffect } from 'react'
 import { Sidebar } from '@/components/sidebar/Sidebar'
 import { ProjectSettings } from '@/components/settings/ProjectSettings'
 import { AccountSettings } from '@/components/settings/AccountSettings'
-import { TerminalPane } from '@/components/terminal/TerminalPane'
-import { ChatView } from '@/components/chat/ChatView'
+import { ChatDesktopView } from '@/components/chat-desktop/ChatDesktopView'
 import { BrokerDetailsPage } from '@/components/broker/BrokerDetailsPage'
 import { FactoryPage } from '@/components/factory/FactoryPage'
 import { BurnSessionPage } from '@/components/burn/BurnSessionPage'
@@ -118,9 +117,7 @@ export default function App(): React.ReactNode {
       ? <BurnProjectPage />
     : activeTab?.kind === 'burn-session-detail'
       ? <BurnSessionDetailPage />
-    : activeTab?.kind === 'channel' || activeTab?.kind === 'dm'
-      ? <ChatView />
-      : <TerminalPane />
+    : <ChatDesktopView />
 
   return (
     <div className="relative flex h-full flex-col">
