@@ -999,12 +999,6 @@ export function DiffPane(): React.ReactNode {
       })
       const agentName = spawned.name || requestedName
 
-      await pear.broker.attachTerminal({
-        projectId: activeProjectId,
-        name: agentName,
-        mode: 'passthrough'
-      }).catch(() => undefined)
-
       useAgentStore.getState().trackSpawnedAgent(agentName, activeProjectId, root.id, 'codex', root.path, {
         channels: [channelName],
         terminalMode: 'passthrough'

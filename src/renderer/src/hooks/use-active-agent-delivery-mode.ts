@@ -1,5 +1,4 @@
 import { useCallback, useMemo } from 'react'
-import { pear, type TerminalAttachMode } from '@/lib/ipc'
 import { useAgentStore, type Agent, getAgentKeyForAgent } from '@/stores/agent-store'
 
 export type ActiveAgentDeliveryMode = 'drive' | 'auto'
@@ -8,14 +7,13 @@ function terminalToDelivery(mode: Agent['terminalMode']): ActiveAgentDeliveryMod
   return mode === 'drive' ? 'drive' : 'auto'
 }
 
-function deliveryToTerminal(mode: ActiveAgentDeliveryMode): TerminalAttachMode {
-  return mode === 'drive' ? 'drive' : 'passthrough'
-}
-
 /**
- * Read + toggle the Hold/Live (drive/auto) delivery mode for the focused agent.
- * Drives both the command-palette action and the global hotkey, so they stay in
- * sync without each re-implementing the agent-store + IPC dance.
+ * Read the focused agent's Hold/Live (drive/auto) delivery mode.
+ *
+ * Mode switching left with the terminal: the broker:no longer exposes a
+ * set-terminal-mode channel, so `toggle` is intentionally inert and
+ * `canToggle` is always false. The hook stays so the command palette can
+ * keep displaying the current mode without re-implementing the lookup.
  */
 export function useActiveAgentDeliveryMode(): {
   activeAgent: Agent | null
@@ -25,7 +23,6 @@ export function useActiveAgentDeliveryMode(): {
 } {
   const agents = useAgentStore((s) => s.agents)
   const activeAgentKey = useAgentStore((s) => s.activeAgentKey)
-  const setAgentTerminalMode = useAgentStore((s) => s.setAgentTerminalMode)
 
   const activeAgent = useMemo(() => {
     if (!activeAgentKey) return null
@@ -34,25 +31,14 @@ export function useActiveAgentDeliveryMode(): {
 
   const currentMode = activeAgent ? terminalToDelivery(activeAgent.terminalMode) : null
 
-  const toggle = useCallback(async () => {
-    if (!activeAgent) return
-    const next: ActiveAgentDeliveryMode = currentMode === 'drive' ? 'auto' : 'drive'
-    const nextTerminal = deliveryToTerminal(next)
-    const previousTerminal = activeAgent.terminalMode
-
-    setAgentTerminalMode(activeAgent.projectId, activeAgent.name, nextTerminal)
-    try {
-      await pear.broker.setTerminalMode(activeAgent.projectId, activeAgent.name, nextTerminal)
-    } catch (err) {
-      setAgentTerminalMode(activeAgent.projectId, activeAgent.name, previousTerminal)
-      console.error('[active-agent-delivery-mode] toggle failed', err)
-    }
-  }, [activeAgent, currentMode, setAgentTerminalMode])
+  // No-op: delivery-mode switching required the removed terminal channel.
+  // Kept (guarded by `canToggle: false`) so existing callers compile.
+  const toggle = useCallback(async () => {}, [])
 
   return {
     activeAgent,
     currentMode,
-    canToggle: !!activeAgent,
+    canToggle: false,
     toggle
   }
 }

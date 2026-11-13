@@ -6,8 +6,7 @@ import type {
   BrokerEventRecord,
   BrokerListAgent,
   BrokerReconciledChatMessage,
-  InboundDeliveryMode,
-  TerminalAttachMode
+  InboundDeliveryMode
 } from '@/lib/ipc'
 import { normalizeChannelName, useProjectStore } from '@/stores/project-store'
 import {
@@ -16,7 +15,13 @@ import {
 } from '@shared/lib/broker-events'
 import { getBrokerErrorKey } from '@shared/lib/broker-errors'
 import { useTypingStore } from '@/stores/typing-store'
-import { clearPtyBuffer, getPtyChunks } from '@/stores/pty-buffer-store'
+
+/**
+ * Delivery posture of an agent's inbound stream, mirrored from the broker's
+ * InboundDeliveryMode. Kept locally so drive-mode affordances (sidebar badge,
+ * pending-message counts) keep rendering after terminal detach.
+ */
+export type AgentTerminalMode = 'view' | 'drive' | 'passthrough'
 
 export interface Agent {
   name: string
@@ -30,7 +35,7 @@ export interface Agent {
   rootId?: string
   parent?: string
   channels?: string[]
-  terminalMode: TerminalAttachMode
+  terminalMode: AgentTerminalMode
   pendingDeliveryIds: string[]
 }
 
@@ -168,7 +173,7 @@ interface BrokerEvent {
 
 interface TrackSpawnedAgentOptions {
   currentState?: AgentCurrentState
-  terminalMode?: TerminalAttachMode
+  terminalMode?: AgentTerminalMode
   lastActivityAt?: string
   lastActivityMs?: number
   channels?: string[]
@@ -178,7 +183,7 @@ function activityFromCurrentState(currentState: AgentCurrentState): Agent['activ
   return currentState === 'idle' ? 'idle' : 'active'
 }
 
-function terminalModeFromInboundDeliveryMode(mode?: InboundDeliveryMode): TerminalAttachMode | undefined {
+function terminalModeFromInboundDeliveryMode(mode?: InboundDeliveryMode): AgentTerminalMode | undefined {
   if (!mode) return undefined
   return mode === 'manual_flush' ? 'drive' : 'passthrough'
 }
@@ -734,8 +739,6 @@ interface AgentState {
   lastReplayGapAt: number
 
   setActiveAgentKey: (key: string | null) => void
-  markAgentActive: (projectId: string | undefined, name: string) => void
-  setAgentTerminalMode: (projectId: string | undefined, name: string, mode: TerminalAttachMode) => void
   trackSpawnedAgent: (
     name: string,
     projectId: string,
@@ -763,10 +766,9 @@ interface AgentState {
     subscribed: boolean
   ) => void
   clearAll: () => void
-  getAgentBuffer: (projectId: string | undefined, name: string) => string[]
 }
 
-export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, get) => ({
+export const useAgentStore = create<AgentState>()(subscribeWithSelector((set) => ({
   agents: [],
   activeAgentKey: null,
   messages: [],
@@ -779,30 +781,6 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
   lastReplayGapAt: 0,
 
   setActiveAgentKey: (key) => set({ activeAgentKey: key }),
-
-  // Used by the PTY-chunk fast path to flip an agent into active/working on
-  // the first chunk after idle, without sending a full handleBrokerEvent
-  // through the regular pipeline.
-  markAgentActive: (projectId, name) => {
-    const agent = get().agents.find((a) => matchesAgent(a, projectId, name))
-    if (!agent) return
-    if (agent.activity === 'active' && agent.currentState === 'working') return
-    set((state) => ({
-      agents: state.agents.map((a) =>
-        matchesAgent(a, projectId, name)
-          ? { ...a, activity: 'active', currentState: 'working' }
-          : a
-      )
-    }))
-  },
-
-  setAgentTerminalMode: (projectId, name, mode) => {
-    set((state) => ({
-      agents: state.agents.map((agent) =>
-        matchesAgent(agent, projectId, name) ? { ...agent, terminalMode: mode } : agent
-      )
-    }))
-  },
 
   // Called right after spawning to associate the agent with a project.
   trackSpawnedAgent: (name, projectId, rootId, cli, rootPath, options) => {
@@ -1126,7 +1104,6 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
         const needNewActive = state.activeAgentKey === removedKey
         const nextActiveAgent = remaining.find((a) => a.status === 'running') || remaining[0]
         useTypingStore.getState().clear(removedKey)
-        clearPtyBuffer(removedKey)
         return {
           agents: remaining,
           activeAgentKey: needNewActive && nextActiveAgent
@@ -1137,8 +1114,8 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
         }
       })
     } else if (kind === 'worker_stream') {
-      // worker_stream is delivered out-of-band via broker:pty-chunk for typing
-      // latency reasons; nothing to do here.
+      // Terminal output no longer renders in Pear; nothing to append here.
+      // Activity/typing still flows through the delivery events below.
     } else if (kind === 'delivery_queued' && name) {
       set((state) => ({
         agents: state.agents.map((a) =>
@@ -1502,17 +1479,16 @@ export const useAgentStore = create<AgentState>()(subscribeWithSelector((set, ge
     })
   },
 
-  getAgentBuffer: (projectId, name) => getPtyChunks(getAgentKey(projectId, name))
 })))
 
 // Cache for the agents-by-(projectId, name) lookup map. Rebuilding it costs
-// O(n) on every PTY tick if we use a useMemo or selector that touches the
+// O(n) on every store tick if we use a useMemo or selector that touches the
 // agents array, so we key it on the array reference (which only changes when
 // the store actually mutates agents) and reuse the same Map across renders.
 // Callers like ChatMessage / ThreadParticipantAvatar previously did
 // `state.agents.find(...)` inside a Zustand selector, which made every
-// message component re-render whenever the agents array changed (every PTY
-// chunk that flips activity / currentState).
+// message component re-render whenever the agents array changed (every
+// event that flips activity / currentState).
 let agentMapCache: { source: Agent[]; map: Map<string, Agent> } | null = null
 
 function getAgentLookup(agents: Agent[]): Map<string, Agent> {
