@@ -171,6 +171,43 @@ export function findDmThread(
   )
 }
 
+/** DM threads that open from an agent's roster row, so they aren't listed twice. */
+export function agentThreadIds(conversations: readonly RelayChatConversation[]): Set<string> {
+  return new Set(conversations.flatMap((conversation) => {
+    if (conversation.kind !== 'agent') return []
+    const thread = findDmThread(conversations, conversation)
+    return thread ? [thread.id] : []
+  }))
+}
+
+/**
+ * Conversations matching a search, best first: name prefix, then name
+ * substring, then summary or participants; most recent activity breaks ties.
+ */
+export function searchConversations(
+  conversations: readonly RelayChatConversation[],
+  query: string,
+  limit = 8
+): RelayChatConversation[] {
+  const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean)
+  if (tokens.length === 0) return []
+  const claimed = agentThreadIds(conversations)
+  const activity = (conversation: RelayChatConversation): string =>
+    (conversation.kind === 'agent' ? findDmThread(conversations, conversation)?.lastMessageAt : undefined) ||
+    conversation.lastMessageAt ||
+    ''
+  const ranked = conversations.flatMap((conversation) => {
+    if (claimed.has(conversation.id)) return []
+    const name = conversation.name.toLowerCase().replace(/^#/, '')
+    const rest = [conversation.summary || '', ...(conversation.participants || [])].join(' ').toLowerCase()
+    if (!tokens.every((token) => name.includes(token) || rest.includes(token))) return []
+    const rank = name.startsWith(tokens[0]) ? 0 : tokens.every((token) => name.includes(token)) ? 1 : 2
+    return [{ conversation, rank, at: activity(conversation) }]
+  })
+  ranked.sort((a, b) => a.rank - b.rank || b.at.localeCompare(a.at) || a.conversation.name.localeCompare(b.conversation.name))
+  return ranked.slice(0, limit).map((entry) => entry.conversation)
+}
+
 /**
  * Every row a pushed message belongs to: the thread itself plus the roster
  * agent that shows it. A first DM from an agent has no thread in the list

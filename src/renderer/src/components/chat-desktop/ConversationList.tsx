@@ -1,6 +1,7 @@
 import { useMemo, useState } from 'react'
 import { Hash, Loader2, Pin, PinOff, Eye, EyeOff, Search } from 'lucide-react'
 import {
+  agentThreadIds,
   conversationMatchesAgents,
   findDmThread,
   isConversationReachable,
@@ -124,12 +125,7 @@ export function ConversationList(): React.ReactNode {
 
   const visible = useMemo(() => {
     const query = search.trim().toLowerCase()
-    // An agent's DM opens from its roster row, so the thread isn't listed twice.
-    const agentThreads = new Set(conversations.flatMap((conversation) => {
-      if (conversation.kind !== 'agent') return []
-      const thread = findDmThread(conversations, conversation)
-      return thread ? [thread.id] : []
-    }))
+    const agentThreads = agentThreadIds(conversations)
     const filtered = conversations.filter((conversation) => {
       if (agentThreads.has(conversation.id)) return false
       if (tabFor(conversation) !== tab) return false

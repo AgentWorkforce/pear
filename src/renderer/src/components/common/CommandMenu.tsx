@@ -4,6 +4,7 @@ import {
   Bot,
   Columns2,
   FolderPlus,
+  Hash,
   Monitor,
   MoonStar,
   PauseCircle,
@@ -12,9 +13,12 @@ import {
   Server,
   Settings
 } from 'lucide-react'
+import { AgentAvatar } from '@/components/common/AgentAvatar'
+import { searchConversations, useChatStore } from '@/stores/chat-store'
 import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 import { useActiveAgentDeliveryMode } from '@/hooks/use-active-agent-delivery-mode'
+import type { RelayChatConversation } from '@/lib/ipc'
 
 interface CommandAction {
   id: string
@@ -22,7 +26,17 @@ interface CommandAction {
   description: string
   keywords: string[]
   Icon: React.ComponentType<{ size?: number; className?: string }>
+  /** Replaces the icon, e.g. an agent's avatar. */
+  leading?: React.ReactNode
   run: () => void
+}
+
+function conversationDescription(conversation: RelayChatConversation): string {
+  if (conversation.summary) return conversation.summary
+  if (conversation.kind === 'channel') return 'Channel'
+  if (conversation.kind === 'dm') return 'Direct message'
+  if (conversation.human) return 'Person'
+  return [conversation.cli, conversation.status].filter(Boolean).join(' · ') || 'Agent'
 }
 
 function normalize(value: string): string {
@@ -51,6 +65,8 @@ export function CommandMenu(): React.ReactNode {
   const toggleTheme = useUIStore((s) => s.toggleTheme)
   const toggleTerminalLayout = useUIStore((s) => s.toggleTerminalLayout)
   const activeProject = useProjectStore((s) => s.getActiveProject())
+  const conversations = useChatStore((s) => s.conversations)
+  const selectConversation = useChatStore((s) => s.selectConversation)
   const {
     activeAgent,
     currentMode: deliveryMode,
@@ -176,10 +192,24 @@ export function CommandMenu(): React.ReactNode {
     toggleTheme
   ])
 
-  const filteredActions = useMemo(
-    () => actions.filter((action) => matchesAction(action, query)),
-    [actions, query]
-  )
+  const filteredActions = useMemo(() => {
+    const threads = searchConversations(conversations, query).map<CommandAction>((conversation) => ({
+      id: `conversation:${conversation.id}`,
+      label: conversation.name,
+      description: conversationDescription(conversation),
+      keywords: [],
+      Icon: Hash,
+      leading: conversation.kind === 'channel' ? undefined : (
+        <AgentAvatar name={conversation.name} cli={conversation.cli} human={!!conversation.human} size={32} />
+      ),
+      run: () => {
+        openTab({ kind: 'agents' })
+        void selectConversation(conversation.id)
+        closeDialog()
+      }
+    }))
+    return [...threads, ...actions.filter((action) => matchesAction(action, query))]
+  }, [actions, closeDialog, conversations, openTab, query, selectConversation])
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent): void => {
@@ -288,7 +318,7 @@ export function CommandMenu(): React.ReactNode {
             ref={inputRef}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
-            placeholder="Type a command..."
+            placeholder="Search agents or type a command..."
             className="h-9 min-w-0 flex-1 bg-transparent text-[15px] text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)]"
           />
         </div>
@@ -311,9 +341,11 @@ export function CommandMenu(): React.ReactNode {
                       : 'text-[var(--pear-text-dim)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]'
                   }`}
                 >
-                  <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35">
-                    <Icon size={15} className="text-[var(--pear-accent)]" />
-                  </span>
+                  {action.leading ?? (
+                    <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35">
+                      <Icon size={15} className="text-[var(--pear-accent)]" />
+                    </span>
+                  )}
                   <span className="min-w-0 flex-1">
                     <span className="block truncate text-sm font-medium">{action.label}</span>
                     <span className="mt-0.5 block truncate text-xs text-[var(--pear-text-faint)]">
@@ -325,7 +357,7 @@ export function CommandMenu(): React.ReactNode {
             })
           ) : (
             <div className="px-3 py-8 text-center text-sm text-[var(--pear-text-faint)]">
-              No commands found
+              No agents or commands found
             </div>
           )}
         </div>
