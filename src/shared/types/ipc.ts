@@ -572,6 +572,29 @@ export interface ChatMessageEvent {
 }
 
 /** A message notification was clicked: show that conversation. */
+/** A relay machine that advertises `spawn:<harness>` capabilities. */
+export interface RelaySpawnNode {
+  name: string
+  /** Agent types it can start (`claude`, `codex`, …). */
+  harnesses: string[]
+}
+
+export interface ChatSpawnInput {
+  node: string
+  harness: string
+  name: string
+  task: string
+  /** Absolute folder on that machine; the node's default when empty. */
+  workingDirectory?: string
+}
+
+export interface ChatSpawnResult {
+  /** `ready`: the node confirmed it. `running`: listed live, no receipt. `unconfirmed`: accepted, not seen yet. */
+  outcome: 'ready' | 'running' | 'unconfirmed'
+  name: string
+  node: string
+}
+
 export interface ChatOpenConversationEvent {
   conversationId: string
   /** Sender, to find the agent row that shows a DM. */
@@ -579,7 +602,7 @@ export interface ChatOpenConversationEvent {
 }
 
 export interface ChatInvalidatedEvent {
-  reason: 'poll' | 'foreground' | 'send' | 'join' | 'open' | 'manual' | 'reconnect' | 'summaries'
+  reason: 'poll' | 'foreground' | 'send' | 'join' | 'open' | 'manual' | 'reconnect' | 'summaries' | 'spawn'
 }
 
 export type GitFileStatusKind = 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked'
@@ -1095,6 +1118,8 @@ export interface PearAPI {
     onInvalidated: (callback: (event: ChatInvalidatedEvent) => void) => () => void
     onMessage: (callback: (event: ChatMessageEvent) => void) => () => void
     onOpenConversation: (callback: (event: ChatOpenConversationEvent) => void) => () => void
+    spawnTargets: () => Promise<RelaySpawnNode[]>
+    spawn: (input: ChatSpawnInput) => Promise<ChatSpawnResult>
   }
   burn: {
     listAgentSummaries: (agents: BurnAgentInput[]) => Promise<BurnAgentSummary[]>

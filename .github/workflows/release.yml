@@ -79,6 +79,24 @@ jobs:
             echo "notes_file=${NOTES_FILE}"
           } >> "${GITHUB_OUTPUT}"
 
+      # electron-builder uploads its artifacts in parallel, and when no release
+      # exists for the tag each upload can create its own draft, splitting the
+      # files across two same-tag releases. Creating the draft first makes
+      # every upload reuse it.
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.changelog.outputs.tag }}"
+          if ! gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release create "${TAG}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --draft \
+              --target "${GITHUB_SHA}" \
+              --title "${{ steps.changelog.outputs.version }}" \
+              --notes-file "${{ steps.changelog.outputs.notes_file }}"
+          fi
+
       - name: Decode App Store Connect API key (.p8)
         env:
           APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
@@ -127,6 +145,27 @@ jobs:
             --notes-file "${{ steps.changelog.outputs.notes_file }}" \
             --draft=false \
             --latest
+
+      # The download page and electron-updater both read the published
+      # release; a split upload would ship a release they can't use.
+      - name: Verify published release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.changelog.outputs.tag }}"
+          SAME_TAG="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
+            --jq ".[] | select(.tag_name == \"${TAG}\") | .id" | wc -l | tr -d ' ')"
+          if [ "${SAME_TAG}" != "1" ]; then
+            echo "::error::${SAME_TAG} releases share ${TAG}; the build's files may be split across them"
+            exit 1
+          fi
+          ASSETS="$(gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" --json assets --jq '.assets[].name')"
+          for required in latest-mac.yml pear-arm64.dmg; do
+            if ! printf '%s\n' "${ASSETS}" | grep -qx "${required}"; then
+              echo "::error::${required} is missing from the published ${TAG} release"
+              exit 1
+            fi
+          done
 
       - name: Upload macOS build artifacts
         if: always()

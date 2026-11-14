@@ -11,6 +11,7 @@ import { DiffPane } from '@/components/diff/DiffPane'
 import ConversationsPanel from '@/components/ai-hist/ConversationsPanel'
 import { AppTopBar } from '@/components/common/AppTopBar'
 import { CommandMenu } from '@/components/common/CommandMenu'
+import { SpawnRelayAgentDialog } from '@/components/chat-desktop/SpawnRelayAgentDialog'
 import { StatusBar } from '@/components/common/StatusBar'
 import { UpdateBanner } from '@/components/common/UpdateBanner'
 import { AddProjectDialog } from '@/components/sidebar/AddProjectDialog'
@@ -136,6 +137,7 @@ export default function App(): React.ReactNode {
       )}
       {activeDialog === 'spawn-local-agent' && <SpawnAgentDialog />}
       {activeDialog === 'cloud-agent' && <CloudAgentDialog />}
+      {activeDialog === 'spawn-relay-agent' && <SpawnRelayAgentDialog />}
       <CommandMenu />
     </div>
   )

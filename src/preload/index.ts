@@ -14,6 +14,8 @@ import type {
   ChatMessageEvent,
   ChatOpenConversationEvent,
   ChatSendInput,
+  ChatSpawnInput,
+  ChatSpawnResult,
   ChatUploadInput,
   BrokerDetails,
   BrokerEventRecord,
@@ -79,6 +81,7 @@ import type {
   RelayChatAttachment,
   RelayChatConversation,
   RelayChatMessage,
+  RelaySpawnNode,
   SessionTranscriptTurn,
   UpdaterState,
   WorkforcePersona
@@ -102,10 +105,13 @@ export type {
   ChatMessageEvent,
   ChatOpenConversationEvent,
   ChatSendInput,
+  ChatSpawnInput,
+  ChatSpawnResult,
   ChatUploadInput,
   RelayChatAttachment,
   RelayChatConversation,
   RelayChatMessage,
+  RelaySpawnNode,
   BrokerAgentDetails,
   BrokerDetails,
   BrokerEventRecord,
@@ -311,7 +317,9 @@ const api = {
     onMessage: (callback: (event: ChatMessageEvent) => void) =>
       subscribe<ChatMessageEvent>('chat:message', callback),
     onOpenConversation: (callback: (event: ChatOpenConversationEvent) => void) =>
-      subscribe<ChatOpenConversationEvent>('chat:open-conversation', callback)
+      subscribe<ChatOpenConversationEvent>('chat:open-conversation', callback),
+    spawnTargets: () => invoke<RelaySpawnNode[]>('chat.spawnTargets'),
+    spawn: (input: ChatSpawnInput) => invoke<ChatSpawnResult>('chat.spawn', input)
   },
   burn: {
     listAgentSummaries: (agents: BurnAgentInput[]) =>

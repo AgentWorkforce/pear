@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Hash, Loader2, Pin, PinOff, Eye, EyeOff, Search } from 'lucide-react'
+import { Hash, Loader2, Pin, PinOff, Plus, Eye, EyeOff, Search } from 'lucide-react'
 import {
   agentThreadIds,
   conversationMatchesAgents,
@@ -90,6 +90,7 @@ export function ConversationList(): React.ReactNode {
   const setShowHidden = useChatStore((s) => s.setShowHidden)
   const directoryId = useUIStore((s) => s.chatDirectoryId)
   const setChatDirectoryId = useUIStore((s) => s.setChatDirectoryId)
+  const openDialog = useUIStore((s) => s.openDialog)
   const agents = useAgentStore((s) => s.agents)
   const projects = useProjectStore((s) => s.projects)
   const directory = projects.find((project) => project.id === directoryId)
@@ -224,6 +225,15 @@ export function ConversationList(): React.ReactNode {
             <option value="recent">Recent</option>
             <option value="name">A–Z</option>
           </select>
+          <button
+            type="button"
+            onClick={() => openDialog('spawn-relay-agent')}
+            aria-label="Start agent on a relay machine"
+            title="Start agent on a relay machine"
+            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] text-[var(--pear-text-secondary)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)]"
+          >
+            <Plus size={14} />
+          </button>
         </div>
         {hosts.length > 0 && (
           <select

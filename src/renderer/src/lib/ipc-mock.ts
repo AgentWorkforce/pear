@@ -1352,7 +1352,9 @@ export const pearMock: PearAPI = {
       noopUnsubscribe(state.chatInvalidatedListeners, callback),
     onMessage: (callback: (event: ChatMessageEvent) => void) =>
       noopUnsubscribe(state.chatMessageListeners, callback),
-    onOpenConversation: () => () => undefined
+    onOpenConversation: () => () => undefined,
+    spawnTargets: async () => [{ name: 'mock-mac', harnesses: ['claude', 'codex'] }],
+    spawn: async (input: { node: string; name: string }) => ({ outcome: 'ready' as const, name: input.name, node: input.node })
   },
   update: {
     getState: async (): Promise<UpdaterState | null> => null,

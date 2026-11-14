@@ -46,6 +46,7 @@ import { RelayChatClient, RelayChatPoller, RELAY_CHAT_POLL_INTERVAL_MS, toConver
 import { RelayChatLive } from './relay-chat-live'
 import { SessionBriefCache, briefText } from './session-briefs'
 import { DmInboxWatcher } from './dm-inbox-watcher'
+import { RelaySpawner } from './relay-spawn'
 import { normalizeRelaycastBaseUrl } from './relay-service-urls'
 import type {
   BrokerReconcileMessagesInput,
@@ -58,6 +59,7 @@ import type {
   ChatMessageEvent,
   ChatOpenConversationEvent,
   ChatSendInput,
+  ChatSpawnInput,
   ChatUploadInput,
   RelayChatConversation,
   RelayChatMessage
@@ -113,6 +115,16 @@ let chatAgentToken: string | null = null
 let chatAgentName: string | null = null
 let chatPoller: RelayChatPoller | null = null
 let chatLive: RelayChatLive | null = null
+const spawners = new WeakMap<RelayChatClient, RelaySpawner>()
+
+function spawnerFor(client: RelayChatClient): RelaySpawner {
+  let spawner = spawners.get(client)
+  if (!spawner) {
+    spawner = new RelaySpawner((path, options) => client.request(path, { ...options, auth: 'agent' }))
+    spawners.set(client, spawner)
+  }
+  return spawner
+}
 
 /** Per-machine companion identity so two hosts never rotate each other's token. */
 function chatAgentIdentityName(): string {
@@ -445,6 +457,12 @@ async function getChatClient(): Promise<RelayChatClient> {
     chatClientPromise = buildChatClient().then((client) => {
       chatClient = client
       ensureChatLive(client)
+      spawnerFor(client).listNodes().then((nodes) => {
+        const list = nodes.map((node) => `${node.name} (${node.harnesses.join(', ')})`).join('; ')
+        console.info(`[chat] ${nodes.length} relay machines can start agents${list ? `: ${list}` : ''}`)
+      }).catch((error: unknown) => {
+        console.warn('[chat] could not list relay machines:', toErrorMessage(error))
+      })
       return client
     }).catch((error: unknown) => {
       chatClientPromise = null
@@ -1216,6 +1234,26 @@ export function registerIpcHandlers(): void {
     const client = await getChatClient()
     if (typeof messageId !== 'string' || !messageId.trim()) throw new Error('Message id is required')
     await client.markRead(messageId)
+  })
+
+  ipcMain.handle('chat.spawnTargets', async () => {
+    const client = await getChatClient()
+    return spawnerFor(client).listNodes()
+  })
+
+  ipcMain.handle('chat.spawn', async (_, input: ChatSpawnInput) => {
+    const client = await getChatClient()
+    if (!input || typeof input !== 'object') throw new Error('Spawn input is required')
+    const result = await spawnerFor(client).spawn({
+      node: String(input.node ?? ''),
+      harness: String(input.harness ?? ''),
+      name: String(input.name ?? ''),
+      task: String(input.task ?? ''),
+      workingDirectory: typeof input.workingDirectory === 'string' ? input.workingDirectory : undefined
+    })
+    console.info(`[chat] started ${result.name} on ${result.node} (${result.outcome})`)
+    broadcastChatInvalidated('spawn')
+    return result
   })
 
   ipcMain.handle('chat.joinChannel', async (_, channel: string) => {

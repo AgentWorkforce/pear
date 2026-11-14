@@ -8,7 +8,7 @@ import {
 import type { BurnAgentInput } from '@/lib/ipc'
 
 export type ViewMode = 'terminal' | 'chat' | 'project-settings' | 'account-settings' | 'broker-details' | 'source-control' | 'ai-hist' | 'burn-session' | 'burn-project' | 'burn-session-detail'
-export type DialogType = 'add-project' | 'spawn-agent' | 'spawn-local-agent' | 'cloud-agent' | 'add-channel' | 'command-menu' | null
+export type DialogType = 'add-project' | 'spawn-agent' | 'spawn-local-agent' | 'cloud-agent' | 'add-channel' | 'command-menu' | 'spawn-relay-agent' | null
 const ThemeSchema = z.enum(['dark', 'light'])
 const TerminalLayoutSchema = z.enum(['tabs', 'horizontal-split'])
 const BooleanPreferenceSchema = z.enum(['true', 'false']).transform((value) => value === 'true')

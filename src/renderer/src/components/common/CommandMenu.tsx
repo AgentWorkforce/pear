@@ -106,6 +106,14 @@ export function CommandMenu(): React.ReactNode {
       run: () => openDialog('spawn-agent')
     },
     {
+      id: 'spawn-relay-agent',
+      label: 'Start agent on a relay machine',
+      description: 'Start Claude, Codex, or another agent on any machine on the relay',
+      keywords: ['spawn', 'new agent', 'remote', 'machine', 'node', 'relay', 'claude', 'codex'],
+      Icon: Server,
+      run: () => openDialog('spawn-relay-agent')
+    },
+    {
       id: 'broker-details',
       label: 'Agent Relay Status',
       description: 'Open Agent Relay health, events, and connection metadata',
