@@ -1,10 +1,8 @@
 import { useCallback, useEffect } from 'react'
 import { pear, type BrokerListAgent } from '@/lib/ipc'
 import { applyObserverChatUpdate } from '@/lib/observer-chat'
-import { getAgentKey, getAgentKeyForAgent, useAgentStore } from '@/stores/agent-store'
-import { appendPtyChunk } from '@/stores/pty-buffer-store'
+import { getAgentKeyForAgent, useAgentStore } from '@/stores/agent-store'
 import { useProjectStore } from '@/stores/project-store'
-import { useTypingStore } from '@/stores/typing-store'
 import { useUIStore } from '@/stores/ui-store'
 
 type BrokerEventLike = Record<string, unknown> & {
@@ -76,15 +74,6 @@ export function useBrokerEvents(): void {
       }
     })
 
-    // PTY chunks ride a dedicated lightweight channel so per-character typing
-    // doesn't pay for the broker:event metadata spread / structured clone.
-    const unsubPtyChunk = pear.broker.onPtyChunk((projectId, name, chunk, offset, generation) => {
-      const key = getAgentKey(projectId, name)
-      appendPtyChunk(key, chunk, offset, generation)
-      useTypingStore.getState().noteActivity(key)
-      useAgentStore.getState().markAgentActive(projectId, name)
-    })
-
     const unsubStatus = pear.broker.onStatus((status) => {
       handleBrokerStatus(status)
       if (status.status === 'connected') {
@@ -139,7 +128,6 @@ export function useBrokerEvents(): void {
 
     return () => {
       unsubEvent()
-      unsubPtyChunk()
       unsubStatus()
       unsubObserverChat?.()
       unsubNewWs()

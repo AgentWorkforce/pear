@@ -40,7 +40,7 @@ function isChannelMessage(message: ChatMessageType, channelName: string): boolea
   return normalizeMessageChannel(message.to) === channelName
 }
 
-function isSameDay(left: number, right: number): boolean {
+export function isSameChatDay(left: number, right: number): boolean {
   const leftDate = new Date(left)
   const rightDate = new Date(right)
 
@@ -53,7 +53,7 @@ function getStartOfDay(date: Date): number {
   return new Date(date.getFullYear(), date.getMonth(), date.getDate()).getTime()
 }
 
-function formatDateDivider(timestamp: number): string {
+export function formatChatDateDivider(timestamp: number): string {
   const date = new Date(timestamp)
   const today = getStartOfDay(new Date())
   const messageDay = getStartOfDay(date)
@@ -76,7 +76,7 @@ function DateDivider({ timestamp }: { timestamp: number }): React.ReactNode {
     <div className="relative my-4 flex items-center justify-center">
       <div className="absolute inset-x-0 top-1/2 h-px bg-[var(--pear-border-subtle)]" />
       <span className="relative rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 py-1 text-xs font-medium text-[var(--pear-text-secondary)]">
-        {formatDateDivider(timestamp)}
+        {formatChatDateDivider(timestamp)}
       </span>
     </div>
   )
@@ -237,7 +237,7 @@ function VirtualizedMessageList({
         if (!message) return null
 
         const previousMessage = messages[index - 1]
-        const showDateDivider = !previousMessage || !isSameDay(previousMessage.timestamp, message.timestamp)
+        const showDateDivider = !previousMessage || !isSameChatDay(previousMessage.timestamp, message.timestamp)
 
         return (
           <VirtualizedMessageRow

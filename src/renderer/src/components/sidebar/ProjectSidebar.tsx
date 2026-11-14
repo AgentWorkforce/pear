@@ -2,18 +2,17 @@ import type React from 'react'
 import { useState, useEffect, useCallback, useMemo, useRef, useLayoutEffect } from 'react'
 import {
   ChevronDown,
+  ChevronRight,
   ChevronUp,
   AlertTriangle,
   FolderKanban,
   Hash,
-  Inbox,
   LayoutGrid,
   LogIn,
   LogOut,
   MessageCircle,
   MessageSquare,
   MoreHorizontal,
-  Pause,
   Plus,
   Search,
   Settings,
@@ -26,9 +25,8 @@ import {
   type DirectMessageRoom
 } from '@/lib/direct-messages'
 import { getAgentKeyForAgent, useAgentStore, type Agent } from '@/stores/agent-store'
-import { useIsAgentTyping } from '@/stores/typing-store'
+import { conversationMatchesAgents, useChatStore } from '@/stores/chat-store'
 import { useProjectStore, type Project } from '@/stores/project-store'
-import { useIssuesStore } from '@/stores/issues-store'
 import { useUIStore, type AppTab, type AppTabInput } from '@/stores/ui-store'
 import { pear, type AuthUser, type IntegrationAuthRecoveryState } from '@/lib/ipc'
 
@@ -178,7 +176,7 @@ function UserAvatar({ user }: { user?: AuthUser }): React.ReactNode {
   )
 }
 
-function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNode {
+export function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNode {
   const openTab = useUIStore((s) => s.openTab)
   const [auth, setAuth] = useState<{ loggedIn: boolean; user?: AuthUser }>({ loggedIn: false })
   const [authRecovery, setAuthRecovery] = useState<IntegrationAuthRecoveryState | null>(null)
@@ -554,48 +552,6 @@ function EmptySection({ label }: { label: string }): React.ReactNode {
   )
 }
 
-function AgentActivityIndicator({ agent }: { agent: Agent }): React.ReactNode {
-  const typing = useIsAgentTyping(agent)
-  if (agent.terminalMode === 'drive' || agent.currentState === 'blocked_on_send') {
-    const label = agent.currentState === 'blocked_on_send' ? 'Blocked on send' : 'Holding messages'
-    return (
-      <span
-        className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35 text-[var(--pear-text-faint)] opacity-75"
-        title={label}
-        aria-label={label}
-      >
-        <Pause size={9} strokeWidth={2.4} />
-      </span>
-    )
-  }
-
-  if (typing) {
-    return (
-      <span
-        className="flex h-4 w-6 shrink-0 items-center justify-center gap-0.5 rounded-full border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35 opacity-75"
-        title="Thinking"
-        aria-label="Thinking"
-      >
-        <span className="h-1 w-1 rounded-full bg-[var(--pear-text-faint)] animate-pulse" />
-        <span className="h-1 w-1 rounded-full bg-[var(--pear-text-faint)] animate-pulse [animation-delay:120ms]" />
-        <span className="h-1 w-1 rounded-full bg-[var(--pear-text-faint)] animate-pulse [animation-delay:240ms]" />
-      </span>
-    )
-  }
-
-  const active = agent.activity !== 'idle' && agent.status === 'running'
-
-  return (
-    <span
-      className="flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)]/35 opacity-75"
-      title={active ? 'Active' : 'Idle'}
-      aria-label={active ? 'Active' : 'Idle'}
-    >
-      <span className={`h-1.5 w-1.5 rounded-full ${active ? 'bg-[var(--pear-teal)]' : 'bg-[var(--pear-yellow)]'}`} />
-    </span>
-  )
-}
-
 function ProjectSwitcher({ collapsed = false }: { collapsed?: boolean }): React.ReactNode {
   const [compactOpen, setCompactOpen] = useState(false)
   const [query, setQuery] = useState('')
@@ -630,17 +586,19 @@ function ProjectSwitcher({ collapsed = false }: { collapsed?: boolean }): React.
   }, [projects.length])
 
   useEffect(() => {
-    if (!collapsed || !open) return
+    if (!open) return
 
     function closeOnOutsideClick(event: PointerEvent): void {
       const target = event.target
       if (target instanceof Node && switcherRef.current?.contains(target)) return
-      setCompactOpen(false)
+      if (collapsed) setCompactOpen(false)
+      else setProjectSwitcherExpanded(false)
+      setQuery('')
     }
 
     document.addEventListener('pointerdown', closeOnOutsideClick, true)
     return () => document.removeEventListener('pointerdown', closeOnOutsideClick, true)
-  }, [collapsed, open])
+  }, [collapsed, open, setProjectSwitcherExpanded])
 
   function toggleOpen(): void {
     const nextOpen = !open
@@ -656,6 +614,7 @@ function ProjectSwitcher({ collapsed = false }: { collapsed?: boolean }): React.
   function selectProject(project: Project): void {
     if (collapsed) setCompactOpen(false)
     setQuery('')
+    useUIStore.getState().setChatDirectoryId(project.id)
     openTab(tabAfterProjectSwitch(project, activeTab))
     setActiveProject(project.id).catch((error) => {
       console.error('[sidebar] Failed to set active project:', error)
@@ -724,6 +683,7 @@ function ProjectSwitcher({ collapsed = false }: { collapsed?: boolean }): React.
         open ? 'is-open' : ''
       }`}
       aria-expanded={open}
+      aria-label={open ? `Collapse projects, current project ${activeProject.name}` : `Expand projects, current project ${activeProject.name}`}
     >
       <FolderKanban size={14} className="shrink-0 text-[var(--pear-text-secondary)]" />
       <span className="min-w-0 flex-1 text-left">
@@ -829,57 +789,187 @@ function ProjectSwitcher({ collapsed = false }: { collapsed?: boolean }): React.
   )
 }
 
-// The Attention Inbox is a global, cross-project surface, so its entry lives
-// above the project-scoped navigation and stays reachable even with no active
-// project selected (e.g. the browser demo build).
-function IssuesNavEntry({ collapsed = false }: { collapsed?: boolean }): React.ReactNode {
+function DirectoryBrowser(): React.ReactNode {
+  const projects = useProjectStore((s) => s.projects)
+  const setActiveProject = useProjectStore((s) => s.setActiveProject)
+  const allAgents = useAgentStore((s) => s.agents)
+  const conversations = useChatStore((s) => s.conversations)
+  const selectConversation = useChatStore((s) => s.selectConversation)
+  const directoryId = useUIStore((s) => s.chatDirectoryId)
+  const setChatDirectoryId = useUIStore((s) => s.setChatDirectoryId)
+  const listOpen = useUIStore((s) => s.projectSwitcherExpanded)
+  const setListOpen = useUIStore((s) => s.setProjectSwitcherExpanded)
+  const openDialog = useUIStore((s) => s.openDialog)
   const openTab = useUIStore((s) => s.openTab)
-  const activeTab = useUIStore((s) => s.tabs.find((tab) => tab.id === s.activeTabId))
-  const active = activeTab?.kind === 'issues'
-  const needsYouCount = useIssuesStore((s) => s.issues.reduce((count, issue) => issue.band === 'needs-you' ? count + 1 : count, 0))
+  const [openDirectoryId, setOpenDirectoryId] = useState<string | null>(null)
 
-  function openIssues(): void {
-    openTab({ kind: 'issues' })
+  const sortedProjects = useMemo(
+    () => [...projects].sort((left, right) =>
+      left.name.localeCompare(right.name, undefined, { sensitivity: 'base', numeric: true })
+    ),
+    [projects]
+  )
+  const selected = projects.find((project) => project.id === directoryId)
+
+  function agentsIn(projectId: string): Agent[] {
+    return allAgents.filter((agent) => agent.projectId === projectId)
   }
 
-  if (collapsed) {
-    return (
-      <button
-        type="button"
-        onClick={openIssues}
-        className={collapsedButtonClass(active)}
-        title={needsYouCount > 0 ? `Issues — ${needsYouCount} need you` : 'Issues'}
-        aria-label="Issues"
-      >
-        <Inbox size={18} className={active ? '' : 'text-[var(--pear-text-dim)]'} />
-        {needsYouCount > 0 && (
-          <span className="absolute -right-0.5 -top-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-[var(--pear-red)] px-1 text-[9px] font-bold leading-none text-white">
-            {needsYouCount}
-          </span>
-        )}
-      </button>
-    )
+  function chooseDirectory(project: Project): void {
+    setChatDirectoryId(project.id)
+    setOpenDirectoryId(project.id)
+    setListOpen(true)
+    openTab({ kind: 'agents', projectId: project.id })
+    setActiveProject(project.id).catch((error) => {
+      console.error('[sidebar] Failed to set active project:', error)
+    })
+  }
+
+  async function spawnIn(project: Project): Promise<void> {
+    setChatDirectoryId(project.id)
+    setOpenDirectoryId(project.id)
+    setListOpen(true)
+    openTab({ kind: 'agents', projectId: project.id })
+    try {
+      await setActiveProject(project.id)
+    } catch (error) {
+      console.error('[sidebar] Failed to set active project:', error)
+      return
+    }
+    openDialog('spawn-agent')
+  }
+
+  function openAgentChat(agent: Agent): void {
+    if (agent.projectId) {
+      const project = projects.find((candidate) => candidate.id === agent.projectId)
+      if (project) chooseDirectory(project)
+    }
+    const match = conversations.find((conversation) => conversationMatchesAgents(conversation, [agent.name]))
+    if (match) void selectConversation(match.id)
   }
 
   return (
-    <div className="px-3 pb-2 pt-1">
+    <div className="border-b border-[var(--pear-border-subtle)]">
       <button
         type="button"
-        onClick={openIssues}
-        className={`flex h-9 w-full min-w-0 items-center gap-2.5 rounded-md border px-2.5 text-left text-[13px] font-semibold transition-colors ${
-          active
-            ? 'border-[var(--pear-accent-dim)] bg-[var(--pear-bg-overlay)] text-[var(--pear-text)]'
-            : 'border-[var(--pear-border-subtle)] bg-[var(--pear-bg-surface)]/70 text-[var(--pear-text)] hover:border-[var(--pear-border)] hover:bg-[var(--pear-bg-surface-hover)]'
-        }`}
+        onClick={() => setListOpen(!listOpen)}
+        className="flex h-12 w-full items-center gap-2.5 px-5 text-left"
+        aria-expanded={listOpen}
+        aria-label={listOpen ? 'Collapse directories' : 'Expand directories'}
       >
-        <Inbox size={15} className="shrink-0 text-[var(--pear-text-dim)]" />
-        <span className="min-w-0 flex-1 truncate">Issues</span>
-        {needsYouCount > 0 && (
-          <span className="shrink-0 rounded-full bg-[var(--pear-red)] px-1.5 py-0.5 text-[10px] font-bold leading-none text-white">
-            {needsYouCount}
+        <FolderKanban size={14} className="shrink-0 text-[var(--pear-text-secondary)]" />
+        <span className="min-w-0 flex-1">
+          <span className="block text-[11px] font-medium leading-[14px] text-[var(--pear-text-faint)]">
+            Directory
           </span>
-        )}
+          <span className="block truncate text-[13px] font-semibold leading-4 text-[var(--pear-text)]">
+            {selected?.name || 'All agents'}
+          </span>
+        </span>
+        {listOpen
+          ? <ChevronUp size={12} className="shrink-0 text-[var(--pear-text-secondary)]" />
+          : <ChevronDown size={12} className="shrink-0 text-[var(--pear-text-secondary)]" />}
       </button>
+
+      {listOpen && (
+        <div className="max-h-[340px] overflow-y-auto px-3 pb-3">
+          <button
+            type="button"
+            onClick={() => setChatDirectoryId(null)}
+            aria-pressed={directoryId === null}
+            className={rowClass(directoryId === null)}
+          >
+            <span className="min-w-0 flex-1 truncate">All agents</span>
+          </button>
+
+          {sortedProjects.length === 0 ? (
+            <button
+              type="button"
+              onClick={() => openDialog('add-project')}
+              className="mt-1 w-full rounded-md border border-dashed border-[var(--pear-border-subtle)] px-2 py-2 text-left text-[11px] text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text-dim)]"
+            >
+              Add a directory
+            </button>
+          ) : (
+            sortedProjects.map((project) => {
+              const agents = agentsIn(project.id)
+              const open = openDirectoryId === project.id
+              const filtering = directoryId === project.id
+              return (
+                <div key={project.id} className="mt-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (filtering && open) {
+                        setOpenDirectoryId(null)
+                        return
+                      }
+                      chooseDirectory(project)
+                    }}
+                    className={rowClass(filtering)}
+                    aria-expanded={open}
+                    aria-label={`${open ? 'Collapse' : 'Show agents in'} ${project.name}`}
+                    title={project.rootPath}
+                  >
+                    {open
+                      ? <ChevronDown size={12} className="shrink-0" />
+                      : <ChevronRight size={12} className="shrink-0" />}
+                    <span className="min-w-0 flex-1 truncate">{project.name}</span>
+                    <span className="shrink-0 rounded-full bg-[var(--pear-bg)]/40 px-1.5 py-0.5 text-[10px] leading-none text-[var(--pear-text-faint)]">
+                      {agents.length}
+                    </span>
+                  </button>
+                  {open && (
+                    <div className="ml-3 mt-1 space-y-1 border-l border-[var(--pear-border-subtle)] pl-2">
+                      <p className="truncate px-2 text-[10px] text-[var(--pear-text-faint)]" title={project.rootPath}>
+                        {project.rootPath}
+                      </p>
+                      {agents.length === 0 ? (
+                        <p className="px-2 py-1 text-[11px] text-[var(--pear-text-faint)]">
+                          No agents in this directory
+                        </p>
+                      ) : (
+                        agents.map((agent) => (
+                          <button
+                            key={getAgentKeyForAgent(agent)}
+                            type="button"
+                            onClick={() => openAgentChat(agent)}
+                            className={rowClass(false)}
+                            aria-label={`Chat with ${agent.name} in ${project.name}`}
+                          >
+                            <AgentHarnessIcon cli={agent.cli} className="h-3.5 w-3.5 shrink-0 text-[var(--pear-text-faint)]" />
+                            <span className="min-w-0 flex-1 truncate">{agent.name}</span>
+                          </button>
+                        ))
+                      )}
+                      <button
+                        type="button"
+                        onClick={() => void spawnIn(project)}
+                        className="flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[12px] text-[var(--pear-text-secondary)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
+                        aria-label={`Spawn agent in ${project.name}`}
+                      >
+                        <Plus size={12} className="shrink-0" />
+                        <span>Spawn agent</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+              )
+            })
+          )}
+
+          {sortedProjects.length > 0 && (
+            <button
+              type="button"
+              onClick={() => openDialog('add-project')}
+              className="mt-2 flex h-8 w-full items-center gap-2 rounded-md px-2 text-left text-[12px] text-[var(--pear-text-faint)] hover:bg-[var(--pear-bg-surface-hover)] hover:text-[var(--pear-text)]"
+            >
+              <Plus size={12} />
+              <span>Add directory</span>
+            </button>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -922,18 +1012,19 @@ function ProjectNavigation({ collapsed = false }: { collapsed?: boolean }): Reac
     openTab({ kind: 'project-settings', projectId: activeProject.id })
   }
 
-  function addAgent(): void {
-    openDialog('spawn-agent')
-  }
-
   function addChannel(): void {
     openDialog('add-channel')
   }
 
   function selectAgent(agent: Agent): void {
     setActiveChannel(null)
+    if (agent.projectId) useUIStore.getState().setChatDirectoryId(agent.projectId)
     openTab({ kind: 'agents', projectId: agent.projectId })
     setActiveAgentKey(getAgentKeyForAgent(agent))
+    const match = useChatStore.getState().conversations.find((conversation) =>
+      conversationMatchesAgents(conversation, [agent.name])
+    )
+    if (match) void useChatStore.getState().selectConversation(match.id)
   }
 
   function selectChannel(channel: string): void {
@@ -1066,48 +1157,6 @@ function ProjectNavigation({ collapsed = false }: { collapsed?: boolean }): Reac
       <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-4">
         <section>
           <SectionHeader
-            title="Agents"
-            addLabel="Add agent"
-            onAdd={addAgent}
-            menuItems={[
-              { label: 'Add agent', icon: Plus, onSelect: addAgent },
-              { label: 'Agent settings', icon: Settings, onSelect: openProjectSettings }
-            ]}
-          />
-          <div className="space-y-1">
-            {agents.length === 0 ? (
-              <button
-                type="button"
-                onClick={addAgent}
-                className="w-full rounded-md border border-dashed border-[var(--pear-border-subtle)] px-2 py-2 text-left text-[11px] text-[var(--pear-text-faint)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text-dim)]"
-              >
-                Spawn an agent
-              </button>
-            ) : (
-              agents.map((agent) => {
-                const key = getAgentKeyForAgent(agent)
-                const active = activeTab?.kind === 'agents' && activeAgentKey === key
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => selectAgent(agent)}
-                    className={rowClass(active)}
-                    title={agent.name}
-                    aria-label={agent.name}
-                  >
-                    <AgentHarnessIcon cli={agent.cli} className="h-3.5 w-3.5 shrink-0 text-[var(--pear-text-faint)]" />
-                    <span className="min-w-0 flex-1 truncate">{agent.name}</span>
-                    <AgentActivityIndicator agent={agent} />
-                  </button>
-                )
-              })
-            )}
-          </div>
-        </section>
-
-        <section>
-          <SectionHeader
             title="Channels"
             addLabel="Add channel"
             onAdd={addChannel}
@@ -1205,10 +1254,6 @@ export function ProjectSidebar(): React.ReactNode {
           <ProjectSwitcher collapsed />
         </div>
 
-        <div className="mb-2">
-          <IssuesNavEntry collapsed />
-        </div>
-
         <ProjectNavigation collapsed />
 
         <div className="shrink-0 border-t border-[var(--pear-border-subtle)] px-2 pt-2">
@@ -1227,12 +1272,8 @@ export function ProjectSidebar(): React.ReactNode {
         </div>
       </div>
 
-      <div className="titlebar-nodrag shrink-0 pb-2">
-        <ProjectSwitcher />
-      </div>
-
-      <div className="shrink-0">
-        <IssuesNavEntry />
+      <div className="titlebar-nodrag shrink-0">
+        <DirectoryBrowser />
       </div>
 
       <ProjectNavigation />

@@ -31,38 +31,6 @@ jobs:
       - run: npx vitest run
       - run: npm run build
 
-  playwright:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npx playwright install --with-deps chromium
-      # Both configs run `npm run build:web` themselves (via test:fidelity / test:redraw),
-      # but build once up front so a build break fails fast and is shared by both suites.
-      - run: npm run build:web
-      # fidelity GATES: the spec seeds pear-web-initial-tab=agents and selects
-      # the spawned agent, so terminal runtimes mount in the web-mock build.
-      # These six specs are the no-duplication / no-loss fence for the
-      # renderer pipeline — a failure here is a rendering regression.
-      - run: npx playwright test --config playwright.fidelity.config.ts
-      # redraw GATES on the drain invariants (drained + finalFrameRendered) —
-      # the typing-lag / parser-backlog fence. Timing metrics stay informational.
-      - run: npx playwright test --config playwright.redraw.config.ts
-      - name: Upload Playwright traces
-        # always() so traces from any failed Playwright gate are captured.
-        # No-op when nothing failed.
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-traces
-          path: test-results/
-          retention-days: 7
-          if-no-files-found: ignore
-
   packaged-mcp-smoke:
     runs-on: macos-latest
     steps:

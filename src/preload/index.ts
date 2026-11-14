@@ -9,8 +9,12 @@ import type {
   AddRootResult,
   AuthLoginInput,
   AuthStatus,
-  BrokerAttachTerminalInput,
-  BrokerAttachTerminalResult,
+  ChatHistoryInput,
+  ChatInvalidatedEvent,
+  ChatMessageEvent,
+  ChatOpenConversationEvent,
+  ChatSendInput,
+  ChatUploadInput,
   BrokerDetails,
   BrokerEventRecord,
   BrokerEventStreamDiagnostic,
@@ -18,15 +22,12 @@ import type {
   BrokerReconciledChatMessage,
   BrokerReconcileMessagesInput,
   BrokerSendMessageInput,
-  BrokerSetTerminalModeResult,
   BrokerSpawnAgentInput,
   BrokerSpawnAgentResult,
   BrokerPlaceAgentInput,
   BrokerPlaceAgentOutcome,
   BrokerNodeSummary,
   BrokerStatusEvent,
-  BrokerTerminalSnapshot,
-  BrokerTerminalSnapshotFormat,
   BurnAgentBreakdown,
   BurnAgentInput,
   BurnAgentSummary,
@@ -43,8 +44,6 @@ import type {
   CloudAgentStatus,
   ConnectedIntegration,
   CreateCloudAgentInput,
-  FactoryConfigReadResult,
-  FactoryStatus,
   FsDirEntry,
   FsReadPreviewResult,
   GitBranchInfo,
@@ -77,9 +76,10 @@ import type {
   ProjectListResult,
   ProjectIntegrationResult,
   ProjectRootRecord,
-  TerminalAttachMode,
-  TermFidelityCorpusInput,
-  TermFidelityCorpusResult,
+  RelayChatAttachment,
+  RelayChatConversation,
+  RelayChatMessage,
+  SessionTranscriptTurn,
   UpdaterState,
   WorkforcePersona
 } from '../shared/types/ipc'
@@ -97,9 +97,16 @@ export type {
   AuthLoginInput,
   AuthStatus,
   AuthUser,
+  ChatHistoryInput,
+  ChatInvalidatedEvent,
+  ChatMessageEvent,
+  ChatOpenConversationEvent,
+  ChatSendInput,
+  ChatUploadInput,
+  RelayChatAttachment,
+  RelayChatConversation,
+  RelayChatMessage,
   BrokerAgentDetails,
-  BrokerAttachTerminalInput,
-  BrokerAttachTerminalResult,
   BrokerDetails,
   BrokerEventRecord,
   BrokerEventStreamDiagnostic,
@@ -107,7 +114,6 @@ export type {
   BrokerReconciledChatMessage,
   BrokerReconcileMessagesInput,
   BrokerSendMessageInput,
-  BrokerSetTerminalModeResult,
   BrokerSpawnAgentInput,
   BrokerSpawnAgentResult,
   BrokerStatusEvent,
@@ -134,8 +140,6 @@ export type {
   CloudAgentSyncMode,
   ConnectedIntegration,
   CreateCloudAgentInput,
-  FactoryConfigReadResult,
-  FactoryStatus,
   FsDirEntry,
   FsReadPreviewResult,
   GitBranchInfo,
@@ -181,10 +185,6 @@ export type {
   ProjectIntegrationResult,
   ProjectRootConflict,
   ProjectRootRecord,
-  TerminalAttachMode,
-  TermFidelityCorpusGrid,
-  TermFidelityCorpusInput,
-  TermFidelityCorpusResult,
   WorkforcePersona
 } from '../shared/types/ipc'
 
@@ -205,9 +205,7 @@ const api = {
     confirmQuit: () => invoke<boolean>('app:confirm-quit'),
     notifyCliReady: () => {
       ipcRenderer.send('cli:renderer-ready')
-    },
-    dumpTermFidelityCorpus: (input: TermFidelityCorpusInput) =>
-      invoke<TermFidelityCorpusResult>('term-fidelity:dump-corpus', input)
+    }
   },
   project: {
     list: () => invoke<ProjectListResult>('project:list'),
@@ -267,25 +265,10 @@ const api = {
       invoke<WorkforcePersona[]>('broker:list-personas', projectId, cwd),
     spawnPersona: (projectId: string, personaId: string) =>
       invoke<BrokerSpawnAgentResult>('broker:spawn-persona', projectId, personaId),
-    attachTerminal: (input: BrokerAttachTerminalInput) =>
-      invoke<BrokerAttachTerminalResult>('broker:attach-terminal', input),
-    sendInput: (projectId: string | undefined, name: string, data: string) =>
-      invoke<{ name: string; bytes_written: number }>('broker:send-input', projectId, name, data),
-    sendInputFast: (projectId: string | undefined, name: string, data: string): void => {
-      ipcRenderer.send('broker:send-input-fast', projectId, name, data)
-    },
-    setTerminalMode: (projectId: string | undefined, name: string, mode: TerminalAttachMode) =>
-      invoke<BrokerSetTerminalModeResult>('broker:set-terminal-mode', projectId, name, mode),
     getPending: (projectId: string | undefined, name: string) =>
       invoke<PendingRelayMessage[]>('broker:get-pending', projectId, name),
     flushPending: (projectId: string | undefined, name: string) =>
       invoke<{ flushed: number }>('broker:flush-pending', projectId, name),
-    resizePty: (projectId: string | undefined, name: string, rows: number, cols: number) =>
-      invoke<void>('broker:resize-pty', projectId, name, rows, cols),
-    snapshotTerminal: (projectId: string | undefined, name: string, format: BrokerTerminalSnapshotFormat) =>
-      invoke<BrokerTerminalSnapshot | null>('broker:snapshot-terminal', projectId, name, format),
-    inputSrtt: (projectId: string | undefined, name: string) =>
-      invoke<number | null>('broker:input-srtt', projectId, name),
     sendMessage: (projectId: string | undefined, input: BrokerSendMessageInput) =>
       invoke<void>('broker:send-message', projectId, input),
     reconcileMessages: (input: BrokerReconcileMessagesInput) =>
@@ -310,35 +293,25 @@ const api = {
       subscribe<BrokerEventStreamDiagnostic>('broker:event-stream-diagnostic', callback),
     onObserverChatUpdate: (callback: (update: ObserverChatUpdate) => void) =>
       subscribe<ObserverChatUpdate>('observer:chat-update', callback),
-    onPtyChunk: (
-      callback: (
-        projectId: string,
-        name: string,
-        chunk: string,
-        offset?: number,
-        generation?: number
-      ) => void
-    ) => {
-      const handler = (
-        _: unknown,
-        projectId: string,
-        name: string,
-        chunk: string,
-        offset?: number,
-        generation?: number
-      ): void => callback(projectId, name, chunk, offset, generation)
-      ipcRenderer.on('broker:pty-chunk', handler)
-      return () => ipcRenderer.removeListener('broker:pty-chunk', handler)
-    },
     onStatus: (callback: (status: BrokerStatusEvent) => void) =>
       subscribe<BrokerStatusEvent>('broker:status', callback)
   },
-  factory: {
-    status: () => invoke<FactoryStatus>('factory:status'),
-    readConfig: (configPath?: string, projectRoot?: string) =>
-      invoke<FactoryConfigReadResult>('factory:read-config', configPath, projectRoot),
-    saveConfig: (config: unknown, configPath?: string, projectRoot?: string) =>
-      invoke<FactoryConfigReadResult>('factory:save-config', config, configPath, projectRoot)
+  chat: {
+    listConversations: () => invoke<RelayChatConversation[]>('chat.listConversations'),
+    getHistory: (input: ChatHistoryInput) =>
+      invoke<RelayChatMessage[]>('chat.getHistory', input),
+    send: (input: ChatSendInput) => invoke<RelayChatMessage>('chat.send', input),
+    markRead: (messageId: string) => invoke<void>('chat.markRead', messageId),
+    joinChannel: (channel: string) =>
+      invoke<{ alreadyMember: boolean }>('chat.joinChannel', channel),
+    uploadFile: (input: ChatUploadInput) =>
+      invoke<RelayChatAttachment>('chat.uploadFile', input),
+    onInvalidated: (callback: (event: ChatInvalidatedEvent) => void) =>
+      subscribe<ChatInvalidatedEvent>('chat:invalidated', callback),
+    onMessage: (callback: (event: ChatMessageEvent) => void) =>
+      subscribe<ChatMessageEvent>('chat:message', callback),
+    onOpenConversation: (callback: (event: ChatOpenConversationEvent) => void) =>
+      subscribe<ChatOpenConversationEvent>('chat:open-conversation', callback)
   },
   burn: {
     listAgentSummaries: (agents: BurnAgentInput[]) =>
@@ -510,6 +483,8 @@ const api = {
     listSessions: (opts?: AiHistRecentOptions) =>
       invoke<AiHistSession[]>('ai-hist:list-sessions', opts),
     getSession: (sessionId: string) => invoke<AiHistEntry[]>('ai-hist:get-session', sessionId),
+    transcript: (sessionId: string) =>
+      invoke<SessionTranscriptTurn[]>('ai-hist:transcript', sessionId),
     search: (query: string, opts?: AiHistRecentOptions) =>
       invoke<AiHistEntry[]>('ai-hist:search', query, opts),
     searchSessions: (query: string, opts?: AiHistRecentOptions) =>

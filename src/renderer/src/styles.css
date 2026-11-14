@@ -1,5 +1,4 @@
 @import 'tailwindcss';
-@import '@xterm/xterm/css/xterm.css';
 @import 'react-diff-view/style/index.css';
 
 /* ── Dark theme (default) ── */
@@ -176,15 +175,6 @@ body,
   outline: 2px solid var(--pear-focus-ring);
   outline-offset: 2px;
   box-shadow: 0 0 0 3px var(--pear-focus-shadow);
-}
-
-.xterm,
-.xterm * {
-  -webkit-app-region: no-drag;
-}
-
-.xterm {
-  cursor: text;
 }
 
 .diff-view {
@@ -549,6 +539,26 @@ body,
   position: fixed;
   white-space: nowrap;
   z-index: 10000;
+}
+
+/* Grok avatar atlas: 4 rows over the 4s clip, 8 columns per row, 8 fps. */
+@keyframes grok-avatar-row {
+  to { transform: translateY(calc(var(--grok-cell) * -4)); }
+}
+@keyframes grok-avatar-column {
+  to { transform: translateX(calc(var(--grok-cell) * -8)); }
+}
+.grok-avatar-rows {
+  animation: grok-avatar-row 4s steps(4, end) infinite;
+}
+.grok-avatar-frames {
+  animation: grok-avatar-column 1s steps(8, end) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .grok-avatar-rows,
+  .grok-avatar-frames {
+    animation: none;
+  }
 }
 
 /* Scrollbar */

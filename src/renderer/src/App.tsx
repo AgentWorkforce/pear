@@ -1,17 +1,13 @@
 import type React from 'react'
 import { useEffect } from 'react'
-import { Sidebar } from '@/components/sidebar/Sidebar'
 import { ProjectSettings } from '@/components/settings/ProjectSettings'
 import { AccountSettings } from '@/components/settings/AccountSettings'
-import { TerminalPane } from '@/components/terminal/TerminalPane'
-import { ChatView } from '@/components/chat/ChatView'
+import { ChatDesktopView } from '@/components/chat-desktop/ChatDesktopView'
 import { BrokerDetailsPage } from '@/components/broker/BrokerDetailsPage'
-import { FactoryPage } from '@/components/factory/FactoryPage'
 import { BurnSessionPage } from '@/components/burn/BurnSessionPage'
 import { BurnProjectPage } from '@/components/burn/BurnProjectPage'
 import { BurnSessionDetailPage } from '@/components/burn/BurnSessionDetailPage'
 import { DiffPane } from '@/components/diff/DiffPane'
-import { AttentionInbox } from '@/components/issues/AttentionInbox'
 import ConversationsPanel from '@/components/ai-hist/ConversationsPanel'
 import { AppTopBar } from '@/components/common/AppTopBar'
 import { CommandMenu } from '@/components/common/CommandMenu'
@@ -39,7 +35,6 @@ export default function App(): React.ReactNode {
   const closeDialog = useUIStore((s) => s.closeDialog)
   const openDialog = useUIStore((s) => s.openDialog)
   const activeTab = useUIStore((s) => s.tabs.find((tab) => tab.id === s.activeTabId))
-  const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
   const load = useProjectStore((s) => s.load)
   const projects = useProjectStore((s) => s.projects)
   const activeProjectId = useProjectStore((s) => s.activeProjectId)
@@ -104,12 +99,8 @@ export default function App(): React.ReactNode {
       ? <AccountSettings />
     : activeTab?.kind === 'broker-details'
       ? <BrokerDetailsPage />
-    : activeTab?.kind === 'factory'
-      ? <FactoryPage />
     : activeTab?.kind === 'source-control'
       ? <DiffPane />
-    : activeTab?.kind === 'issues'
-      ? <AttentionInbox />
     : activeTab?.kind === 'ai-hist'
       ? <ConversationsPanel />
     : activeTab?.kind === 'burn-session'
@@ -118,28 +109,16 @@ export default function App(): React.ReactNode {
       ? <BurnProjectPage />
     : activeTab?.kind === 'burn-session-detail'
       ? <BurnSessionDetailPage />
-    : activeTab?.kind === 'channel' || activeTab?.kind === 'dm'
-      ? <ChatView />
-      : <TerminalPane />
+    : <ChatDesktopView />
 
   return (
     <div className="relative flex h-full flex-col">
       <AppTopBar />
       <UpdateBanner />
 
-      <div className="flex min-h-0 flex-1">
-        <div
-          className={`relative z-30 h-full shrink-0 transition-[width] duration-150 ${
-            sidebarCollapsed ? 'w-[56px]' : 'w-[272px] min-w-[220px] max-w-[380px]'
-          }`}
-        >
-          <Sidebar />
-        </div>
-
-        <div className="flex min-w-0 flex-1 flex-col">
-          <div className="min-h-0 flex-1">
-            {mainView}
-          </div>
+      <div className="flex min-h-0 flex-1 flex-col">
+        <div className="min-h-0 flex-1">
+          {mainView}
         </div>
       </div>
 

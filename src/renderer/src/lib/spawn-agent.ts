@@ -102,12 +102,6 @@ export async function spawnProjectAgent(
   })
   const name = spawned.name || requestedName
 
-  await pear.broker.attachTerminal({
-    projectId: project.id,
-    name,
-    mode: 'passthrough'
-  })
-
   agentStore.trackSpawnedAgent(name, project.id, root.id, cli, root.path)
   agentStore.setActiveAgentKey(getAgentKey(project.id, name))
   useUIStore.getState().openTab({ kind: 'agents', projectId: project.id })
@@ -126,9 +120,8 @@ export interface PlaceAgentUiResult {
  * Place an agent on a fleet node via the relay placement engine (#411). `node`
  * omitted/'' → any eligible least-loaded node (may resolve to this Mac); a node
  * name targets that node; 'self' targets this machine. A local landing is
- * integrated exactly like a direct spawn (terminal attached + tracked); a remote
- * landing has no local PTY — its raw terminal has no relay transport yet
- * (acceptance #2b), so it is surfaced chat-first and no terminal tab is opened.
+ * integrated exactly like a direct spawn (tracked); a remote landing is
+ * surfaced chat-first and no terminal tab is opened.
  * Placement failures throw with a clear, user-facing message (never a hang).
  */
 export async function placeProjectAgent(
@@ -160,7 +153,6 @@ export async function placeProjectAgent(
   const agentStore = useAgentStore.getState()
   if (result.local) {
     // Landed on this Mac — same integration as a direct local spawn.
-    await pear.broker.attachTerminal({ projectId: project.id, name: result.name, mode: 'passthrough' })
     agentStore.trackSpawnedAgent(result.name, project.id, root.id, cli, root.path)
     agentStore.setActiveAgentKey(getAgentKey(project.id, result.name))
     useUIStore.getState().openTab({ kind: 'agents', projectId: project.id })
@@ -334,12 +326,6 @@ export async function spawnProjectPersona(project: Project, personaId: string, r
   const persona = personas.find((candidate) => candidate.id === personaId)
   const spawned = await pear.broker.spawnPersona(project.id, personaId)
   const name = spawned.name || personaId
-
-  await pear.broker.attachTerminal({
-    projectId: project.id,
-    name,
-    mode: 'passthrough'
-  })
 
   agentStore.trackSpawnedAgent(name, project.id, root.id, spawned.cli || persona?.harness || personaId, root.path)
   agentStore.setActiveAgentKey(getAgentKey(project.id, name))

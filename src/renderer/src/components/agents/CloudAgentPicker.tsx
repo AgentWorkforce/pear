@@ -415,11 +415,6 @@ export default function CloudAgentPicker({
         ...(attachingAgent?.defaultModel ? { model: attachingAgent.defaultModel } : {})
       })
       const name = spawned.name || requestedName
-      await pear.broker.attachTerminal({
-        projectId,
-        name,
-        mode: 'passthrough'
-      })
       useAgentStore.getState().trackSpawnedAgent(name, projectId, undefined, cli, '/workspace')
       useAgentStore.getState().setActiveAgentKey(getAgentKey(projectId, name))
       useUIStore.getState().openTab({ kind: 'agents', projectId })

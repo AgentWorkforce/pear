@@ -149,14 +149,14 @@ export function isLinearStatesListablePath(remotePath: string): boolean {
   return segments[0] === 'linear' && segments[1] === 'states'
 }
 
-// The Issues tab (issues-store.ts) lists /linear/issues and reads/writes the
-// issue records beneath it (status writeback, comments), but — exactly like
+// Integrations list /linear/issues and read/write the issue records beneath it
+// (status writeback, comments), but — exactly like
 // /linear/states above — the adapter materializes /linear/issues as a sibling
 // of the team-level mount scope (/linear/teams...), so the mount-path checks
 // reject it. Recognize the /linear/issues subtree so list/read AND write are
 // allowed when a Linear integration is visible. Unlike states, this carve-out
-// permits writes: issue status changes and comments are the whole point of the
-// Issues control center.
+// permits writes: issue status changes and comments are the point of the
+// carve-out.
 export function isLinearIssuesListablePath(remotePath: string): boolean {
   const segments = (remotePath || '').trim().replace(/\/+$/, '').split('/').filter(Boolean)
   return segments[0] === 'linear' && segments[1] === 'issues'

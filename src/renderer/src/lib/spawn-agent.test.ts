@@ -16,7 +16,6 @@ const mockPear = vi.hoisted(() => ({
       runtime: 'local',
       cli: input.cli
     })),
-    attachTerminal: vi.fn(async () => ({ name: 'agent', mode: 'auto_inject', pending: 0, snapshot: null })),
     sendMessage: vi.fn(async () => undefined),
     releaseAgent: vi.fn(async () => undefined)
   },

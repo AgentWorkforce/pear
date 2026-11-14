@@ -30,8 +30,6 @@ import {
   isDeliveryEventForMessage,
   isWorkerStreamForAgent
 } from './broker-event-utils'
-import { PtyInputStreamManager } from './pty-input-stream'
-import { PtyChunkDeduper } from './pty-dedup'
 import { normalizeRelaycastBaseUrl } from './relay-service-urls'
 import {
   SpawnCoordinator,
@@ -60,8 +58,6 @@ import type {
   BrokerEventStreamDiagnostic,
   BrokerReconciledChatMessage,
   BrokerReconcileMessagesInput,
-  BrokerTerminalSnapshot,
-  BrokerTerminalSnapshotFormat,
   WorkforcePersona
 } from '../shared/types/ipc'
 import {
@@ -70,7 +66,6 @@ import {
   resolveCommandOnPath,
   resolvePackageBin
 } from './mcp-command'
-import { startPearFleetSidecar, pearFleetProviderName, type RunningPearFleetSidecar } from './pear-fleet-node'
 import {
   isObserverStreamEnabled,
   ObserverStreamManager,
@@ -341,8 +336,6 @@ async function findWorkforcePersona(
   }
 }
 
-type TerminalAttachMode = 'view' | 'drive' | 'passthrough'
-
 export interface CloudAgentSandboxHandle {
   sandboxId: string
   execUrl: string
@@ -364,36 +357,10 @@ type DeliveryConfirmationResult = {
   targets: string[]
 }
 
-export interface AttachTerminalInput {
-  name: string
-  rows?: number
-  cols?: number
-  mode?: TerminalAttachMode
-}
-
-export interface AttachTerminalResult {
-  name: string
-  mode: InboundDeliveryMode
-  previousMode?: InboundDeliveryMode
-  pending: number
-  snapshot?: {
-    rows: number
-    cols: number
-    cursor: [number, number]
-    screen: string
-    offset?: number
-    generation?: number
-  }
-}
-
 export type { GeneratedCommitDraft }
 
 export interface BrokerRuntimeAutoFixResult {
   removed: string[]
-}
-
-function isPositiveInteger(value: unknown): value is number {
-  return typeof value === 'number' && Number.isInteger(value) && value > 0
 }
 
 const BROKER_DETAILS_TIMEOUT_MS = 3_000
@@ -421,8 +388,6 @@ const BROKER_RELEASE_RETRY_BASE_MS = parsePositiveIntegerEnv('PEAR_BROKER_RELEAS
 // operation resets the streak.
 const MAX_BROKER_TIMEOUTS_BEFORE_REVIVE = 2
 const BROKER_REVIVE_TERM_GRACE_MS = 1_500
-const LOCAL_FLEET_REGISTRATION_TIMEOUT_MS = 2_000
-const LOCAL_FLEET_STOP_TIMEOUT_MS = 1_000
 const PERSONA_REGISTRATION_TIMEOUT_MS = 5_000
 const PERSONA_REGISTRATION_STABILITY_MS = 1_000
 const PERSONA_HARNESS_READY_TIMEOUT_MS = 120_000
@@ -443,16 +408,6 @@ const AGENTWORKFORCE_CLI_VERSION = '4.1.16'
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms))
-}
-
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined
-  const timeout = new Promise<T>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(message)), timeoutMs)
-  })
-  return Promise.race([promise, timeout]).finally(() => {
-    if (timer) clearTimeout(timer)
-  })
 }
 
 async function mapWithConcurrency<T, R>(
@@ -710,10 +665,6 @@ function getErrorStatus(err: unknown): unknown {
   return (err as { status?: unknown }).status
 }
 
-function isUnsupportedInputStreamError(err: unknown): boolean {
-  return getErrorStatus(err) === 404 || /\b404\b|not found|unsupported/i.test(toErrorMessage(err))
-}
-
 function isMissingAgentError(err: unknown): boolean {
   return getErrorStatus(err) === 404 || /agent_not_found|no worker named|not found/i.test(toErrorMessage(err))
 }
@@ -766,14 +717,6 @@ function isBrokerTimeoutError(err: unknown): boolean {
     const message = node.message
     return typeof message === 'string' && /aborted due to timeout|ETIMEDOUT|timed?out/i.test(message)
   })
-}
-
-// The PTY input WS rejects in-flight sends with `input_stream_closed` when the
-// stream is deliberately torn down (project/agent shutdown, terminal re-attach)
-// while a keystroke was mid-flight. That's an expected close, not a transport
-// failure — callers fall through to HTTP without logging it as an error.
-function isInputStreamClosedError(err: unknown): boolean {
-  return (err as { code?: unknown } | null | undefined)?.code === 'input_stream_closed'
 }
 
 function withBrokerDetailsTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
@@ -882,10 +825,6 @@ function brokerConnectionPathCandidates(cwd: string): string[] {
     join(cwd, '.agentworkforce', 'relay', 'connection.json'),
     join(cwd, '.agent-relay', 'connection.json')
   ]
-}
-
-function toInboundDeliveryMode(mode?: TerminalAttachMode): InboundDeliveryMode {
-  return mode === 'drive' ? 'manual_flush' : 'auto_inject'
 }
 
 function normalizeChannels(channels: string[]): string[] {
@@ -1099,8 +1038,6 @@ interface BrokerSession {
   // auto-shuts-down after 120s without a lease renewal, so we own the timer
   // here and clear it on shutdown.
   leaseTimer?: ReturnType<typeof setInterval>
-  fleetSidecar?: RunningPearFleetSidecar
-  fleetSidecarCwd?: string
   // Agent-scoped relay client used to invoke placement (#411). Lazily created on
   // first placeAgent/listNodes: workspace key from the broker session + a
   // dedicated `pear-requester-<projectId>` agent identity (placement.spawn ->
@@ -1263,15 +1200,12 @@ export class BrokerManager {
   // pending-persona readiness set. BrokerManager delegates the coalescing here
   // and keeps the actual spawn work inline.
   private spawnCoordinator = new SpawnCoordinator()
+
   // Which broker sessions (by session key) an agent name is registered on.
   // Both a project's local and cloud brokers join the same relay workspace,
   // so agent names are project-unique in practice — the set tracks which
   // session actually owns the worker so agent-scoped calls route correctly.
   private agentSessions = new Map<string, Set<string>>()
-  // PTY input streaming (WS fast path + HTTP fallback) and all its per-agent
-  // state live here; this manager owns the stream maps, failure counting, and
-  // fallback cooldown.
-  private inputStreamManager = new PtyInputStreamManager()
   // Consecutive broker read timeouts per project/operation; after MAX we
   // respawn the wedged broker. Reset whenever that operation succeeds.
   private brokerTimeoutCounts = new Map<string, number>()
@@ -1281,7 +1215,6 @@ export class BrokerManager {
   // prune) plus the replay query the renderer rehydrates from. BrokerManager
   // keeps event publishing / IPC fan-out inline and delegates storage here.
   private brokerEventHistory = new BrokerEventHistory()
-  private ptyDeduper = new PtyChunkDeduper({ debugEnabled: isBrokerDebugEnabled })
   // Ingress-validation telemetry: last warn time per malformed `kind`
   // (throttled) and the set of unknown `kind`s already logged (once each).
   private malformedEventWarnedAt = new Map<string, number>()
@@ -1385,11 +1318,6 @@ export class BrokerManager {
     queued.attempts += 1
     try {
       await this.brokerOperation(session, 'cleanup', () => session.client.release(queued.name, queued.reason))
-      this.inputStreamManager.closeInputStream(
-        this.inputStreamManager.getInputStreamKey(queued.sessionKey, queued.name),
-        1000,
-        'agent released'
-      )
       this.forgetAgentSession(queued.name, queued.sessionKey)
       this.queuedReleases.delete(key)
     } catch (err) {
@@ -1441,7 +1369,6 @@ export class BrokerManager {
       existing.name = name
       await this.syncChannels(normalizedProjectId, nextChannels)
       await this.refreshEventStream(normalizedProjectId, 'existing-session-start', win)
-      await this.ensureLocalFleetSidecar(existing)
       this.maybeStartObserverStream(normalizedProjectId)
       this.sendStatus(normalizedProjectId, 'connected')
       return false
@@ -1459,7 +1386,6 @@ export class BrokerManager {
         started.cwd = cwd
         started.name = name
         await this.syncChannels(normalizedProjectId, nextChannels)
-        await this.ensureLocalFleetSidecar(started)
         this.sendStatus(normalizedProjectId, 'connected')
         return false
       } catch (err) {
@@ -1491,7 +1417,6 @@ export class BrokerManager {
         existingClient.connectEvents()
 
         await this.syncChannels(normalizedProjectId, nextChannels)
-        await this.ensureLocalFleetSidecar(session)
         this.maybeStartObserverStream(normalizedProjectId)
         this.publishBrokerEvent(normalizedProjectId, normalizedProjectId, win, {
           kind: 'broker_initialized',
@@ -1562,7 +1487,6 @@ export class BrokerManager {
         operationQueue: new BrokerOperationQueue(BROKER_OPERATION_CONCURRENCY)
       }
       this.sessions.set(normalizedProjectId, session)
-      await this.ensureLocalFleetSidecar(session)
       this.maybeStartObserverStream(normalizedProjectId)
 
       this.publishBrokerEvent(normalizedProjectId, normalizedProjectId, win, {
@@ -1662,7 +1586,6 @@ export class BrokerManager {
     // eslint-disable-next-line prefer-const
     promise = (async () => {
       console.warn(`[broker] Broker for project ${projectId} is unreachable; restarting on a fresh port`)
-      await this.stopSessionFleetSidecar(session)
       this.dropSession(projectId, { disconnectOnly: true })
       await terminateOwnedBrokerProcess(brokerPid)
       if (this.revivePromises.get(projectId) !== promise) return false
@@ -1931,80 +1854,6 @@ export class BrokerManager {
     }
   }
 
-  private async ensureLocalFleetSidecar(session: BrokerSession): Promise<void> {
-    if (session.cloudSandboxId) return
-    if (session.fleetSidecar && session.fleetSidecarCwd === session.cwd) return
-    if (session.fleetSidecar) {
-      await this.stopSessionFleetSidecar(session)
-    }
-
-    const sidecar = startPearFleetSidecar({
-      projectId: session.projectId,
-      cwd: session.cwd,
-      brokerName: session.name,
-      readBrokerSession: () => session.client.getSession(),
-      log: (message) => console.log(`[broker] ${message}`),
-      warn: (message) => console.warn(`[broker] ${message}`)
-    })
-    session.fleetSidecar = sidecar
-    session.fleetSidecarCwd = session.cwd
-    void sidecar.done.then(
-      () => {
-        if (session.fleetSidecar === sidecar) {
-          session.fleetSidecar = undefined
-          session.fleetSidecarCwd = undefined
-        }
-      },
-      (err) => {
-        if (session.fleetSidecar === sidecar) {
-          session.fleetSidecar = undefined
-          session.fleetSidecarCwd = undefined
-          console.warn(`[broker] Local fleet node exited for project ${session.projectId}:`, err)
-        }
-      }
-    )
-
-    try {
-      await withTimeout(
-        sidecar.registered,
-        LOCAL_FLEET_REGISTRATION_TIMEOUT_MS,
-        `Local fleet node registration timed out after ${LOCAL_FLEET_REGISTRATION_TIMEOUT_MS}ms`
-      )
-    } catch (err) {
-      const message = toErrorMessage(err)
-      if (/timed out/i.test(message)) {
-        console.warn(`[broker] Local fleet node registration still pending for project ${session.projectId}:`, message)
-        return
-      }
-      if (session.fleetSidecar === sidecar) {
-        await this.stopSessionFleetSidecar(session)
-      } else {
-        await withTimeout(
-          sidecar.stop(),
-          LOCAL_FLEET_STOP_TIMEOUT_MS,
-          `Local fleet node stop timed out after ${LOCAL_FLEET_STOP_TIMEOUT_MS}ms`
-        ).catch(() => undefined)
-      }
-      console.warn(`[broker] Local fleet node registration failed for project ${session.projectId}:`, err)
-    }
-  }
-
-  private async stopSessionFleetSidecar(session: BrokerSession): Promise<void> {
-    const sidecar = session.fleetSidecar
-    session.fleetSidecar = undefined
-    session.fleetSidecarCwd = undefined
-    if (!sidecar) return
-    try {
-      await withTimeout(
-        sidecar.stop(),
-        LOCAL_FLEET_STOP_TIMEOUT_MS,
-        `Local fleet node stop timed out after ${LOCAL_FLEET_STOP_TIMEOUT_MS}ms`
-      )
-    } catch (err) {
-      console.warn(`[broker] Failed to stop local fleet node for project ${session.projectId}:`, err)
-    }
-  }
-
   /**
    * Attach to an already-provisioned cloud sandbox (used by CloudAgentManager
    * which warms the box via the cloud-agents/{id}/box endpoint).
@@ -2050,7 +1899,6 @@ export class BrokerManager {
       const previous = this.sessions.get(sessionKey)
       if (previous) {
         try {
-          await this.stopSessionFleetSidecar(previous)
           await previous.client.shutdown()
         } catch (err) {
           // Non-fatal: we replace the session regardless, but a failed shutdown
@@ -2554,12 +2402,13 @@ export class BrokerManager {
     return relay
   }
 
+  // Name this machine advertises as a fleet node. Inlined from the deleted
+  // pear-fleet-node module (same `${brokerName || projectId || 'pear'}-local-fleet`
+  // scheme) so placement can still identify the local node without the
+  // sidecar that used to register it.
   private localFleetNodeName(session: BrokerSession): string {
-    return pearFleetProviderName({
-      projectId: session.projectId,
-      cwd: session.cwd,
-      brokerName: session.name
-    })
+    const rawName = `${session.name || session.projectId || 'pear'}-local-fleet`
+    return rawName.replace(/[^\w.-]+/gu, '-').replace(/^-+|-+$/gu, '') || 'pear-local-fleet'
   }
 
   /**
@@ -2675,42 +2524,6 @@ export class BrokerManager {
         return
       }
       this.noteBrokerEventReceipt(sessionKey, event)
-      // Fast path for PTY chunks: ship just (projectId, name, chunk) over a
-      // dedicated channel so typing latency doesn't pay for compactBrokerEvent,
-      // the broker:event metadata spread, or pushing into eventHistory per
-      // character. Activity bookkeeping (rememberAgentSession + cloud sandbox
-      // observers) still runs. The inline string checks below are the cheap,
-      // per-keystroke validation for worker_stream chunks — a chunk that fails
-      // them falls through to full zod validation at the general boundary
-      // below, so we never pay a discriminated-union parse per character.
-      if (
-        event.kind === 'worker_stream' &&
-        'name' in event && typeof event.name === 'string' &&
-        'chunk' in event && typeof event.chunk === 'string'
-      ) {
-        if (this.ptyDeduper.isDuplicatePtyChunk(sessionKey, event.name, event, eventStreamGeneration)) {
-          return
-        }
-        const targetWindow = this.windowForSession(sessionKey, win)
-        if (targetWindow && !targetWindow.isDestroyed()) {
-          const offset = brokerEventNumber(event, 'offset')
-          targetWindow.webContents.send(
-            'broker:pty-chunk',
-            projectId,
-            event.name,
-            event.chunk,
-            ...(offset !== undefined ? [offset, eventStreamGeneration] : [])
-          )
-        }
-        this.rememberAgentSession(event.name, sessionKey)
-        if (this.sessions.get(sessionKey)?.cloudSandboxId) {
-          for (const observer of Array.from(this.eventObservers)) {
-            observer(projectId, event)
-          }
-        }
-        return
-      }
-
       // General ingress: validate ONCE with zod. Malformed known events are
       // dropped (the stream keeps running); unknown kinds are forwarded
       // unchanged for forward-compat. `forwarded` is the typed payload we
@@ -2740,11 +2553,9 @@ export class BrokerManager {
           })
         }
       } else if (event.kind === 'agent_exit' && event.name) {
-        this.inputStreamManager.closeInputStream(this.inputStreamManager.getInputStreamKey(sessionKey, event.name), 1000, 'agent closed')
         this.forgetAgentSession(event.name, sessionKey)
         this.queueRelease(session, event.name, 'agent exit')
       } else if ((event.kind === 'agent_exited' || event.kind === 'agent_released') && event.name) {
-        this.inputStreamManager.closeInputStream(this.inputStreamManager.getInputStreamKey(sessionKey, event.name), 1000, 'agent closed')
         this.forgetAgentSession(event.name, sessionKey)
       } else if ('name' in event && typeof event.name === 'string') {
         this.rememberAgentSession(event.name, sessionKey)
@@ -2836,7 +2647,6 @@ export class BrokerManager {
   }
 
   private forgetAgentSession(name: string, sessionKey: string): void {
-    this.ptyDeduper.forgetStream(sessionKey, name)
     const sessionKeys = this.agentSessions.get(name)
     if (!sessionKeys) return
     sessionKeys.delete(sessionKey)
@@ -3107,90 +2917,6 @@ export class BrokerManager {
     }
 
     throw new Error(`Unable to allocate an agent name for ${input.baseName}`)
-  }
-
-  // Poll listAgents until `name` appears or the deadline passes. Used at the
-  // top of attachTerminal so a freshly-spawned agent doesn't 404 on the
-  // first setInboundDeliveryMode/getInboundDeliveryMode call. No-op if the
-  // agent is already registered (the first listAgents() call returns it).
-  // Returns true when the agent appeared, false on timeout. A false result
-  // means the renderer likely tried to revive a stale replayed terminal, so
-  // attach should stop before touching delivery-mode or snapshot endpoints.
-  private async waitForAgentRegistration(session: BrokerSession, name: string): Promise<boolean> {
-    // Bumped from PERSONA_REGISTRATION_TIMEOUT_MS (5s) — `claude --resume`
-    // reads session history before connecting to the broker; a long
-    // conversation can push first-registration past 5s.
-    const deadlineMs = parsePositiveIntegerEnv('PEAR_ATTACH_REGISTRATION_TIMEOUT_MS', 15_000)
-    const deadline = Date.now() + deadlineMs
-    while (Date.now() < deadline) {
-      try {
-        const agents = await this.brokerOperation(session, 'live', () => session.client.listAgents())
-        if (agents.some((agent) => agent.name === name)) return true
-      } catch {
-        // Transient broker errors during the wait are fine — keep polling
-        // until the deadline; if the broker is genuinely down the downstream
-        // calls will surface the real error.
-      }
-      await delay(250)
-    }
-    return false
-  }
-
-  // Resolve which of the project's sessions actually has `name` registered,
-  // polling every candidate until the registration deadline. With a local +
-  // cloud session pair the ownership map may not know a freshly-spawned agent
-  // yet, and defaulting to the wrong broker makes every downstream call burn
-  // its full agent_not_found retry budget (~7.5s each) before failing — the
-  // "switching to a cloud agent terminal is painfully slow" symptom. Probing
-  // both brokers up front attaches to the right one in a single round-trip.
-  private async locateSessionForAgent(
-    name: string,
-    projectId?: string
-  ): Promise<{ session: BrokerSession; registered: boolean }> {
-    const fallback = this.getSessionForAgent(name, projectId)
-    const candidates = projectId?.trim() ? this.sessionsForProject(projectId) : [fallback]
-    if (candidates.length <= 1) {
-      return { session: fallback, registered: await this.waitForAgentRegistration(fallback, name) }
-    }
-
-    const deadline = Date.now() + parsePositiveIntegerEnv('PEAR_ATTACH_REGISTRATION_TIMEOUT_MS', 15_000)
-    while (Date.now() < deadline) {
-      for (const candidate of candidates) {
-        // Silent by design: this probes both brokers every 250ms until the
-        // deadline, and a not-yet-registered agent throws transiently here.
-        // Logging would flood; the `registered: false` return surfaces the
-        // real outcome to the caller.
-        const agents = await this.brokerOperation(candidate, 'live', () => candidate.client.listAgents()).catch(() => null)
-        if (agents?.some((agent) => agent.name === name)) {
-          this.rememberAgentSession(name, sessionKeyFor(candidate))
-          return { session: candidate, registered: true }
-        }
-      }
-      await delay(250)
-    }
-    return { session: fallback, registered: false }
-  }
-
-  // Retry a broker call that targets a specific agent name on
-  // agent_not_found. Closes the residual race between
-  // waitForAgentRegistration returning true and the next call hitting a
-  // broker node that hasn't seen the registration yet, and also handles
-  // the case where waitForAgentRegistration timed out but the agent
-  // registers right after (e.g. claude --resume took 16s to boot).
-  private async withAgentMissingRetry<T>(label: string, name: string, fn: () => Promise<T>): Promise<T> {
-    const attempts = [0, 500, 1000, 2000, 4000]
-    let lastErr: unknown
-    for (let i = 0; i < attempts.length; i += 1) {
-      if (attempts[i] > 0) await delay(attempts[i])
-      try {
-        return await fn()
-      } catch (err) {
-        lastErr = err
-        if (!isMissingAgentError(err)) throw err
-        console.warn(`[broker] ${label} for ${name} got agent_not_found (attempt ${i + 1}/${attempts.length}); retrying`)
-      }
-    }
-    throw lastErr
   }
 
   private async verifyPersonaBrokerRegistration(session: BrokerSession, name: string): Promise<ListAgent | null> {
@@ -3538,238 +3264,6 @@ export class BrokerManager {
     return [eventText, chunks.join(''), snapshotText].filter(Boolean).join('\n')
   }
 
-  async attachTerminal(projectId: string | undefined, input: AttachTerminalInput): Promise<AttachTerminalResult> {
-    const name = input.name.trim()
-    if (!name) {
-      throw new Error('Agent name is required')
-    }
-
-    // Wait for the broker to register the worker — and resolve WHICH broker
-    // owns it when the project runs local + cloud sessions side by side.
-    // spawnAgent (used by the Conversations panel's Resume flow and Add Agent
-    // dialog) returns as soon as the CLI process is forked, before the worker
-    // has connected to the broker, so the renderer races: spawn → mount
-    // terminal → attach → broker 404. claude --resume in particular reads
-    // session history first and can take 10+ seconds to register.
-    const { session, registered } = await this.locateSessionForAgent(name, projectId)
-    const mode = toInboundDeliveryMode(input.mode)
-    if (!registered) {
-      console.warn(`[broker] attachTerminal: ${name} did not appear in listAgents within wait window; treating as a stale terminal`)
-      return {
-        name,
-        mode,
-        pending: 0
-      }
-    }
-
-    const client = session.client
-    // A re-attach (window reload, restart, tab re-open) is a fresh start for
-    // this terminal — clear any stale HTTP-only fallback so the WS fast path
-    // gets retried instead of being stuck on HTTP for the agent's lifetime.
-    this.inputStreamManager.resetInputStreamFallback(this.inputStreamManager.getInputStreamKey(sessionKeyFor(session), name))
-    let previousMode: InboundDeliveryMode | undefined
-
-    try {
-      previousMode = await this.withAgentMissingRetry('getInboundDeliveryMode', name, () =>
-        this.brokerOperation(session, 'live', () => client.getInboundDeliveryMode(name))
-      )
-    } catch (err) {
-      console.warn(`[broker] Failed to read delivery mode for ${name}:`, err)
-    }
-
-    // Keep the broker's inbound delivery policy aligned with the renderer's
-    // queue mode while human terminal input continues to go through sendInput.
-    try {
-      await this.withAgentMissingRetry('setInboundDeliveryMode', name, () =>
-        this.brokerOperation(session, 'live', () => client.setInboundDeliveryMode(name, mode))
-      )
-    } catch (err) {
-      console.warn(`[broker] Failed to set delivery mode for ${name}:`, err)
-    }
-
-    let resizedBeforeSnapshot = false
-    if (isPositiveInteger(input.rows) && isPositiveInteger(input.cols)) {
-      try {
-        await this.withAgentMissingRetry('resizePty', name, () =>
-          this.brokerOperation(session, 'live', () => client.resizePty(name, input.rows!, input.cols!))
-        )
-        resizedBeforeSnapshot = true
-      } catch (err) {
-        console.warn(`[broker] Failed to sync PTY size for ${name}:`, err)
-      }
-    }
-
-    // Pending count is a non-critical UI hint; 0 on failure is a safe default
-    // and the snapshot call right below surfaces any real attach failure.
-    const pending = mode === 'manual_flush'
-      ? await this.withAgentMissingRetry('getPending', name, () =>
-          this.brokerOperation(session, 'live', () => client.getPending(name))
-        ).then((messages) => messages.length).catch(() => 0)
-      : 0
-
-    try {
-      if (resizedBeforeSnapshot) {
-        await delay(80)
-      }
-      const snapshot = await this.withAgentMissingRetry('snapshot', name, () =>
-        this.brokerOperation(session, 'live', () => client.snapshot(name, 'ansi'))
-      )
-      return {
-        name,
-        mode,
-        previousMode,
-        pending,
-        snapshot: {
-          rows: snapshot.rows,
-          cols: snapshot.cols,
-          cursor: snapshot.cursor,
-          screen: Buffer.from(snapshot.screen, 'base64').toString('utf-8'),
-          ...(typeof snapshot.offset === 'number' && Number.isFinite(snapshot.offset)
-            ? { offset: snapshot.offset }
-            : {}),
-          generation: session.eventStreamGeneration
-        }
-      }
-    } catch (err) {
-      console.warn(`[broker] Failed to capture terminal snapshot for ${name}:`, err)
-      return {
-        name,
-        mode,
-        previousMode,
-        pending
-      }
-    }
-  }
-
-  async sendInput(
-    projectId: string | undefined,
-    name: string,
-    data: string
-  ): Promise<{ name: string; bytes_written: number }> {
-    const trimmedName = name.trim()
-    if (!trimmedName) {
-      throw new Error('Agent name is required')
-    }
-    if (!data) {
-      return { name: trimmedName, bytes_written: 0 }
-    }
-
-    const session = this.getSessionForAgent(trimmedName, projectId)
-    const key = this.inputStreamManager.getInputStreamKey(sessionKeyFor(session), trimmedName)
-    this.inputStreamManager.refreshExpiredInputStreamFallback(key)
-    if (!this.inputStreamManager.hasFallback(key)) {
-      // Kick off (or reuse) the WS stream, but only *send* on it once the broker
-      // has acked the handshake. Before that, fall through to HTTP so a keystroke
-      // never stalls on the open timeout — the symptom that made typing look dead
-      // after a re-attach. Subsequent keystrokes take the fast path once ready.
-      const { stream, ready } = this.inputStreamManager.ensureInputStream(session.client, key, trimmedName)
-      if (ready && !stream.closed) {
-        try {
-          return await stream.send(data)
-        } catch (err) {
-          if (this.inputStreamManager.getStream(key) === stream) {
-            this.inputStreamManager.closeInputStream(key, 1011, 'stream send failed')
-          }
-          if (isUnsupportedInputStreamError(err)) {
-            this.inputStreamManager.addFallback(key)
-          }
-          // A deliberate close (project/agent shutdown, terminal re-attach) that
-          // races an in-flight send rejects with `input_stream_closed`. That's
-          // not a transport failure — fall through to HTTP silently instead of
-          // logging a misleading "stream failed" warning (notably on app quit).
-          if (!isInputStreamClosedError(err)) {
-            console.warn(`[broker] PTY input stream failed for ${trimmedName}; falling back to HTTP input:`, err)
-          }
-        }
-      }
-    }
-    return this.brokerOperation(session, 'live', () => session.client.sendInput(trimmedName, data))
-  }
-
-  // Fire-and-forget input for interactive typing. We don't await the PTY
-  // ack because we don't need backpressure for human keystrokes — and the
-  // extra round-trip latency shows up as a sticky-typing feel. Errors get
-  // logged and the broker's existing stream-fallback logic in sendInput
-  // takes care of reopening a broken stream.
-  sendInputFireAndForget(projectId: string | undefined, name: string, data: string): void {
-    const trimmedName = typeof name === 'string' ? name.trim() : ''
-    if (!trimmedName || typeof data !== 'string' || data.length === 0) {
-      return
-    }
-    this.sendInput(projectId, trimmedName, data).catch((err) => {
-      // Keystroke races with agent shutdown: ignore the "no such agent" 404
-      // and the broker's transient "internal channel closed" while it's
-      // tearing down. Both surface as noise that's not actionable.
-      if (isMissingAgentError(err)) return
-      if (isBrokerUnreachableError(err)) return
-      const message = toErrorMessage(err)
-      if (/internal channel closed|internal reply dropped/i.test(message)) return
-      console.warn(`[broker] sendInputFireAndForget failed for ${trimmedName}:`, err)
-    })
-  }
-
-  // Latest smoothed input→ack round-trip (ms) for an agent's PTY input stream,
-  // or null if there's no open stream or no ack measured yet. Cheap latency
-  // signal the renderer's predictive echo bootstraps its adaptive engage
-  // decision from, so it engages promptly instead of waiting to measure a full
-  // echo-confirmation cycle itself. Safe to call for unknown agents.
-  getInputSrtt(projectId: string | undefined, name: string): number | null {
-    const trimmedName = typeof name === 'string' ? name.trim() : ''
-    if (!trimmedName) return null
-    try {
-      const session = this.getSessionForAgent(trimmedName, projectId)
-      const key = this.inputStreamManager.getInputStreamKey(sessionKeyFor(session), trimmedName)
-      return this.inputStreamManager.getStream(key)?.srttMs ?? null
-    } catch {
-      return null
-    }
-  }
-
-  async setTerminalMode(
-    projectId: string | undefined,
-    name: string,
-    mode: TerminalAttachMode
-  ): Promise<{ name: string; mode: InboundDeliveryMode; flushed: number; pending: number }> {
-    const trimmedName = name.trim()
-    if (!trimmedName) {
-      throw new Error('Agent name is required')
-    }
-
-    let session: BrokerSession
-    try {
-      session = this.getSessionForAgent(trimmedName, projectId)
-    } catch (err) {
-      if (isWorkspaceNotStartedError(err)) {
-        return { name: trimmedName, mode: toInboundDeliveryMode(mode), flushed: 0, pending: 0 }
-      }
-      throw err
-    }
-
-    let result: { mode: InboundDeliveryMode; flushed: number }
-    try {
-      result = await this.brokerOperation(session, 'live', () =>
-        session.client.setInboundDeliveryMode(trimmedName, toInboundDeliveryMode(mode))
-      )
-    } catch (err) {
-      if (isMissingAgentError(err)) {
-        return { name: trimmedName, mode: toInboundDeliveryMode(mode), flushed: 0, pending: 0 }
-      }
-      throw err
-    }
-    // Pending count is a non-critical UI hint; 0 on failure is a safe default
-    // (the setInboundDeliveryMode above already succeeded for this to run).
-    const pending = result.mode === 'manual_flush'
-      ? await this.brokerOperation(session, 'live', () => session.client.getPending(trimmedName)).then((messages) => messages.length).catch(() => 0)
-      : 0
-
-    return {
-      name: trimmedName,
-      mode: result.mode,
-      flushed: result.flushed,
-      pending
-    }
-  }
-
   async getPendingMessages(projectId: string | undefined, name: string): Promise<PendingRelayMessage[]> {
     const trimmedName = name.trim()
     if (!trimmedName) {
@@ -3815,66 +3309,6 @@ export class BrokerManager {
     return this.brokerOperation(session, 'live', () => session.client.flushPending(trimmedName))
   }
 
-  async resizePty(projectId: string | undefined, name: string, rows: number, cols: number): Promise<void> {
-    let session: BrokerSession
-    try {
-      session = this.getSessionForAgent(name, projectId)
-    } catch (err) {
-      if (isWorkspaceNotStartedError(err)) return
-      throw err
-    }
-    try {
-      await this.brokerOperation(session, 'live', () => session.client.resizePty(name, rows, cols))
-    } catch (err) {
-      if (isMissingAgentError(err)) return
-      throw err
-    }
-  }
-
-  // Side-effect-free read of the broker's authoritative PTY screen, used by
-  // the renderer's quiet-time terminal reconciler (terminal-reconciler.ts).
-  // Unlike attachTerminal this never resets input streams, never touches the
-  // delivery mode, and degrades to null on every failure — a skipped
-  // reconcile check is always safe, a thrown one floods the IPC log on a
-  // periodic poll. Polled read ⇒ wedge recovery, same as getPending.
-  async snapshotTerminal(
-    projectId: string | undefined,
-    name: string,
-    format: BrokerTerminalSnapshotFormat
-  ): Promise<BrokerTerminalSnapshot | null> {
-    const trimmedName = name.trim()
-    if (!trimmedName) return null
-    let session: BrokerSession
-    try {
-      session = this.getSessionForAgent(trimmedName, projectId)
-    } catch {
-      return null
-    }
-    return this.withWedgeRecovery<BrokerTerminalSnapshot | null>(
-      session,
-      'snapshotTerminal',
-      null,
-      async (current) => {
-        try {
-          const snapshot = await this.brokerOperation(current, 'live', () => current.client.snapshot(trimmedName, format))
-          return {
-            rows: snapshot.rows,
-            cols: snapshot.cols,
-            cursor: snapshot.cursor,
-            screen:
-              format === 'ansi'
-                ? Buffer.from(snapshot.screen, 'base64').toString('utf-8')
-                : snapshot.screen,
-            ...(snapshot.offset !== undefined ? { offset: snapshot.offset } : {})
-          }
-        } catch (err) {
-          if (isMissingAgentError(err)) return null
-          throw err
-        }
-      },
-      { degradeOnTimeout: true }
-    )
-  }
 
   async sendMessage(projectId: string | undefined, input: SendMessageInput): Promise<void> {
     const session = input.to.startsWith('#')
@@ -4135,7 +3569,6 @@ export class BrokerManager {
     }
     const session = this.getSessionForAgent(trimmedName, projectId)
     await this.brokerOperation(session, 'normal', () => session.client.release(trimmedName))
-    this.inputStreamManager.closeInputStream(this.inputStreamManager.getInputStreamKey(sessionKeyFor(session), trimmedName), 1000, 'agent released')
     this.forgetAgentSession(trimmedName, sessionKeyFor(session))
   }
 
@@ -4396,7 +3829,6 @@ export class BrokerManager {
       const sessions = this.sessionsForProject(targetProjectId)
       for (const session of sessions) {
         try {
-          await this.stopSessionFleetSidecar(session)
           await session.client.shutdown()
         } catch (err) {
           // Non-fatal during teardown, but a failed cloud-session shutdown can
@@ -4421,7 +3853,6 @@ export class BrokerManager {
   }
 
   private dropSession(sessionKey: string, options: { disconnectOnly: boolean }): void {
-    this.inputStreamManager.closeInputStreamsForSession(sessionKey)
     this.clearBrokerTimeoutCountsForProject(projectIdFromSessionKey(sessionKey))
     // The observer stream is scoped to this session's workspace + token —
     // stop it with the session; a restarted session starts a fresh one.
@@ -4447,7 +3878,6 @@ export class BrokerManager {
     // different workspace would otherwise reuse an agent token scoped to the old
     // workspace (mirrors the observer-token invalidation above).
     session.placementRelay = undefined
-    void this.stopSessionFleetSidecar(session)
     if (options.disconnectOnly) {
       const disconnect = (session.client as { disconnect?: () => void }).disconnect
       if (typeof disconnect === 'function') {
@@ -4470,7 +3900,6 @@ export class BrokerManager {
     const session = this.sessions.get(sessionKey)
     if (!session) return
     try {
-      await this.stopSessionFleetSidecar(session)
       await session.client.shutdown()
     } catch (err) {
       // Non-fatal: we drop the session anyway, but a failed shutdown can leak

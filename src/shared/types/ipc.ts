@@ -3,7 +3,6 @@
 // src/renderer/src/lib/ipc.ts (the consumer-facing re-export) import from
 // here. The preload uses `satisfies PearAPI` to enforce that the
 // implementation matches this surface.
-import type { FactoryConfig } from '@agent-relay/factory'
 
 export type ViewMode =
   | 'terminal'
@@ -16,9 +15,7 @@ export type ViewMode =
   | 'burn-session'
   | 'burn-project'
   | 'burn-session-detail'
-  | 'factory'
 
-export type TerminalAttachMode = 'view' | 'drive' | 'passthrough'
 export type InboundDeliveryMode = 'auto_inject' | 'manual_flush'
 export type MessageInjectionMode = 'wait' | 'steer'
 export type AgentCurrentState = 'working' | 'idle' | 'blocked_on_send'
@@ -393,25 +390,6 @@ export interface BrokerSpawnAgentResult {
   cli?: string
 }
 
-export interface TermFidelityCorpusGrid {
-  rows: number
-  cols: number
-  text: string
-}
-
-export interface TermFidelityCorpusInput {
-  projectId?: string
-  agentName: string
-  cli: string
-  renderer: TermFidelityCorpusGrid
-  broker: TermFidelityCorpusGrid
-  telemetryLines: string[]
-}
-
-export type TermFidelityCorpusResult =
-  | { dumped: true; path: string }
-  | { dumped: false; reason: 'rate-limited' | 'failed' }
-
 /**
  * Request to place an agent on a fleet node via the relay placement engine
  * (issue #411 — the requester side). `node` omitted → any eligible, least-loaded
@@ -495,50 +473,6 @@ export interface WorkforcePersona {
   source?: string
 }
 
-export interface BrokerAttachTerminalInput {
-  projectId?: string
-  name: string
-  rows?: number
-  cols?: number
-  mode?: TerminalAttachMode
-}
-
-export interface BrokerAttachTerminalResult {
-  name: string
-  mode: InboundDeliveryMode
-  previousMode?: InboundDeliveryMode
-  pending: number
-  snapshot?: {
-    rows: number
-    cols: number
-    cursor: [number, number]
-    screen: string
-    /** Cumulative PTY byte offset represented by this snapshot (Relay v10+). */
-    offset?: number
-    /** Pear event-listener generation that captured this snapshot. */
-    generation?: number
-  }
-}
-
-export interface BrokerSetTerminalModeResult {
-  name: string
-  mode: InboundDeliveryMode
-  flushed: number
-  pending: number
-}
-
-export type BrokerTerminalSnapshotFormat = 'plain' | 'ansi'
-
-export interface BrokerTerminalSnapshot {
-  rows: number
-  cols: number
-  cursor: [number, number]
-  /** Row text for `plain`; decoded ANSI reproduction byte stream for `ansi`. */
-  screen: string
-  /** Cumulative PTY byte offset represented by this snapshot (Relay v10+). */
-  offset?: number
-}
-
 export interface BrokerSendMessageInput {
   to: string
   text: string
@@ -551,53 +485,101 @@ export interface BrokerStatusEvent {
   error?: string
 }
 
-export type FactoryNodeConfig = Pick<
-  FactoryConfig,
-  'capabilities' | 'clonePaths' | 'dryRun'
-> & Partial<Pick<FactoryConfig, 'workspaceId' | 'cloneRoot'>>
+/**
+ * Relaycast chat-companion wire types. IDs carry a Pear-side prefix so the
+ * renderer can route without sniffing shape: `relay:<agent>`,
+ * `drive:<file>`, `conversation:<dm-id>`, `channel:<name>`.
+ */
+export type RelayChatConversationKind = 'dm' | 'channel' | 'agent'
 
-export interface FactoryConfigReadResult {
-  configPath: string
-  exists: boolean
-  config: FactoryNodeConfig | null
-  errors: string[]
-  warning?: string
-}
-
-export interface FactoryAgentStatus {
-  id?: string
+export interface RelayChatConversation {
+  kind: RelayChatConversationKind
+  /** `conversation:<id>` for DMs, `channel:<name>` for channels, `relay:<name>` for roster agents. */
+  id: string
+  /** Display name: participant names joined with `, `, `#channel`, or the agent name. */
   name: string
-  role?: string
+  participants?: string[]
+  lastMessageAt?: string
+  unreadCount?: number
+  /** Channels only: whether the companion identity is a member. */
+  isMember?: boolean
+  /** Roster agents: Relaycast presence (`online`, `offline`, `away`, …). */
   status?: string
-  issue?: {
-    key: string
-    path?: string
-    title?: string
-    url?: string
-  }
+  /** Session this agent declared. Tool calls stay out of the thread. */
+  sessionId?: string
+  /** Tool the agent runs in (`claude`, `codex`, …), for its icon. */
+  cli?: string
+  /** What the agent is working on: objective, session title, or its first prompt. */
+  summary?: string
+  /** Roster entry for a person rather than an agent. */
+  human?: boolean
 }
 
-export interface FactoryIssueStatus {
-  key: string
-  title?: string
-  url?: string
-  state?: string
-  repo?: string
-  assignee?: string
-  updatedAt?: string
+export interface RelayChatAttachment {
+  file_id: string
+  filename: string
+  content_type: string
+  size_bytes: number
+  downloadUrl?: string
 }
 
-export interface FactoryStatus {
-  source: 'cloud'
-  state: 'unauthenticated' | 'unconfigured' | 'online' | 'empty' | 'unavailable'
-  connected: boolean
-  workspaceId?: string
-  cloudUrl?: string
-  updatedAt?: string
-  message?: string
-  counters?: Record<string, number>
-  agents: FactoryAgentStatus[]
-  issues: FactoryIssueStatus[]
+export interface RelayChatMessage {
+  id: string
+  conversationId?: string
+  channelName?: string
+  from: string
+  text: string
+  /** ISO8601 server timestamp. */
+  createdAt: string
+  /** True when `from` is the companion identity. */
+  mine: boolean
+  /** False for renderer-optimistic rows (`local:*`) not yet echoed by Relaycast. */
+  hasServerID: boolean
+  /** Set only when history was requested with delivery info. */
+  delivered?: boolean
+  attachments: RelayChatAttachment[]
+}
+
+export interface ChatHistoryInput {
+  kind: RelayChatConversationKind
+  /** Conversation id (`conversation:<id>` or raw) or channel name. */
+  id: string
+  limit?: number
+  /** When true, attach per-message delivery state via message readers. */
+  withDelivery?: boolean
+}
+
+export interface ChatSendInput {
+  kind: RelayChatConversationKind
+  /** DM recipient agent name, or channel name for channels. */
+  to: string
+  text: string
+  attachments?: string[]
+  idempotencyKey?: string
+}
+
+export interface ChatUploadInput {
+  filename: string
+  contentType: string
+  /** Raw bytes, base64-encoded (Buffers do not survive every IPC path). */
+  base64: string
+}
+
+export interface ChatMessageEvent {
+  /** `conversation:<id>` or `channel:<name>` the message belongs to. */
+  conversationId: string
+  message: RelayChatMessage
+}
+
+/** A message notification was clicked: show that conversation. */
+export interface ChatOpenConversationEvent {
+  conversationId: string
+  /** Sender, to find the agent row that shows a DM. */
+  from: string
+}
+
+export interface ChatInvalidatedEvent {
+  reason: 'poll' | 'foreground' | 'send' | 'join' | 'open' | 'manual' | 'reconnect' | 'summaries'
 }
 
 export type GitFileStatusKind = 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked'
@@ -990,6 +972,14 @@ export interface AiHistResumeEntry {
   project: string | null
 }
 
+/** One human or agent turn from a local session file. Tool calls are omitted. */
+export interface SessionTranscriptTurn {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
+  timestampMs: number | null
+}
+
 export interface ProjectListResult {
   projects: unknown[]
   activeId: string | null
@@ -1038,7 +1028,6 @@ export interface PearAPI {
   app: {
     confirmQuit: () => Promise<boolean>
     notifyCliReady: () => void
-    dumpTermFidelityCorpus: (input: TermFidelityCorpusInput) => Promise<TermFidelityCorpusResult>
   }
   project: {
     list: () => Promise<ProjectListResult>
@@ -1078,27 +1067,8 @@ export interface PearAPI {
     listNodes: (projectId: string, capability?: string) => Promise<BrokerNodeSummary[]>
     listPersonas: (projectId: string, cwd?: string) => Promise<WorkforcePersona[]>
     spawnPersona: (projectId: string, personaId: string) => Promise<BrokerSpawnAgentResult>
-    attachTerminal: (input: BrokerAttachTerminalInput) => Promise<BrokerAttachTerminalResult>
-    sendInput: (
-      projectId: string | undefined,
-      name: string,
-      data: string
-    ) => Promise<{ name: string; bytes_written: number }>
-    sendInputFast: (projectId: string | undefined, name: string, data: string) => void
-    setTerminalMode: (
-      projectId: string | undefined,
-      name: string,
-      mode: TerminalAttachMode
-    ) => Promise<BrokerSetTerminalModeResult>
     getPending: (projectId: string | undefined, name: string) => Promise<PendingRelayMessage[]>
     flushPending: (projectId: string | undefined, name: string) => Promise<{ flushed: number }>
-    resizePty: (projectId: string | undefined, name: string, rows: number, cols: number) => Promise<void>
-    snapshotTerminal: (
-      projectId: string | undefined,
-      name: string,
-      format: BrokerTerminalSnapshotFormat
-    ) => Promise<BrokerTerminalSnapshot | null>
-    inputSrtt: (projectId: string | undefined, name: string) => Promise<number | null>
     sendMessage: (projectId: string | undefined, input: BrokerSendMessageInput) => Promise<void>
     reconcileMessages: (input: BrokerReconcileMessagesInput) => Promise<BrokerReconciledChatMessage[]>
     refreshEventStream: (projectId?: string, reason?: string) => Promise<void>
@@ -1113,21 +1083,18 @@ export interface PearAPI {
     onEvent: (callback: (event: unknown) => void) => () => void
     onEventStreamDiagnostic: (callback: (event: BrokerEventStreamDiagnostic) => void) => () => void
     onObserverChatUpdate: (callback: (update: ObserverChatUpdate) => void) => () => void
-    onPtyChunk: (
-      callback: (
-        projectId: string,
-        name: string,
-        chunk: string,
-        offset?: number,
-        generation?: number
-      ) => void
-    ) => () => void
     onStatus: (callback: (status: BrokerStatusEvent) => void) => () => void
   }
-  factory: {
-    status: () => Promise<FactoryStatus>
-    readConfig: (configPath?: string, projectRoot?: string) => Promise<FactoryConfigReadResult>
-    saveConfig: (config: unknown, configPath?: string, projectRoot?: string) => Promise<FactoryConfigReadResult>
+  chat: {
+    listConversations: () => Promise<RelayChatConversation[]>
+    getHistory: (input: ChatHistoryInput) => Promise<RelayChatMessage[]>
+    send: (input: ChatSendInput) => Promise<RelayChatMessage>
+    markRead: (messageId: string) => Promise<void>
+    joinChannel: (channel: string) => Promise<{ alreadyMember: boolean }>
+    uploadFile: (input: ChatUploadInput) => Promise<RelayChatAttachment>
+    onInvalidated: (callback: (event: ChatInvalidatedEvent) => void) => () => void
+    onMessage: (callback: (event: ChatMessageEvent) => void) => () => void
+    onOpenConversation: (callback: (event: ChatOpenConversationEvent) => void) => () => void
   }
   burn: {
     listAgentSummaries: (agents: BurnAgentInput[]) => Promise<BurnAgentSummary[]>
@@ -1251,6 +1218,8 @@ export interface PearAPI {
     recent: (opts?: AiHistRecentOptions) => Promise<AiHistEntry[]>
     listSessions: (opts?: AiHistRecentOptions) => Promise<AiHistSession[]>
     getSession: (sessionId: string) => Promise<AiHistEntry[]>
+    /** Human and agent text from the session file. Tool calls are not included. */
+    transcript: (sessionId: string) => Promise<SessionTranscriptTurn[]>
     search: (query: string, opts?: AiHistRecentOptions) => Promise<AiHistEntry[]>
     searchSessions: (query: string, opts?: AiHistRecentOptions) => Promise<AiHistSession[]>
     stats: () => Promise<AiHistStats | null>
