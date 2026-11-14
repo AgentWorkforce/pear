@@ -9,7 +9,9 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-latest
+    # macos-26 images fail electron-builder's temp signing keychain unlock
+    # (SecKeychainUnlock: passphrase not correct); pin until that's fixed.
+    runs-on: macos-15
     timeout-minutes: 120 # backstop for the notarization retry loop below
     steps:
       - name: Checkout
