@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
+import type { RelayChatMessage } from '../shared/types/ipc'
 import {
   RelayChatClient,
   RelayChatError,
@@ -210,6 +211,79 @@ describe('relay chat client models', () => {
     expect(calls[0].headers.authorization).toBe('Bearer at_live_agent')
   })
 
+  it('reads DM participants and last activity from the current conversation summary', async () => {
+    const { fetchImpl } = makeFetch(() => jsonResponse(okEnvelope([
+      {
+        id: 'dm_1',
+        type: '1:1',
+        name: null,
+        participants: [
+          { agent_id: 'a1', agent_name: 'pear-chat-mini' },
+          { agent_id: 'a2', agent_name: 'kjgrok' }
+        ],
+        last_message: { id: 'm9', text: 'on it', agent_id: 'a2', created_at: '2026-11-14T04:40:00Z' },
+        unread_count: 1,
+        created_at: '2026-11-13T00:00:00Z'
+      },
+      { id: 'dm_2', participant_names: ['alice'], last_message_at: '2026-11-12T00:00:00Z' }
+    ])))
+    const threads = await clientWith(fetchImpl).listDMConversations()
+    expect(threads).toEqual([
+      {
+        id: 'conversation:dm_1',
+        conversationId: 'dm_1',
+        participants: ['pear-chat-mini', 'kjgrok'],
+        lastMessageAt: '2026-11-14T04:40:00Z',
+        unreadCount: 1,
+        lastMessage: {
+          id: 'm9',
+          conversationId: 'dm_1',
+          from: 'kjgrok',
+          text: 'on it',
+          createdAt: '2026-11-14T04:40:00Z',
+          mine: false,
+          hasServerID: true,
+          attachments: []
+        }
+      },
+      {
+        id: 'conversation:dm_2',
+        conversationId: 'dm_2',
+        participants: ['alice'],
+        lastMessageAt: '2026-11-12T00:00:00Z'
+      }
+    ])
+  })
+
+  it('names a DM by the other side, not the signed-in identity', async () => {
+    const { fetchImpl } = makeFetch((call) => jsonResponse(okEnvelope(call.url.includes('/dm/conversations')
+      ? [{ id: 'dm_1', participants: [{ agent_id: 'a1', agent_name: 'khaliq-gant' }, { agent_id: 'a2', agent_name: 'claude-infra-infra-7d' }] }]
+      : [])))
+    const conversations = await clientWith(fetchImpl, { selfName: 'khaliq-gant' }).listConversations()
+    expect(conversations).toEqual([
+      { kind: 'dm', id: 'conversation:dm_1', name: 'claude-infra-infra-7d', participants: ['claude-infra-infra-7d'] }
+    ])
+  })
+
+  it('re-issues the agent token once on 401 and retries', async () => {
+    let token = 'at_live_old'
+    const refreshAgentToken = vi.fn(async (): Promise<string | null> => {
+      token = 'at_live_new'
+      return token
+    })
+    const { fetchImpl, calls } = makeFetch((call) => call.headers.authorization === 'Bearer at_live_new'
+      ? jsonResponse(okEnvelope([]))
+      : jsonResponse(errorEnvelope('agent_token_invalid', 'expired'), 401))
+    const client = clientWith(fetchImpl, { getAgentToken: () => token, refreshAgentToken })
+    await expect(client.listDMConversations()).resolves.toEqual([])
+    expect(refreshAgentToken).toHaveBeenCalledTimes(1)
+    expect(calls.map((call) => call.headers.authorization)).toEqual(['Bearer at_live_old', 'Bearer at_live_new'])
+
+    refreshAgentToken.mockResolvedValue(null)
+    token = 'at_live_revoked'
+    await expect(client.listDMConversations()).rejects.toMatchObject({ code: 'unauthorized' })
+  })
+
   it('computes delivery from non-sender readers', async () => {
     const { fetchImpl, calls } = makeFetch((_call, index) => {
       // First call: sender + another reader. Second call: only the sender.
@@ -234,6 +308,30 @@ describe('relay chat client models', () => {
       delivered: false
     })
     expect(calls).toHaveLength(2)
+  })
+
+  it('checks delivery only for the companion last message', async () => {
+    const { fetchImpl, calls } = makeFetch((call) => {
+      if (call.url.includes('/readers')) {
+        return jsonResponse(okEnvelope([{ agent_name: 'alice', agent_id: 'a1', read_at: '2026-11-12T00:01:00Z' }]))
+      }
+      return jsonResponse(okEnvelope([]))
+    })
+    const client = clientWith(fetchImpl)
+    const message = (id: string, from: string, mine: boolean): RelayChatMessage => ({
+      id, from, mine, text: id, createdAt: '2026-11-12T00:00:00Z', hasServerID: true, attachments: []
+    })
+    const messages = [
+      message('m1', 'pear-chat-mini', true),
+      message('m2', 'alice', false),
+      message('m3', 'pear-chat-mini', true),
+      message('m4', 'alice', false)
+    ]
+    await client.attachDelivery(messages, 'pear-chat-mini')
+    expect(calls.map((call) => call.url).filter((url) => url.includes('/readers'))).toEqual([
+      expect.stringContaining('/messages/m3/readers')
+    ])
+    expect(messages.find((row) => row.id === 'm3')?.delivered).toBe(true)
   })
 
   it('treats channel join 409 as already-a-member', async () => {

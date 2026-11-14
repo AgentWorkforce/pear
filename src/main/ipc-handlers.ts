@@ -1,10 +1,7 @@
-import { app, ipcMain, dialog, BrowserWindow, shell } from 'electron'
+import { app, ipcMain, dialog, BrowserWindow, Notification, shell } from 'electron'
 import { toErrorMessage } from './errors'
-import { isRecord } from './guards'
 import { createHash } from 'crypto'
-import { existsSync } from 'fs'
-import { mkdir, readFile, writeFile } from 'fs/promises'
-import { basename, dirname, isAbsolute, join, resolve } from 'path'
+import { basename, join, resolve } from 'path'
 import type { SpawnPtyInput, SendMessageInput } from '@agent-relay/harness-driver'
 import {
   loadStore,
@@ -30,12 +27,25 @@ import { proactiveAgentManager } from './proactive-agent'
 import { integrationsManager } from './integrations'
 import { getIntegrationEventTelemetrySnapshot, integrationEventBridge } from './integration-event-bridge'
 import { aiHistManager } from './ai-hist'
+import {
+  agentCli,
+  agentSessionBinding,
+  agentSummary,
+  historyEventTurns,
+  readSessionTranscript,
+  type SessionTurn
+} from './session-transcript'
+import { listedRosterAgents, wireMetadata } from './agent-roster'
 import { burnManager, type BurnAgentInput, type BurnProjectInput, type BurnSessionBreakdownInput, type BurnFingerprintInput } from './burn'
 import { resetRelayWorkspaceManager } from './relay-workspace'
 import { isDirectory } from './path-utils'
 import { findProjectForPath, projectContainsPath } from './cli'
 import { hostname } from 'os'
-import { RelayChatClient, RelayChatPoller, RELAY_CHAT_POLL_INTERVAL_MS } from './relay-chat-client'
+import { RelayCast, RelayError } from '@relaycast/sdk'
+import { RelayChatClient, RelayChatPoller, RELAY_CHAT_POLL_INTERVAL_MS, toConversationId } from './relay-chat-client'
+import { RelayChatLive } from './relay-chat-live'
+import { SessionBriefCache, briefText } from './session-briefs'
+import { DmInboxWatcher } from './dm-inbox-watcher'
 import { normalizeRelaycastBaseUrl } from './relay-service-urls'
 import type {
   BrokerReconcileMessagesInput,
@@ -46,13 +56,10 @@ import type {
   ChatHistoryInput,
   ChatInvalidatedEvent,
   ChatMessageEvent,
+  ChatOpenConversationEvent,
   ChatSendInput,
   ChatUploadInput,
-  FactoryAgentStatus,
-  FactoryConfigReadResult,
-  FactoryIssueStatus,
-  FactoryNodeConfig,
-  FactoryStatus,
+  RelayChatConversation,
   RelayChatMessage
 } from '../shared/types/ipc'
 import type { ProactiveAgentDraft } from './proactive-agent.types'
@@ -91,411 +98,6 @@ function warnGitStatusOnce(path: string, error: unknown): void {
 }
 
 
-function firstString(record: Record<string, unknown>, keys: string[]): string | undefined {
-  for (const key of keys) {
-    const value = record[key]
-    if (typeof value === 'string' && value.trim()) return value.trim()
-  }
-  return undefined
-}
-
-function firstRecord(record: Record<string, unknown>, keys: string[]): Record<string, unknown> | undefined {
-  for (const key of keys) {
-    const value = record[key]
-    if (isRecord(value)) return value
-  }
-  return undefined
-}
-
-function firstArray(record: Record<string, unknown>, keys: string[]): unknown[] {
-  for (const key of keys) {
-    const value = record[key]
-    if (Array.isArray(value)) return value
-  }
-  return []
-}
-
-function buildCloudApiUrl(apiUrl: string, path: string): string {
-  return new URL(path.replace(/^\/+/u, ''), `${apiUrl.replace(/\/+$/u, '')}/`).toString()
-}
-
-function defaultFactoryConfigPath(projectRoot?: string): string {
-  const candidates = [
-    projectRoot ? join(projectRoot, 'factory.config.json') : undefined,
-    join(process.cwd(), 'factory.config.json'),
-    join(app.getAppPath(), 'factory.config.json')
-  ].filter((candidate): candidate is string => !!candidate)
-
-  return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]
-}
-
-function normalizeFactoryConfigPath(path?: string, projectRoot?: string): string {
-  if (path?.trim()) return isAbsolute(path) ? path : resolve(projectRoot || process.cwd(), path)
-  return defaultFactoryConfigPath(projectRoot)
-}
-
-function emptyNodeConfig(): FactoryNodeConfig {
-  return {
-    capabilities: [],
-    clonePaths: {},
-    dryRun: false
-  }
-}
-
-function stringRecord(value: unknown): Record<string, string> {
-  if (!isRecord(value)) return {}
-  const out: Record<string, string> = {}
-  for (const [key, entry] of Object.entries(value)) {
-    if (typeof entry === 'string') out[key] = entry
-  }
-  return out
-}
-
-function hasOwn(record: Record<string, unknown>, key: string): boolean {
-  return Object.prototype.hasOwnProperty.call(record, key)
-}
-
-function recordsEqual(a: Record<string, string>, b: Record<string, string>): boolean {
-  const aKeys = Object.keys(a)
-  const bKeys = Object.keys(b)
-  if (aKeys.length !== bKeys.length) return false
-  return aKeys.every((key) => a[key] === b[key])
-}
-
-function normalizeNodeConfigInput(input: unknown): { config: FactoryNodeConfig | null; errors: string[] } {
-  if (!isRecord(input)) {
-    return { config: null, errors: ['nodeConfig: must be an object'] }
-  }
-
-  const errors: string[] = []
-  const workspaceId = typeof input.workspaceId === 'string' && input.workspaceId.trim()
-    ? input.workspaceId.trim()
-    : undefined
-  const cloneRoot = typeof input.cloneRoot === 'string' && input.cloneRoot.trim()
-    ? input.cloneRoot.trim()
-    : undefined
-  const capabilities = Array.isArray(input.capabilities)
-    ? input.capabilities.filter((item): item is string => typeof item === 'string' && !!item.trim()).map((item) => item.trim())
-    : []
-  if (input.capabilities !== undefined && !Array.isArray(input.capabilities)) {
-    errors.push('capabilities: must be an array of strings')
-  }
-  if (input.clonePaths !== undefined && !isRecord(input.clonePaths)) {
-    errors.push('clonePaths: must be an object of repo-to-path strings')
-  }
-  if (input.dryRun !== undefined && typeof input.dryRun !== 'boolean') {
-    errors.push('dryRun: must be a boolean')
-  }
-
-  if (errors.length > 0) return { config: null, errors }
-
-  return {
-    config: {
-      ...(workspaceId ? { workspaceId } : {}),
-      capabilities,
-      ...(cloneRoot ? { cloneRoot } : {}),
-      clonePaths: stringRecord(input.clonePaths),
-      dryRun: typeof input.dryRun === 'boolean' ? input.dryRun : false
-    },
-    errors: []
-  }
-}
-
-// NodeConfig fields (cloneRoot/clonePaths) live at the TOP LEVEL of compact
-// configs, but split configs inherit them from workspaceConfig.repos when
-// nodeConfig omits them. Keep this in sync with @agent-relay/factory's
-// combineSplitConfigInput semantics.
-function extractNodeConfig(raw: Record<string, unknown>): FactoryNodeConfig {
-  const isSplitConfig = isRecord(raw.nodeConfig) || isRecord(raw.workspaceConfig)
-  const source = isRecord(raw.nodeConfig)
-    ? raw.nodeConfig
-    : isRecord(raw.factoryConfig)
-      ? raw.factoryConfig
-      : raw
-  const workspaceConfig = isSplitConfig && isRecord(raw.workspaceConfig) ? raw.workspaceConfig : undefined
-  const repos = isRecord(source.repos)
-    ? source.repos
-    : isRecord(workspaceConfig?.repos)
-      ? workspaceConfig.repos
-      : undefined
-  const normalized = normalizeNodeConfigInput({
-    workspaceId: source.workspaceId ?? workspaceConfig?.workspaceId,
-    capabilities: source.capabilities,
-    cloneRoot: source.cloneRoot ?? repos?.cloneRoot,
-    clonePaths: source.clonePaths ?? repos?.clonePaths,
-    dryRun: source.dryRun
-  })
-  return normalized.config ?? emptyNodeConfig()
-}
-
-function splitNodeConfigForSave(raw: Record<string, unknown>, parsed: FactoryNodeConfig): Partial<FactoryNodeConfig> {
-  const previousNode = isRecord(raw.nodeConfig) ? raw.nodeConfig : {}
-  const workspace = isRecord(raw.workspaceConfig) ? raw.workspaceConfig : {}
-  const workspaceRepos = isRecord(workspace.repos) ? workspace.repos : {}
-  const next: Partial<FactoryNodeConfig> = { ...parsed }
-
-  if (!hasOwn(previousNode, 'workspaceId') && parsed.workspaceId === workspace.workspaceId) {
-    delete next.workspaceId
-  }
-
-  if (!hasOwn(previousNode, 'cloneRoot') && parsed.cloneRoot === workspaceRepos.cloneRoot) {
-    delete next.cloneRoot
-  }
-
-  const workspaceClonePaths = stringRecord(workspaceRepos.clonePaths)
-  if (
-    !hasOwn(previousNode, 'clonePaths') &&
-    recordsEqual(parsed.clonePaths ?? {}, workspaceClonePaths)
-  ) {
-    delete next.clonePaths
-  }
-
-  return next
-}
-
-async function readFactoryNodeConfig(configPath?: string, projectRoot?: string): Promise<FactoryConfigReadResult> {
-  const path = normalizeFactoryConfigPath(configPath, projectRoot)
-  if (!existsSync(path)) {
-    return { configPath: path, exists: false, config: emptyNodeConfig(), errors: [] }
-  }
-
-  try {
-    const raw = JSON.parse(await readFile(path, 'utf8')) as unknown
-    if (!isRecord(raw)) throw new Error('factory config must be a JSON object')
-    return { configPath: path, exists: true, config: extractNodeConfig(raw), errors: [] }
-  } catch (error) {
-    return { configPath: path, exists: true, config: null, errors: [toErrorMessage(error)] }
-  }
-}
-
-async function saveFactoryNodeConfig(
-  config: unknown,
-  configPath?: string,
-  projectRoot?: string
-): Promise<FactoryConfigReadResult> {
-  const path = normalizeFactoryConfigPath(configPath, projectRoot)
-  const parsed = normalizeNodeConfigInput(config)
-  if (!parsed.config) {
-    return { configPath: path, exists: existsSync(path), config: null, errors: parsed.errors }
-  }
-
-  let raw: Record<string, unknown> = {}
-  if (existsSync(path)) {
-    try {
-      const existing = JSON.parse(await readFile(path, 'utf8')) as unknown
-      if (isRecord(existing)) raw = existing
-    } catch {
-      raw = {}
-    }
-  }
-
-  let next: Record<string, unknown>
-  if (isRecord(raw.nodeConfig) || isRecord(raw.workspaceConfig)) {
-    next = { ...raw, nodeConfig: splitNodeConfigForSave(raw, parsed.config) }
-  } else if (isRecord(raw.factoryConfig)) {
-    next = { ...raw, factoryConfig: { ...raw.factoryConfig, ...parsed.config } }
-  } else {
-    next = { ...raw, ...parsed.config }
-  }
-
-  await mkdir(dirname(path), { recursive: true })
-  await writeFile(path, `${JSON.stringify(next, null, 2)}\n`, 'utf8')
-  return { configPath: path, exists: true, config: parsed.config, errors: [] }
-}
-
-function normalizeIssue(value: unknown): FactoryIssueStatus | null {
-  if (!isRecord(value)) return null
-  const key = firstString(value, ['key', 'issueKey', 'id'])
-  if (!key) return null
-  return {
-    key,
-    title: firstString(value, ['title', 'name', 'summary']),
-    url: firstString(value, ['url', 'href']),
-    state: firstString(value, ['state', 'status']),
-    repo: firstString(value, ['repo', 'repository', 'repositoryName']),
-    assignee: firstString(value, ['assignee', 'owner']),
-    updatedAt: firstString(value, ['updatedAt', 'updated_at', 'lastActivityAt'])
-  }
-}
-
-function normalizeAgent(value: unknown): FactoryAgentStatus | null {
-  if (!isRecord(value)) return null
-  const name = firstString(value, ['name', 'agentName', 'id'])
-  if (!name) return null
-  const issueRecord = firstRecord(value, ['issue', 'linearIssue'])
-  const issue = issueRecord ? normalizeIssue(issueRecord) : null
-  return {
-    id: firstString(value, ['id', 'agentId']),
-    name,
-    role: firstString(value, ['role', 'persona']),
-    status: firstString(value, ['status', 'state']),
-    ...(issue ? { issue } : {})
-  }
-}
-
-function normalizeFactoryCloudStatus(
-  payload: Record<string, unknown>,
-  auth: { apiUrl: string },
-  workspaceId: string
-): FactoryStatus {
-  const root = firstRecord(payload, ['factory', 'status']) ?? payload
-  // A speculative cloud payload can list the same issue across the
-  // issues/inFlight/queued buckets; dedup by key (keep first occurrence) so the
-  // renderer never emits duplicate React keys and we treat duplicate delivery as
-  // normal per AGENTS.md.
-  const seenIssueKeys = new Set<string>()
-  const issues = [
-    ...firstArray(root, ['issues']),
-    ...firstArray(root, ['inFlight', 'inflight']),
-    ...firstArray(root, ['queued'])
-  ]
-    .map(normalizeIssue)
-    .filter((issue): issue is FactoryIssueStatus => {
-      if (!issue) return false
-      if (seenIssueKeys.has(issue.key)) return false
-      seenIssueKeys.add(issue.key)
-      return true
-    })
-  const agents = firstArray(root, ['agents', 'workers', 'spawns'])
-    .map(normalizeAgent)
-    .filter((agent): agent is FactoryAgentStatus => !!agent)
-  const counters = firstRecord(root, ['counters', 'counts'])
-  const stateText = firstString(root, ['state', 'status'])
-  const hasCloudState = issues.length > 0 || agents.length > 0 || (counters && Object.keys(counters).length > 0)
-
-  return {
-    source: 'cloud',
-    state: stateText === 'unavailable' || stateText === 'offline'
-      ? 'unavailable'
-      : hasCloudState
-        ? 'online'
-        : 'empty',
-    connected: true,
-    workspaceId,
-    cloudUrl: auth.apiUrl,
-    updatedAt: firstString(root, ['updatedAt', 'updated_at']) ?? new Date().toISOString(),
-    message: firstString(root, ['message', 'detail']),
-    counters: counters
-      ? Object.fromEntries(
-        Object.entries(counters)
-          .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1]))
-      )
-      : undefined,
-    agents,
-    issues
-  }
-}
-
-function emptyFactoryCloudStatus(
-  auth: { apiUrl: string },
-  workspaceId: string,
-  message = 'Cloud factory status is not available yet.'
-): FactoryStatus {
-  return {
-    source: 'cloud',
-    state: 'empty',
-    connected: true,
-    workspaceId,
-    cloudUrl: auth.apiUrl,
-    updatedAt: new Date().toISOString(),
-    message,
-    agents: [],
-    issues: []
-  }
-}
-
-let factoryStatusInFlight: Promise<FactoryStatus> | null = null
-
-async function readFactoryCloudStatus(): Promise<FactoryStatus> {
-  const authState = await auth.resolveCloudAuth()
-  if (!authState) {
-    return {
-      source: 'cloud',
-      state: 'unauthenticated',
-      connected: false,
-      message: 'Sign in to Agent Relay Cloud to view factory status.',
-      agents: [],
-      issues: []
-    }
-  }
-
-  let workspaceId: string
-  try {
-    workspaceId = await auth.getAccountWorkspaceId(auth.accountWorkspaceReadyRetryOptions())
-  } catch (error) {
-    return {
-      source: 'cloud',
-      state: 'unconfigured',
-      connected: false,
-      cloudUrl: authState.apiUrl,
-      message: toErrorMessage(error),
-      agents: [],
-      issues: []
-    }
-  }
-
-  const endpoints = [
-    `/api/v1/workspaces/${encodeURIComponent(workspaceId)}/factory/status`,
-    `/api/v1/factory/status?workspaceId=${encodeURIComponent(workspaceId)}`,
-    `/api/factory/status?workspaceId=${encodeURIComponent(workspaceId)}`
-  ]
-  let unsupported = false
-
-  for (const endpoint of endpoints) {
-    const response = await fetch(buildCloudApiUrl(authState.apiUrl, endpoint), {
-      headers: { Authorization: `Bearer ${authState.accessToken}`, Accept: 'application/json' }
-    }).catch((error: unknown) => {
-      throw new Error(`Cloud factory status request failed: ${toErrorMessage(error)}`)
-    })
-    if (response.status === 404 || response.status === 405 || response.status === 501) {
-      unsupported = true
-      continue
-    }
-    if (response.status === 401 || response.status === 403) {
-      return {
-        source: 'cloud',
-        state: 'unauthenticated',
-        connected: false,
-        workspaceId,
-        cloudUrl: authState.apiUrl,
-        message: 'Cloud authentication expired. Sign in again to view factory status.',
-        agents: [],
-        issues: []
-      }
-    }
-    if (!response.ok) {
-      const text = await response.text().catch(() => '')
-      return {
-        source: 'cloud',
-        state: 'unavailable',
-        connected: false,
-        workspaceId,
-        cloudUrl: authState.apiUrl,
-        message: `Cloud factory status failed: ${response.status} ${text || response.statusText}`,
-        agents: [],
-        issues: []
-      }
-    }
-    const payload = await response.json().catch(() => ({})) as unknown
-    return normalizeFactoryCloudStatus(isRecord(payload) ? payload : {}, authState, workspaceId)
-  }
-
-  return emptyFactoryCloudStatus(
-    authState,
-    workspaceId,
-    unsupported ? 'Cloud factory status endpoint is not available yet.' : undefined
-  )
-}
-
-function factoryStatus(): Promise<FactoryStatus> {
-  if (!factoryStatusInFlight) {
-    factoryStatusInFlight = readFactoryCloudStatus().finally(() => {
-      factoryStatusInFlight = null
-    })
-  }
-  return factoryStatusInFlight
-}
-
 // --- Chat companion (Relaycast) ---
 // Credentials reuse the Cloud sign-in + safeStorage pattern from `auth.ts`
 // (resolveCloudAuth / getAccountWorkspaceId); no new secret storage. The
@@ -510,6 +112,7 @@ let chatWorkspaceKey: string | null = null
 let chatAgentToken: string | null = null
 let chatAgentName: string | null = null
 let chatPoller: RelayChatPoller | null = null
+let chatLive: RelayChatLive | null = null
 
 /** Per-machine companion identity so two hosts never rotate each other's token. */
 function chatAgentIdentityName(): string {
@@ -550,11 +153,267 @@ async function resolveChatWorkspaceKey(): Promise<string> {
 
 async function rotateChatWorkspaceKey(): Promise<string | null> {
   chatWorkspaceKey = null
+  relayCast = null
+  relayCastKey = null
   try {
     return await resolveChatWorkspaceKey()
   } catch {
     return null
   }
+}
+
+let relayCast: RelayCast | null = null
+let relayCastKey: string | null = null
+
+/** Workspace-scoped Relaycast SDK client. Roster and registration go through this, not a local PTY. */
+async function getRelayCast(): Promise<RelayCast> {
+  const key = await resolveChatWorkspaceKey()
+  const baseUrl = normalizeRelaycastBaseUrl(process.env.RELAYCAST_BASE_URL || process.env.RELAY_BASE_URL)
+  if (relayCast && relayCastKey === key) return relayCast
+  relayCast = new RelayCast({
+    apiKey: key,
+    baseUrl,
+    originActor: 'pear'
+  })
+  relayCastKey = key
+  return relayCast
+}
+
+function agentNameKey(name: string): string {
+  return name.trim().toLowerCase().replace(/^relay:/, '')
+}
+
+function rosterAgentConversations(agents: Array<{
+  name?: string
+  type?: string
+  status?: string
+  lastSeen?: string
+  persona?: string | null
+  metadata?: Record<string, unknown>
+}>): RelayChatConversation[] {
+  const rows: RelayChatConversation[] = []
+  for (const agent of agents) {
+    const name = agent.name?.trim()
+    if (!name) continue
+    const sessionId = agentSessionBinding(agent.metadata)?.sessionId
+    const cli = agentCli(name, agent.metadata, agent.persona)
+    const objective = typeof agent.metadata?.objective === 'string' ? agent.metadata.objective.trim() : ''
+    if (objective) agentsWithObjective.add(`relay:${name}`)
+    else agentsWithObjective.delete(`relay:${name}`)
+    const summary = agentSummary(agent.metadata)
+    rows.push({
+      kind: 'agent',
+      id: `relay:${name}`,
+      name,
+      participants: [name],
+      ...(agent.status ? { status: agent.status } : {}),
+      ...(agent.lastSeen ? { lastMessageAt: agent.lastSeen } : {}),
+      ...(sessionId ? { sessionId } : {}),
+      ...(cli ? { cli } : {}),
+      ...(summary ? { summary } : {}),
+      ...(agent.type?.toLowerCase() === 'human' ? { human: true } : {})
+    })
+  }
+  return rows
+}
+
+const sessionPromptSummaries = new Map<string, string | null>()
+/** Roster rows whose agent published an objective; that outranks any generated brief. */
+const agentsWithObjective = new Set<string>()
+
+const sessionBriefs = new SessionBriefCache({
+  fetchBrief: fetchSessionBrief,
+  onUpdated: () => {
+    console.info('[chat] new session briefs from History; refreshing the list')
+    broadcastChatInvalidated('summaries')
+  }
+})
+
+async function fetchSessionBrief(sessionId: string): Promise<string | null> {
+  const cloudAuth = await auth.resolveCloudAuth()
+  if (!cloudAuth) return null
+  const workspaceId = await auth.getAccountWorkspaceId(auth.accountWorkspaceReadyRetryOptions())
+  const res = await fetch(
+    `${cloudAuth.apiUrl.replace(/\/+$/u, '')}/api/v1/workspaces/${encodeURIComponent(workspaceId)}` +
+      `/reflex/sessions/${encodeURIComponent(sessionId)}/brief?admit=false`,
+    { headers: { Authorization: `Bearer ${cloudAuth.accessToken}`, Accept: 'application/json' } }
+  )
+  if (!res.ok) {
+    if (!briefStatusesLogged.has(res.status)) {
+      briefStatusesLogged.add(res.status)
+      console.info(`[chat] session briefs unavailable from Cloud (HTTP ${res.status}); summaries use the fallback`)
+    }
+    return null
+  }
+  return briefText(await res.json().catch(() => null))
+}
+
+const briefStatusesLogged = new Set<number>()
+
+/**
+ * Each agent's summary: its published objective, else History's session
+ * brief, else its session title or description, else its first prompt.
+ * Briefs load in the background and refresh the list when they arrive.
+ */
+async function withPromptSummaries(rows: RelayChatConversation[]): Promise<RelayChatConversation[]> {
+  void sessionBriefs.refresh(rows.flatMap((row) => (row.sessionId && !agentsWithObjective.has(row.id) ? [row.sessionId] : [])))
+  return Promise.all(rows.map(async (row) => {
+    if (!row.sessionId || agentsWithObjective.has(row.id)) return row
+    const brief = sessionBriefs.get(row.sessionId)
+    if (brief) return { ...row, summary: brief }
+    if (row.summary) return row
+    if (!sessionPromptSummaries.has(row.sessionId)) {
+      try {
+        const entries = await aiHistManager.getSession(row.sessionId)
+        const first = [...entries].sort((a, b) => a.timestampMs - b.timestampMs)[0]?.prompt?.trim()
+        sessionPromptSummaries.set(row.sessionId, first ? first.slice(0, 200) : null)
+      } catch {
+        sessionPromptSummaries.set(row.sessionId, null)
+      }
+    }
+    const summary = sessionPromptSummaries.get(row.sessionId)
+    return summary ? { ...row, summary } : row
+  }))
+}
+
+/**
+ * A DM with a listed agent carries that agent's session, tool, and summary
+ * into the thread. DM history outlives registrations, so a thread whose agent
+ * is no longer reachable is dropped; only the roster says who can receive.
+ */
+function conversationsWithSessions(
+  roster: RelayChatConversation[],
+  threads: RelayChatConversation[]
+): RelayChatConversation[] {
+  const agents = new Map<string, RelayChatConversation>()
+  for (const agent of roster) agents.set(agentNameKey(agent.name), agent)
+  const tagged = threads.flatMap((thread): RelayChatConversation[] => {
+    if (thread.kind === 'channel') return [thread]
+    const names = [thread.name, ...(thread.participants || [])]
+    for (const name of names) {
+      const agent = agents.get(agentNameKey(name))
+      if (!agent) continue
+      return [{
+        ...thread,
+        ...(thread.sessionId || !agent.sessionId ? {} : { sessionId: agent.sessionId }),
+        ...(thread.cli || !agent.cli ? {} : { cli: agent.cli }),
+        ...(thread.summary || !agent.summary ? {} : { summary: agent.summary }),
+        ...(thread.status || !agent.status ? {} : { status: agent.status })
+      }]
+    }
+    return []
+  })
+  const threadIds = new Set(tagged.map((thread) => thread.id))
+  return [...roster.filter((agent) => !threadIds.has(agent.id)), ...tagged]
+}
+
+/**
+ * Registration is create-only. A name this machine already holds is a 409,
+ * and `rotate-token` now requires the agent token we do not have. Reclaim
+ * the companion with the workspace-key takeover route, which mints a new
+ * `at_live_` token.
+ */
+async function reclaimCompanion(name: string, agentId: string): Promise<{ name: string; token: string }> {
+  const key = await resolveChatWorkspaceKey()
+  const baseUrl = normalizeRelaycastBaseUrl(process.env.RELAYCAST_BASE_URL || process.env.RELAY_BASE_URL)
+  const response = await fetch(`${baseUrl.replace(/\/+$/u, '')}/v1/agents/${encodeURIComponent(name)}/takeover`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${key}`,
+      Accept: 'application/json',
+      'Content-Type': 'application/json'
+    },
+    body: JSON.stringify({
+      expected_agent_id: agentId,
+      actor: 'pear',
+      reason: 'Pear desktop reclaiming its companion identity to send',
+      session_ref: `pear:${name}`,
+      node_id: 'pear-desktop'
+    })
+  })
+  const payload = await response.json().catch(() => null) as { data?: { name?: string; token?: string }; error?: { message?: string } } | null
+  const token = payload?.data?.token
+  if (!response.ok || !token) {
+    const message = payload?.error?.message || `Companion takeover failed: ${response.status}`
+    throw new Error(message)
+  }
+  return { name: payload.data?.name || name, token }
+}
+
+async function claimCompanion(relay: RelayCast, name: string): Promise<{ name: string; token: string }> {
+  try {
+    const created = await relay.agents.register({ name, type: 'agent' })
+    if (!created.token) throw new Error('Registration did not return an agent token')
+    return { name: created.name || name, token: created.token }
+  } catch (error) {
+    if (!(error instanceof RelayError) || error.code !== 'name_conflict') throw error
+    const existing = await relay.agents.get(name)
+    return reclaimCompanion(existing.name || name, existing.id)
+  }
+}
+
+/**
+ * Your own relay identity in this workspace, from Cloud — the one the
+ * dashboard and the Relay macOS / iOS apps send and read as, so agents that
+ * message you reach Pear too. Null when Cloud won't issue it.
+ */
+async function personCredential(baseUrl: string): Promise<{ name: string; token: string } | null> {
+  try {
+    const cloudAuth = await auth.resolveCloudAuth()
+    if (!cloudAuth) return null
+    const workspaceId = await auth.getAccountWorkspaceId(auth.accountWorkspaceReadyRetryOptions())
+    const res = await fetch(
+      `${cloudAuth.apiUrl.replace(/\/+$/u, '')}/api/v1/workspaces/${encodeURIComponent(workspaceId)}/messaging/identity/credential`,
+      { method: 'POST', headers: { Authorization: `Bearer ${cloudAuth.accessToken}`, Accept: 'application/json' } }
+    )
+    if (!res.ok) {
+      console.warn(`[chat] Cloud messaging identity returned ${res.status}; using this machine's companion`)
+      return null
+    }
+    const body = await res.json().catch(() => null) as { identity?: Record<string, unknown> } | null
+    const name = typeof body?.identity?.name === 'string' ? body.identity.name.trim() : ''
+    const token = typeof body?.identity?.token === 'string' ? body.identity.token.trim() : ''
+    const relaycastUrl = typeof body?.identity?.relaycastUrl === 'string' ? body.identity.relaycastUrl : ''
+    if (!name || !token.startsWith('at_live_')) {
+      console.warn('[chat] Cloud returned no usable messaging identity; using this machine\'s companion')
+      return null
+    }
+    if (relaycastUrl && normalizeRelaycastBaseUrl(relaycastUrl) !== baseUrl) {
+      console.warn(`[chat] Cloud messaging identity is on ${relaycastUrl}, not ${baseUrl}; using this machine's companion`)
+      return null
+    }
+    return { name, token }
+  } catch (error) {
+    console.warn('[chat] Cloud messaging identity failed; using this machine\'s companion:', toErrorMessage(error))
+    return null
+  }
+}
+
+let chatIdentityIsPerson = false
+let agentTokenRefresh: Promise<string | null> | null = null
+
+/** A 401 on the person token: ask Cloud again (coalesced) and restart the live stream on a new token. */
+function refreshChatAgentToken(): Promise<string | null> {
+  if (!chatIdentityIsPerson) return Promise.resolve(null)
+  if (!agentTokenRefresh) {
+    const baseUrl = normalizeRelaycastBaseUrl(process.env.RELAYCAST_BASE_URL || process.env.RELAY_BASE_URL)
+    agentTokenRefresh = personCredential(baseUrl)
+      .then((identity) => {
+        if (!identity || identity.name !== chatAgentName) return null
+        if (identity.token !== chatAgentToken) {
+          chatAgentToken = identity.token
+          console.info('[chat] messaging token re-issued by Cloud; reconnecting the live stream')
+          chatLive?.stop()
+          chatLive = null
+          if (chatClient) ensureChatLive(chatClient)
+        }
+        return identity.token
+      })
+      .finally(() => {
+        agentTokenRefresh = null
+      })
+  }
+  return agentTokenRefresh
 }
 
 async function buildChatClient(): Promise<RelayChatClient> {
@@ -568,11 +427,15 @@ async function buildChatClient(): Promise<RelayChatClient> {
       chatWorkspaceKey = key
     },
     rotateWorkspaceKey: rotateChatWorkspaceKey,
+    refreshAgentToken: refreshChatAgentToken,
     selfName: () => chatAgentName
   })
-  const identity = await client.ensureAgent(chatAgentIdentityName())
+  const person = await personCredential(baseUrl)
+  const identity = person ?? await claimCompanion(await getRelayCast(), chatAgentIdentityName())
+  chatIdentityIsPerson = !!person
   chatAgentName = identity.name
   chatAgentToken = identity.token
+  console.info(`[chat] messaging as ${identity.name}${person ? ' (your relay identity)' : ' (this machine\'s companion)'}`)
   return client
 }
 
@@ -581,6 +444,7 @@ async function getChatClient(): Promise<RelayChatClient> {
   if (!chatClientPromise) {
     chatClientPromise = buildChatClient().then((client) => {
       chatClient = client
+      ensureChatLive(client)
       return client
     }).catch((error: unknown) => {
       chatClientPromise = null
@@ -588,6 +452,247 @@ async function getChatClient(): Promise<RelayChatClient> {
     })
   }
   return chatClientPromise
+}
+
+/** Newest events first, a few pages back: enough for the recent conversation. */
+const CLOUD_SESSION_EVENT_PAGE = 200
+const CLOUD_SESSION_EVENT_PAGES = 3
+const cloudSessionTurnsInFlight = new Map<string, Promise<SessionTurn[]>>()
+/** Reopening a chat within this window reuses the last read instead of paging History again. */
+const CLOUD_SESSION_CACHE_MS = 60_000
+const cloudSessionTurnsCache = new Map<string, { turns: SessionTurn[]; at: number }>()
+
+/**
+ * A session recorded on another machine, read from RelayHistory through
+ * Cloud's session events route (the one the Relay iOS app uses). Empty when
+ * the session was never shared with History.
+ */
+function cloudSessionTurns(sessionId: string): Promise<SessionTurn[]> {
+  const cached = cloudSessionTurnsCache.get(sessionId)
+  if (cached && Date.now() - cached.at < CLOUD_SESSION_CACHE_MS) return Promise.resolve(cached.turns)
+  const pending = cloudSessionTurnsInFlight.get(sessionId)
+  if (pending) return pending
+  const load = fetchCloudSessionTurns(sessionId)
+    .then((turns) => {
+      if (turns.length > 0) cloudSessionTurnsCache.set(sessionId, { turns, at: Date.now() })
+      return turns
+    })
+    .finally(() => cloudSessionTurnsInFlight.delete(sessionId))
+  cloudSessionTurnsInFlight.set(sessionId, load)
+  return load
+}
+
+async function fetchCloudSessionTurns(sessionId: string): Promise<SessionTurn[]> {
+  const started = Date.now()
+  try {
+    const cloudAuth = await auth.resolveCloudAuth()
+    if (!cloudAuth) return []
+    const workspaceId = await auth.getAccountWorkspaceId(auth.accountWorkspaceReadyRetryOptions())
+    const base = `${cloudAuth.apiUrl.replace(/\/+$/u, '')}/api/v1/workspaces/${encodeURIComponent(workspaceId)}` +
+      `/reflex/sessions/${encodeURIComponent(sessionId)}/events`
+    const events: unknown[] = []
+    const seenCursors = new Set<string>()
+    let cursor: string | null = null
+    for (let page = 0; page < CLOUD_SESSION_EVENT_PAGES; page += 1) {
+      const query = new URLSearchParams({ limit: String(CLOUD_SESSION_EVENT_PAGE), order: 'desc' })
+      if (cursor) query.set('cursor', cursor)
+      const res = await fetch(`${base}?${query}`, {
+        headers: { Authorization: `Bearer ${cloudAuth.accessToken}`, Accept: 'application/json' }
+      })
+      if (res.status === 404) {
+        console.log(`[chat] session ${sessionId} is not shared with History`)
+        break
+      }
+      if (!res.ok) {
+        console.warn(`[chat] session ${sessionId} history returned ${res.status}`)
+        break
+      }
+      const body = await res.json().catch(() => null) as { events?: unknown; nextCursor?: unknown } | null
+      if (!body || !Array.isArray(body.events)) break
+      events.push(...body.events)
+      cursor = typeof body.nextCursor === 'string' && body.nextCursor ? body.nextCursor : null
+      if (!cursor || seenCursors.has(cursor)) break
+      seenCursors.add(cursor)
+    }
+    const turns = historyEventTurns(events)
+    console.log(`[chat] session ${sessionId}: ${turns.length} turns from History (${events.length} events) in ${Date.now() - started}ms`)
+    return turns
+  } catch (error) {
+    console.warn(`[chat] session ${sessionId} history failed:`, toErrorMessage(error))
+    return []
+  }
+}
+
+/** Like the Relay iOS app: delivery usually follows within seconds, so check briefly after a send. */
+const DELIVERY_CHECKS = 10
+const DELIVERY_CHECK_INTERVAL_MS = 3_000
+/** Sent messages still showing Sent, by id. One watch per message. */
+const awaitingDelivery = new Map<string, { conversationId: string; message: RelayChatMessage; sentAt: number }>()
+
+/** Flip a sent message to Delivered once; later reads of the same message are no-ops. */
+function markDelivered(messageId: string, via: string): void {
+  const pending = awaitingDelivery.get(messageId)
+  if (!pending) return
+  awaitingDelivery.delete(messageId)
+  console.info(`[chat] ${messageId} delivered after ${((Date.now() - pending.sentAt) / 1000).toFixed(1)}s (${via})`)
+  broadcastChatMessage(pending.conversationId, { ...pending.message, delivered: true })
+}
+
+/**
+ * Re-push a sent message once a recipient has read it, so its label moves
+ * from Sent to Delivered without reopening the thread. The live stream's
+ * read receipt usually lands first; the readers poll covers a dropped socket.
+ */
+function watchDelivery(client: RelayChatClient, conversationId: string, message: RelayChatMessage): void {
+  if (!message.hasServerID || awaitingDelivery.has(message.id)) return
+  awaitingDelivery.set(message.id, { conversationId, message, sentAt: Date.now() })
+  void (async () => {
+    for (let check = 0; check < DELIVERY_CHECKS; check += 1) {
+      await new Promise((resolve) => setTimeout(resolve, DELIVERY_CHECK_INTERVAL_MS))
+      if (!awaitingDelivery.has(message.id)) return
+      const { delivered } = await client.getMessageReaders(message.id, message.from).catch(() => ({ delivered: false }))
+      if (delivered) {
+        markDelivered(message.id, 'readers poll')
+        return
+      }
+    }
+    if (awaitingDelivery.delete(message.id)) {
+      console.info(`[chat] ${message.id} not read within ${DELIVERY_CHECKS * DELIVERY_CHECK_INTERVAL_MS / 1000}s; the recipient may be busy`)
+    }
+  })()
+}
+
+const notifiedMessages = new Set<string>()
+/** Electron drops a notification's click handler once the object is collected. */
+const openNotifications = new Set<Notification>()
+const NOTIFIED_LIMIT = 500
+const NOTIFICATION_PREVIEW_CHARS = 180
+
+/**
+ * Like the Relay desktop app: a system notification for a message someone
+ * sent you while Pear isn't in front. Clicking it opens that conversation.
+ */
+function notifyIncomingMessage(conversationId: string, message: RelayChatMessage): void {
+  if (message.mine || !message.id || notifiedMessages.has(message.id)) return
+  if (BrowserWindow.getAllWindows().some((win) => win.isFocused())) return
+  if (!Notification.isSupported()) return
+  notifiedMessages.add(message.id)
+  if (notifiedMessages.size > NOTIFIED_LIMIT) notifiedMessages.delete(notifiedMessages.values().next().value as string)
+  const text = message.text.replace(/\s+/gu, ' ').trim()
+  const notification = new Notification({
+    title: message.channelName ? `${message.from} in #${message.channelName}` : message.from,
+    body: text.length > NOTIFICATION_PREVIEW_CHARS
+      ? `${text.slice(0, NOTIFICATION_PREVIEW_CHARS - 1)}…`
+      : text || 'New message'
+  })
+  notification.on('click', () => {
+    const win = BrowserWindow.getAllWindows()[0]
+    if (!win) return
+    if (win.isMinimized()) win.restore()
+    win.show()
+    win.focus()
+    const event: ChatOpenConversationEvent = { conversationId, from: message.from }
+    win.webContents.send('chat:open-conversation', event)
+  })
+  openNotifications.add(notification)
+  const release = (): void => {
+    openNotifications.delete(notification)
+  }
+  notification.on('close', release)
+  notification.on('click', release)
+  notification.on('failed', (_event, error) => {
+    release()
+    console.warn('[chat] notification failed:', error)
+  })
+  notification.show()
+}
+
+const pushedMessages = new Set<string>()
+const PUSHED_LIMIT = 2_000
+let inboxDuplicates = 0
+
+/**
+ * One path for a received message, whichever source saw it first — the live
+ * stream or the inbox check. Each message id is pushed and notified once.
+ */
+function deliverIncoming(conversationId: string, message: RelayChatMessage, via: 'live stream' | 'inbox check'): void {
+  if (message.id && pushedMessages.has(message.id)) {
+    inboxDuplicates += 1
+    if (inboxDuplicates % 50 === 1) console.info(`[chat] already delivered ${message.id} (${inboxDuplicates} repeats)`)
+    return
+  }
+  if (message.id) {
+    pushedMessages.add(message.id)
+    if (pushedMessages.size > PUSHED_LIMIT) pushedMessages.delete(pushedMessages.values().next().value as string)
+  }
+  if (!message.mine) console.info(`[chat] message ${message.id} from ${message.from} in ${conversationId} (${via})`)
+  broadcastChatMessage(conversationId, message)
+  notifyIncomingMessage(conversationId, message)
+}
+
+const INBOX_CHECK_INTERVAL_MS = 10_000
+const inboxWatcher = new DmInboxWatcher()
+let inboxTimer: ReturnType<typeof setInterval> | null = null
+let inboxCheck: Promise<void> | null = null
+
+function observeInbox(threads: Awaited<ReturnType<RelayChatClient['listDMConversations']>>): void {
+  for (const { conversationId, message } of inboxWatcher.observe(threads)) {
+    deliverIncoming(conversationId, message, 'inbox check')
+  }
+}
+
+/** Like the Relay apps' local notices: catch new DMs the live stream didn't deliver. */
+function ensureInboxCheck(client: RelayChatClient): void {
+  if (inboxTimer) return
+  const check = (): void => {
+    if (inboxCheck) return
+    inboxCheck = client.listDMConversations()
+      .then(observeInbox)
+      .catch((error: unknown) => {
+        console.warn('[chat] inbox check failed:', toErrorMessage(error))
+      })
+      .finally(() => {
+        inboxCheck = null
+      })
+  }
+  check()
+  inboxTimer = setInterval(check, INBOX_CHECK_INTERVAL_MS)
+}
+
+/** Relaycast WebSocket: received messages and read receipts arrive as they happen. */
+function ensureChatLive(client: RelayChatClient): RelayChatLive {
+  if (!chatLive) {
+    chatLive = new RelayChatLive({
+      createSocket: async () => {
+        if (!chatAgentToken) throw new Error('No companion agent token')
+        return (await getRelayCast()).as(chatAgentToken)
+      },
+      selfName: () => chatAgentName,
+      toMessage: (record, fallback) => client.messageFromEvent(record, fallback),
+      onMessage: (conversationId, message) => {
+        deliverIncoming(conversationId, message, 'live stream')
+      },
+      onRead: (messageId) => {
+        markDelivered(messageId, 'read receipt')
+      },
+      onResync: (reason) => {
+        console.info(`[chat] live stream ${reason === 'gap' ? 'missed events' : 'reconnected'}; reloading`)
+        broadcastChatInvalidated('reconnect')
+      }
+    })
+  }
+  const live = chatLive
+  void live.start().catch((error: unknown) => {
+    console.warn('[chat] live stream failed to start; polling only:', toErrorMessage(error))
+  })
+  return live
+}
+
+const SLOW_CHAT_CALL_MS = 1_500
+
+function logSlowChatCall(call: string, started: number, detail: string): void {
+  const elapsed = Date.now() - started
+  if (elapsed >= SLOW_CHAT_CALL_MS) console.warn(`[chat] ${call} took ${elapsed}ms (${detail})`)
 }
 
 function broadcastChatInvalidated(reason: ChatInvalidatedEvent['reason']): void {
@@ -613,7 +718,7 @@ function ensureChatPoller(client: RelayChatClient): RelayChatPoller {
           await client.listNodes()
         },
         pollMessages: async () => {
-          await client.listDMConversations()
+          observeInbox(await client.listDMConversations())
         },
         pollChannels: async () => {
           await client.listChannels()
@@ -629,6 +734,7 @@ function ensureChatPoller(client: RelayChatClient): RelayChatPoller {
       { intervalMs: RELAY_CHAT_POLL_INTERVAL_MS }
     )
     chatPoller.start()
+    ensureInboxCheck(client)
   }
   return chatPoller
 }
@@ -637,11 +743,21 @@ function ensureChatPoller(client: RelayChatClient): RelayChatPoller {
 export function resetChatClient(): void {
   chatPoller?.stop()
   chatPoller = null
+  chatLive?.stop()
+  chatLive = null
+  if (inboxTimer) clearInterval(inboxTimer)
+  inboxTimer = null
+  inboxWatcher.reset()
+  pushedMessages.clear()
+  chatIdentityIsPerson = false
+  awaitingDelivery.clear()
   chatClient = null
   chatClientPromise = null
   chatWorkspaceKey = null
   chatAgentToken = null
   chatAgentName = null
+  relayCast = null
+  relayCastKey = null
 }
 
 function normalizeChatSendInput(input: ChatSendInput): ChatSendInput {
@@ -1017,34 +1133,82 @@ export function registerIpcHandlers(): void {
 
   // --- Chat companion (Relaycast) ---
   ipcMain.handle('chat.listConversations', async () => {
-    const client = await getChatClient()
-    ensureChatPoller(client)
-    return client.listConversations()
+    const started = Date.now()
+    let rosterMs = 0
+    let threadsMs = 0
+    const rosterLoad = (async () => {
+      const relay = await getRelayCast()
+      const agents = (await relay.agents.list({ status: 'all' }))
+        .map((agent) => ({ ...agent, metadata: wireMetadata(agent.metadata) }))
+      const listed = listedRosterAgents(agents, chatAgentName ?? chatAgentIdentityName())
+      const rows = await withPromptSummaries(rosterAgentConversations(listed))
+      rosterMs = Date.now() - started
+      return rows
+    })()
+    const threadsLoad = (async () => {
+      try {
+        const client = await getChatClient()
+        ensureChatPoller(client)
+        const threads = await client.listConversations()
+        chatLive?.subscribeChannels(threads.filter((thread) => thread.kind === 'channel').map((thread) => thread.name))
+        return threads
+      } catch (error) {
+        console.warn('[chat] Thread list failed; showing the Relaycast roster:', toErrorMessage(error))
+        return [] as RelayChatConversation[]
+      } finally {
+        threadsMs = Date.now() - started
+      }
+    })()
+    // The roster and the thread list are independent; neither waits on the other.
+    const [roster, threads] = await Promise.all([rosterLoad, threadsLoad])
+    logSlowChatCall(
+      'listConversations',
+      started,
+      `roster ${rosterMs}ms / ${roster.length} agents (${roster.filter((row) => row.sessionId).length} with sessions), ` +
+        `threads ${threadsMs}ms / ${threads.length}`
+    )
+    return conversationsWithSessions(roster, threads)
   })
 
   ipcMain.handle('chat.getHistory', async (_, input: ChatHistoryInput) => {
+    const started = Date.now()
     const client = await getChatClient()
     const poller = ensureChatPoller(client)
     const normalized = normalizeChatHistoryInput(input)
     // Per-open history load + foreground refresh target. The background tick
     // never pulls full channel history — only open/foreground/manual does.
     poller.setOpenChannel(normalized.kind === 'channel' ? normalized.id : null)
-    return client.getHistory(normalized)
+    const messages = await client.getHistory(normalized)
+    logSlowChatCall('getHistory', started, `${normalized.kind} ${messages.length} messages`)
+    return messages
   })
 
   ipcMain.handle('chat.send', async (_, input: ChatSendInput) => {
+    const started = Date.now()
     const client = await getChatClient()
+    const claimMs = Date.now() - started
     const normalized = normalizeChatSendInput(input)
     // A throw here rejects the IPC call with a RelayChatError so the
     // renderer can roll back its optimistic row — nothing is fabricated.
-    const message = normalized.kind === 'dm'
-      ? await client.sendDM(normalized)
-      : await client.sendChannelMessage(normalized.to, normalized)
+    let message: RelayChatMessage
+    try {
+      message = normalized.kind === 'dm'
+        ? await client.sendDM(normalized)
+        : await client.sendChannelMessage(normalized.to, normalized)
+    } catch (error) {
+      console.warn(`[chat] send to ${normalized.kind}:${normalized.to} failed after ${Date.now() - started}ms:`, toErrorMessage(error))
+      throw error
+    }
+    console.info(
+      `[chat] sent ${normalized.kind}:${normalized.to} id=${message.id} in ${Date.now() - started}ms (companion ${claimMs}ms)`
+    )
     const conversationId = normalized.kind === 'dm'
-      ? message.conversationId ?? `conversation:${normalized.to}`
+      ? toConversationId(message.conversationId ?? normalized.to)
       : `channel:${normalized.to.replace(/^#+/, '')}`
+    // The sending window refreshes itself; this push only updates other
+    // listeners, so no `send` invalidation that would reload everything twice.
     broadcastChatMessage(conversationId, message)
-    broadcastChatInvalidated('send')
+    watchDelivery(client, conversationId, message)
     return message
   })
 
@@ -1078,19 +1242,6 @@ export function registerIpcHandlers(): void {
       contentType: input.contentType?.trim() || 'application/octet-stream',
       bytes: new Uint8Array(bytes)
     })
-  })
-
-  // --- Factory ---
-  ipcMain.handle('factory:status', async () => {
-    return factoryStatus()
-  })
-
-  ipcMain.handle('factory:read-config', async (_, configPath?: string, projectRoot?: string) => {
-    return readFactoryNodeConfig(configPath, projectRoot)
-  })
-
-  ipcMain.handle('factory:save-config', async (_, config: unknown, configPath?: string, projectRoot?: string) => {
-    return saveFactoryNodeConfig(config, configPath, projectRoot)
   })
 
   // --- Burn ---
@@ -1465,6 +1616,13 @@ export function registerIpcHandlers(): void {
   ipcMain.handle('ai-hist:get-session', (_, sessionId: string) =>
     aiHistManager.getSession(sessionId)
   )
+  ipcMain.handle('ai-hist:transcript', async (_, sessionId: string) => {
+    if (typeof sessionId !== 'string' || !sessionId.trim()) return []
+    const id = sessionId.trim()
+    const local = readSessionTranscript(id)
+    if (local.length > 0) return local
+    return cloudSessionTurns(id)
+  })
   ipcMain.handle(
     'ai-hist:search',
     (_, query: string, opts?: Parameters<typeof aiHistManager.search>[1]) =>

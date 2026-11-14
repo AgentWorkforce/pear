@@ -12,6 +12,7 @@ import type {
   ChatHistoryInput,
   ChatInvalidatedEvent,
   ChatMessageEvent,
+  ChatOpenConversationEvent,
   ChatSendInput,
   ChatUploadInput,
   BrokerDetails,
@@ -43,8 +44,6 @@ import type {
   CloudAgentStatus,
   ConnectedIntegration,
   CreateCloudAgentInput,
-  FactoryConfigReadResult,
-  FactoryStatus,
   FsDirEntry,
   FsReadPreviewResult,
   GitBranchInfo,
@@ -80,6 +79,7 @@ import type {
   RelayChatAttachment,
   RelayChatConversation,
   RelayChatMessage,
+  SessionTranscriptTurn,
   UpdaterState,
   WorkforcePersona
 } from '../shared/types/ipc'
@@ -100,6 +100,7 @@ export type {
   ChatHistoryInput,
   ChatInvalidatedEvent,
   ChatMessageEvent,
+  ChatOpenConversationEvent,
   ChatSendInput,
   ChatUploadInput,
   RelayChatAttachment,
@@ -139,8 +140,6 @@ export type {
   CloudAgentSyncMode,
   ConnectedIntegration,
   CreateCloudAgentInput,
-  FactoryConfigReadResult,
-  FactoryStatus,
   FsDirEntry,
   FsReadPreviewResult,
   GitBranchInfo,
@@ -310,14 +309,9 @@ const api = {
     onInvalidated: (callback: (event: ChatInvalidatedEvent) => void) =>
       subscribe<ChatInvalidatedEvent>('chat:invalidated', callback),
     onMessage: (callback: (event: ChatMessageEvent) => void) =>
-      subscribe<ChatMessageEvent>('chat:message', callback)
-  },
-  factory: {
-    status: () => invoke<FactoryStatus>('factory:status'),
-    readConfig: (configPath?: string, projectRoot?: string) =>
-      invoke<FactoryConfigReadResult>('factory:read-config', configPath, projectRoot),
-    saveConfig: (config: unknown, configPath?: string, projectRoot?: string) =>
-      invoke<FactoryConfigReadResult>('factory:save-config', config, configPath, projectRoot)
+      subscribe<ChatMessageEvent>('chat:message', callback),
+    onOpenConversation: (callback: (event: ChatOpenConversationEvent) => void) =>
+      subscribe<ChatOpenConversationEvent>('chat:open-conversation', callback)
   },
   burn: {
     listAgentSummaries: (agents: BurnAgentInput[]) =>
@@ -489,6 +483,8 @@ const api = {
     listSessions: (opts?: AiHistRecentOptions) =>
       invoke<AiHistSession[]>('ai-hist:list-sessions', opts),
     getSession: (sessionId: string) => invoke<AiHistEntry[]>('ai-hist:get-session', sessionId),
+    transcript: (sessionId: string) =>
+      invoke<SessionTranscriptTurn[]>('ai-hist:transcript', sessionId),
     search: (query: string, opts?: AiHistRecentOptions) =>
       invoke<AiHistEntry[]>('ai-hist:search', query, opts),
     searchSessions: (query: string, opts?: AiHistRecentOptions) =>

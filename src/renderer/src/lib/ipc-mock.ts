@@ -46,7 +46,6 @@ import type {
   CloudAgentStatus,
   ConnectedIntegration,
   CreateCloudAgentInput,
-  FactoryNodeConfig,
   FsDirEntry,
   FsReadPreviewResult,
   GitBranchInfo,
@@ -1031,48 +1030,6 @@ export const pearMock: PearAPI = {
     onStatus: (callback: (status: BrokerStatusEvent) => void) => noopUnsubscribe(state.brokerStatusListeners, callback),
     checkCliAvailable: async (_cli: string) => true
   },
-  factory: {
-    status: async () => ({
-      source: 'cloud' as const,
-      state: 'empty' as const,
-      connected: true,
-      workspaceId: 'mock',
-      cloudUrl: 'https://agentrelay.com/cloud',
-      updatedAt: new Date().toISOString(),
-      message: 'Mock cloud factory has no active work',
-      agents: [],
-      issues: []
-    }),
-    readConfig: async (configPath?: string) => ({
-      configPath: configPath || 'factory.config.json',
-      exists: true,
-      config: {
-        workspaceId: 'mock',
-        capabilities: ['spawn:claude', 'spawn:codex'],
-        cloneRoot: '/mock/workspaces',
-        clonePaths: {},
-        dryRun: false
-      },
-      errors: []
-    }),
-    saveConfig: async (config: unknown, configPath?: string) => {
-      const record = config && typeof config === 'object' && !Array.isArray(config)
-        ? config as Partial<FactoryNodeConfig>
-        : {}
-      return {
-        configPath: configPath || 'factory.config.json',
-        exists: true,
-        config: {
-          workspaceId: typeof record.workspaceId === 'string' ? record.workspaceId : undefined,
-          capabilities: Array.isArray(record.capabilities) ? record.capabilities : [],
-          cloneRoot: typeof record.cloneRoot === 'string' ? record.cloneRoot : undefined,
-          clonePaths: record.clonePaths && typeof record.clonePaths === 'object' ? record.clonePaths : {},
-          dryRun: typeof record.dryRun === 'boolean' ? record.dryRun : false
-        },
-        errors: []
-      }
-    }
-  },
   burn: {
     listAgentSummaries: async (agents: BurnAgentInput[]) => agents.map(emptyBurnSummary),
     getAgentBreakdown: async (agent: BurnAgentInput): Promise<BurnAgentBreakdown> => ({ ...emptyBurnSummary(agent), byModel: [], byTool: [] }),
@@ -1315,6 +1272,7 @@ export const pearMock: PearAPI = {
     recent: async (_opts?: AiHistRecentOptions): Promise<AiHistEntry[]> => [],
     listSessions: async (_opts?: AiHistRecentOptions): Promise<AiHistSession[]> => [],
     getSession: async (): Promise<AiHistEntry[]> => [],
+    transcript: async () => [],
     search: async (): Promise<AiHistEntry[]> => [],
     searchSessions: async (): Promise<AiHistSession[]> => [],
     stats: async (): Promise<AiHistStats | null> => null,
@@ -1393,7 +1351,8 @@ export const pearMock: PearAPI = {
     onInvalidated: (callback: (event: ChatInvalidatedEvent) => void) =>
       noopUnsubscribe(state.chatInvalidatedListeners, callback),
     onMessage: (callback: (event: ChatMessageEvent) => void) =>
-      noopUnsubscribe(state.chatMessageListeners, callback)
+      noopUnsubscribe(state.chatMessageListeners, callback),
+    onOpenConversation: () => () => undefined
   },
   update: {
     getState: async (): Promise<UpdaterState | null> => null,

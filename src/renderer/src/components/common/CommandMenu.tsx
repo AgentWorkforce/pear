@@ -3,7 +3,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Bot,
   Columns2,
-  Factory,
   FolderPlus,
   Monitor,
   MoonStar,
@@ -102,19 +101,6 @@ export function CommandMenu(): React.ReactNode {
           projectId: activeProject?.id,
           title: activeProject ? `${activeProject.name} Relay` : undefined
         })
-        closeDialog()
-      }
-    },
-    {
-      id: 'factory',
-      label: 'Factory',
-      description: activeProject
-        ? 'View cloud factory status and edit local node config'
-        : 'Add a project, then view cloud factory status',
-      keywords: ['factory', 'linear', 'issues', 'cloud', 'node config'],
-      Icon: Factory,
-      run: () => {
-        openTab({ kind: 'factory', projectId: activeProject?.id })
         closeDialog()
       }
     },

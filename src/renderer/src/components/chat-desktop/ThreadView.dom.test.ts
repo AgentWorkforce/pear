@@ -152,6 +152,55 @@ describe('ThreadView', () => {
     expect(screen.getByText('Delivered')).toBeTruthy()
   })
 
+  it('shows a loading state before history arrives', () => {
+    seedHistory([])
+    useChatStore.setState({ history: {} })
+    render(React.createElement(ThreadView, { conversationId: 'channel:general' }))
+    expect(screen.getByText('Loading conversation…')).toBeTruthy()
+    expect(screen.queryByText(/No messages yet/)).toBeNull()
+  })
+
+  it('shows the agent session conversation in the thread', () => {
+    seedHistory([msg('m1', 'alice', 'live reply', false, atNoonDaysAgo(0))])
+    useChatStore.setState({
+      sessionTurns: {
+        'channel:general': [
+          { id: 't1', role: 'user', text: 'Fix the reconnect', timestampMs: Date.now() - 3_600_000 },
+          { id: 't2', role: 'assistant', text: 'The broker reconnects.', timestampMs: Date.now() - 3_500_000 }
+        ]
+      }
+    })
+    render(React.createElement(ThreadView, { conversationId: 'channel:general' }))
+    expect(screen.getByText('Fix the reconnect')).toBeTruthy()
+    expect(screen.getByText('The broker reconnects.')).toBeTruthy()
+    expect(screen.getByText('live reply')).toBeTruthy()
+  })
+
+  it('labels the person You on the right and gives the agent its tool avatar on the left', () => {
+    const agent: RelayChatConversation = { kind: 'agent', id: 'relay:alice', name: 'alice', participants: ['alice'], cli: 'claude' }
+    useChatStore.setState({
+      conversations: [agent],
+      history: { 'relay:alice': [] },
+      historyLoading: {},
+      historyError: {},
+      sessionTurns: {
+        'relay:alice': [
+          { id: 't1', role: 'user', text: 'Ship it', timestampMs: Date.now() - 60_000 },
+          { id: 't2', role: 'assistant', text: 'Shipping now.', timestampMs: Date.now() - 50_000 },
+          { id: 't3', role: 'assistant', text: 'Done.', timestampMs: Date.now() - 40_000 }
+        ]
+      }
+    })
+    render(React.createElement(ThreadView, { conversationId: 'relay:alice' }))
+    expect(screen.getByText('You').closest('[data-testid="thread-row"]')?.className).toContain('justify-end')
+    expect(screen.getByText('Shipping now.').closest('[data-testid="thread-row"]')?.className).toContain('justify-start')
+    // One avatar and name for the agent's two grouped replies.
+    expect(screen.getAllByLabelText('claude agent')).toHaveLength(1)
+    expect(screen.getAllByText('alice')).toHaveLength(1)
+    const mine = screen.getByLabelText('You')
+    expect(mine.closest('[data-testid="thread-row"]')?.getAttribute('data-mine')).toBe('true')
+  })
+
   it('shows optimistic Sending rows and tap-to-edit on failure', () => {
     seedHistory([msg('m1', 'alice', 'hi', false, atNoonDaysAgo(0))])
     useChatStore.setState({
@@ -188,5 +237,14 @@ describe('ThreadView', () => {
     fireEvent.click(screen.getByText('failed text'))
     expect(useChatStore.getState().composerDraft).toBe('failed text')
     expect(useChatStore.getState().pending['channel:general'] || []).toHaveLength(1)
+  })
+
+  it('renders message text as selectable text, not inside a button', () => {
+    seedHistory([msg('m1', 'alice', 'copy me please', false, atNoonDaysAgo(0))])
+    render(React.createElement(ThreadView, { conversationId: 'channel:general' }))
+    const body = screen.getByText('copy me please').closest('[data-testid="message-body"]')
+    expect(body?.tagName).toBe('DIV')
+    expect(body?.getAttribute('role')).toBeNull()
+    expect(screen.getByText('copy me please').closest('button')).toBeNull()
   })
 })

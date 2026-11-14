@@ -28,7 +28,7 @@ export function ChatDesktopView(): React.ReactNode {
       <header className="flex min-h-14 shrink-0 items-center gap-3 border-b border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-5">
         <MessageCircle size={18} className="text-[var(--pear-text-faint)]" />
         <h1 className="text-lg font-semibold text-[var(--pear-text)]">Threads</h1>
-        <span className="text-xs text-[var(--pear-text-faint)]">Tasks and threads Pear owns</span>
+        <span className="text-xs text-[var(--pear-text-faint)]">Chats with your agents</span>
       </header>
       <div className="flex min-h-0 flex-1">
         <ConversationList />

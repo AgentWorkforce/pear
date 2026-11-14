@@ -4,18 +4,16 @@ import {
   ChevronLeft,
   ChevronRight,
   Clock3,
-  Factory,
   Flame,
   GitPullRequest,
   Hash,
   LayoutGrid,
   MessageCircle,
-  PanelLeftClose,
-  PanelLeftOpen,
   Server,
   Settings,
   X
 } from 'lucide-react'
+import { AccountMenu } from '@/components/sidebar/ProjectSidebar'
 import { useProjectStore } from '@/stores/project-store'
 import { useUIStore, type AppTab } from '@/stores/ui-store'
 
@@ -31,8 +29,6 @@ function TabIcon({ tab, className = '' }: { tab: AppTab; className?: string }): 
       return <Settings size={14} className={iconClassName} />
     case 'broker-details':
       return <Server size={14} className={iconClassName} />
-    case 'factory':
-      return <Factory size={14} className={iconClassName} />
     case 'source-control':
       return <GitPullRequest size={14} className={iconClassName} />
     case 'ai-hist':
@@ -60,8 +56,6 @@ function tabSubtitle(tab: AppTab, projectNameById: Map<string, string>): string 
       return projectName ? `${projectName} settings` : 'Settings'
     case 'broker-details':
       return projectName ? `${projectName} relay` : 'Connection status'
-    case 'factory':
-      return projectName ? `${projectName} factory cloud` : 'Factory cloud'
     case 'source-control':
       return projectName ? `${projectName} changes` : 'File changes'
     case 'ai-hist':
@@ -81,7 +75,6 @@ function tabSubtitle(tab: AppTab, projectNameById: Map<string, string>): string 
 export function AppTopBar(): React.ReactNode {
   const [historyOpen, setHistoryOpen] = useState(false)
   const projects = useProjectStore((s) => s.projects)
-  const activeProjectId = useProjectStore((s) => s.activeProjectId)
   const tabs = useUIStore((s) => s.tabs)
   const activeTabId = useUIStore((s) => s.activeTabId)
   const history = useUIStore((s) => s.history)
@@ -92,30 +85,15 @@ export function AppTopBar(): React.ReactNode {
   const closeTab = useUIStore((s) => s.closeTab)
   const navigateBack = useUIStore((s) => s.navigateBack)
   const navigateForward = useUIStore((s) => s.navigateForward)
-  const sidebarCollapsed = useUIStore((s) => s.sidebarCollapsed)
-  const toggleSidebar = useUIStore((s) => s.toggleSidebar)
   const canGoBack = historyIndex > 0
   const canGoForward = historyIndex < history.length - 1
-  const SidebarIcon = sidebarCollapsed ? PanelLeftOpen : PanelLeftClose
-  const sidebarLabel = sidebarCollapsed ? 'Expand menu' : 'Collapse menu'
+  const visibleTabs = tabs.filter((tab) => tab.kind !== 'agents')
   const projectNameById = useMemo(
     () => new Map(projects.map((project) => [project.id, project.name])),
     [projects]
   )
-  const factoryActive = tabs.some((tab) => tab.id === activeTabId && tab.kind === 'factory')
-
   return (
     <div className="titlebar-drag relative z-40 flex h-11 shrink-0 items-center border-b border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] pl-[138px] pr-3 text-[var(--pear-text)]">
-      <button
-        type="button"
-        onClick={toggleSidebar}
-        className="titlebar-nodrag absolute left-[96px] top-1/2 flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-full text-[var(--pear-text-faint)] transition-colors hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text)]"
-        title={sidebarLabel}
-        aria-label={sidebarLabel}
-      >
-        <SidebarIcon size={17} strokeWidth={2.4} />
-      </button>
-
       <div className="flex items-center gap-2">
         <div className="relative">
           <button
@@ -194,25 +172,10 @@ export function AppTopBar(): React.ReactNode {
         </button>
       </div>
 
-      <button
-        type="button"
-        onClick={() => openTab({ kind: 'factory', projectId: activeProjectId ?? undefined })}
-        className={`titlebar-nodrag ml-3 flex h-8 shrink-0 items-center gap-1.5 rounded-full px-3 text-[13px] font-medium transition-colors ${
-          factoryActive
-            ? 'bg-[var(--pear-bg-surface)] text-[var(--pear-text)]'
-            : 'text-[var(--pear-text-faint)] hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text)]'
-        }`}
-        title="Open factory"
-        aria-label="Open factory cloud status"
-      >
-        <Factory size={15} className={factoryActive ? 'text-[var(--pear-accent-bright)]' : ''} />
-        <span>Factory</span>
-      </button>
-
       <div className="ml-4 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
-        {tabs.map((tab) => {
+        {visibleTabs.map((tab) => {
           const active = tab.id === activeTabId
-          const canClose = tabs.length > 1
+          const canClose = visibleTabs.length > 1
 
           return (
             <div
@@ -256,6 +219,9 @@ export function AppTopBar(): React.ReactNode {
             </div>
           )
         })}
+      </div>
+      <div className="titlebar-nodrag ml-2 shrink-0">
+        <AccountMenu compact />
       </div>
     </div>
   )

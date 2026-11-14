@@ -50,15 +50,18 @@ Kept as-is: `auth.ts`, `store.ts`, `integrations*`,
 `proactive-agent*`, `broker-binary` / `event-history` /
 `observer-stream`, `burn*`, `git` / `filesystem`, updater / CLI /
 avatar-cache, and the renderer shell (`App.tsx`, sidebar) plus the
-non-terminal surfaces (`chat`, `diff`, `issues`, `agents`, `settings`).
+non-terminal surfaces (`chat`, `diff`, `agents`, `settings`). The
+factory and issues tabs were removed afterward.
 
 ## 2. New chat architecture
 
 Direct Cloud/Relaycast API client in the main process — no local daemon,
 no socket bridge:
 
-- New `src/main/relay-chat-client.ts`: fetch wrapper against the Relaycast
-  base + `/v1`, Bearer `workspaceKey` for roster calls and `agentToken`
+- Roster and companion registration go through `@relaycast/sdk` (`RelayCast`),
+  the published SDK of the relaycast crate. Pear does not spawn a PTY to
+  discover agents. `src/main/relay-chat-client.ts` remains the fetch wrapper
+  for DM and channel calls: Bearer `workspaceKey` for roster calls and `agentToken`
   (`at_live_…`) for agent calls, 3x retry on 503 `database_overloaded`,
   workspace-key rotation via `/workspaces/{id}/resolve` on 401.
 - Poll scheduler in main: 30s `refresh()` (roster + nodes //
@@ -70,7 +73,7 @@ no socket bridge:
   plus `chat:invalidated` / `chat:message` events) in
   `shared/types/ipc.ts`, `main/ipc-handlers.ts`, `preload/index.ts`.
 - New renderer surface `components/chat-desktop/`: `ConversationList.tsx`
-  (Agents / Messages / Channels tabs, search + machine filter, pin/hide,
+  (Messages / Channels tabs, directory filter, search + machine filter, pin/hide,
   unread dot, 5-minute reachable dot), `ThreadView.tsx` (day dividers,
   15-minute groups, mine-right / theirs-left, channel sender labels, link
   detection, attachment download, delivery label under last own message,

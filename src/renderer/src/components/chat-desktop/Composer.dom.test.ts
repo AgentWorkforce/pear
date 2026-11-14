@@ -85,11 +85,44 @@ describe('Composer', () => {
     fireEvent.keyDown(screen.getByLabelText('Message'), { key: 'Enter', shiftKey: false })
     await waitFor(() => {
       expect(chatMocks.send).toHaveBeenCalledWith(
-        expect.objectContaining({ kind: 'dm', to: 'thread-1', text: 'hello' })
+        expect.objectContaining({ kind: 'dm', to: 'alice@macbook', text: 'hello' })
       )
     })
     await waitFor(() => {
       expect((screen.getByLabelText('Message') as HTMLTextAreaElement).value).toBe('')
+    })
+  })
+
+  it('clears at once and sends the next message while the first is in flight', async () => {
+    const resolvers: Array<() => void> = []
+    chatMocks.send.mockImplementation((input: { text: string }) => new Promise((resolve) => {
+      resolvers.push(() => resolve({
+        id: `m-${input.text}`,
+        conversationId: 'thread-1',
+        from: 'pear-companion',
+        text: input.text,
+        createdAt: new Date().toISOString(),
+        mine: true,
+        hasServerID: true,
+        attachments: []
+      }))
+    }))
+    render(React.createElement(Composer, { conversationId: 'conversation:thread-1' }))
+    const input = screen.getByLabelText('Message') as HTMLTextAreaElement
+
+    fireEvent.change(input, { target: { value: 'first' } })
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: false })
+    expect(input.value).toBe('')
+
+    fireEvent.change(input, { target: { value: 'second' } })
+    expect((screen.getByLabelText('Send message') as HTMLButtonElement).disabled).toBe(false)
+    fireEvent.keyDown(input, { key: 'Enter', shiftKey: false })
+    expect(input.value).toBe('')
+    expect(chatMocks.send).toHaveBeenCalledTimes(2)
+
+    for (const resolve of resolvers) resolve()
+    await waitFor(() => {
+      expect(useChatStore.getState().pending['conversation:thread-1']).toEqual([])
     })
   })
 

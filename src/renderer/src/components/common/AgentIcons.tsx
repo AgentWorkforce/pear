@@ -72,11 +72,32 @@ export function GeminiIcon({ className }: AgentIconProps): React.ReactNode {
 
 export function GrokIcon({ className }: AgentIconProps): React.ReactNode {
   return (
-    <svg viewBox="0 0 24 24" fill="none" className={className} aria-hidden="true">
-      <path
-        d="M13.545 11.998 20.5 4H18.64L12.72 10.89 7.955 4H2l7.29 10.608L2 22.5h1.86l6.38-7.408 5.1 7.408H21.5l-7.955-11.502Zm-2.26 2.621-.74-1.059L4.52 5.26h2.535l4.753 6.799.74 1.059 6.177 8.836H16.19l-4.905-7.335Z"
-        fill="currentColor"
-      />
+    <svg viewBox="0 0 24 24" fill="currentColor" fillRule="evenodd" className={className} aria-hidden="true">
+      <path d="M9.27 15.29l7.978-5.897c.391-.29.95-.177 1.137.272.98 2.369.542 5.215-1.41 7.169-1.951 1.954-4.667 2.382-7.149 1.406l-2.711 1.257c3.889 2.661 8.611 2.003 11.562-.953 2.341-2.344 3.066-5.539 2.388-8.42l.006.007c-.983-4.232.242-5.924 2.75-9.383.06-.082.12-.164.179-.248l-3.301 3.305v-.01L9.267 15.292M7.623 16.723c-2.792-2.67-2.31-6.801.071-9.184 1.761-1.763 4.647-2.483 7.166-1.425l2.705-1.25a7.808 7.808 0 00-1.829-1A8.975 8.975 0 005.984 5.83c-2.533 2.536-3.33 6.436-1.962 9.764 1.022 2.487-.653 4.246-2.34 6.022-.599.63-1.199 1.259-1.682 1.925l7.62-6.815" />
+    </svg>
+  )
+}
+
+export function CursorIcon({ className }: AgentIconProps): React.ReactNode {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" fillRule="evenodd" className={className} aria-hidden="true">
+      <path d="M22.106 5.68L12.5.135a.998.998 0 00-.998 0L1.893 5.68a.84.84 0 00-.419.726v11.186c0 .3.16.577.42.727l9.607 5.547a.999.999 0 00.998 0l9.608-5.547a.84.84 0 00.42-.727V6.407a.84.84 0 00-.42-.726zm-.603 1.176L12.228 22.92c-.063.108-.228.064-.228-.061V12.34a.59.59 0 00-.295-.51l-9.11-5.26c-.107-.062-.063-.228.062-.228h18.55c.264 0 .428.286.296.514z" />
+    </svg>
+  )
+}
+
+export function OpenAIIcon({ className }: AgentIconProps): React.ReactNode {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" fillRule="evenodd" className={className} aria-hidden="true">
+      <path d="M9.205 8.658v-2.26c0-.19.072-.333.238-.428l4.543-2.616c.619-.357 1.356-.523 2.117-.523 2.854 0 4.662 2.212 4.662 4.566 0 .167 0 .357-.024.547l-4.71-2.759a.797.797 0 00-.856 0l-5.97 3.473zm10.609 8.8V12.06c0-.333-.143-.57-.429-.737l-5.97-3.473 1.95-1.118a.433.433 0 01.476 0l4.543 2.617c1.309.76 2.189 2.378 2.189 3.948 0 1.808-1.07 3.473-2.76 4.163zM7.802 12.703l-1.95-1.142c-.167-.095-.239-.238-.239-.428V5.899c0-2.545 1.95-4.472 4.591-4.472 1 0 1.927.333 2.712.928L8.23 5.067c-.285.166-.428.404-.428.737v6.898zM12 15.128l-2.795-1.57v-3.33L12 8.658l2.795 1.57v3.33L12 15.128zm1.796 7.23c-1 0-1.927-.332-2.712-.927l4.686-2.712c.285-.166.428-.404.428-.737v-6.898l1.974 1.142c.167.095.238.238.238.428v5.233c0 2.545-1.974 4.472-4.614 4.472zm-5.637-5.303l-4.544-2.617c-1.308-.761-2.188-2.378-2.188-3.948A4.482 4.482 0 014.21 6.327v5.423c0 .333.143.571.428.738l5.947 3.449-1.95 1.118a.432.432 0 01-.476 0zm-.262 3.9c-2.688 0-4.662-2.021-4.662-4.519 0-.19.024-.38.047-.57l4.686 2.71c.286.167.571.167.856 0l5.97-3.448v2.26c0 .19-.07.333-.237.428l-4.543 2.616c-.619.357-1.356.523-2.117.523zm5.899 2.83a5.947 5.947 0 005.827-4.756C22.287 18.339 24 15.84 24 13.296c0-1.665-.713-3.282-1.998-4.448.119-.5.19-.999.19-1.498 0-3.401-2.759-5.947-5.946-5.947-.642 0-1.26.095-1.88.31A5.962 5.962 0 0010.205 0a5.947 5.947 0 00-5.827 4.757C1.713 5.447 0 7.945 0 10.49c0 1.666.713 3.283 1.998 4.448-.119.5-.19 1-.19 1.499 0 3.401 2.759 5.946 5.946 5.946.642 0 1.26-.095 1.88-.309a5.96 5.96 0 004.162 1.713z" />
+    </svg>
+  )
+}
+
+export function MuseIcon({ className }: AgentIconProps): React.ReactNode {
+  return (
+    <svg viewBox="0 0 24 24" fill="currentColor" fillRule="evenodd" className={className} aria-hidden="true">
+      <path d="M6.915 4.03c-1.968 0-3.683 1.28-4.871 3.113C.704 9.208 0 11.883 0 14.449c0 .706.07 1.369.21 1.973a6.624 6.624 0 0 0 .265.86 5.297 5.297 0 0 0 .371.761c.696 1.159 1.818 1.927 3.593 1.927 1.497 0 2.633-.671 3.965-2.444.76-1.012 1.144-1.626 2.663-4.32l.756-1.339.186-.325c.061.1.121.196.183.3l2.152 3.595c.724 1.21 1.665 2.556 2.47 3.314 1.046.987 1.992 1.22 3.06 1.22 1.075 0 1.876-.355 2.455-.843a3.743 3.743 0 0 0 .81-.973c.542-.939.861-2.127.861-3.745 0-2.72-.681-5.357-2.084-7.45-1.282-1.912-2.957-2.93-4.716-2.93-1.047 0-2.088.467-3.053 1.308-.652.57-1.257 1.29-1.82 2.05-.69-.875-1.335-1.547-1.958-2.056-1.182-.966-2.315-1.303-3.454-1.303zm10.16 2.053c1.147 0 2.188.758 2.992 1.999 1.132 1.748 1.647 4.195 1.647 6.4 0 1.548-.368 2.9-1.839 2.9-.58 0-1.027-.23-1.664-1.004-.496-.601-1.343-1.878-2.832-4.358l-.617-1.028a44.908 44.908 0 0 0-1.255-1.98c.07-.109.141-.224.211-.327 1.12-1.667 2.118-2.602 3.358-2.602zm-10.201.553c1.265 0 2.058.791 2.675 1.446.307.327.737.871 1.234 1.579l-1.02 1.566c-.757 1.163-1.882 3.017-2.837 4.338-1.191 1.649-1.81 1.817-2.486 1.817-.524 0-1.038-.237-1.383-.794-.263-.426-.464-1.13-.464-2.046 0-2.221.63-4.535 1.66-6.088.454-.687.964-1.226 1.533-1.533a2.264 2.264 0 0 1 1.088-.285z" />
     </svg>
   )
 }
@@ -87,12 +108,43 @@ const AGENT_ICON_COMPONENTS = {
   copilot: CopilotIcon,
   opencode: OpenCodeIcon,
   gemini: GeminiIcon,
-  grok: GrokIcon
+  grok: GrokIcon,
+  cursor: CursorIcon,
+  openai: OpenAIIcon,
+  muse: MuseIcon
 } satisfies Record<string, React.ComponentType<AgentIconProps>>
 
+type AgentIconKey = keyof typeof AGENT_ICON_COMPONENTS
+
+/** Provider spellings seen in session metadata, mapped to the mark they share. */
+const AGENT_ICON_ALIASES: Record<string, AgentIconKey> = {
+  claudecode: 'claude',
+  'claude-code': 'claude',
+  claude_code: 'claude',
+  'claude-cloud': 'claude',
+  xai: 'grok',
+  'grok-bot': 'grok',
+  grokbot: 'grok',
+  'cursor-cloud': 'cursor',
+  cursor_cloud: 'cursor',
+  'open-code': 'opencode',
+  open_code: 'opencode',
+  'open-ai': 'openai',
+  open_ai: 'openai',
+  'muse-open': 'muse',
+  'muse-assistant': 'muse'
+}
+
+export function agentIconKey(cli?: string): AgentIconKey | null {
+  const key = cli?.trim().toLowerCase()
+  if (!key) return null
+  if (key in AGENT_ICON_COMPONENTS) return key as AgentIconKey
+  return AGENT_ICON_ALIASES[key] ?? null
+}
+
 export function getAgentIcon(cli?: string): React.ComponentType<AgentIconProps> | null {
-  if (!cli) return null
-  return AGENT_ICON_COMPONENTS[cli.toLowerCase() as keyof typeof AGENT_ICON_COMPONENTS] || null
+  const key = agentIconKey(cli)
+  return key ? AGENT_ICON_COMPONENTS[key] : null
 }
 
 export function AgentHarnessIcon({ cli, className }: AgentHarnessIconProps): React.ReactNode {

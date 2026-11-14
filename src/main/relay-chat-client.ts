@@ -73,6 +73,8 @@ export interface RelayDMThread {
   participants: string[]
   lastMessageAt?: string
   unreadCount?: number
+  /** The thread's newest message, as the list reports it. */
+  lastMessage?: RelayChatMessage
 }
 
 export interface RelayChannel {
@@ -193,6 +195,8 @@ export interface RelayChatClientOptions {
    * null when rotation is unavailable (the 401 then surfaces to the caller).
    */
   rotateWorkspaceKey?: () => Promise<string | null>
+  /** Re-issue the agent token after a 401 (another client may have rotated it). */
+  refreshAgentToken?: () => Promise<string | null>
   /** Companion agent name used for the `mine` flag. */
   selfName?: string | (() => string | null | undefined | Promise<string | null | undefined>)
   fetchImpl?: typeof fetch
@@ -361,6 +365,14 @@ export class RelayChatClient {
         )
       }
 
+      if (res.status === 401 && options.auth === 'agent' && !rotated && this.options.refreshAgentToken) {
+        const fresh = await this.options.refreshAgentToken().catch(() => null)
+        if (fresh?.trim()) {
+          rotated = true
+          continue
+        }
+      }
+
       if (res.status === 401 && options.auth === 'workspace' && !rotated && this.options.rotateWorkspaceKey) {
         const fresh = await this.options.rotateWorkspaceKey().catch(() => null)
         if (fresh?.trim()) {
@@ -423,6 +435,11 @@ export class RelayChatClient {
       hasServerID: isServerMessageId(id),
       attachments: normalizeAttachments(entry.attachments)
     }
+  }
+
+  /** A message pushed over the live stream, in the same shape as history rows. */
+  messageFromEvent(record: unknown, fallback: { conversationId?: string; channelName?: string }): Promise<RelayChatMessage> {
+    return this.normalizeMessage(record, fallback)
   }
 
   // --- Roster (workspace key) ---
@@ -504,20 +521,50 @@ export class RelayChatClient {
   async listDMConversations(): Promise<RelayDMThread[]> {
     const data = await this.request<unknown>('/dm/conversations', { auth: 'agent' })
     const rows = Array.isArray(data) ? data : []
+    const self = (await this.selfName())?.toLowerCase()
     return rows.flatMap((entry) => {
       const record = asRecord(entry)
       const conversationId = asString(record?.id ?? record?.conversation_id ?? record?.conversationId)
       if (!conversationId) return []
-      const lastMessageAt = asString(record?.last_message_at ?? record?.lastMessageAt)
+      const lastMessage = asRecord(record?.last_message ?? record?.lastMessage)
+      const lastMessageAt = asString(lastMessage?.created_at ?? lastMessage?.createdAt) ??
+        asString(record?.last_message_at ?? record?.lastMessageAt)
       const unreadRaw = record?.unread_count ?? record?.unreadCount
       const unreadCount = typeof unreadRaw === 'number' ? unreadRaw : undefined
+      // `participants` is `[{ agent_id, agent_name }]`; older payloads sent `participant_names`.
+      const namesById = new Map<string, string>()
+      const participants = Array.isArray(record?.participants)
+        ? (record?.participants as unknown[]).flatMap((entry) => {
+          const participant = asRecord(entry)
+          const name = typeof entry === 'string' ? entry : asString(participant?.agent_name ?? participant?.agentName)
+          const agentId = asString(participant?.agent_id ?? participant?.agentId)
+          if (name && agentId) namesById.set(agentId, name)
+          return name ? [name] : []
+        })
+        : asStringArray(record?.participant_names ?? record?.participantNames)
       const thread: RelayDMThread = {
         id: toConversationId(conversationId),
         conversationId,
-        participants: asStringArray(record?.participant_names ?? record?.participantNames)
+        participants
       }
       if (lastMessageAt) thread.lastMessageAt = lastMessageAt
       if (unreadCount !== undefined) thread.unreadCount = unreadCount
+      const lastId = asString(lastMessage?.id)
+      if (lastMessage && lastId) {
+        const senderId = asString(lastMessage.agent_id ?? lastMessage.agentId)
+        const from = asString(lastMessage.agent_name ?? lastMessage.agentName) ??
+          (senderId ? namesById.get(senderId) : undefined) ?? 'unknown'
+        thread.lastMessage = {
+          id: lastId,
+          conversationId,
+          from,
+          text: asString(lastMessage.text) ?? '',
+          createdAt: lastMessageAt ?? new Date().toISOString(),
+          mine: !!self && from.toLowerCase() === self,
+          hasServerID: isServerMessageId(lastId),
+          attachments: []
+        }
+      }
       return [thread]
     })
   }
@@ -545,15 +592,21 @@ export class RelayChatClient {
 
   async listConversations(): Promise<RelayChatConversation[]> {
     const [threads, channels] = await Promise.all([this.listDMConversations(), this.listChannels()])
+    const self = (await this.selfName())?.toLowerCase()
     return [
-      ...threads.map((thread): RelayChatConversation => ({
-        kind: 'dm' as const,
-        id: thread.id,
-        name: thread.participants.length > 0 ? thread.participants.join(', ') : thread.conversationId,
-        participants: thread.participants,
-        ...(thread.lastMessageAt ? { lastMessageAt: thread.lastMessageAt } : {}),
-        ...(thread.unreadCount !== undefined ? { unreadCount: thread.unreadCount } : {})
-      })),
+      ...threads.map((thread): RelayChatConversation => {
+        // The other side of the DM; the companion itself is in every thread.
+        const others = thread.participants.filter((name) => parseAgentMachine(name).name.toLowerCase() !== self)
+        const participants = others.length > 0 ? others : thread.participants
+        return {
+          kind: 'dm' as const,
+          id: thread.id,
+          name: participants.length > 0 ? participants.join(', ') : thread.conversationId,
+          participants,
+          ...(thread.lastMessageAt ? { lastMessageAt: thread.lastMessageAt } : {}),
+          ...(thread.unreadCount !== undefined ? { unreadCount: thread.unreadCount } : {})
+        }
+      }),
       ...channels.map((channel): RelayChatConversation => ({
         kind: 'channel' as const,
         id: channel.id,
@@ -704,16 +757,27 @@ export class RelayChatClient {
     return { readers, delivered }
   }
 
-  /** Best-effort delivery flags for a history page; never rejects the page. */
+  /**
+   * Best-effort delivery flag for a history page; never rejects the page.
+   * The thread shows delivery only under the companion's last message, so
+   * only that message is checked — one readers call per message made a
+   * 100-message page wait on 100 sequential requests.
+   */
   async attachDelivery(messages: RelayChatMessage[], senderName?: string): Promise<RelayChatMessage[]> {
-    for (const message of messages) {
-      if (!isServerMessageId(message.id)) continue
-      try {
-        const { delivered } = await this.getMessageReaders(message.id, message.from || senderName)
-        message.delivered = delivered
-      } catch {
-        // Readers are advisory — a failure must not fail the history load.
+    let latestOwn: RelayChatMessage | undefined
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index]
+      if (message?.mine && isServerMessageId(message.id)) {
+        latestOwn = message
+        break
       }
+    }
+    if (!latestOwn) return messages
+    try {
+      const { delivered } = await this.getMessageReaders(latestOwn.id, latestOwn.from || senderName)
+      latestOwn.delivered = delivered
+    } catch {
+      // Readers are advisory — a failure must not fail the history load.
     }
     return messages
   }

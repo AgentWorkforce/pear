@@ -33,7 +33,6 @@
   },
   "dependencies": {
     "@agent-relay/cloud": "^11.1.0",
-    "@agent-relay/factory": "^0.1.19",
     "@agent-relay/harness-driver": "^11.1.0",
     "@agent-relay/harnesses": "^11.1.0",
     "@agent-relay/integration-prompts": "^11.1.0",

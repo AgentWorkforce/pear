@@ -1,8 +1,11 @@
-import { useEffect, useRef } from 'react'
-import { Download, FileText, Pencil } from 'lucide-react'
+import { useEffect, useRef, type KeyboardEvent } from 'react'
+import { Download, FileText, Loader2, Pencil } from 'lucide-react'
 import { formatChatDateDivider, isSameChatDay } from '@/components/chat/ChatView'
+import { AgentAvatar } from '@/components/common/AgentAvatar'
+import { HumanAvatar } from '@/components/chat/HumanAvatar'
+import { useAuthUser } from '@/lib/auth-user'
 import { useChatStore, type ChatPendingMessage } from '@/stores/chat-store'
-import type { RelayChatAttachment, RelayChatMessage } from '@/lib/ipc'
+import type { RelayChatAttachment, RelayChatMessage, SessionTranscriptTurn } from '@/lib/ipc'
 
 /** Consecutive same-sender rows within 15 minutes render as one group. */
 export const CHAT_GROUP_WINDOW_MS = 15 * 60 * 1_000
@@ -57,16 +60,12 @@ function AttachmentRow({ attachment }: { attachment: RelayChatAttachment }): Rea
   return <span className={classes}>{body}</span>
 }
 
-function SenderChip({ name }: { name: string }): React.ReactNode {
-  return (
-    <span className="mb-1 flex items-center gap-1.5">
-      <span className="flex h-5 w-5 items-center justify-center rounded bg-[var(--pear-bg-overlay)] text-[10px] font-bold text-[var(--pear-text-secondary)]">
-        {(name || '?').slice(0, 1).toUpperCase()}
-      </span>
-      <span className="text-[11px] font-semibold text-[var(--pear-text-secondary)]">{name}</span>
-    </span>
-  )
+function formatRowTime(createdAt: string): string {
+  const at = Date.parse(createdAt)
+  return Number.isFinite(at) ? new Date(at).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }) : ''
 }
+
+const AVATAR_SIZE = 32
 
 interface ThreadRow {
   key: string
@@ -84,12 +83,17 @@ interface ThreadRow {
 
 const EMPTY_MESSAGES: RelayChatMessage[] = []
 const EMPTY_PENDING: ChatPendingMessage[] = []
+const EMPTY_TURNS: SessionTranscriptTurn[] = []
 
 export function ThreadView({ conversationId }: { conversationId: string }): React.ReactNode {
   const conversation = useChatStore((s) => s.conversations.find((c) => c.id === conversationId))
   const messages = useChatStore((s) => s.history[conversationId] ?? EMPTY_MESSAGES)
-  const loading = useChatStore((s) => s.historyLoading[conversationId] || false)
+  const sessionTurns = useChatStore((s) => s.sessionTurns[conversationId] ?? EMPTY_TURNS)
+  const authUser = useAuthUser()
   const error = useChatStore((s) => s.historyError[conversationId])
+  const loading = useChatStore((s) =>
+    Boolean(s.historyLoading[conversationId]) || (!s.history[conversationId] && !s.historyError[conversationId])
+  )
   const pending = useChatStore((s) => s.pending[conversationId] ?? EMPTY_PENDING)
   const delivery = useChatStore((s) => s.delivery)
   const editFailedPending = useChatStore((s) => s.editFailedPending)
@@ -98,7 +102,7 @@ export function ThreadView({ conversationId }: { conversationId: string }): Reac
   useEffect(() => {
     const node = scrollRef.current
     if (node) node.scrollTop = node.scrollHeight
-  }, [messages.length, pending.length, conversationId])
+  }, [messages.length, sessionTurns.length, pending.length, conversationId])
 
   if (!conversation) {
     return (
@@ -108,31 +112,61 @@ export function ThreadView({ conversationId }: { conversationId: string }): Reac
     )
   }
 
-  const rows: ThreadRow[] = []
-  let previousAt = 0
-  let previousFrom = ''
-  messages.forEach((message, index) => {
-    const at = Date.parse(message.createdAt)
-    const dayChanged = index === 0 || !isSameChatDay(previousAt, Number.isFinite(at) ? at : previousAt)
-    const grouped =
-      index > 0 &&
-      message.from === previousFrom &&
-      Number.isFinite(at) &&
-      at - previousAt <= CHAT_GROUP_WINDOW_MS
-    rows.push({
+  const spoken = [
+    ...sessionTurns.map((turn) => ({
+      key: `session:${turn.id}`,
+      message: undefined,
+      mine: turn.role === 'user',
+      from: turn.role === 'user' ? 'you' : conversation.name,
+      text: turn.text,
+      createdAt: turn.timestampMs ? new Date(turn.timestampMs).toISOString() : '',
+      attachments: [] as RelayChatAttachment[]
+    })),
+    ...messages.map((message) => ({
       key: message.id,
       message,
       mine: message.mine,
       from: message.from,
       text: message.text,
       createdAt: message.createdAt,
-      attachments: message.attachments || [],
-      showDayDivider: dayChanged,
+      attachments: message.attachments || []
+    }))
+  ].sort((left, right) => {
+    const leftAt = Date.parse(left.createdAt)
+    const rightAt = Date.parse(right.createdAt)
+    const leftOk = Number.isFinite(leftAt)
+    const rightOk = Number.isFinite(rightAt)
+    if (leftOk && rightOk && leftAt !== rightAt) return leftAt - rightAt
+    if (leftOk !== rightOk) return leftOk ? 1 : -1
+    return 0
+  })
+
+  const rows: ThreadRow[] = []
+  let previousAt = 0
+  let previousFrom = ''
+  spoken.forEach((message, index) => {
+    const at = Date.parse(message.createdAt)
+    const speaker = message.mine ? '\u0000you' : message.from
+    const dayChanged = index === 0 || !isSameChatDay(previousAt, Number.isFinite(at) ? at : previousAt)
+    const grouped =
+      index > 0 &&
+      speaker === previousFrom &&
+      Number.isFinite(at) &&
+      at - previousAt <= CHAT_GROUP_WINDOW_MS
+    rows.push({
+      key: message.key,
+      message: message.message,
+      mine: message.mine,
+      from: message.from,
+      text: message.text,
+      createdAt: message.createdAt,
+      attachments: message.attachments,
+      showDayDivider: dayChanged && Number.isFinite(at),
       dayDividerAt: Number.isFinite(at) ? at : Date.now(),
       showSender: !grouped
     })
     if (Number.isFinite(at)) previousAt = at
-    previousFrom = message.from
+    previousFrom = speaker
   })
   for (const item of pending) {
     rows.push({
@@ -161,8 +195,23 @@ export function ThreadView({ conversationId }: { conversationId: string }): Reac
 
   return (
     <div ref={scrollRef} data-testid="thread-scroll" className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
+      <div className="mx-auto w-full max-w-3xl">
       {loading && rows.length === 0 && (
-        <p className="py-10 text-center text-sm text-[var(--pear-text-faint)]">Loading history…</p>
+        <div aria-busy="true" className="flex flex-col gap-3 py-4">
+          <p className="flex items-center justify-center gap-2 text-sm text-[var(--pear-text-faint)]">
+            <Loader2 size={14} className="animate-spin" />
+            {conversation.sessionId ? 'Loading conversation and session…' : 'Loading conversation…'}
+          </p>
+          {['w-2/3', 'ml-auto w-1/2', 'w-3/5'].map((width) => (
+            <div key={width} className={`h-10 animate-pulse rounded-lg bg-[var(--pear-bg-overlay)] ${width}`} />
+          ))}
+        </div>
+      )}
+      {loading && rows.length > 0 && (
+        <p className="sticky top-0 z-10 mx-auto mb-2 flex w-fit items-center gap-1.5 rounded-full border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-3 py-1 text-[11px] text-[var(--pear-text-faint)]">
+          <Loader2 size={11} className="animate-spin" />
+          Updating…
+        </p>
       )}
       {error && (
         <p className="py-10 text-center text-sm text-[var(--pear-red)]">{error}</p>
@@ -187,26 +236,56 @@ export function ThreadView({ conversationId }: { conversationId: string }): Reac
             <div
               data-testid="thread-row"
               data-mine={row.mine ? 'true' : 'false'}
-              className={`mb-1.5 flex ${row.mine ? 'justify-end' : 'justify-start'}`}
+              className={`flex gap-2.5 ${row.mine ? 'justify-end' : 'justify-start'} ${row.showSender ? 'mt-4' : 'mt-1'}`}
             >
-              <div className={`max-w-[75%] ${row.mine ? 'items-end' : 'items-start'} flex flex-col`}>
-                {!row.mine && row.showSender && <SenderChip name={row.from} />}
-                <button
-                  type="button"
-                  disabled={!failed}
-                  onClick={failed ? () => editFailedPending(row.pending?.localId || '') : undefined}
+              {!row.mine && (
+                <span className="shrink-0" style={{ width: AVATAR_SIZE }}>
+                  {row.showSender && (
+                    <AgentAvatar
+                      name={row.from}
+                      cli={row.from === conversation.name ? conversation.cli : undefined}
+                      human={row.from === conversation.name && !!conversation.human}
+                      size={AVATAR_SIZE}
+                    />
+                  )}
+                </span>
+              )}
+              <div className={`flex max-w-[78%] flex-col ${row.mine ? 'items-end' : 'items-start'}`}>
+                {row.showSender && (
+                  <span className={`mb-1 flex items-baseline gap-2 text-[11px] ${row.mine ? 'flex-row-reverse' : ''}`}>
+                    <span className="font-semibold text-[var(--pear-text-secondary)]">
+                      {row.mine ? 'You' : row.from}
+                    </span>
+                    <span className="text-[var(--pear-text-faint)]">{formatRowTime(row.createdAt)}</span>
+                  </span>
+                )}
+                <div
+                  data-testid="message-body"
+                  {...(failed
+                    ? {
+                      role: 'button',
+                      tabIndex: 0,
+                      onClick: () => editFailedPending(row.pending?.localId || ''),
+                      onKeyDown: (event: KeyboardEvent) => {
+                        if (event.key === 'Enter' || event.key === ' ') {
+                          event.preventDefault()
+                          editFailedPending(row.pending?.localId || '')
+                        }
+                      }
+                    }
+                    : {})}
                   title={failed ? 'Tap to edit and retry' : undefined}
-                  className={`whitespace-pre-wrap break-words rounded-lg px-3 py-2 text-left text-sm ${
+                  className={`select-text whitespace-pre-wrap break-words px-3.5 py-2 text-left text-sm leading-relaxed ${
                     row.mine
-                      ? 'bg-[var(--pear-accent-dim)] text-[var(--pear-text)]'
-                      : 'border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] text-[var(--pear-text)]'
+                      ? 'rounded-2xl rounded-tr-md bg-[var(--pear-accent-dim)] text-[var(--pear-text)]'
+                      : 'rounded-2xl rounded-tl-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] text-[var(--pear-text)]'
                   } ${failed ? 'cursor-pointer border border-dashed border-[var(--pear-red)]' : 'cursor-default'}`}
                 >
                   {linkifyText(row.text)}
                   {row.attachments.map((attachment) => (
                     <AttachmentRow key={attachment.file_id} attachment={attachment} />
                   ))}
-                </button>
+                </div>
                 {row.pending && (
                   <span className="mt-0.5 flex items-center gap-1 text-[11px] text-[var(--pear-text-faint)]">
                     {failed ? (
@@ -230,10 +309,23 @@ export function ThreadView({ conversationId }: { conversationId: string }): Reac
                     </span>
                   )}
               </div>
+              {row.mine && (
+                <span className="shrink-0" style={{ width: AVATAR_SIZE }}>
+                  {row.showSender && (
+                    <HumanAvatar
+                      user={authUser}
+                      iconSize={Math.round(AVATAR_SIZE * 0.55)}
+                      className="flex items-center justify-center overflow-hidden rounded-lg bg-[var(--pear-bg)]/60"
+                      style={{ width: AVATAR_SIZE, height: AVATAR_SIZE }}
+                    />
+                  )}
+                </span>
+              )}
             </div>
           </div>
         )
       })}
+      </div>
     </div>
   )
 }

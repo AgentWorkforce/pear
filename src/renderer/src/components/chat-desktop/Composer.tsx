@@ -25,7 +25,6 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   const [attachmentIds, setAttachmentIds] = useState<string[]>([])
   const [attachmentNames, setAttachmentNames] = useState<string[]>([])
   const [uploading, setUploading] = useState(false)
-  const [sending, setSending] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
   const fileRef = useRef<HTMLInputElement | null>(null)
 
@@ -44,7 +43,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     setUploadError(null)
   }, [conversationId])
 
-  const canSend = (text.trim().length > 0 || attachmentIds.length > 0) && !sending && !uploading
+  const canSend = (text.trim().length > 0 || attachmentIds.length > 0) && !uploading
 
   const handleAttach = async (files: FileList | null): Promise<void> => {
     if (!files || files.length === 0) return
@@ -73,17 +72,14 @@ export function Composer({ conversationId }: { conversationId: string }): React.
     }
   }
 
-  const handleSend = async (): Promise<void> => {
+  // The thread shows the message as Sending at once and keeps a failed one
+  // for tap-to-edit, so the composer clears without waiting on Relaycast.
+  const handleSend = (): void => {
     if (!canSend) return
-    setSending(true)
-    try {
-      await sendMessage(text, attachmentIds)
-      setText('')
-      setAttachmentIds([])
-      setAttachmentNames([])
-    } finally {
-      setSending(false)
-    }
+    void sendMessage(text, attachmentIds)
+    setText('')
+    setAttachmentIds([])
+    setAttachmentNames([])
   }
 
   return (
@@ -125,7 +121,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
           type="button"
           title="Attach files"
           aria-label="Attach files"
-          disabled={uploading || sending}
+          disabled={uploading}
           onClick={() => fileRef.current?.click()}
           className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-[var(--pear-border-subtle)] text-[var(--pear-text-secondary)] hover:border-[var(--pear-accent-dim)] hover:text-[var(--pear-text)] disabled:opacity-40"
         >
@@ -140,7 +136,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey) {
               event.preventDefault()
-              void handleSend()
+              handleSend()
             }
           }}
           placeholder={uploading ? 'Uploading…' : 'Message this thread…'}
@@ -153,7 +149,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
           title="Send"
           aria-label="Send message"
           disabled={!canSend}
-          onClick={() => void handleSend()}
+          onClick={handleSend}
           className="flex h-9 w-9 shrink-0 items-center justify-center rounded-md bg-[var(--pear-accent-dim)] text-[var(--pear-text)] disabled:opacity-40"
         >
           <Send size={16} />

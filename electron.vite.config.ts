@@ -6,7 +6,7 @@ import tailwindcss from '@tailwindcss/vite'
 export default defineConfig({
   main: {
     plugins: [externalizeDepsPlugin({
-      exclude: ['@agent-relay/sdk', '@agent-relay/cloud', '@agent-relay/harness-driver', 'zod']
+      exclude: ['@agent-relay/sdk', '@agent-relay/cloud', '@agent-relay/harness-driver', '@relaycast/sdk', '@relaycast/types', 'zod']
     })],
     build: {
       rollupOptions: {

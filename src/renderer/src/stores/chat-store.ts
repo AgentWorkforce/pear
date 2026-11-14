@@ -4,9 +4,11 @@ import {
   pear,
   type ChatInvalidatedEvent,
   type ChatMessageEvent,
+  type ChatOpenConversationEvent,
   type RelayChatAttachment,
   type RelayChatConversation,
-  type RelayChatMessage
+  type RelayChatMessage,
+  type SessionTranscriptTurn
 } from '@/lib/ipc'
 
 /**
@@ -43,6 +45,8 @@ interface ChatDesktopState {
   conversationsError: string | null
   selectedId: string | null
   history: Record<string, RelayChatMessage[]>
+  /** Human and agent text from the open agent's declared session. */
+  sessionTurns: Record<string, SessionTranscriptTurn[]>
   historyLoading: Record<string, boolean>
   historyError: Record<string, string | null>
   pending: Record<string, ChatPendingMessage[]>
@@ -67,9 +71,32 @@ interface ChatDesktopState {
   setComposerDraft: (draft: string) => void
   applyChatMessage: (event: ChatMessageEvent) => void
   applyInvalidated: (event: ChatInvalidatedEvent) => void
+  openFromNotification: (event: ChatOpenConversationEvent) => Promise<void>
   startSync: () => void
   stopSync: () => void
   reset: () => void
+}
+
+/** `relay:name@host` and `name@host` both reduce to `name`. */
+export function agentIdentity(name: string): string {
+  const trimmed = name.trim().toLowerCase().replace(/^relay:/, '')
+  const at = trimmed.lastIndexOf('@')
+  return at > 0 ? trimmed.slice(0, at) : trimmed
+}
+
+/**
+ * A directory filter matches DMs and roster rows whose name or participant
+ * is an agent working in that directory. Channels are not directory-scoped.
+ */
+export function conversationMatchesAgents(
+  conversation: RelayChatConversation,
+  agentNames: readonly string[]
+): boolean {
+  if (conversation.kind === 'channel') return false
+  const known = new Set(agentNames.map(agentIdentity).filter((name) => name.length > 0))
+  if (known.size === 0) return false
+  const labels = [conversation.name, ...(conversation.participants || [])]
+  return labels.some((label) => known.has(agentIdentity(label)))
 }
 
 /** `name@host` -> `host`. Bare names have no machine to filter on. */
@@ -101,6 +128,10 @@ export function isConversationReachable(
   conversation: RelayChatConversation,
   now: number = Date.now()
 ): boolean {
+  if (conversation.kind === 'agent') {
+    const status = conversation.status?.toLowerCase()
+    return status === 'online' || status === 'active'
+  }
   if (conversation.kind !== 'dm' || !conversation.lastMessageAt) return false
   const at = Date.parse(conversation.lastMessageAt)
   if (!Number.isFinite(at)) return false
@@ -115,16 +146,74 @@ export function historyIdFor(conversation: RelayChatConversation): string {
   return conversation.id
 }
 
+/** The other party in a DM. `POST /dm` addresses an agent name, not a conversation id. */
+export function dmRecipient(conversation: RelayChatConversation): string {
+  const labels = conversation.participants && conversation.participants.length > 0
+    ? conversation.participants
+    : [conversation.name]
+  const other = labels.find((label) => {
+    const name = agentIdentity(label)
+    return name.length > 0 && !name.startsWith('pear-chat-')
+  })
+  return (other || labels[0] || conversation.id.replace(/^conversation:/, '')).trim()
+}
+
+/** DM thread whose participants include this roster agent, when one already exists. */
+export function findDmThread(
+  conversations: readonly RelayChatConversation[],
+  agent: RelayChatConversation
+): RelayChatConversation | undefined {
+  const identity = agentIdentity(agent.name || agent.id.replace(/^relay:/, ''))
+  if (!identity) return undefined
+  return conversations.find((candidate) =>
+    candidate.kind === 'dm' &&
+    [candidate.name, ...(candidate.participants || [])].some((label) => agentIdentity(label) === identity)
+  )
+}
+
 /**
- * What `chat.send` expects as `to`: the bare channel name, or the raw DM
- * conversation id. Main derives the broadcast `conversationId` back from
- * this value (`conversation:<to>` for DMs), so the two stay in sync.
+ * Every row a pushed message belongs to: the thread itself plus the roster
+ * agent that shows it. A first DM from an agent has no thread in the list
+ * yet, so it falls back to that agent's row.
+ */
+export function historyKeysForMessage(
+  conversations: readonly RelayChatConversation[],
+  conversationId: string,
+  message: Pick<RelayChatMessage, 'from' | 'mine'>
+): string[] {
+  const keys = conversations
+    .filter((conversation) =>
+      conversation.id === conversationId ||
+      (conversation.kind === 'agent' && findDmThread(conversations, conversation)?.id === conversationId))
+    .map((conversation) => conversation.id)
+  if (keys.length > 0 || message.mine || !conversationId.startsWith('conversation:')) return keys
+  const sender = agentIdentity(message.from)
+  return conversations
+    .filter((conversation) => conversation.kind === 'agent' && agentIdentity(conversation.name) === sender)
+    .map((conversation) => conversation.id)
+}
+
+/** The DM thread's last activity behind a row, to spot new messages after a list poll. */
+function threadActivity(conversations: readonly RelayChatConversation[], id: string): string | undefined {
+  const conversation = conversations.find((c) => c.id === id)
+  if (!conversation) return undefined
+  const thread = conversation.kind === 'agent' ? findDmThread(conversations, conversation) : conversation
+  return thread?.lastMessageAt
+}
+
+/**
+ * What `chat.send` expects as `to`: the bare channel name, or the other
+ * agent's name. Relaycast rejects a conversation id in `to`.
  */
 export function sendTargetFor(conversation: RelayChatConversation): { kind: 'dm' | 'channel'; to: string } {
   if (conversation.kind === 'channel') {
     return { kind: 'channel', to: conversation.id.replace(/^channel:/, '').replace(/^#+/, '') }
   }
-  return { kind: 'dm', to: conversation.id.replace(/^conversation:/, '') }
+  if (conversation.kind === 'agent') {
+    const name = conversation.id.replace(/^relay:/, '').trim()
+    return { kind: 'dm', to: name || conversation.name }
+  }
+  return { kind: 'dm', to: dmRecipient(conversation) }
 }
 
 let pendingSeq = 0
@@ -133,6 +222,15 @@ let syncInterval: ReturnType<typeof setInterval> | null = null
 
 function toErrorMessage(error: unknown): string {
   return error instanceof Error ? error.message : 'Chat request failed'
+}
+
+async function loadAgentSession(conversation: RelayChatConversation): Promise<SessionTranscriptTurn[]> {
+  if (!conversation.sessionId || conversation.kind === 'channel') return []
+  try {
+    return await pear.aiHist.transcript(conversation.sessionId)
+  } catch {
+    return []
+  }
 }
 
 function latestServerMessageId(messages: RelayChatMessage[]): string | null {
@@ -149,6 +247,7 @@ const initialState = {
   conversationsError: null as string | null,
   selectedId: null as string | null,
   history: {} as Record<string, RelayChatMessage[]>,
+  sessionTurns: {} as Record<string, SessionTranscriptTurn[]>,
   historyLoading: {} as Record<string, boolean>,
   historyError: {} as Record<string, string | null>,
   pending: {} as Record<string, ChatPendingMessage[]>,
@@ -161,11 +260,17 @@ const initialState = {
   lastRefreshAt: null as string | null
 }
 
-export const useChatStore = create<ChatDesktopState>()(
-  subscribeWithSelector((set, get) => ({
-    ...initialState,
+/**
+ * A send, a focus refresh, a push invalidation, and the 30s tick can all ask
+ * for the same list or thread at once. Concurrent callers share the request
+ * already in flight instead of starting another.
+ */
+let refreshInFlight: Promise<void> | null = null
+const historyInFlight = new Map<string, Promise<void>>()
 
-    refreshConversations: async () => {
+export const useChatStore = create<ChatDesktopState>()(
+  subscribeWithSelector((set, get) => {
+    const runRefreshConversations = async (): Promise<void> => {
       set({ conversationsLoading: true, conversationsError: null })
       try {
         const conversations = await pear.chat.listConversations()
@@ -184,6 +289,74 @@ export const useChatStore = create<ChatDesktopState>()(
       } catch (error) {
         set({ conversationsLoading: false, conversationsError: toErrorMessage(error) })
       }
+    }
+
+    const runLoadHistory = async (id: string): Promise<void> => {
+      const conversation = get().conversations.find((c) => c.id === id)
+      if (!conversation) return
+      set((state) => ({
+        historyLoading: { ...state.historyLoading, [id]: true },
+        historyError: { ...state.historyError, [id]: null }
+      }))
+      const dmThread = conversation.kind === 'agent'
+        ? findDmThread(get().conversations, conversation)
+        : undefined
+      const sessionTurns = await loadAgentSession(conversation)
+      if (conversation.kind === 'agent' && !dmThread) {
+        set((state) => ({
+          history: { ...state.history, [id]: state.history[id] ?? [] },
+          sessionTurns: { ...state.sessionTurns, [id]: sessionTurns },
+          historyLoading: { ...state.historyLoading, [id]: false }
+        }))
+        return
+      }
+      try {
+        const messages = await pear.chat.getHistory({
+          kind: dmThread ? 'dm' : conversation.kind,
+          id: historyIdFor(dmThread || conversation),
+          limit: 100,
+          withDelivery: true
+        })
+        set((state) => {
+          const delivery = { ...state.delivery }
+          for (const message of messages) {
+            if (message.delivered !== undefined) delivery[message.id] = message.delivered
+          }
+          return {
+            history: { ...state.history, [id]: messages },
+            sessionTurns: { ...state.sessionTurns, [id]: sessionTurns },
+            historyLoading: { ...state.historyLoading, [id]: false },
+            delivery
+          }
+        })
+      } catch (error) {
+        set((state) => ({
+          sessionTurns: { ...state.sessionTurns, [id]: sessionTurns },
+          historyLoading: { ...state.historyLoading, [id]: false },
+          historyError: { ...state.historyError, [id]: toErrorMessage(error) }
+        }))
+      }
+    }
+
+    return {
+    ...initialState,
+
+    refreshConversations: () => {
+      if (refreshInFlight) return refreshInFlight
+      refreshInFlight = runRefreshConversations().finally(() => {
+        refreshInFlight = null
+      })
+      return refreshInFlight
+    },
+
+    loadHistory: (id) => {
+      const existing = historyInFlight.get(id)
+      if (existing) return existing
+      const run = runLoadHistory(id).finally(() => {
+        historyInFlight.delete(id)
+      })
+      historyInFlight.set(id, run)
+      return run
     },
 
     selectConversation: async (id) => {
@@ -205,39 +378,6 @@ export const useChatStore = create<ChatDesktopState>()(
       set((state) => ({
         unreadConversationIDs: state.unreadConversationIDs.filter((unread) => unread !== id)
       }))
-    },
-
-    loadHistory: async (id) => {
-      const conversation = get().conversations.find((c) => c.id === id)
-      if (!conversation) return
-      set((state) => ({
-        historyLoading: { ...state.historyLoading, [id]: true },
-        historyError: { ...state.historyError, [id]: null }
-      }))
-      try {
-        const messages = await pear.chat.getHistory({
-          kind: conversation.kind,
-          id: historyIdFor(conversation),
-          limit: 100,
-          withDelivery: true
-        })
-        set((state) => {
-          const delivery = { ...state.delivery }
-          for (const message of messages) {
-            if (message.delivered !== undefined) delivery[message.id] = message.delivered
-          }
-          return {
-            history: { ...state.history, [id]: messages },
-            historyLoading: { ...state.historyLoading, [id]: false },
-            delivery
-          }
-        })
-      } catch (error) {
-        set((state) => ({
-          historyLoading: { ...state.historyLoading, [id]: false },
-          historyError: { ...state.historyError, [id]: toErrorMessage(error) }
-        }))
-      }
     },
 
     sendMessage: async (text, attachmentIds = []) => {
@@ -268,25 +408,38 @@ export const useChatStore = create<ChatDesktopState>()(
         composerDraft: ''
       }))
       try {
-        await pear.chat.send({
+        const sent = await pear.chat.send({
           kind: target.kind,
           to: target.to,
           text: body,
           ...(attachmentIds.length > 0 ? { attachments: attachmentIds } : {}),
           idempotencyKey: localId
         })
-        set((state) => ({
-          pending: {
-            ...state.pending,
-            [conversation.id]: (state.pending[conversation.id] || []).filter(
-              (item) => item.localId !== localId
-            )
+        set((state) => {
+          const existing = state.history[conversation.id] || []
+          const history = existing.some((item) => item.id === sent.id)
+            ? existing
+            : [...existing, sent]
+          return {
+            pending: {
+              ...state.pending,
+              [conversation.id]: (state.pending[conversation.id] || []).filter(
+                (item) => item.localId !== localId
+              )
+            },
+            history: { ...state.history, [conversation.id]: history }
           }
-        }))
-        // Optimistic send, then refresh the list and reload history so the
-        // server echo (broadcast or polled) becomes the canonical row.
-        await get().refreshConversations()
-        await get().loadHistory(conversation.id)
+        })
+        // The list refresh takes seconds (hundreds of roster agents), so a
+        // thread that already exists reloads first. Only a first DM to a
+        // roster agent needs the refreshed list to find its new thread.
+        const hasThread = conversation.kind !== 'agent' || !!findDmThread(get().conversations, conversation)
+        if (hasThread) {
+          void get().loadHistory(conversation.id)
+          void get().refreshConversations()
+        } else {
+          void get().refreshConversations().then(() => get().loadHistory(conversation.id))
+        }
       } catch (error) {
         set((state) => ({
           pending: {
@@ -364,43 +517,81 @@ export const useChatStore = create<ChatDesktopState>()(
 
     applyChatMessage: (event) => {
       const { conversationId, message } = event
-      const { selectedId, history } = get()
+      const { selectedId, conversations } = get()
       if (message.delivered !== undefined) {
         set((state) => ({ delivery: { ...state.delivery, [message.id]: message.delivered as boolean } }))
       }
-      if (history[conversationId]) {
-        set((state) => ({
-          history: {
-            ...state.history,
-            [conversationId]: [...(state.history[conversationId] || []), message]
+      // A delivery flip re-pushes a message the thread already shows.
+      if (message.delivered === true) return
+      const keys = historyKeysForMessage(conversations, conversationId, message)
+      const isNew = (rows: RelayChatMessage[] | undefined): boolean =>
+        !!rows && !rows.some((row) => row.id === message.id)
+      const fresh = keys.filter((key) => isNew(get().history[key]))
+      // A push can repeat (send echo, socket replay); keep one row per message id.
+      if (fresh.length > 0) {
+        set((state) => {
+          const history = { ...state.history }
+          for (const key of fresh) {
+            if (isNew(history[key])) history[key] = [...history[key], message]
           }
-        }))
+          return { history }
+        })
       }
+      const touched = new Set([conversationId, ...keys])
       set((state) => ({
         conversations: state.conversations.map((conversation) =>
-          conversation.id === conversationId
+          touched.has(conversation.id)
             ? { ...conversation, lastMessageAt: message.createdAt }
             : conversation
         )
       }))
-      if (conversationId === selectedId) {
+      if (!conversations.some((conversation) => conversation.id === conversationId)) {
+        void get().refreshConversations()
+      }
+      if (message.mine) return
+      if (selectedId && touched.has(selectedId)) {
         void pear.chat.markRead(message.id).catch(() => undefined)
       } else {
+        const unread = keys.length > 0 ? keys : [conversationId]
         set((state) => ({
-          unreadConversationIDs: state.unreadConversationIDs.includes(conversationId)
-            ? state.unreadConversationIDs
-            : [...state.unreadConversationIDs, conversationId]
+          unreadConversationIDs: [
+            ...state.unreadConversationIDs,
+            ...unread.filter((id) => !state.unreadConversationIDs.includes(id))
+          ]
         }))
       }
     },
 
+    openFromNotification: async ({ conversationId, from }) => {
+      const target = (): string | undefined =>
+        historyKeysForMessage(get().conversations, conversationId, { from, mine: false })[0]
+      // A first message can arrive before its thread is in the list.
+      if (!target()) await get().refreshConversations()
+      const id = target()
+      if (id) await get().selectConversation(id)
+    },
+
     applyInvalidated: (event) => {
-      void get().refreshConversations()
-      // Foreground / open / manual invalidations also reload the open
-      // thread; the interval tick only refreshes the list.
-      if (event.reason !== 'poll' && get().selectedId) {
-        void get().loadHistory(get().selectedId as string)
+      const selectedId = get().selectedId
+      if (event.reason === 'summaries') {
+        void get().refreshConversations()
+        return
       }
+      if (event.reason !== 'poll') {
+        void get().refreshConversations()
+        if (selectedId) void get().loadHistory(selectedId)
+        return
+      }
+      // The interval tick reloads the open thread only when the list shows
+      // it moved — the fallback for messages the live stream didn't push.
+      const before = selectedId ? threadActivity(get().conversations, selectedId) : undefined
+      void get().refreshConversations().then(() => {
+        if (!selectedId || get().selectedId !== selectedId) return
+        const conversation = get().conversations.find((c) => c.id === selectedId)
+        if (!conversation || conversation.kind === 'channel') return
+        const after = threadActivity(get().conversations, selectedId)
+        if (after && after !== before) void get().loadHistory(selectedId)
+      })
     },
 
     startSync: () => {
@@ -408,6 +599,10 @@ export const useChatStore = create<ChatDesktopState>()(
       const unsubscribes: Array<() => void> = []
       unsubscribes.push(pear.chat.onInvalidated((event) => get().applyInvalidated(event)))
       unsubscribes.push(pear.chat.onMessage((event) => get().applyChatMessage(event)))
+      const unsubscribeOpen = pear.chat.onOpenConversation?.((event) => {
+        void get().openFromNotification(event)
+      })
+      if (unsubscribeOpen) unsubscribes.push(unsubscribeOpen)
       const foregroundRefresh = (): void => {
         void get().refreshConversations()
         const selectedId = get().selectedId
@@ -442,8 +637,11 @@ export const useChatStore = create<ChatDesktopState>()(
     reset: () => {
       get().stopSync()
       pendingSeq = 0
+      refreshInFlight = null
+      historyInFlight.clear()
       set({ ...initialState })
     }
-  })))
+    }
+  }))
 
 export type { RelayChatAttachment, RelayChatConversation, RelayChatMessage }

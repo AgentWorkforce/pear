@@ -3,7 +3,6 @@
 // src/renderer/src/lib/ipc.ts (the consumer-facing re-export) import from
 // here. The preload uses `satisfies PearAPI` to enforce that the
 // implementation matches this surface.
-import type { FactoryConfig } from '@agent-relay/factory'
 
 export type ViewMode =
   | 'terminal'
@@ -16,7 +15,6 @@ export type ViewMode =
   | 'burn-session'
   | 'burn-project'
   | 'burn-session-detail'
-  | 'factory'
 
 export type InboundDeliveryMode = 'auto_inject' | 'manual_flush'
 export type MessageInjectionMode = 'wait' | 'steer'
@@ -492,19 +490,29 @@ export interface BrokerStatusEvent {
  * renderer can route without sniffing shape: `relay:<agent>`,
  * `drive:<file>`, `conversation:<dm-id>`, `channel:<name>`.
  */
-export type RelayChatConversationKind = 'dm' | 'channel'
+export type RelayChatConversationKind = 'dm' | 'channel' | 'agent'
 
 export interface RelayChatConversation {
   kind: RelayChatConversationKind
-  /** `conversation:<id>` for DMs, `channel:<name>` for channels. */
+  /** `conversation:<id>` for DMs, `channel:<name>` for channels, `relay:<name>` for roster agents. */
   id: string
-  /** Display name: participant names joined with `, `, or `#channel`. */
+  /** Display name: participant names joined with `, `, `#channel`, or the agent name. */
   name: string
   participants?: string[]
   lastMessageAt?: string
   unreadCount?: number
   /** Channels only: whether the companion identity is a member. */
   isMember?: boolean
+  /** Roster agents: Relaycast presence (`online`, `offline`, `away`, …). */
+  status?: string
+  /** Session this agent declared. Tool calls stay out of the thread. */
+  sessionId?: string
+  /** Tool the agent runs in (`claude`, `codex`, …), for its icon. */
+  cli?: string
+  /** What the agent is working on: objective, session title, or its first prompt. */
+  summary?: string
+  /** Roster entry for a person rather than an agent. */
+  human?: boolean
 }
 
 export interface RelayChatAttachment {
@@ -563,57 +571,15 @@ export interface ChatMessageEvent {
   message: RelayChatMessage
 }
 
+/** A message notification was clicked: show that conversation. */
+export interface ChatOpenConversationEvent {
+  conversationId: string
+  /** Sender, to find the agent row that shows a DM. */
+  from: string
+}
+
 export interface ChatInvalidatedEvent {
-  reason: 'poll' | 'foreground' | 'send' | 'join' | 'open' | 'manual'
-}
-
-export type FactoryNodeConfig = Pick<
-  FactoryConfig,
-  'capabilities' | 'clonePaths' | 'dryRun'
-> & Partial<Pick<FactoryConfig, 'workspaceId' | 'cloneRoot'>>
-
-export interface FactoryConfigReadResult {
-  configPath: string
-  exists: boolean
-  config: FactoryNodeConfig | null
-  errors: string[]
-  warning?: string
-}
-
-export interface FactoryAgentStatus {
-  id?: string
-  name: string
-  role?: string
-  status?: string
-  issue?: {
-    key: string
-    path?: string
-    title?: string
-    url?: string
-  }
-}
-
-export interface FactoryIssueStatus {
-  key: string
-  title?: string
-  url?: string
-  state?: string
-  repo?: string
-  assignee?: string
-  updatedAt?: string
-}
-
-export interface FactoryStatus {
-  source: 'cloud'
-  state: 'unauthenticated' | 'unconfigured' | 'online' | 'empty' | 'unavailable'
-  connected: boolean
-  workspaceId?: string
-  cloudUrl?: string
-  updatedAt?: string
-  message?: string
-  counters?: Record<string, number>
-  agents: FactoryAgentStatus[]
-  issues: FactoryIssueStatus[]
+  reason: 'poll' | 'foreground' | 'send' | 'join' | 'open' | 'manual' | 'reconnect' | 'summaries'
 }
 
 export type GitFileStatusKind = 'added' | 'modified' | 'deleted' | 'renamed' | 'untracked'
@@ -1006,6 +972,14 @@ export interface AiHistResumeEntry {
   project: string | null
 }
 
+/** One human or agent turn from a local session file. Tool calls are omitted. */
+export interface SessionTranscriptTurn {
+  id: string
+  role: 'user' | 'assistant'
+  text: string
+  timestampMs: number | null
+}
+
 export interface ProjectListResult {
   projects: unknown[]
   activeId: string | null
@@ -1120,11 +1094,7 @@ export interface PearAPI {
     uploadFile: (input: ChatUploadInput) => Promise<RelayChatAttachment>
     onInvalidated: (callback: (event: ChatInvalidatedEvent) => void) => () => void
     onMessage: (callback: (event: ChatMessageEvent) => void) => () => void
-  }
-  factory: {
-    status: () => Promise<FactoryStatus>
-    readConfig: (configPath?: string, projectRoot?: string) => Promise<FactoryConfigReadResult>
-    saveConfig: (config: unknown, configPath?: string, projectRoot?: string) => Promise<FactoryConfigReadResult>
+    onOpenConversation: (callback: (event: ChatOpenConversationEvent) => void) => () => void
   }
   burn: {
     listAgentSummaries: (agents: BurnAgentInput[]) => Promise<BurnAgentSummary[]>
@@ -1248,6 +1218,8 @@ export interface PearAPI {
     recent: (opts?: AiHistRecentOptions) => Promise<AiHistEntry[]>
     listSessions: (opts?: AiHistRecentOptions) => Promise<AiHistSession[]>
     getSession: (sessionId: string) => Promise<AiHistEntry[]>
+    /** Human and agent text from the session file. Tool calls are not included. */
+    transcript: (sessionId: string) => Promise<SessionTranscriptTurn[]>
     search: (query: string, opts?: AiHistRecentOptions) => Promise<AiHistEntry[]>
     searchSessions: (query: string, opts?: AiHistRecentOptions) => Promise<AiHistSession[]>
     stats: () => Promise<AiHistStats | null>
