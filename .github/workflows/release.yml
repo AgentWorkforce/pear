@@ -115,6 +115,7 @@ jobs:
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
           # Publishing the GitHub Release
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.changelog.outputs.tag }}
         # electron-builder notarizes internally and has no per-attempt retry,
         # so Apple's transient notary drops (-1009) can fail an otherwise-good
         # build. Retry the whole build a few times; notarization runs before
@@ -125,6 +126,16 @@ jobs:
               exit 0
             fi
             echo "release attempt ${attempt} failed; retrying in 60s..."
+            # A failed attempt (e.g. hdiutil "Resource busy" after notarizing)
+            # can leave files on the draft. GitHub rejects re-uploading a name
+            # that exists, and electron-builder can't find its own leftovers
+            # because GitHub swaps the spaces in their names for dots.
+            for release_id in $(gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" \
+              --jq ".[] | select(.tag_name == \"${TAG}\" and .draft) | .id"); do
+              for asset_id in $(gh api "repos/${GITHUB_REPOSITORY}/releases/${release_id}/assets" --jq '.[].id'); do
+                gh api -X DELETE "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+              done
+            done
             sleep 60
           done
           echo "release failed after 3 attempts"
