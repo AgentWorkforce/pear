@@ -19,8 +19,10 @@ on:
         required: true
 permissions:
   contents: read
+# Keyed by run too: a run waiting for approval must not be replaced by a
+# later dispatch of the same ref.
 concurrency:
-  group: fast-path-${{ inputs.ref }}
+  group: fast-path-${{ inputs.ref }}-${{ github.run_id }}
   cancel-in-progress: false
 jobs:
   checks:
@@ -37,7 +39,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
       - run: npm ci
       - run: npm run verify:mcp-resources-drift
       - run: npm run lint
@@ -57,7 +58,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
       - run: npm ci
       - run: npm run verify:mcp-resources-drift
       - run: npm run dist:mac
