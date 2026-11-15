@@ -21,21 +21,28 @@ export function ChatTitle(): React.ReactNode {
   if (!conversation) return null
   const details = conversationDetails(conversation)
   return (
-    <div className="flex min-w-0 flex-1 items-center gap-3" data-testid="chat-title">
+    <div
+      className="flex h-full min-w-0 flex-1 items-center gap-3.5 border-l border-[var(--pear-border-subtle)] pl-5 pr-4"
+      data-testid="chat-title"
+    >
       {conversation.kind === 'channel' ? (
-        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-[var(--pear-bg-surface)]">
+        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[var(--pear-bg-surface)]">
           <Hash size={18} className="text-[var(--pear-text-faint)]" />
         </span>
       ) : (
-        <AgentAvatar name={conversation.name} cli={conversation.cli} human={!!conversation.human} size={36} />
+        <span className="shrink-0">
+          <AgentAvatar name={conversation.name} cli={conversation.cli} human={!!conversation.human} size={36} />
+        </span>
       )}
-      <div className="min-w-0 flex-1 leading-snug">
-        <div className="flex min-w-0 items-baseline gap-2">
-          <span className="truncate text-[16px] font-semibold text-[var(--pear-text)]">{conversation.name}</span>
-          {details && <span className="shrink-0 truncate text-[12px] text-[var(--pear-text-faint)]">{details}</span>}
+      <div className="flex min-w-0 flex-1 flex-col justify-center gap-1">
+        <div className="flex min-w-0 items-center gap-3">
+          <span className="truncate text-[16px] font-semibold leading-5 text-[var(--pear-text)]">{conversation.name}</span>
+          {details && (
+            <span className="min-w-0 truncate text-[12px] leading-5 text-[var(--pear-text-faint)]">{details}</span>
+          )}
         </div>
         {conversation.summary && (
-          <p className="truncate text-[13px] text-[var(--pear-text-secondary)]" title={conversation.summary}>
+          <p className="truncate text-[13px] leading-[18px] text-[var(--pear-text-secondary)]" title={conversation.summary}>
             {conversation.summary}
           </p>
         )}

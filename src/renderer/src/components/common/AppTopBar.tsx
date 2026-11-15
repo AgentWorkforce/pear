@@ -174,7 +174,7 @@ export function AppTopBar(): React.ReactNode {
         </button>
       </div>
 
-      <div className="ml-4 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+      <div className={`flex h-full min-w-0 flex-1 items-center gap-1 overflow-x-auto ${chatOpen ? 'ml-3' : 'ml-4'}`}>
         {chatOpen && <ChatTitle />}
         {visibleTabs.map((tab) => {
           const active = tab.id === activeTabId
