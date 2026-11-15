@@ -16,6 +16,20 @@ function fileToBase64(file: File): Promise<string> {
   })
 }
 
+/**
+ * Images on the clipboard, named so several pastes stay distinguishable
+ * (macOS names every pasted screenshot `image.png`).
+ */
+export function pastedImages(clipboard: Pick<DataTransfer, 'files'> | null, now: Date = new Date()): File[] {
+  const images = Array.from(clipboard?.files || []).filter((file) => file.type.startsWith('image/'))
+  const stamp = now.toISOString().replace(/[:.]/g, '-')
+  return images.map((file, index) => {
+    const extension = file.type.split('/')[1]?.replace('jpeg', 'jpg') || 'png'
+    const name = `pasted-${stamp}${images.length > 1 ? `-${index + 1}` : ''}.${extension}`
+    return new File([file], name, { type: file.type })
+  })
+}
+
 export function Composer({ conversationId }: { conversationId: string }): React.ReactNode {
   const draft = useChatStore((s) => s.composerDraft)
   const setComposerDraft = useChatStore((s) => s.setComposerDraft)
@@ -45,7 +59,7 @@ export function Composer({ conversationId }: { conversationId: string }): React.
 
   const canSend = (text.trim().length > 0 || attachmentIds.length > 0) && !uploading
 
-  const handleAttach = async (files: FileList | null): Promise<void> => {
+  const handleAttach = async (files: FileList | File[] | null): Promise<void> => {
     if (!files || files.length === 0) return
     setUploading(true)
     setUploadError(null)
@@ -132,6 +146,12 @@ export function Composer({ conversationId }: { conversationId: string }): React.
           onChange={(event) => {
             setText(event.target.value)
             if (draft) setComposerDraft('')
+          }}
+          onPaste={(event) => {
+            const images = pastedImages(event.clipboardData)
+            if (images.length === 0) return
+            event.preventDefault()
+            void handleAttach(images)
           }}
           onKeyDown={(event) => {
             if (event.key === 'Enter' && !event.shiftKey) {

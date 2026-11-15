@@ -182,4 +182,40 @@ describe('Composer', () => {
       vi.unstubAllGlobals()
     }
   })
+
+  it('uploads an image pasted into the message box', async () => {
+    const fileReader = vi.fn(function (this: Record<string, unknown>) {
+      this.readAsDataURL = () => {
+        this.result = 'data:image/png;base64,iVBORw=='
+        ;(this.onload as () => void)?.()
+      }
+    })
+    vi.stubGlobal('FileReader', fileReader)
+    try {
+      chatMocks.uploadFile.mockResolvedValue({
+        file_id: 'img-1',
+        filename: 'pasted.png',
+        content_type: 'image/png',
+        size_bytes: 4
+      })
+      render(React.createElement(Composer, { conversationId: 'conversation:thread-1' }))
+      const image = new File(['png'], 'image.png', { type: 'image/png' })
+      fireEvent.paste(screen.getByLabelText('Message'), { clipboardData: { files: [image] } })
+      await waitFor(() => {
+        expect(chatMocks.uploadFile).toHaveBeenCalledWith(expect.objectContaining({
+          filename: expect.stringMatching(/^pasted-.+\.png$/),
+          contentType: 'image/png',
+          base64: 'iVBORw=='
+        }))
+      })
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('leaves a plain-text paste to the text box', () => {
+    render(React.createElement(Composer, { conversationId: 'conversation:thread-1' }))
+    fireEvent.paste(screen.getByLabelText('Message'), { clipboardData: { files: [] } })
+    expect(chatMocks.uploadFile).not.toHaveBeenCalled()
+  })
 })

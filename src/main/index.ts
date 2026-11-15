@@ -1,4 +1,4 @@
-import { app, BrowserWindow, shell, Menu, protocol, nativeImage, ipcMain } from 'electron'
+import { app, BrowserWindow, shell, Menu, protocol, nativeImage, ipcMain, screen } from 'electron'
 import { existsSync } from 'fs'
 import { join, resolve } from 'path'
 import { registerIpcHandlers } from './ipc-handlers'
@@ -13,6 +13,7 @@ import { addProject, loadStore, setActiveProject } from './store'
 import { isDirectory } from './path-utils'
 import { initAutoUpdater, registerUpdaterIpc, checkForUpdatesInteractive } from './updater'
 import { registerCliInstallIpc, promptInstallPearCli } from './cli-install'
+import { attachZoom, initialWindowSize, loadZoom, windowButtonPosition, zoomMenuItems } from './window-zoom'
 
 const APP_NAME = 'Pear by Agent Relay'
 
@@ -106,24 +107,26 @@ function shutdownBrokerOnce(): Promise<void> {
 
 function createWindow(): void {
   rendererReadyForCliOpen = false
+  const zoom = loadZoom()
   mainWindow = new BrowserWindow({
-    width: 1400,
-    height: 900,
+    ...initialWindowSize(screen.getPrimaryDisplay().workAreaSize),
     minWidth: 960,
     minHeight: 600,
     show: false,
     title: APP_NAME,
     icon: getAppIcon(),
     titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 16, y: 16 },
+    trafficLightPosition: windowButtonPosition(zoom),
     backgroundColor: '#08111a',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false,
       contextIsolation: true,
-      nodeIntegration: false
+      nodeIntegration: false,
+      zoomFactor: zoom
     }
   })
+  attachZoom(mainWindow)
 
   mainWindow.on('ready-to-show', () => {
     mainWindow!.show()
@@ -230,6 +233,8 @@ function createMenu(): void {
         { role: 'reload' },
         { role: 'forceReload' },
         { role: 'toggleDevTools' },
+        { type: 'separator' },
+        ...zoomMenuItems(() => mainWindow),
         { type: 'separator' },
         { role: 'togglefullscreen' }
       ]
