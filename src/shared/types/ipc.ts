@@ -500,7 +500,12 @@ export interface RelayChatConversation {
   name: string
   participants?: string[]
   lastMessageAt?: string
-  unreadCount?: number
+  /**
+   * DMs: id of the newest message when someone else sent it. Relaycast's
+   * `unread_count` is the thread's total message count, so read state is
+   * kept in Pear against this id.
+   */
+  lastIncomingId?: string
   /** Channels only: whether the companion identity is a member. */
   isMember?: boolean
   /** Roster agents: Relaycast presence (`online`, `offline`, `away`, …). */

@@ -387,12 +387,23 @@ export function agentCli(name: string, metadata: Record<string, unknown> | undef
 }
 
 /** What the agent is working on: its published objective or the provider's session title. */
+/**
+ * What an agent is working on: its objective, what its session says it's
+ * doing, a description, then a session title. Titles without a space are
+ * generated slugs (`khaliqgant-0e`) and say nothing.
+ */
 export function agentSummary(metadata: Record<string, unknown> | undefined): string | null {
-  for (const key of ['objective', 'session_title', 'description']) {
-    const text = stringOf(metadata?.[key])
-    if (text) return text.slice(0, 200)
-  }
-  return null
+  // Desktop publishes the generated session slug (`infra-7d`) as both the title and `doing`.
+  const sentence = (text: string): string => (/\s/.test(text) ? text : '')
+  const candidates = [
+    stringOf(metadata?.objective),
+    sentence(stringOf(record(metadata?.activity)?.doing)),
+    stringOf(metadata?.description),
+    stringOf(record(metadata?.card)?.description),
+    sentence(stringOf(metadata?.session_title))
+  ]
+  const text = candidates.find(Boolean)
+  return text ? text.slice(0, 200) : null
 }
 
 function isMetadataRecord(value: unknown): value is Record<string, unknown> {

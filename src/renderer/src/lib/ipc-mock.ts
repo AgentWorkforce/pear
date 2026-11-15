@@ -242,15 +242,14 @@ function createState(): MockState {
         name: 'alice@macbook',
         participants: ['alice@macbook'],
         lastMessageAt: isoMinutesAgo(2),
-        unreadCount: 1
+        lastIncomingId: 'msg-thread-1-latest'
       },
       {
         kind: 'dm',
         id: 'conversation:thread-2',
         name: 'bob@linuxbox',
         participants: ['bob@linuxbox'],
-        lastMessageAt: isoMinutesAgo(60),
-        unreadCount: 0
+        lastMessageAt: isoMinutesAgo(60)
       },
       {
         kind: 'channel',
@@ -1316,14 +1315,7 @@ export const pearMock: PearAPI = {
       emit(state.chatInvalidatedListeners, { reason: 'send' })
       return clone(message)
     },
-    markRead: async (messageId: string): Promise<void> => {
-      for (const conversation of state.chatConversations) {
-        const raw = conversation.id.replace(/^(conversation|channel):/, '').replace(/^#+/, '')
-        if ((state.chatHistory[raw] || []).some((message) => message.id === messageId)) {
-          conversation.unreadCount = 0
-        }
-      }
-    },
+    markRead: async (_messageId: string): Promise<void> => {},
     joinChannel: async (channel: string): Promise<{ alreadyMember: boolean }> => {
       const bare = channel.trim().replace(/^#+/, '')
       if (!bare) throw new Error('Channel name is required')

@@ -230,11 +230,81 @@ export function conversationUnread(
   unreadIds: ReadonlySet<string>,
   conversation: RelayChatConversation
 ): boolean {
-  const unread = (row: RelayChatConversation): boolean => unreadIds.has(row.id) || (row.unreadCount || 0) > 0
+  const unread = (row: RelayChatConversation): boolean => unreadIds.has(row.id)
   if (unread(conversation)) return true
   if (conversation.kind !== 'agent') return false
   const thread = findDmThread(conversations, conversation)
   return !!thread && unread(thread)
+}
+
+/**
+ * What the person has seen: conversation id → newest incoming message id,
+ * and when tracking began. A conversation with no entry is unread only if
+ * its last message came after `since`.
+ */
+export interface ReadMarkers {
+  since: string
+  seen: Record<string, string>
+}
+
+const READ_MARKERS_KEY = 'pear.chat.read'
+
+export function loadReadMarkers(): ReadMarkers | null {
+  try {
+    const raw = localStorage.getItem(READ_MARKERS_KEY)
+    const parsed = (raw ? JSON.parse(raw) : null) as Partial<ReadMarkers> | null
+    return parsed && typeof parsed.since === 'string' && parsed.seen && typeof parsed.seen === 'object'
+      ? { since: parsed.since, seen: parsed.seen }
+      : null
+  } catch {
+    return null
+  }
+}
+
+function saveReadMarkers(markers: ReadMarkers): void {
+  try {
+    localStorage.setItem(READ_MARKERS_KEY, JSON.stringify(markers))
+  } catch {
+    // Read state is a convenience; storage failures only cost a stale dot.
+  }
+}
+
+/**
+ * Conversations whose newest incoming message differs from the one last seen.
+ * With no markers at all (first launch) everything already there counts as
+ * read; conversations in `open` are being looked at, so they are read too.
+ */
+export function readState(
+  conversations: readonly RelayChatConversation[],
+  markers: ReadMarkers | null,
+  open: ReadonlySet<string>,
+  now: Date = new Date()
+): { markers: ReadMarkers; unread: string[] } {
+  const since = markers?.since ?? now.toISOString()
+  const seen = { ...(markers?.seen || {}) }
+  const unread: string[] = []
+  for (const conversation of conversations) {
+    const latest = conversation.lastIncomingId
+    if (!latest) continue
+    const known = seen[conversation.id]
+    const isNew = known
+      ? known !== latest
+      : !!markers && !!conversation.lastMessageAt && Date.parse(conversation.lastMessageAt) > Date.parse(since)
+    if (isNew && !open.has(conversation.id)) unread.push(conversation.id)
+    else seen[conversation.id] = latest
+  }
+  return { markers: { since, seen }, unread }
+}
+
+/** The selected row plus the DM thread an agent row shows. */
+function openConversationIds(
+  conversations: readonly RelayChatConversation[],
+  selectedId: string | null
+): Set<string> {
+  const selected = selectedId ? conversations.find((c) => c.id === selectedId) : undefined
+  if (!selected) return new Set()
+  const thread = selected.kind === 'agent' ? findDmThread(conversations, selected) : undefined
+  return new Set([selected.id, ...(thread ? [thread.id] : [])])
 }
 
 /** DM threads that open from an agent's roster row, so they aren't listed twice. */
@@ -377,17 +447,17 @@ export const useChatStore = create<ChatDesktopState>()(
       set({ conversationsLoading: true, conversationsError: null })
       try {
         const conversations = await pear.chat.listConversations()
-        const serverUnread = new Set(
-          conversations.filter((c) => (c.unreadCount || 0) > 0).map((c) => c.id)
-        )
+        const open = openConversationIds(conversations, get().selectedId)
+        const read = readState(conversations, loadReadMarkers(), open)
+        saveReadMarkers(read.markers)
         const previousUnread = get().unreadConversationIDs.filter((id) =>
-          conversations.some((c) => c.id === id)
+          !open.has(id) && conversations.some((c) => c.id === id)
         )
         set({
           conversations,
           conversationsLoading: false,
           lastRefreshAt: new Date().toISOString(),
-          unreadConversationIDs: [...new Set([...serverUnread, ...previousUnread])]
+          unreadConversationIDs: [...new Set([...read.unread, ...previousUnread])]
         })
       } catch (error) {
         set({ conversationsLoading: false, conversationsError: toErrorMessage(error) })
@@ -479,13 +549,9 @@ export const useChatStore = create<ChatDesktopState>()(
         }
       }
       set((state) => {
-        const selected = state.conversations.find((c) => c.id === id)
-        const thread = selected?.kind === 'agent' ? findDmThread(state.conversations, selected) : undefined
-        const read = new Set([id, ...(thread ? [thread.id] : [])])
-        return {
-          unreadConversationIDs: state.unreadConversationIDs.filter((unread) => !read.has(unread)),
-          conversations: state.conversations.map((c) => (read.has(c.id) && c.unreadCount ? { ...c, unreadCount: 0 } : c))
-        }
+        const read = openConversationIds(state.conversations, id)
+        saveReadMarkers(readState(state.conversations, loadReadMarkers(), read).markers)
+        return { unreadConversationIDs: state.unreadConversationIDs.filter((unread) => !read.has(unread)) }
       })
     },
 
@@ -650,7 +716,11 @@ export const useChatStore = create<ChatDesktopState>()(
       set((state) => ({
         conversations: state.conversations.map((conversation) =>
           touched.has(conversation.id)
-            ? { ...conversation, lastMessageAt: message.createdAt }
+            ? {
+                ...conversation,
+                lastMessageAt: message.createdAt,
+                ...(message.mine || conversation.kind !== 'dm' ? {} : { lastIncomingId: message.id })
+              }
             : conversation
         )
       }))
@@ -660,6 +730,8 @@ export const useChatStore = create<ChatDesktopState>()(
       if (message.mine) return
       if (selectedId && touched.has(selectedId)) {
         void pear.chat.markRead(message.id).catch(() => undefined)
+        const latest = get().conversations
+        saveReadMarkers(readState(latest, loadReadMarkers(), openConversationIds(latest, selectedId)).markers)
       } else {
         const unread = keys.length > 0 ? keys : [conversationId]
         set((state) => ({

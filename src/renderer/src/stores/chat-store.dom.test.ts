@@ -31,7 +31,7 @@ vi.mock('@/lib/ipc', () => ({
   pear: { chat: chatMocks, aiHist: { transcript: transcriptMock } }
 }))
 
-function dm(id: string, name: string, minutesAgo: number | null, unreadCount = 0): RelayChatConversation {
+function dm(id: string, name: string, minutesAgo: number | null, lastIncomingId?: string): RelayChatConversation {
   return {
     kind: 'dm',
     id: `conversation:${id}`,
@@ -40,7 +40,7 @@ function dm(id: string, name: string, minutesAgo: number | null, unreadCount = 0
     ...(minutesAgo !== null
       ? { lastMessageAt: new Date(Date.now() - minutesAgo * 60_000).toISOString() }
       : {}),
-    unreadCount
+    ...(lastIncomingId ? { lastIncomingId } : {})
   }
 }
 
@@ -59,6 +59,7 @@ function message(id: string, from: string, text: string, mine: boolean): RelayCh
 
 beforeEach(() => {
   vi.useRealTimers()
+  localStorage.clear()
   useChatStore.getState().reset()
   vi.clearAllMocks()
   chatMocks.onInvalidated.mockImplementation(() => () => undefined)
@@ -69,6 +70,7 @@ beforeEach(() => {
 })
 
 afterEach(() => {
+  localStorage.clear()
   useChatStore.getState().reset()
   vi.useRealTimers()
   vi.clearAllMocks()
@@ -133,22 +135,72 @@ describe('chat-store helpers', () => {
 })
 
 describe('chat-store sync', () => {
-  it('refresh fills conversations and unread ids from the server', async () => {
+  it('treats every existing conversation as read on first launch', async () => {
     chatMocks.listConversations.mockResolvedValue([
-      dm('thread-1', 'alice@macbook', 2, 1),
-      dm('thread-2', 'bob@linuxbox', 60, 0)
+      dm('thread-1', 'alice@macbook', 2, 'm1'),
+      dm('thread-2', 'bob@linuxbox', 60, 'm2')
     ])
     await act(async () => {
       await useChatStore.getState().refreshConversations()
     })
     const state = useChatStore.getState()
     expect(state.conversations).toHaveLength(2)
-    expect(state.unreadConversationIDs).toEqual(['conversation:thread-1'])
+    expect(state.unreadConversationIDs).toEqual([])
     expect(state.conversationsError).toBeNull()
   })
 
+  it('marks a conversation unread only when a newer incoming message arrives', async () => {
+    chatMocks.listConversations.mockResolvedValue([dm('thread-1', 'alice@macbook', 2, 'm1'), dm('thread-2', 'bob@linuxbox', 60, 'm2')])
+    await act(async () => {
+      await useChatStore.getState().refreshConversations()
+    })
+    chatMocks.listConversations.mockResolvedValue([dm('thread-1', 'alice@macbook', 1, 'm3'), dm('thread-2', 'bob@linuxbox', 60, 'm2')])
+    await act(async () => {
+      await useChatStore.getState().refreshConversations()
+      await useChatStore.getState().refreshConversations()
+    })
+    expect(useChatStore.getState().unreadConversationIDs).toEqual(['conversation:thread-1'])
+  })
+
+  it('ignores old conversations missing from saved read state, but flags new ones', async () => {
+    localStorage.setItem('pear.chat.read', JSON.stringify({ since: new Date(Date.now() - 5 * 60_000).toISOString(), seen: {} }))
+    chatMocks.listConversations.mockResolvedValue([dm('old', 'alice@macbook', 60, 'm1'), dm('new', 'bob@linuxbox', 1, 'm2')])
+    await act(async () => {
+      await useChatStore.getState().refreshConversations()
+    })
+    expect(useChatStore.getState().unreadConversationIDs).toEqual(['conversation:new'])
+  })
+
+  it('re-baselines saved read state from an older format instead of flagging everything', async () => {
+    localStorage.setItem('pear.chat.read', '{}')
+    chatMocks.listConversations.mockResolvedValue([dm('thread-1', 'alice@macbook', 1, 'm1')])
+    await act(async () => {
+      await useChatStore.getState().refreshConversations()
+    })
+    expect(useChatStore.getState().unreadConversationIDs).toEqual([])
+  })
+
+  it('keeps an opened conversation read across later refreshes', async () => {
+    chatMocks.listConversations.mockResolvedValue([dm('thread-1', 'alice@macbook', 2, 'm1')])
+    await act(async () => {
+      await useChatStore.getState().refreshConversations()
+    })
+    chatMocks.listConversations.mockResolvedValue([dm('thread-1', 'alice@macbook', 1, 'm2')])
+    await act(async () => {
+      await useChatStore.getState().refreshConversations()
+    })
+    expect(useChatStore.getState().unreadConversationIDs).toEqual(['conversation:thread-1'])
+    await act(async () => {
+      await useChatStore.getState().selectConversation('conversation:thread-1')
+      await useChatStore.getState().selectConversation(null)
+      await useChatStore.getState().refreshConversations()
+    })
+    expect(useChatStore.getState().unreadConversationIDs).toEqual([])
+  })
+
   it('select loads history with delivery, marks read, clears unread', async () => {
-    chatMocks.listConversations.mockResolvedValue([dm('thread-1', 'alice@macbook', 2, 1)])
+    localStorage.setItem('pear.chat.read', JSON.stringify({ since: new Date(Date.now() - 10 * 60_000).toISOString(), seen: {} }))
+    chatMocks.listConversations.mockResolvedValue([dm('thread-1', 'alice@macbook', 2, 'm1')])
     chatMocks.getHistory.mockResolvedValue([message('m1', 'alice@macbook', 'hi', false)])
     await act(async () => {
       await useChatStore.getState().refreshConversations()

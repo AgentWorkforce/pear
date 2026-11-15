@@ -74,8 +74,10 @@ export function briefText(body: unknown): string | null {
   const brief = body && typeof body === 'object' ? (body as { brief?: unknown }).brief : null
   if (!brief || typeof brief !== 'object') return null
   const { description, title } = brief as { description?: unknown; title?: unknown }
+  const titleText = typeof title === 'string' ? title.trim() : ''
+  // A title without a space is the generated session slug (`infra-7d`), not a summary.
   const text = typeof description === 'string' && description.trim()
     ? description.trim()
-    : typeof title === 'string' ? title.trim() : ''
+    : /\s/.test(titleText) ? titleText : ''
   return text ? text.slice(0, 320) : null
 }

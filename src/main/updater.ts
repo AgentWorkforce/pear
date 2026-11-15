@@ -5,7 +5,9 @@ import type { UpdaterState } from '../shared/types/ipc'
 const { autoUpdater } = electronUpdater
 
 // Re-check for updates this often while the app stays open.
-const UPDATE_POLL_INTERVAL_MS = 6 * 60 * 60 * 1000
+const UPDATE_POLL_INTERVAL_MS = 60 * 60 * 1000
+// Coming back to the app re-checks too, at most this often.
+const FOCUS_CHECK_GAP_MS = 15 * 60 * 1000
 
 let initialized = false
 
@@ -17,6 +19,24 @@ let currentState: UpdaterState | null = null
 // Guards overlapping downloadUpdate() calls (e.g. a double-clicked CTA).
 let downloading = false
 
+// Startup, the hourly poll, and window focus can all ask at once; they share one check.
+let checkInFlight: Promise<void> | null = null
+let lastCheckAt = 0
+
+/**
+ * Whether a background check is worth running: not once an update is already
+ * downloaded and waiting for a restart, and not again within `minGapMs`.
+ */
+export function shouldCheckForUpdates(
+  state: UpdaterState | null,
+  lastCheckMs: number,
+  nowMs: number,
+  minGapMs: number
+): boolean {
+  if (state?.kind === 'downloaded' || state?.kind === 'downloading') return false
+  return nowMs - lastCheckMs >= minGapMs
+}
+
 function broadcast(channel: string, payload?: unknown): void {
   for (const win of BrowserWindow.getAllWindows()) {
     win.webContents.send(channel, payload)
@@ -25,17 +45,15 @@ function broadcast(channel: string, payload?: unknown): void {
 
 /**
  * Wire up GitHub-Releases auto-update. No-ops outside a packaged build (dev runs
- * have no update feed and electron-updater would throw). An available update is
- * surfaced to the renderer as an in-app CTA; the download starts on demand
- * (autoDownload = false) and the user is prompted to restart once it's ready.
+ * have no update feed and electron-updater would throw). A new version
+ * downloads in the background and installs when Pear quits; the banner offers
+ * an immediate restart once it's ready.
  */
 export function initAutoUpdater(): void {
   if (initialized || !app.isPackaged) return
   initialized = true
 
-  // Don't download until the user clicks "Update now" in the in-app banner. A
-  // downloaded-but-not-installed update still applies on the next quit.
-  autoUpdater.autoDownload = false
+  autoUpdater.autoDownload = true
   autoUpdater.autoInstallOnAppQuit = true
 
   autoUpdater.on('update-available', (info) => {
@@ -65,16 +83,24 @@ export function initAutoUpdater(): void {
   })
 
   void checkForUpdates()
-  setInterval(() => void checkForUpdates(), UPDATE_POLL_INTERVAL_MS)
+  setInterval(() => void checkForUpdates(UPDATE_POLL_INTERVAL_MS / 2), UPDATE_POLL_INTERVAL_MS)
+  app.on('browser-window-focus', () => void checkForUpdates(FOCUS_CHECK_GAP_MS))
 }
 
-export async function checkForUpdates(): Promise<void> {
-  if (!app.isPackaged) return
-  try {
-    await autoUpdater.checkForUpdates()
-  } catch (error) {
-    console.warn('[updater] Check failed:', error instanceof Error ? error.message : String(error))
-  }
+export function checkForUpdates(minGapMs = 0): Promise<void> {
+  if (!app.isPackaged) return Promise.resolve()
+  if (checkInFlight) return checkInFlight
+  if (!shouldCheckForUpdates(currentState, lastCheckAt, Date.now(), minGapMs)) return Promise.resolve()
+  lastCheckAt = Date.now()
+  checkInFlight = autoUpdater.checkForUpdates()
+    .then(() => undefined)
+    .catch((error: unknown) => {
+      console.warn('[updater] Check failed:', error instanceof Error ? error.message : String(error))
+    })
+    .finally(() => {
+      checkInFlight = null
+    })
+  return checkInFlight
 }
 
 /**

@@ -27,8 +27,7 @@ const CONVERSATION: RelayChatConversation = {
   id: 'conversation:thread-1',
   name: 'alice@macbook',
   participants: ['alice@macbook'],
-  lastMessageAt: new Date().toISOString(),
-  unreadCount: 0
+  lastMessageAt: new Date().toISOString()
 }
 
 function seed(): void {

@@ -45,6 +45,7 @@ describe('briefText', () => {
     expect(briefText({ status: 'ready', brief: { title: 'T', description: 'What it is doing' } })).toBe('What it is doing')
     expect(briefText({ status: 'ready', brief: { title: 'Only a title', description: '' } })).toBe('Only a title')
     expect(briefText({ status: 'pending', brief: null })).toBeNull()
+    expect(briefText({ status: 'ready', brief: { title: 'infra-7d', description: '' } })).toBeNull()
     expect(briefText(null)).toBeNull()
   })
 })

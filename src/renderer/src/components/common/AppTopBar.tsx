@@ -14,6 +14,7 @@ import {
   X
 } from 'lucide-react'
 import { AccountMenu } from '@/components/sidebar/ProjectSidebar'
+import { ChatTitle } from '@/components/chat-desktop/ChatTitle'
 import { useProjectStore } from '@/stores/project-store'
 import { useUIStore, type AppTab } from '@/stores/ui-store'
 
@@ -88,6 +89,7 @@ export function AppTopBar(): React.ReactNode {
   const canGoBack = historyIndex > 0
   const canGoForward = historyIndex < history.length - 1
   const visibleTabs = tabs.filter((tab) => tab.kind !== 'agents')
+  const chatOpen = tabs.find((tab) => tab.id === activeTabId)?.kind === 'agents'
   const projectNameById = useMemo(
     () => new Map(projects.map((project) => [project.id, project.name])),
     [projects]
@@ -173,6 +175,7 @@ export function AppTopBar(): React.ReactNode {
       </div>
 
       <div className="ml-4 flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+        {chatOpen && <ChatTitle />}
         {visibleTabs.map((tab) => {
           const active = tab.id === activeTabId
           const canClose = visibleTabs.length > 1

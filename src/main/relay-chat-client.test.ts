@@ -234,7 +234,6 @@ describe('relay chat client models', () => {
         conversationId: 'dm_1',
         participants: ['pear-chat-mini', 'kjgrok'],
         lastMessageAt: '2026-11-14T04:40:00Z',
-        unreadCount: 1,
         lastMessage: {
           id: 'm9',
           conversationId: 'dm_1',
@@ -263,6 +262,22 @@ describe('relay chat client models', () => {
     expect(conversations).toEqual([
       { kind: 'dm', id: 'conversation:dm_1', name: 'claude-infra-infra-7d', participants: ['claude-infra-infra-7d'] }
     ])
+  })
+
+  it('reports the newest incoming message for read state, not the server message count', async () => {
+    const participants = [{ agent_id: 'a1', agent_name: 'khaliq-gant' }, { agent_id: 'a2', agent_name: 'worker' }]
+    const { fetchImpl } = makeFetch((call) => jsonResponse(okEnvelope(call.url.includes('/dm/conversations')
+      ? [
+        { id: 'dm_in', participants, unread_count: 12, last_message: { id: 'm5', text: 'done', agent_id: 'a2', created_at: '2026-11-14T04:40:00Z' } },
+        { id: 'dm_out', participants, unread_count: 3, last_message: { id: 'm6', text: 'thanks', agent_id: 'a1', created_at: '2026-11-14T04:41:00Z' } }
+      ]
+      : [])))
+    const conversations = await clientWith(fetchImpl, { selfName: 'khaliq-gant' }).listConversations()
+    expect(conversations.map((c) => [c.id, c.lastIncomingId])).toEqual([
+      ['conversation:dm_in', 'm5'],
+      ['conversation:dm_out', undefined]
+    ])
+    expect(conversations.some((c) => 'unreadCount' in c)).toBe(false)
   })
 
   it('re-issues the agent token once on 401 and retries', async () => {

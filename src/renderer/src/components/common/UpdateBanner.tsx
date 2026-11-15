@@ -1,12 +1,11 @@
 import type React from 'react'
-import { useRef, useState } from 'react'
 import { AlertTriangle, Download, RefreshCw, X } from 'lucide-react'
 import { pear } from '@/lib/ipc'
 import { useUpdateStore } from '@/stores/update-store'
 
 /**
- * Slim full-width banner shown under the top bar when an update is available,
- * downloading, ready, or errored. Drives the click-to-download → restart flow.
+ * Slim full-width banner shown under the top bar while an update downloads in
+ * the background, once it's ready (it also installs on quit), or on error.
  */
 export function UpdateBanner(): React.ReactNode {
   const status = useUpdateStore((s) => s.status)
@@ -15,24 +14,8 @@ export function UpdateBanner(): React.ReactNode {
   const error = useUpdateStore((s) => s.error)
   const dismissed = useUpdateStore((s) => s.dismissed)
   const dismiss = useUpdateStore((s) => s.dismiss)
-  const [starting, setStarting] = useState(false)
-  // Synchronous guard: `starting` is applied async, so two fast clicks would
-  // otherwise both fire `update:download` before the button disables.
-  const startingRef = useRef(false)
 
   if (dismissed || status === 'idle') return null
-
-  const startDownload = async (): Promise<void> => {
-    if (startingRef.current) return
-    startingRef.current = true
-    setStarting(true)
-    try {
-      await pear.update.download()
-    } finally {
-      startingRef.current = false
-      setStarting(false)
-    }
-  }
 
   const isError = status === 'error'
   const accent = isError
@@ -54,13 +37,13 @@ export function UpdateBanner(): React.ReactNode {
       <div className="min-w-0 flex-1">
         {status === 'available' && (
           <span>
-            Pear <span className="font-medium">{version}</span> is available.
+            Downloading Pear <span className="font-medium">{version}</span>…
           </span>
         )}
         {status === 'downloading' && <span>Downloading update… {Math.round(percent)}%</span>}
         {status === 'downloaded' && (
           <span>
-            Pear <span className="font-medium">{version}</span> is ready to install.
+            Pear <span className="font-medium">{version}</span> is ready. It installs when you quit, or restart now.
           </span>
         )}
         {status === 'error' && <span>Update failed: {error}</span>}
@@ -75,16 +58,6 @@ export function UpdateBanner(): React.ReactNode {
         )}
       </div>
 
-      {status === 'available' && (
-        <button
-          type="button"
-          onClick={() => void startDownload()}
-          disabled={starting}
-          className="shrink-0 rounded-full bg-[var(--pear-accent)] px-3 py-1 text-[12px] font-medium text-[var(--pear-bg)] transition-opacity hover:opacity-90 disabled:opacity-60"
-        >
-          {starting ? 'Starting…' : 'Update now'}
-        </button>
-      )}
       {status === 'downloaded' && (
         <button
           type="button"

@@ -30,16 +30,14 @@ function seed(): void {
       id: 'conversation:thread-1',
       name: 'alice@macbook',
       participants: ['alice@macbook'],
-      lastMessageAt: new Date(now - 2 * 60_000).toISOString(),
-      unreadCount: 1
+      lastMessageAt: new Date(now - 2 * 60_000).toISOString()
     },
     {
       kind: 'dm',
       id: 'conversation:thread-2',
       name: 'bob@linuxbox',
       participants: ['bob@linuxbox'],
-      lastMessageAt: new Date(now - 60 * 60_000).toISOString(),
-      unreadCount: 0
+      lastMessageAt: new Date(now - 60 * 60_000).toISOString()
     },
     { kind: 'channel', id: 'channel:general', name: '#general', isMember: true }
   ]
@@ -52,7 +50,7 @@ function seed(): void {
     historyLoading: {},
     historyError: {},
     pending: {},
-    unreadConversationIDs: [],
+    unreadConversationIDs: ['conversation:thread-1'],
     delivery: {},
     pinnedConversationIDs: [],
     hiddenConversationIDs: [],
@@ -254,8 +252,8 @@ describe('ConversationList', () => {
         { kind: 'agent', id: 'relay:zed', name: 'zed', participants: ['zed'] },
         { kind: 'dm', id: 'conversation:dm_a', name: 'alpha', participants: ['alpha'], lastMessageAt: at(1) },
         { kind: 'dm', id: 'conversation:dm_b', name: 'bravo', participants: ['bravo'], lastMessageAt: at(2) },
-        // The unread count lives on the agent's DM thread, which the list folds into the agent row.
-        { kind: 'dm', id: 'conversation:dm_z', name: 'zed', participants: ['zed'], lastMessageAt: at(60), unreadCount: 2 }
+        // Unread state lives on the agent's DM thread, which the list folds into the agent row.
+        { kind: 'dm', id: 'conversation:dm_z', name: 'zed', participants: ['zed'], lastMessageAt: at(60), lastIncomingId: 'm9' }
       ],
       pinnedConversationIDs: ['relay:bravo'],
       unreadConversationIDs: ['conversation:dm_z']

@@ -72,7 +72,6 @@ export interface RelayDMThread {
   conversationId: string
   participants: string[]
   lastMessageAt?: string
-  unreadCount?: number
   /** The thread's newest message, as the list reports it. */
   lastMessage?: RelayChatMessage
 }
@@ -529,8 +528,6 @@ export class RelayChatClient {
       const lastMessage = asRecord(record?.last_message ?? record?.lastMessage)
       const lastMessageAt = asString(lastMessage?.created_at ?? lastMessage?.createdAt) ??
         asString(record?.last_message_at ?? record?.lastMessageAt)
-      const unreadRaw = record?.unread_count ?? record?.unreadCount
-      const unreadCount = typeof unreadRaw === 'number' ? unreadRaw : undefined
       // `participants` is `[{ agent_id, agent_name }]`; older payloads sent `participant_names`.
       const namesById = new Map<string, string>()
       const participants = Array.isArray(record?.participants)
@@ -548,7 +545,6 @@ export class RelayChatClient {
         participants
       }
       if (lastMessageAt) thread.lastMessageAt = lastMessageAt
-      if (unreadCount !== undefined) thread.unreadCount = unreadCount
       const lastId = asString(lastMessage?.id)
       if (lastMessage && lastId) {
         const senderId = asString(lastMessage.agent_id ?? lastMessage.agentId)
@@ -604,7 +600,7 @@ export class RelayChatClient {
           name: participants.length > 0 ? participants.join(', ') : thread.conversationId,
           participants,
           ...(thread.lastMessageAt ? { lastMessageAt: thread.lastMessageAt } : {}),
-          ...(thread.unreadCount !== undefined ? { unreadCount: thread.unreadCount } : {})
+          ...(thread.lastMessage && !thread.lastMessage.mine ? { lastIncomingId: thread.lastMessage.id } : {})
         }
       }),
       ...channels.map((channel): RelayChatConversation => ({
