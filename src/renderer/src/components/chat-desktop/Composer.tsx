@@ -141,8 +141,8 @@ export function Composer({ conversationId }: { conversationId: string }): React.
           }}
           placeholder={uploading ? 'Uploading…' : 'Message this thread…'}
           aria-label="Message"
-          rows={1}
-          className="max-h-32 min-h-9 flex-1 resize-y rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3 py-2 text-sm text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent-dim)]"
+          rows={3}
+          className="max-h-72 min-h-[84px] flex-1 resize-y rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3.5 py-2.5 text-[15px] leading-relaxed text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent-dim)]"
         />
         <button
           type="button"

@@ -115,7 +115,7 @@ function createWindow(): void {
     title: APP_NAME,
     icon: getAppIcon(),
     titleBarStyle: 'hiddenInset',
-    trafficLightPosition: { x: 16, y: 10 },
+    trafficLightPosition: { x: 16, y: 16 },
     backgroundColor: '#08111a',
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),

@@ -321,7 +321,7 @@ export function ConversationList(): React.ReactNode {
               onKeyDown={(event) => {
                 if (event.key === 'Enter' || event.key === ' ') openConversation(conversation.id)
               }}
-              className={`group flex cursor-pointer items-start gap-2.5 rounded-lg px-2.5 py-2.5 ${
+              className={`group relative flex cursor-pointer items-start gap-2.5 rounded-lg px-2.5 py-2.5 ${
                 active ? 'bg-[var(--pear-bg-overlay)]' : 'hover:bg-[var(--pear-bg)]/60'
               }`}
             >
@@ -362,7 +362,7 @@ export function ConversationList(): React.ReactNode {
                   </span>
                 )}
               </span>
-              <span className="hidden shrink-0 items-center gap-0.5 group-hover:flex">
+              <span className="absolute right-1.5 top-1.5 hidden items-center gap-0.5 rounded-md bg-[var(--pear-bg-raised)] shadow-sm group-focus-within:flex group-hover:flex">
                 <button
                   type="button"
                   title={isPinned ? 'Unpin' : 'Pin'}

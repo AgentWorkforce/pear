@@ -3,7 +3,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { CircleX, FileDiff, Flame, GitMerge } from 'lucide-react'
 import { formatGitDiffLineCount, formatTokenCount, formatUsd } from '@/lib/format'
 import { useBurnFingerprintRefresh } from '@/components/burn/useBurnFingerprintRefresh'
-import { useAgentStore } from '@/stores/agent-store'
+import { useChatStore } from '@/stores/chat-store'
 import { useGitStore } from '@/stores/git-store'
 import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
@@ -34,9 +34,15 @@ function pullRequestStatusTitle(pullRequest: GitPullRequest): string {
   return `${pullRequest.owner}/${pullRequest.repo} ${pullRequest.branch} (${state})${pullRequest.title ? `: ${pullRequest.title}` : ''}`
 }
 
+/** Relay messaging, as the chat list last reached it: the connection Pear actually uses. */
+export function relayConnection(error: string | null, lastRefreshAt: string | null): 'connected' | 'connecting' | 'offline' {
+  if (error) return 'offline'
+  return lastRefreshAt ? 'connected' : 'connecting'
+}
+
 export function StatusBar(): React.ReactNode {
-  const brokerStatus = useAgentStore((s) => s.brokerStatus)
-  const brokerErrors = useAgentStore((s) => s.brokerErrors)
+  const relayError = useChatStore((s) => s.conversationsError)
+  const relayStatus = useChatStore((s) => relayConnection(s.conversationsError, s.lastRefreshAt))
   const project = useProjectStore((s) => s.getActiveProject())
   const projectChangedFiles = useGitStore((s) => s.projectFiles)
   const projectSummary = useGitStore((s) => s.projectSummary)
@@ -106,9 +112,9 @@ export function StatusBar(): React.ReactNode {
   }, [projectRootPathKey])
 
   const statusColor =
-    brokerStatus === 'connected'
+    relayStatus === 'connected'
       ? 'bg-[var(--pear-accent)]'
-      : brokerStatus === 'error'
+      : relayStatus === 'offline'
         ? 'bg-[var(--pear-red)]'
         : 'bg-[var(--pear-text-faint)]'
   const pullRequestMergeIconColor = pullRequests.some(pullRequestHasBlockingStatus)
@@ -117,29 +123,17 @@ export function StatusBar(): React.ReactNode {
 
   return (
     <div className="relative flex h-[38px] shrink-0 items-center gap-6 border-t border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-6 text-xs text-[var(--pear-text-dim)]">
-      <button
-        type="button"
-        title="Open Agent Relay Status"
-        aria-label={`Agent Relay status ${brokerStatus}. Open Agent Relay Status.`}
-        onClick={() => openTab({
-          kind: 'broker-details',
-          projectId: project?.id,
-          title: project ? `${project.name} Relay` : undefined
-        })}
-        className={`flex items-center gap-2 rounded-full px-2.5 py-1 transition-colors ${
-          brokerStatus === 'error'
-            ? 'border border-[var(--pear-red)]/25 bg-[var(--pear-red)]/10 text-[var(--pear-text)] hover:bg-[var(--pear-red)]/15'
-            : 'hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text)]'
+      <span
+        role="status"
+        title={relayError ? `Can't reach Agent Relay: ${relayError}` : 'Agent Relay messaging'}
+        aria-label={`Agent Relay ${relayStatus}`}
+        className={`flex items-center gap-2 rounded-full px-2.5 py-1 ${
+          relayStatus === 'offline' ? 'border border-[var(--pear-red)]/25 bg-[var(--pear-red)]/10 text-[var(--pear-text)]' : ''
         }`}
       >
         <div className={`h-2 w-2 rounded-full ${statusColor}`} />
-        <span>{brokerStatus}</span>
-        {brokerErrors.length > 0 && (
-          <span className="rounded-full bg-[var(--pear-red)]/15 px-1.5 py-0.5 text-[10px] text-[var(--pear-red)]">
-            {brokerErrors.length}
-          </span>
-        )}
-      </button>
+        <span>{relayStatus === 'connected' ? 'connected to relay' : relayStatus === 'offline' ? 'relay unreachable' : 'connecting…'}</span>
+      </span>
 
       <div className="flex-1" />
 

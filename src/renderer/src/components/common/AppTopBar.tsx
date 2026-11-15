@@ -95,7 +95,7 @@ export function AppTopBar(): React.ReactNode {
     [projects]
   )
   return (
-    <div className="titlebar-drag relative z-40 flex h-11 shrink-0 items-center border-b border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] pl-[138px] pr-3 text-[var(--pear-text)]">
+    <div className="titlebar-drag relative z-40 flex h-14 shrink-0 items-center border-b border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] pl-[138px] pr-3 text-[var(--pear-text)]">
       <div className="flex items-center gap-2">
         <div className="relative">
           <button
