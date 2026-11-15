@@ -35,7 +35,7 @@ import {
   readSessionTranscript,
   type SessionTurn
 } from './session-transcript'
-import { listedRosterAgents, wireMetadata } from './agent-roster'
+import { agentPlacement, listedRosterAgents, wireMetadata } from './agent-roster'
 import { burnManager, type BurnAgentInput, type BurnProjectInput, type BurnSessionBreakdownInput, type BurnFingerprintInput } from './burn'
 import { resetRelayWorkspaceManager } from './relay-workspace'
 import { isDirectory } from './path-utils'
@@ -46,7 +46,7 @@ import { RelayChatClient, RelayChatPoller, RELAY_CHAT_POLL_INTERVAL_MS, toConver
 import { RelayChatLive } from './relay-chat-live'
 import { SessionBriefCache, briefText } from './session-briefs'
 import { DmInboxWatcher } from './dm-inbox-watcher'
-import { RelaySpawner } from './relay-spawn'
+import { RelaySpawner, nodeNamesById } from './relay-spawn'
 import { normalizeRelaycastBaseUrl } from './relay-service-urls'
 import type {
   BrokerReconcileMessagesInput,
@@ -195,6 +195,27 @@ function agentNameKey(name: string): string {
   return name.trim().toLowerCase().replace(/^relay:/, '')
 }
 
+const NODE_NAMES_TTL_MS = 5 * 60_000
+let nodeNames: Map<string, string> = new Map()
+let nodeNamesAt = 0
+let nodeNamesLoad: Promise<void> | null = null
+
+/** Relay node names by id, refreshed at most every few minutes; stale or empty on failure. */
+async function relayNodeNames(): Promise<ReadonlyMap<string, string>> {
+  if (Date.now() - nodeNamesAt < NODE_NAMES_TTL_MS) return nodeNames
+  nodeNamesLoad ??= (async () => {
+    const client = await getChatClient()
+    nodeNames = nodeNamesById(await client.request<unknown>('/nodes', { auth: 'agent' }))
+    nodeNamesAt = Date.now()
+  })().catch((error: unknown) => {
+    console.warn('[chat] could not load relay machine names:', toErrorMessage(error))
+  }).finally(() => {
+    nodeNamesLoad = null
+  })
+  await nodeNamesLoad
+  return nodeNames
+}
+
 function rosterAgentConversations(agents: Array<{
   name?: string
   type?: string
@@ -202,7 +223,7 @@ function rosterAgentConversations(agents: Array<{
   lastSeen?: string
   persona?: string | null
   metadata?: Record<string, unknown>
-}>): RelayChatConversation[] {
+}>, machineNames: ReadonlyMap<string, string> = new Map()): RelayChatConversation[] {
   const rows: RelayChatConversation[] = []
   for (const agent of agents) {
     const name = agent.name?.trim()
@@ -213,6 +234,7 @@ function rosterAgentConversations(agents: Array<{
     if (objective) agentsWithObjective.add(`relay:${name}`)
     else agentsWithObjective.delete(`relay:${name}`)
     const summary = agentSummary(agent.metadata)
+    const placement = agentPlacement(name, agent.metadata, machineNames)
     rows.push({
       kind: 'agent',
       id: `relay:${name}`,
@@ -223,7 +245,8 @@ function rosterAgentConversations(agents: Array<{
       ...(sessionId ? { sessionId } : {}),
       ...(cli ? { cli } : {}),
       ...(summary ? { summary } : {}),
-      ...(agent.type?.toLowerCase() === 'human' ? { human: true } : {})
+      ...(agent.type?.toLowerCase() === 'human' ? { human: true } : {}),
+      ...placement
     })
   }
   return rows
@@ -1156,10 +1179,10 @@ export function registerIpcHandlers(): void {
     let threadsMs = 0
     const rosterLoad = (async () => {
       const relay = await getRelayCast()
-      const agents = (await relay.agents.list({ status: 'all' }))
-        .map((agent) => ({ ...agent, metadata: wireMetadata(agent.metadata) }))
+      const [roster, machineNames] = await Promise.all([relay.agents.list({ status: 'all' }), relayNodeNames()])
+      const agents = roster.map((agent) => ({ ...agent, metadata: wireMetadata(agent.metadata) }))
       const listed = listedRosterAgents(agents, chatAgentName ?? chatAgentIdentityName())
-      const rows = await withPromptSummaries(rosterAgentConversations(listed))
+      const rows = await withPromptSummaries(rosterAgentConversations(listed, machineNames))
       rosterMs = Date.now() - started
       return rows
     })()

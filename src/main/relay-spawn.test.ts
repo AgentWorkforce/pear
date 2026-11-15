@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   RelaySpawner,
   nodeHasLiveAgent,
+  nodeNamesById,
   parseSpawnNodes,
   spawnFailureMessage,
   spawnInputProblem,
@@ -36,6 +37,13 @@ describe('parseSpawnNodes', () => {
   it('accepts a wrapped list and ignores junk', () => {
     expect(parseSpawnNodes({ nodes: [node('a', ['spawn:claude']), null, 'x'] })).toEqual([{ name: 'a', harnesses: ['claude'] }])
     expect(parseSpawnNodes(null)).toEqual([])
+  })
+})
+
+describe('nodeNamesById', () => {
+  it('maps node ids to names, for any node status', () => {
+    expect([...nodeNamesById([{ id: 'n1', name: 'studio', status: 'offline' }, { node_id: 'n2', name: 'box' }, { id: 'n3' }])])
+      .toEqual([['n1', 'studio'], ['n2', 'box']])
   })
 })
 

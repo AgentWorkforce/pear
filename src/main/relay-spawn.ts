@@ -55,6 +55,17 @@ export function parseSpawnNodes(raw: unknown): RelaySpawnNode[] {
   })
 }
 
+/** Node id → name, for agents that only report the node they run on. */
+export function nodeNamesById(raw: unknown): Map<string, string> {
+  const names = new Map<string, string>()
+  for (const node of records(raw)) {
+    const id = text(node.id) || text(node.node_id)
+    const name = text(node.name)
+    if (id && name) names.set(id, name)
+  }
+  return names
+}
+
 /** Whether `node` reports `name` among its live agents. */
 export function nodeHasLiveAgent(raw: unknown, node: string, name: string): boolean {
   return records(raw).some((entry) =>

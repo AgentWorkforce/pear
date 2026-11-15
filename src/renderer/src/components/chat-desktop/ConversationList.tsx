@@ -1,21 +1,36 @@
 import { useMemo, useState } from 'react'
 import { Hash, Loader2, Pin, PinOff, Plus, Eye, EyeOff, Search } from 'lucide-react'
 import {
+  NO_CHAT_FILTERS,
   agentThreadIds,
-  conversationMatchesAgents,
+  chatFilterOptions,
+  conversationUnread,
   findDmThread,
   isConversationReachable,
-  parseChatHost,
-  selectChatHosts,
-  useChatStore
+  matchesChatFilters,
+  useChatStore,
+  type ChatFilters
 } from '@/stores/chat-store'
-import { useAgentStore } from '@/stores/agent-store'
-import { useProjectStore } from '@/stores/project-store'
 import { useUIStore } from '@/stores/ui-store'
 import { AgentAvatar } from '@/components/common/AgentAvatar'
 import type { RelayChatConversation } from '@/lib/ipc'
 
 type ConversationTab = 'messages' | 'channels'
+
+const FILTERS_KEY = 'pear.chat.filters'
+
+function storedFilters(): ChatFilters {
+  try {
+    const raw = JSON.parse(localStorage.getItem(FILTERS_KEY) || '{}') as Partial<ChatFilters>
+    return {
+      project: typeof raw.project === 'string' ? raw.project : '',
+      cli: typeof raw.cli === 'string' ? raw.cli : '',
+      machine: typeof raw.machine === 'string' ? raw.machine : ''
+    }
+  } catch {
+    return NO_CHAT_FILTERS
+  }
+}
 
 function tabFor(conversation: RelayChatConversation): ConversationTab {
   return conversation.kind === 'channel' ? 'channels' : 'messages'
@@ -45,22 +60,32 @@ function storedSort(): ConversationSort {
  * on top, then the rest by when the agent was last seen; an agent row's own
  * `lastMessageAt` is its presence heartbeat, so it can't rank messages.
  */
+/**
+ * Pinned first, then anything unread, then by the chosen order. `all` is the
+ * unfiltered list, where an agent row finds the DM thread it shows.
+ */
 export function sortConversations(
   conversations: RelayChatConversation[],
   pinned: string[],
-  order: ConversationSort = 'recent'
+  order: ConversationSort = 'recent',
+  unreadIds: ReadonlySet<string> = new Set(),
+  all: readonly RelayChatConversation[] = conversations
 ): RelayChatConversation[] {
   const pinnedSet = new Set(pinned)
   const messagedAt = new Map(conversations.map((conversation) => [
     conversation.id,
     conversation.kind === 'agent'
-      ? findDmThread(conversations, conversation)?.lastMessageAt || ''
+      ? findDmThread(all, conversation)?.lastMessageAt || ''
       : conversation.lastMessageAt || ''
   ]))
+  const unread = new Set(conversations.filter((c) => conversationUnread(all, unreadIds, c)).map((c) => c.id))
   return [...conversations].sort((a, b) => {
     const aPinned = pinnedSet.has(a.id)
     const bPinned = pinnedSet.has(b.id)
     if (aPinned !== bPinned) return aPinned ? -1 : 1
+    const aUnread = unread.has(a.id)
+    const bUnread = unread.has(b.id)
+    if (aUnread !== bUnread) return aUnread ? -1 : 1
     const byName = a.name.localeCompare(b.name, undefined, { sensitivity: 'base', numeric: true })
     if (order === 'name') return byName
     const aMessaged = messagedAt.get(a.id) || ''
@@ -88,28 +113,26 @@ export function ConversationList(): React.ReactNode {
   const togglePin = useChatStore((s) => s.togglePin)
   const toggleHide = useChatStore((s) => s.toggleHide)
   const setShowHidden = useChatStore((s) => s.setShowHidden)
-  const directoryId = useUIStore((s) => s.chatDirectoryId)
-  const setChatDirectoryId = useUIStore((s) => s.setChatDirectoryId)
   const openDialog = useUIStore((s) => s.openDialog)
-  const agents = useAgentStore((s) => s.agents)
-  const projects = useProjectStore((s) => s.projects)
-  const directory = projects.find((project) => project.id === directoryId)
 
   const [tab, setTab] = useState<ConversationTab>('messages')
   const [search, setSearch] = useState('')
-  const [machine, setMachine] = useState<string>('all')
+  const [filters, setFiltersState] = useState<ChatFilters>(storedFilters)
+  const setFilter = (key: keyof ChatFilters, value: string): void => {
+    const next = { ...filters, [key]: value }
+    setFiltersState(next)
+    try {
+      localStorage.setItem(FILTERS_KEY, JSON.stringify(next))
+    } catch {
+      // The choice still applies for this session.
+    }
+  }
 
   function openConversation(id: string): void {
     void selectConversation(id)
   }
 
-  const hosts = useMemo(() => selectChatHosts(conversations), [conversations])
-  const directoryAgentNames = useMemo(
-    () => (directoryId
-      ? agents.filter((agent) => agent.projectId === directoryId).map((agent) => agent.name)
-      : null),
-    [agents, directoryId]
-  )
+  const filterOptions = useMemo(() => chatFilterOptions(conversations), [conversations])
   const hiddenSet = useMemo(() => new Set(hidden), [hidden])
   const unreadSet = useMemo(() => new Set(unreadIDs), [unreadIDs])
   const now = Date.now()
@@ -130,20 +153,8 @@ export function ConversationList(): React.ReactNode {
     const filtered = conversations.filter((conversation) => {
       if (agentThreads.has(conversation.id)) return false
       if (tabFor(conversation) !== tab) return false
-      if (
-        directoryAgentNames &&
-        conversation.kind !== 'channel' &&
-        !conversationMatchesAgents(conversation, directoryAgentNames)
-      ) {
-        return false
-      }
+      if (!matchesChatFilters(conversation, filters)) return false
       if (!showHidden && hiddenSet.has(conversation.id)) return false
-      if (machine !== 'all') {
-        const onMachine = (conversation.participants || []).some(
-          (participant) => parseChatHost(participant) === machine
-        )
-        if (!onMachine) return false
-      }
       if (query) {
         const haystack = [conversation.name, conversation.summary || '', ...(conversation.participants || [])]
           .join(' ')
@@ -152,8 +163,14 @@ export function ConversationList(): React.ReactNode {
       }
       return true
     })
-    return sortConversations(filtered, pinned, sortOrder)
-  }, [conversations, tab, showHidden, hiddenSet, machine, search, pinned, directoryAgentNames, sortOrder])
+    return sortConversations(filtered, pinned, sortOrder, unreadSet, conversations)
+  }, [conversations, tab, showHidden, hiddenSet, filters, search, pinned, sortOrder, unreadSet])
+  const filtering = !!(filters.project || filters.cli || filters.machine)
+  const filterSelects: Array<{ key: keyof ChatFilters; label: string; all: string; options: string[] }> = [
+    { key: 'project', label: 'Filter by project', all: 'All projects', options: filterOptions.projects },
+    { key: 'cli', label: 'Filter by agent type', all: 'All types', options: filterOptions.clis },
+    { key: 'machine', label: 'Filter by machine', all: 'All machines', options: filterOptions.machines }
+  ]
 
   const hiddenCount = conversations.filter((c) => hiddenSet.has(c.id)).length
 
@@ -187,21 +204,6 @@ export function ConversationList(): React.ReactNode {
             )}
           </span>
         </div>
-        {projects.length > 0 && (
-          <select
-            value={directoryId || ''}
-            onChange={(event) => setChatDirectoryId(event.target.value || null)}
-            aria-label="Filter by directory"
-            className="mt-2 h-8 w-full rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-2 text-xs text-[var(--pear-text-secondary)] outline-none focus:border-[var(--pear-accent-dim)]"
-          >
-            <option value="">All directories</option>
-            {projects.map((project) => (
-              <option key={project.id} value={project.id}>
-                {project.name}
-              </option>
-            ))}
-          </select>
-        )}
         <div className="mt-2 flex gap-1.5">
           <div className="relative min-w-0 flex-1">
             <Search
@@ -235,20 +237,32 @@ export function ConversationList(): React.ReactNode {
             <Plus size={14} />
           </button>
         </div>
-        {hosts.length > 0 && (
-          <select
-            value={machine}
-            onChange={(event) => setMachine(event.target.value)}
-            aria-label="Filter by machine"
-            className="mt-2 h-8 w-full rounded-md border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-2 text-xs text-[var(--pear-text-secondary)] outline-none focus:border-[var(--pear-accent-dim)]"
-          >
-            <option value="all">All machines</option>
-            {hosts.map((host) => (
-              <option key={host} value={host}>
-                {host}
-              </option>
+        {tab === 'messages' && (
+          <div className="mt-2 flex gap-1.5">
+            {filterSelects.map(({ key, label, all, options }) => (
+              <select
+                key={key}
+                value={filters[key]}
+                onChange={(event) => setFilter(key, event.target.value)}
+                aria-label={label}
+                className={`h-8 min-w-0 flex-1 truncate rounded-md border bg-[var(--pear-bg)] px-1.5 text-xs outline-none focus:border-[var(--pear-accent-dim)] ${
+                  filters[key]
+                    ? 'border-[var(--pear-accent-dim)] text-[var(--pear-text)]'
+                    : 'border-[var(--pear-border-subtle)] text-[var(--pear-text-secondary)]'
+                }`}
+              >
+                <option value="">{all}</option>
+                {filters[key] && !options.includes(filters[key]) && (
+                  <option value={filters[key]}>{filters[key]}</option>
+                )}
+                {options.map((option) => (
+                  <option key={option} value={option}>
+                    {option}
+                  </option>
+                ))}
+              </select>
             ))}
-          </select>
+          </div>
         )}
       </div>
 
@@ -272,13 +286,27 @@ export function ConversationList(): React.ReactNode {
         )}
         {!loading && !error && visible.length === 0 && (
           <p className="px-2 py-6 text-center text-xs text-[var(--pear-text-faint)]">
-            {directoryId && tab === 'messages'
-              ? `No chats with agents in ${directory?.name || 'this directory'}`
-              : 'No conversations yet'}
+            {filtering && tab === 'messages' ? 'No conversations match these filters' : 'No conversations yet'}
           </p>
         )}
+        {!loading && !error && filtering && tab === 'messages' && (
+          <button
+            type="button"
+            onClick={() => {
+              setFiltersState(NO_CHAT_FILTERS)
+              try {
+                localStorage.removeItem(FILTERS_KEY)
+              } catch {
+                // Nothing stored.
+              }
+            }}
+            className="mx-auto mb-1 block text-[11px] text-[var(--pear-text-faint)] underline hover:text-[var(--pear-text-secondary)]"
+          >
+            Clear filters
+          </button>
+        )}
         {visible.map((conversation) => {
-          const unread = unreadSet.has(conversation.id) || (conversation.unreadCount || 0) > 0
+          const unread = conversationUnread(conversations, unreadSet, conversation)
           const isPinned = pinned.includes(conversation.id)
           const isHidden = hiddenSet.has(conversation.id)
           const reachable = isConversationReachable(conversation, now)

@@ -75,3 +75,23 @@ export function listedRosterAgents<T extends RosterAgent>(
     return true
   })
 }
+
+function metadataText(record: unknown, key: string): string {
+  const value = record && typeof record === 'object' ? (record as Record<string, unknown>)[key] : undefined
+  return typeof value === 'string' ? value.trim() : ''
+}
+
+/** Where an agent works and runs, from what its session publishes. */
+export function agentPlacement(
+  name: string,
+  metadata: Record<string, unknown> | undefined,
+  nodeNames: ReadonlyMap<string, string>
+): { project?: string; machine?: string } {
+  const project = metadataText(metadata?.activity, 'repo') || metadataText(metadata, 'project')
+  const nodeId = metadataText(metadata?.fleet, 'nodeId') || metadataText(metadata, 'node_id')
+  const at = name.lastIndexOf('@')
+  const machine = metadataText(metadata, 'host') ||
+    (nodeId ? nodeNames.get(nodeId) ?? '' : '') ||
+    (at > 0 ? name.slice(at + 1).trim() : '')
+  return { ...(project ? { project } : {}), ...(machine ? { machine } : {}) }
+}

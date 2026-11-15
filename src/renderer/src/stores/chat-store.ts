@@ -119,6 +119,59 @@ export function selectChatHosts(conversations: RelayChatConversation[]): string[
   return [...hosts].sort((a, b) => a.localeCompare(b))
 }
 
+export interface ChatFilters {
+  project: string
+  cli: string
+  machine: string
+}
+
+export const NO_CHAT_FILTERS: ChatFilters = { project: '', cli: '', machine: '' }
+
+/** `Mac.local`, `mac`, and `MAC` are one machine. */
+export function machineKey(name: string): string {
+  return name.trim().replace(/\.$/, '').replace(/\.local$/i, '').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '')
+}
+
+function conversationMachines(conversation: RelayChatConversation): string[] {
+  if (conversation.machine) return [conversation.machine]
+  return (conversation.participants || []).flatMap((participant) => parseChatHost(participant) ?? [])
+}
+
+/** Filter choices present in the list: projects, agent types, machines (one label per machine). */
+export function chatFilterOptions(conversations: readonly RelayChatConversation[]): {
+  projects: string[]
+  clis: string[]
+  machines: string[]
+} {
+  const projects = new Set<string>()
+  const clis = new Set<string>()
+  const machines = new Map<string, string>()
+  for (const conversation of conversations) {
+    if (conversation.kind === 'channel') continue
+    if (conversation.project) projects.add(conversation.project)
+    if (conversation.cli) clis.add(conversation.cli)
+    for (const machine of conversationMachines(conversation)) {
+      const key = machineKey(machine)
+      if (key && !machines.has(key)) machines.set(key, machine)
+    }
+  }
+  const sorted = (values: Iterable<string>): string[] =>
+    [...values].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base', numeric: true }))
+  return { projects: sorted(projects), clis: sorted(clis), machines: sorted(machines.values()) }
+}
+
+/** Whether a conversation passes the filters. Channels aren't tied to one project, type, or machine. */
+export function matchesChatFilters(conversation: RelayChatConversation, filters: ChatFilters): boolean {
+  if (conversation.kind === 'channel') return true
+  if (filters.project && conversation.project !== filters.project) return false
+  if (filters.cli && conversation.cli !== filters.cli) return false
+  if (filters.machine) {
+    const wanted = machineKey(filters.machine)
+    if (!conversationMachines(conversation).some((machine) => machineKey(machine) === wanted)) return false
+  }
+  return true
+}
+
 /**
  * Reachability without a roster endpoint on the `chat.*` bridge: a DM
  * thread counts as reachable when its last message is inside the 5-minute
@@ -169,6 +222,19 @@ export function findDmThread(
     candidate.kind === 'dm' &&
     [candidate.name, ...(candidate.participants || [])].some((label) => agentIdentity(label) === identity)
   )
+}
+
+/** Unread on the row itself, or on the DM thread an agent row shows. */
+export function conversationUnread(
+  conversations: readonly RelayChatConversation[],
+  unreadIds: ReadonlySet<string>,
+  conversation: RelayChatConversation
+): boolean {
+  const unread = (row: RelayChatConversation): boolean => unreadIds.has(row.id) || (row.unreadCount || 0) > 0
+  if (unread(conversation)) return true
+  if (conversation.kind !== 'agent') return false
+  const thread = findDmThread(conversations, conversation)
+  return !!thread && unread(thread)
 }
 
 /** DM threads that open from an agent's roster row, so they aren't listed twice. */
@@ -412,9 +478,15 @@ export const useChatStore = create<ChatDesktopState>()(
           // Read receipts are advisory — a failure must not break opening.
         }
       }
-      set((state) => ({
-        unreadConversationIDs: state.unreadConversationIDs.filter((unread) => unread !== id)
-      }))
+      set((state) => {
+        const selected = state.conversations.find((c) => c.id === id)
+        const thread = selected?.kind === 'agent' ? findDmThread(state.conversations, selected) : undefined
+        const read = new Set([id, ...(thread ? [thread.id] : [])])
+        return {
+          unreadConversationIDs: state.unreadConversationIDs.filter((unread) => !read.has(unread)),
+          conversations: state.conversations.map((c) => (read.has(c.id) && c.unreadCount ? { ...c, unreadCount: 0 } : c))
+        }
+      })
     },
 
     sendMessage: async (text, attachmentIds = []) => {

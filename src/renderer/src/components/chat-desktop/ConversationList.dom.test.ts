@@ -5,9 +5,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ConversationList } from './ConversationList'
 import { useChatStore } from '@/stores/chat-store'
-import { useAgentStore, type Agent } from '@/stores/agent-store'
-import { useProjectStore } from '@/stores/project-store'
-import { useUIStore } from '@/stores/ui-store'
 import type { RelayChatConversation } from '@/lib/ipc'
 
 const chatMocks = vi.hoisted(() => ({
@@ -66,15 +63,14 @@ function seed(): void {
 }
 
 beforeEach(() => {
+  localStorage.removeItem('pear.chat.filters')
   seed()
 })
 
 afterEach(() => {
   cleanup()
   useChatStore.getState().reset()
-  useUIStore.setState({ chatDirectoryId: null })
-  useAgentStore.setState({ agents: [] })
-  useProjectStore.setState({ projects: [], activeProjectId: null })
+  localStorage.removeItem('pear.chat.filters')
   vi.clearAllMocks()
 })
 
@@ -136,22 +132,55 @@ describe('ConversationList', () => {
     expect(screen.queryByLabelText('bob@linuxbox')).not.toBeNull()
   })
 
-  it('filters messages to agents in the selected directory', () => {
-    useProjectStore.setState({
-      projects: [{ id: 'proj-relay', name: 'relay', rootPath: '/Volumes/T7/relay', roots: [], channels: [] } as never],
-      activeProjectId: 'proj-relay'
+  it('filters agents by project, agent type, and machine, and remembers the choice', () => {
+    const agent = (name: string, extra: Partial<RelayChatConversation>): RelayChatConversation => ({
+      kind: 'agent', id: `relay:${name}`, name, participants: [name], ...extra
     })
-    useAgentStore.setState({
-      agents: [{ name: 'alice', projectId: 'proj-relay' } as Agent]
+    useChatStore.setState({
+      conversations: [
+        ...useChatStore.getState().conversations,
+        agent('infra-claude', { project: 'infra', cli: 'claude', machine: 'Finn-Mac-Mini' }),
+        agent('infra-codex', { project: 'infra', cli: 'codex', machine: 'studio' }),
+        agent('app-claude', { project: 'relay-app', cli: 'claude', machine: 'finn-mac-mini.local' })
+      ]
     })
-    useUIStore.setState({ chatDirectoryId: 'proj-relay' })
+    const { unmount } = render(React.createElement(ConversationList))
+    const options = (label: string): string[] =>
+      Array.from((screen.getByLabelText(label) as HTMLSelectElement).options).map((option) => option.text)
+    expect(options('Filter by project')).toEqual(['All projects', 'infra', 'relay-app'])
+    expect(options('Filter by agent type')).toEqual(['All types', 'claude', 'codex'])
+    // One entry per machine, however its name is spelled.
+    expect(options('Filter by machine')).toEqual(['All machines', 'Finn-Mac-Mini', 'linuxbox', 'macbook', 'studio'])
 
+    fireEvent.change(screen.getByLabelText('Filter by project'), { target: { value: 'infra' } })
+    expect(screen.queryByLabelText('infra-claude')).not.toBeNull()
+    expect(screen.queryByLabelText('infra-codex')).not.toBeNull()
+    expect(screen.queryByLabelText('app-claude')).toBeNull()
+    expect(screen.queryByLabelText('alice@macbook')).toBeNull()
+
+    fireEvent.change(screen.getByLabelText('Filter by agent type'), { target: { value: 'claude' } })
+    expect(screen.queryByLabelText('infra-codex')).toBeNull()
+
+    fireEvent.change(screen.getByLabelText('Filter by project'), { target: { value: '' } })
+    fireEvent.change(screen.getByLabelText('Filter by machine'), { target: { value: 'Finn-Mac-Mini' } })
+    expect(screen.queryByLabelText('infra-claude')).not.toBeNull()
+    expect(screen.queryByLabelText('app-claude')).not.toBeNull()
+
+    unmount()
     render(React.createElement(ConversationList))
-    expect(screen.queryByLabelText('alice@macbook')).not.toBeNull()
-    expect(screen.queryByLabelText('bob@linuxbox')).toBeNull()
+    expect((screen.getByLabelText('Filter by machine') as HTMLSelectElement).value).toBe('Finn-Mac-Mini')
+    expect((screen.getByLabelText('Filter by agent type') as HTMLSelectElement).value).toBe('claude')
+  })
 
-    fireEvent.change(screen.getByLabelText('Filter by directory'), { target: { value: '' } })
-    expect(screen.queryByLabelText('bob@linuxbox')).not.toBeNull()
+  it('offers to clear filters that match nothing, and leaves channels unfiltered', () => {
+    localStorage.setItem('pear.chat.filters', JSON.stringify({ project: 'gone', cli: '', machine: '' }))
+    render(React.createElement(ConversationList))
+    expect(screen.getByText('No conversations match these filters')).toBeTruthy()
+    fireEvent.click(screen.getByRole('tab', { name: 'channels' }))
+    expect(screen.queryByLabelText('#general')).not.toBeNull()
+    fireEvent.click(screen.getByRole('tab', { name: 'messages' }))
+    fireEvent.click(screen.getByText('Clear filters'))
+    expect(screen.queryByLabelText('alice@macbook')).not.toBeNull()
   })
 
   it('shows a loading state until the first list arrives', () => {
@@ -212,6 +241,41 @@ describe('ConversationList', () => {
     expect(order()).toEqual(['alpha', 'bravo', 'zed'])
     expect(localStorage.getItem('pear.chat.sort')).toBe('name')
     localStorage.removeItem('pear.chat.sort')
+  })
+
+  it('floats conversations with unread messages to the top, below pins, in either order', async () => {
+    localStorage.removeItem('pear.chat.sort')
+    const now = Date.now()
+    const at = (minutesAgo: number): string => new Date(now - minutesAgo * 60_000).toISOString()
+    useChatStore.setState({
+      conversations: [
+        { kind: 'agent', id: 'relay:alpha', name: 'alpha', participants: ['alpha'] },
+        { kind: 'agent', id: 'relay:bravo', name: 'bravo', participants: ['bravo'] },
+        { kind: 'agent', id: 'relay:zed', name: 'zed', participants: ['zed'] },
+        { kind: 'dm', id: 'conversation:dm_a', name: 'alpha', participants: ['alpha'], lastMessageAt: at(1) },
+        { kind: 'dm', id: 'conversation:dm_b', name: 'bravo', participants: ['bravo'], lastMessageAt: at(2) },
+        // The unread count lives on the agent's DM thread, which the list folds into the agent row.
+        { kind: 'dm', id: 'conversation:dm_z', name: 'zed', participants: ['zed'], lastMessageAt: at(60), unreadCount: 2 }
+      ],
+      pinnedConversationIDs: ['relay:bravo'],
+      unreadConversationIDs: ['conversation:dm_z']
+    })
+    render(React.createElement(ConversationList))
+    const order = (): string[] =>
+      screen.getAllByRole('button').map((row) => row.getAttribute('aria-label') || '').filter((label) => ['alpha', 'bravo', 'zed'].includes(label))
+    expect(order()).toEqual(['bravo', 'zed', 'alpha'])
+    expect(within(screen.getByLabelText('zed') as HTMLElement).getByLabelText('unread')).toBeTruthy()
+
+    fireEvent.change(screen.getByLabelText('Sort conversations'), { target: { value: 'name' } })
+    expect(order()).toEqual(['bravo', 'zed', 'alpha'])
+    localStorage.removeItem('pear.chat.sort')
+
+    await act(async () => {
+      await useChatStore.getState().selectConversation('relay:zed')
+    })
+    expect(useChatStore.getState().unreadConversationIDs).toEqual([])
+    expect(within(screen.getByLabelText('zed') as HTMLElement).queryByLabelText('unread')).toBeNull()
+    expect(order()).toEqual(['bravo', 'alpha', 'zed'])
   })
 
   it('lists an agent once when its DM thread is also loaded', () => {

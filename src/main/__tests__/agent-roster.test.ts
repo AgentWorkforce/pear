@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { isReachableAgent, listedRosterAgents, wireMetadata, type RosterAgent } from '../agent-roster.ts'
+import { agentPlacement, isReachableAgent, listedRosterAgents, wireMetadata, type RosterAgent } from '../agent-roster.ts'
 import { agentCli, agentSessionBinding } from '../session-transcript.ts'
 
 describe('wireMetadata', () => {
@@ -59,5 +59,25 @@ describe('listedRosterAgents', () => {
       listedRosterAgents(agents, 'pear-chat-mini', NOW).map((agent) => agent.name),
       ['alice', 'khaliq']
     )
+  })
+})
+
+describe('agentPlacement', () => {
+  const nodes = new Map([['node_desktop_1', 'studio-desktop']])
+
+  it('reads the project from the session repo, then a declared project', () => {
+    assert.deepEqual(agentPlacement('a', { activity: { repo: 'relay-app' }, project: 'other' }, nodes), { project: 'relay-app' })
+    assert.deepEqual(agentPlacement('a', { project: 'x-tweet-competition' }, nodes), { project: 'x-tweet-competition' })
+  })
+
+  it('reads the machine from the host, then the fleet node, then name@host', () => {
+    assert.deepEqual(agentPlacement('a', { host: 'Finn-Mac-Mini', fleet: { nodeId: 'node_desktop_1' } }, nodes), { machine: 'Finn-Mac-Mini' })
+    assert.deepEqual(agentPlacement('a', { fleet: { nodeId: 'node_desktop_1' } }, nodes), { machine: 'studio-desktop' })
+    assert.deepEqual(agentPlacement('a', { node_id: 'node_desktop_1' }, nodes), { machine: 'studio-desktop' })
+    assert.deepEqual(agentPlacement('worker@linuxbox', undefined, nodes), { machine: 'linuxbox' })
+  })
+
+  it('leaves both out when nothing is published', () => {
+    assert.deepEqual(agentPlacement('a', { fleet: { nodeId: 'unknown' }, activity: { repo: '  ' } }, nodes), {})
   })
 })

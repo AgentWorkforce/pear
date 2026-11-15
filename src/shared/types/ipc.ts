@@ -513,6 +513,10 @@ export interface RelayChatConversation {
   summary?: string
   /** Roster entry for a person rather than an agent. */
   human?: boolean
+  /** Repository or project the agent is working in. */
+  project?: string
+  /** Machine the agent runs on. */
+  machine?: string
 }
 
 export interface RelayChatAttachment {
