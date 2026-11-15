@@ -588,6 +588,12 @@ export interface RelaySpawnNode {
   harnesses: string[]
   /** Repositories the machine is configured for (`owner/repo`); names only, not folders. */
   repositories?: string[]
+  /** Folders agents recently started in on that machine, newest first; only sent when teammates may spawn there. */
+  recentFolders?: string[]
+  /** Local checkouts by repository (worktrees appear more than once); same gate as `recentFolders`. */
+  repositoryPaths?: { repository: string; path: string }[]
+  /** The machine's home folder; same gate as `recentFolders`. */
+  homeDir?: string
 }
 
 export interface ChatSpawnInput {

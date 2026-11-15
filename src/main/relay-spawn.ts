@@ -29,6 +29,13 @@ export function machineKey(name: string): string {
   return name.trim().replace(/\.$/, '').replace(/\.local$/i, '').normalize('NFKD').toLowerCase().replace(/[^\p{L}\p{N}]/gu, '')
 }
 
+/** An absolute folder without its trailing slash, or '' for anything else. */
+function absoluteFolder(value: unknown): string {
+  const folder = text(value)
+  if (!folder.startsWith('/')) return ''
+  return folder.length > 1 ? folder.replace(/\/+$/, '') : folder
+}
+
 function isSpawnHost(node: Json): boolean {
   const tags = Array.isArray(node.tags) ? node.tags : []
   return text(node.status) === 'online' && node.live !== false && node.handlers_live !== false && !tags.includes('direct')
@@ -44,12 +51,35 @@ export function parseSpawnNodes(raw: unknown): RelaySpawnNode[] {
       return value.startsWith('spawn:') && value.length > 6
     })
     const harnesses = [...new Set(spawns.map((capability) => text(capability.name).slice(6)))].sort()
-    const repositories = [...new Set(spawns.flatMap((capability) => {
-      const listed = record(record(capability.metadata).configured).repositories
+    const configured = (key: string): string[] => spawns.flatMap((capability) => {
+      const listed = record(record(capability.metadata).configured)[key]
       return Array.isArray(listed) ? listed.map(text).filter(Boolean) : []
-    }))].sort()
+    })
+    const repositories = [...new Set(configured('repositories'))].sort()
+    // Newest first per capability; the first capability's order wins.
+    const recentFolders = [...new Set(configured('recent_folders').map(absoluteFolder).filter(Boolean))]
+    const seenPaths = new Set<string>()
+    const repositoryPaths = spawns.flatMap((capability) => {
+      const listed = record(record(capability.metadata).configured).repository_paths
+      return records(Array.isArray(listed) ? listed : []).flatMap((entry) => {
+        const repository = text(entry.repository)
+        const path = absoluteFolder(entry.path)
+        const key = `${repository}\u0000${path}`
+        if (!repository || !path || seenPaths.has(key)) return []
+        seenPaths.add(key)
+        return [{ repository, path }]
+      })
+    })
+    const homeDir = spawns.map((capability) => absoluteFolder(record(record(capability.metadata).configured).home_dir)).find(Boolean)
     if (!name || harnesses.length === 0) return []
-    return [repositories.length > 0 ? { name, harnesses, repositories } : { name, harnesses }]
+    return [{
+      name,
+      harnesses,
+      ...(repositories.length > 0 ? { repositories } : {}),
+      ...(recentFolders.length > 0 ? { recentFolders } : {}),
+      ...(repositoryPaths.length > 0 ? { repositoryPaths } : {}),
+      ...(homeDir ? { homeDir } : {})
+    }]
   })
   nodes.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()) || a.name.localeCompare(b.name))
   const seen = new Set<string>()

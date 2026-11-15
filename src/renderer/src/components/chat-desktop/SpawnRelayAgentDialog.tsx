@@ -2,7 +2,7 @@ import type React from 'react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Loader2, RefreshCw, X } from 'lucide-react'
 import { pear, type RelaySpawnNode } from '@/lib/ipc'
-import { folderHistory, folderSuggestions, lastSegmentRange, withFolder } from '@/lib/spawn-folders'
+import { folderHistory, folderSuggestions, lastSegmentRange, machineFolders, withFolder } from '@/lib/spawn-folders'
 import { agentIdentity, useChatStore } from '@/stores/chat-store'
 import { useUIStore } from '@/stores/ui-store'
 
@@ -35,6 +35,11 @@ function remember(value: Remembered): void {
   }
 }
 
+/** Folders the machine itself reports: recent starts, then its checkouts. */
+function reportedFolders(machine: RelaySpawnNode | undefined): string[] {
+  return [...(machine?.recentFolders ?? []), ...(machine?.repositoryPaths ?? []).map((entry) => entry.path)]
+}
+
 function errorText(error: unknown): string {
   const raw = error instanceof Error ? error.message : String(error)
   return raw.replace(/^Error invoking remote method '[^']+': (?:\w*Error: )?/, '')
@@ -59,8 +64,8 @@ export function SpawnRelayAgentDialog(): React.ReactNode {
   const [phase, setPhase] = useState<'form' | 'starting' | 'unconfirmed'>('form')
   const [error, setError] = useState<string | null>(null)
 
-  const prefillFolder = (machine: string): void => {
-    const value = folderHistory(remembered().folders?.[machine])[0] ?? ''
+  const prefillFolder = (machine: RelaySpawnNode): void => {
+    const value = machineFolders(remembered().folders?.[machine.name], reportedFolders(machine))[0] ?? ''
     prefilled.current = value
     setFolder(value)
   }
@@ -75,7 +80,7 @@ export function SpawnRelayAgentDialog(): React.ReactNode {
       if (!chosen) return
       setNode(chosen.name)
       setHarness(chosen.harnesses.includes(last.harness ?? '') ? (last.harness as string) : chosen.harnesses[0])
-      prefillFolder(chosen.name)
+      prefillFolder(chosen)
     }).catch((err: unknown) => setLoadError(errorText(err)))
   }
 
@@ -91,7 +96,7 @@ export function SpawnRelayAgentDialog(): React.ReactNode {
 
   const selected = useMemo(() => nodes?.find((candidate) => candidate.name === node), [nodes, node])
   const suggestions = useMemo(
-    () => folderSuggestions(folderHistory(remembered().folders?.[node]), selected?.repositories),
+    () => folderSuggestions(machineFolders(remembered().folders?.[node], reportedFolders(selected)), selected?.repositories),
     [node, selected]
   )
   const trimmedName = name.trim()
@@ -109,7 +114,7 @@ export function SpawnRelayAgentDialog(): React.ReactNode {
     setNode(value)
     const next = nodes?.find((candidate) => candidate.name === value)
     if (next && !next.harnesses.includes(harness)) setHarness(next.harnesses[0])
-    prefillFolder(value)
+    if (next) prefillFolder(next)
   }
 
   const handleSubmit = async (event: React.FormEvent): Promise<void> => {
@@ -255,7 +260,7 @@ export function SpawnRelayAgentDialog(): React.ReactNode {
                   requestAnimationFrame(() => input.setSelectionRange(start, end))
                 }}
                 list="spawn-folder-suggestions"
-                placeholder="/Users/name/project"
+                placeholder={selected?.homeDir ? `${selected.homeDir.replace(/\/$/, '')}/project` : '/Users/name/project'}
                 spellCheck={false}
                 disabled={phase === 'starting'}
                 className={inputClass}
@@ -267,7 +272,7 @@ export function SpawnRelayAgentDialog(): React.ReactNode {
                 ? <span className="mt-1 block text-xs text-[var(--pear-red)]">{folderProblem}</span>
                 : folder && folder === prefilled.current && (
                   <span className="mt-1 block text-xs text-[var(--pear-text-faint)]">
-                    Last folder used on {node}. Type to swap the project, or pick another from the list.
+                    Recent folder on {node}. Type to swap the project, or pick another from the list.
                   </span>
                 )}
             </label>

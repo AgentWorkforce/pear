@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { MAX_FOLDER_HISTORY, folderHistory, folderSuggestions, lastSegmentRange, parentFolder, withFolder } from './spawn-folders'
+import { MAX_FOLDER_HISTORY, folderHistory, folderSuggestions, lastSegmentRange, machineFolders, parentFolder, withFolder } from './spawn-folders'
 
 describe('folderHistory', () => {
   it('reads the old single-folder save and drops junk and duplicates', () => {
@@ -33,6 +33,13 @@ describe('folderSuggestions', () => {
     ])
   })
 
+  it('does not guess a folder for a repository already checked out in a known folder', () => {
+    expect(folderSuggestions(['/Users/finn/code/pear', '/Users/finn/wt/relay'], ['AgentWorkforce/relay'])).toEqual([
+      '/Users/finn/code/pear',
+      '/Users/finn/wt/relay'
+    ])
+  })
+
   it('cannot place repositories on a machine with no folder history', () => {
     expect(folderSuggestions([], ['AgentWorkforce/relay'])).toEqual([])
   })
@@ -44,5 +51,13 @@ describe('lastSegmentRange', () => {
     const [start, end] = lastSegmentRange(folder)
     expect(folder.slice(start, end)).toBe('pear')
     expect(lastSegmentRange('/Users/finn/code/')).toEqual([12, 16])
+  })
+})
+
+describe('machineFolders', () => {
+  it('puts folders picked here before ones the machine reports, once each', () => {
+    expect(machineFolders(['/a/pear'], ['/a/relay', '/a/pear/', 'rel'])).toEqual(['/a/pear', '/a/relay'])
+    expect(machineFolders(undefined, ['/srv/app'])).toEqual(['/srv/app'])
+    expect(machineFolders('/old')).toEqual(['/old'])
   })
 })

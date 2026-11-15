@@ -13,6 +13,11 @@ export function folderHistory(saved: unknown): string[] {
     .map(trimFolder).filter((value) => value.startsWith('/')))]
 }
 
+/** Folders known for a machine: ones picked here first, then ones the machine reports. */
+export function machineFolders(saved: unknown, reported: readonly string[] = []): string[] {
+  return folderHistory([...folderHistory(saved), ...reported])
+}
+
 export function withFolder(history: string[], folder: string): string[] {
   const value = trimFolder(folder)
   if (!value.startsWith('/')) return history
@@ -33,7 +38,8 @@ export function parentFolder(folder: string): string | null {
 export function folderSuggestions(history: string[], repositories: string[] = []): string[] {
   const parents = [...new Set(history.map(parentFolder).filter((value): value is string => !!value))]
   const repoNames = [...new Set(repositories.map((repo) => repo.split('/').pop()?.trim() ?? '').filter(Boolean))]
-  const siblings = parents.flatMap((parent) => repoNames.map((repo) => `${parent}/${repo}`))
+  const placed = new Set(history.map((folder) => folder.split('/').pop()))
+  const siblings = parents.flatMap((parent) => repoNames.filter((repo) => !placed.has(repo)).map((repo) => `${parent}/${repo}`))
   return [...new Set([...history, ...siblings])].slice(0, MAX_SUGGESTIONS)
 }
 

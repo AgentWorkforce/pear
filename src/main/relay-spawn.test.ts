@@ -51,6 +51,49 @@ describe('parseSpawnNodes', () => {
       { name: 'studio', harnesses: ['claude', 'codex'], repositories: ['AgentWorkforce/pear', 'AgentWorkforce/relay'] }
     ])
   })
+
+  it('collects recent folders newest first, absolute only, once each', () => {
+    const raw = [{
+      ...node('studio', []),
+      capabilities: [
+        { name: 'spawn:codex', metadata: { configured: { recent_folders: ['/Users/finn/code/pear/', '/Users/finn/code/relay', '~/x', 'rel'] } } },
+        { name: 'spawn:claude', metadata: { configured: { recent_folders: ['/Users/finn/code/relay', '/srv/app'] } } },
+        { name: 'release', metadata: { configured: { recent_folders: ['/ignored'] } } }
+      ]
+    }]
+    expect(parseSpawnNodes(raw)[0].recentFolders).toEqual(['/Users/finn/code/pear', '/Users/finn/code/relay', '/srv/app'])
+    expect(parseSpawnNodes([{ ...node('studio', []), capabilities: [{ name: 'spawn:codex', metadata: { configured: { recent_folders: [] } } }] }])[0])
+      .toEqual({ name: 'studio', harnesses: ['codex'] })
+  })
+
+  it('collects reported checkouts, keeping worktrees, and the home folder', () => {
+    const raw = [{
+      ...node('studio', []),
+      capabilities: [
+        {
+          name: 'spawn:codex',
+          metadata: {
+            configured: {
+              repository_paths: [
+                { repository: 'AgentWorkforce/pear', path: '/Users/finn/code/pear/' },
+                { repository: 'AgentWorkforce/pear', path: '/Users/finn/wt/pear-2' },
+                { repository: 'AgentWorkforce/relay', path: 'relative' },
+                { path: '/no/repo' }
+              ],
+              home_dir: '/Users/finn/'
+            }
+          }
+        },
+        { name: 'spawn:claude', metadata: { configured: { repository_paths: [{ repository: 'AgentWorkforce/pear', path: '/Users/finn/code/pear' }], home_dir: '~' } } }
+      ]
+    }]
+    const [parsed] = parseSpawnNodes(raw)
+    expect(parsed.repositoryPaths).toEqual([
+      { repository: 'AgentWorkforce/pear', path: '/Users/finn/code/pear' },
+      { repository: 'AgentWorkforce/pear', path: '/Users/finn/wt/pear-2' }
+    ])
+    expect(parsed.homeDir).toBe('/Users/finn')
+  })
 })
 
 describe('nodeNamesById', () => {
