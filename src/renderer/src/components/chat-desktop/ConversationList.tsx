@@ -11,7 +11,8 @@ import {
   useChatStore,
   type ChatFilters
 } from '@/stores/chat-store'
-import { useUIStore } from '@/stores/ui-store'
+import { CHAT_SIDEBAR_DEFAULT_WIDTH, CHAT_SIDEBAR_MAX_WIDTH, CHAT_SIDEBAR_MIN_WIDTH, useUIStore } from '@/stores/ui-store'
+import { startPanelResize } from '@/components/diff/diffPaneUtils'
 import { AgentAvatar } from '@/components/common/AgentAvatar'
 import type { RelayChatConversation } from '@/lib/ipc'
 
@@ -114,6 +115,8 @@ export function ConversationList(): React.ReactNode {
   const toggleHide = useChatStore((s) => s.toggleHide)
   const setShowHidden = useChatStore((s) => s.setShowHidden)
   const openDialog = useUIStore((s) => s.openDialog)
+  const sidebarWidth = useUIStore((s) => s.chatSidebarWidth)
+  const setSidebarWidth = useUIStore((s) => s.setChatSidebarWidth)
 
   const [tab, setTab] = useState<ConversationTab>('messages')
   const [search, setSearch] = useState('')
@@ -175,7 +178,33 @@ export function ConversationList(): React.ReactNode {
   const hiddenCount = conversations.filter((c) => hiddenSet.has(c.id)).length
 
   return (
-    <div className="flex h-full w-80 shrink-0 flex-col border-r border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)]">
+    <div
+      className="relative flex h-full shrink-0 flex-col border-r border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)]"
+      style={{ width: sidebarWidth }}
+    >
+      <div
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize conversation list"
+        aria-valuenow={sidebarWidth}
+        aria-valuemin={CHAT_SIDEBAR_MIN_WIDTH}
+        aria-valuemax={CHAT_SIDEBAR_MAX_WIDTH}
+        tabIndex={0}
+        title="Drag to resize; double-click to reset"
+        onPointerDown={(event) => startPanelResize(event, {
+          axis: 'x',
+          startValue: sidebarWidth,
+          min: CHAT_SIDEBAR_MIN_WIDTH,
+          max: CHAT_SIDEBAR_MAX_WIDTH,
+          onResize: setSidebarWidth
+        })}
+        onDoubleClick={() => setSidebarWidth(CHAT_SIDEBAR_DEFAULT_WIDTH)}
+        onKeyDown={(event) => {
+          if (event.key === 'ArrowLeft') setSidebarWidth(sidebarWidth - 16)
+          if (event.key === 'ArrowRight') setSidebarWidth(sidebarWidth + 16)
+        }}
+        className="absolute -right-[3px] top-0 z-10 h-full w-1.5 cursor-col-resize transition-colors hover:bg-[var(--pear-accent)]/40 focus-visible:bg-[var(--pear-accent)]/40"
+      />
       <div className="shrink-0 px-3 pt-3">
         <div className="flex gap-1" role="tablist" aria-label="Conversations">
           {(['messages', 'channels'] as ConversationTab[]).map((value) => (

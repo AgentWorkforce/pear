@@ -6,8 +6,8 @@ export const DEFAULT_ZOOM = 1.2
 const MIN_ZOOM = 0.8
 const MAX_ZOOM = 1.8
 const ZOOM_STEP = 0.1
-/** CSS height of the app's top bar (`h-14`) before zoom. */
-const TOP_BAR_HEIGHT = 56
+/** CSS height of the app's top bar (`h-16`) before zoom. */
+const TOP_BAR_HEIGHT = 64
 /** Height macOS reserves around the window buttons, so they center in the bar. */
 const WINDOW_BUTTON_BOX = 24
 

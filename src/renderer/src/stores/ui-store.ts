@@ -45,6 +45,8 @@ interface UIState {
   activeDialog: DialogType
   sidebarCollapsed: boolean
   projectSwitcherExpanded: boolean
+  /** Width of the chat conversation list; the top bar lines its divider up with it. */
+  chatSidebarWidth: number
   /** Project whose agents the thread list is filtered to. Null shows every agent. */
   chatDirectoryId: string | null
   theme: Theme
@@ -61,6 +63,7 @@ interface UIState {
   closeDialog: () => void
   toggleSidebar: () => void
   setProjectSwitcherExpanded: (expanded: boolean) => void
+  setChatSidebarWidth: (width: number) => void
   toggleProjectSwitcher: () => void
   setChatDirectoryId: (projectId: string | null) => void
   setTheme: (theme: Theme) => void
@@ -83,6 +86,19 @@ function readStored<T>(key: string, schema: z.ZodType<T, z.ZodTypeDef, unknown>,
 const initialTheme = readStored('pear-theme', ThemeSchema, 'dark')
 const initialTerminalLayout = readStored('pear-terminal-layout', TerminalLayoutSchema, 'horizontal-split')
 const initialProjectSwitcherExpanded = readStored('pear-project-switcher-expanded', BooleanPreferenceSchema, false)
+
+export const CHAT_SIDEBAR_DEFAULT_WIDTH = 320
+export const CHAT_SIDEBAR_MIN_WIDTH = 260
+export const CHAT_SIDEBAR_MAX_WIDTH = 560
+
+export function clampChatSidebarWidth(width: number): number {
+  if (!Number.isFinite(width)) return CHAT_SIDEBAR_DEFAULT_WIDTH
+  return Math.round(Math.min(CHAT_SIDEBAR_MAX_WIDTH, Math.max(CHAT_SIDEBAR_MIN_WIDTH, width)))
+}
+
+const initialChatSidebarWidth = clampChatSidebarWidth(
+  readStored('pear.chat.sidebarWidth', z.coerce.number(), CHAT_SIDEBAR_DEFAULT_WIDTH)
+)
 
 // Apply on load
 if (typeof document !== 'undefined') {
@@ -232,6 +248,7 @@ export const useUIStore = create<UIState>((set, get) => ({
   activeDialog: null,
   sidebarCollapsed: false,
   projectSwitcherExpanded: initialProjectSwitcherExpanded,
+  chatSidebarWidth: initialChatSidebarWidth,
   chatDirectoryId: null,
   theme: initialTheme,
   terminalLayout: initialTerminalLayout,
@@ -380,6 +397,13 @@ export const useUIStore = create<UIState>((set, get) => ({
   openDialog: (dialog) => set({ activeDialog: dialog }),
   closeDialog: () => set({ activeDialog: null }),
   toggleSidebar: () => set((state) => ({ sidebarCollapsed: !state.sidebarCollapsed })),
+  setChatSidebarWidth: (width) => {
+    const next = clampChatSidebarWidth(width)
+    if (next === get().chatSidebarWidth) return
+    localStorage.setItem('pear.chat.sidebarWidth', String(next))
+    set({ chatSidebarWidth: next })
+  },
+
   setProjectSwitcherExpanded: (expanded) => {
     localStorage.setItem('pear-project-switcher-expanded', String(expanded))
     set({ projectSwitcherExpanded: expanded })

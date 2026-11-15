@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ConversationList } from './ConversationList'
 import { useChatStore } from '@/stores/chat-store'
+import { clampChatSidebarWidth, useUIStore } from '@/stores/ui-store'
 import type { RelayChatConversation } from '@/lib/ipc'
 
 const chatMocks = vi.hoisted(() => ({
@@ -73,6 +74,21 @@ afterEach(() => {
 })
 
 describe('ConversationList', () => {
+  it('resizes the list from its edge within limits, and resets on double-click', () => {
+    useUIStore.setState({ chatSidebarWidth: 320 })
+    render(React.createElement(ConversationList))
+    const handle = screen.getByRole('separator', { name: 'Resize conversation list' })
+    fireEvent.keyDown(handle, { key: 'ArrowRight' })
+    expect(useUIStore.getState().chatSidebarWidth).toBe(336)
+    expect(localStorage.getItem('pear.chat.sidebarWidth')).toBe('336')
+    useUIStore.getState().setChatSidebarWidth(5000)
+    expect(useUIStore.getState().chatSidebarWidth).toBe(560)
+    fireEvent.doubleClick(handle)
+    expect(useUIStore.getState().chatSidebarWidth).toBe(320)
+    expect(clampChatSidebarWidth(10)).toBe(260)
+    expect(clampChatSidebarWidth(Number.NaN)).toBe(320)
+  })
+
   it('shows unread and 5-minute reachable dots', () => {
     render(React.createElement(ConversationList))
     const alice = screen.getByLabelText('alice@macbook')

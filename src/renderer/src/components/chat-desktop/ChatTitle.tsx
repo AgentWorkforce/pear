@@ -26,23 +26,23 @@ export function ChatTitle(): React.ReactNode {
       data-testid="chat-title"
     >
       {conversation.kind === 'channel' ? (
-        <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-[var(--pear-bg-surface)]">
-          <Hash size={18} className="text-[var(--pear-text-faint)]" />
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-[var(--pear-bg-surface)]">
+          <Hash size={16} className="text-[var(--pear-text-faint)]" />
         </span>
       ) : (
         <span className="shrink-0">
-          <AgentAvatar name={conversation.name} cli={conversation.cli} human={!!conversation.human} size={36} />
+          <AgentAvatar name={conversation.name} cli={conversation.cli} human={!!conversation.human} size={32} />
         </span>
       )}
-      <div className="flex min-w-0 flex-1 flex-col justify-center gap-1">
+      <div className="flex min-w-0 flex-1 flex-col justify-center gap-[5px] py-3">
         <div className="flex min-w-0 items-center gap-3">
-          <span className="truncate text-[16px] font-semibold leading-5 text-[var(--pear-text)]">{conversation.name}</span>
+          <span className="truncate text-[13px] font-semibold leading-[18px] text-[var(--pear-text)]">{conversation.name}</span>
           {details && (
-            <span className="min-w-0 truncate text-[12px] leading-5 text-[var(--pear-text-faint)]">{details}</span>
+            <span className="min-w-0 truncate text-[11px] leading-[18px] text-[var(--pear-text-faint)]">{details}</span>
           )}
         </div>
         {conversation.summary && (
-          <p className="truncate text-[13px] leading-[18px] text-[var(--pear-text-secondary)]" title={conversation.summary}>
+          <p className="truncate text-[11.5px] leading-[15px] text-[var(--pear-text-secondary)]" title={conversation.summary}>
             {conversation.summary}
           </p>
         )}

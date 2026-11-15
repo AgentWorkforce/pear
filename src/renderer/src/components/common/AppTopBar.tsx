@@ -90,13 +90,18 @@ export function AppTopBar(): React.ReactNode {
   const canGoForward = historyIndex < history.length - 1
   const visibleTabs = tabs.filter((tab) => tab.kind !== 'agents')
   const chatOpen = tabs.find((tab) => tab.id === activeTabId)?.kind === 'agents'
+  const chatSidebarWidth = useUIStore((s) => s.chatSidebarWidth)
   const projectNameById = useMemo(
     () => new Map(projects.map((project) => [project.id, project.name])),
     [projects]
   )
   return (
-    <div className="titlebar-drag relative z-40 flex h-14 shrink-0 items-center border-b border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] pl-[138px] pr-3 text-[var(--pear-text)]">
-      <div className="flex items-center gap-2">
+    <div className={`titlebar-drag relative z-40 flex h-16 shrink-0 items-center border-b border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] pr-3 text-[var(--pear-text)] ${chatOpen ? '' : 'pl-[138px]'}`}>
+      {/* With chat open this spans the conversation list's width so the header divider continues its border. */}
+      <div
+        className={`flex items-center gap-2 ${chatOpen ? 'shrink-0 pl-[138px]' : ''}`}
+        style={chatOpen ? { width: chatSidebarWidth } : undefined}
+      >
         <div className="relative">
           <button
             type="button"
@@ -174,7 +179,7 @@ export function AppTopBar(): React.ReactNode {
         </button>
       </div>
 
-      <div className={`flex h-full min-w-0 flex-1 items-center gap-1 overflow-x-auto ${chatOpen ? 'ml-3' : 'ml-4'}`}>
+      <div className={`flex h-full min-w-0 flex-1 items-center gap-1 overflow-x-auto ${chatOpen ? '' : 'ml-4'}`}>
         {chatOpen && <ChatTitle />}
         {visibleTabs.map((tab) => {
           const active = tab.id === activeTabId

@@ -14,8 +14,8 @@ describe('window zoom', () => {
   })
 
   it('centers the window buttons in the zoomed top bar', () => {
-    expect(windowButtonPosition(1)).toEqual({ x: 16, y: 16 })
-    expect(windowButtonPosition(1.2)).toEqual({ x: 16, y: 22 })
+    expect(windowButtonPosition(1)).toEqual({ x: 16, y: 20 })
+    expect(windowButtonPosition(1.2)).toEqual({ x: 16, y: 26 })
   })
 
   it('opens at most of the screen, within limits', () => {
