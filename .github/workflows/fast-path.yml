@@ -1,0 +1,85 @@
+# Fast path: run CI's checks for any ref on Blacksmith runners, outside the
+# shared GitHub-hosted queue. Anyone with write access (people or agents) may
+# start it; nothing runs until Khaliq approves the fast-path environment.
+# It runs ci.yml's checks job and the packaged MCP smoke test (macOS arm64),
+# and uploads the unsigned macOS build as a workflow artifact named with the
+# commit SHA. It never creates or edits a GitHub Release: Release (macOS)
+# stays the only way to publish a signed build to electron-updater users.
+name: fast-path
+run-name: fast-path ${{ inputs.ref }} (${{ inputs.reason }})
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag or commit to check (a PR branch is fine)
+        required: true
+        default: main
+      reason:
+        description: Why this needs the fast path
+        required: true
+permissions:
+  contents: read
+concurrency:
+  group: fast-path-${{ inputs.ref }}
+  cancel-in-progress: false
+jobs:
+  checks:
+    environment: fast-path
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - id: sha
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run verify:mcp-resources-drift
+      - run: npm run lint
+      - run: npm run typecheck:web
+      - run: npm run typecheck:node
+      - run: npm test
+      - run: npx vitest run
+      - run: npm run build
+
+  packaged-mcp-smoke:
+    needs: checks
+    runs-on: blacksmith-6vcpu-macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.checks.outputs.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run verify:mcp-resources-drift
+      - run: npm run dist:mac
+      - run: npm run verify:mcp-spawn
+      - name: Upload the unsigned macOS build
+        uses: actions/upload-artifact@v4
+        with:
+          name: pear-macos-unsigned-${{ needs.checks.outputs.sha }}
+          path: |
+            dist/*.dmg
+            dist/*.zip
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Summary
+        env:
+          REF: ${{ inputs.ref }}
+          SHA: ${{ needs.checks.outputs.sha }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          {
+            echo "### pear fast path"
+            echo "- ref: \`$REF\` at \`$SHA\`"
+            echo "- reason: $REASON"
+            echo "- artifact: \`pear-macos-unsigned-$SHA\` (unsigned, not a release)"
+          } >> "$GITHUB_STEP_SUMMARY"
