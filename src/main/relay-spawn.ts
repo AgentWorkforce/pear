@@ -39,11 +39,17 @@ export function parseSpawnNodes(raw: unknown): RelaySpawnNode[] {
   const nodes = records(raw).flatMap((node) => {
     if (!isSpawnHost(node)) return []
     const name = text(node.name)
-    const harnesses = [...new Set(records(node.capabilities).flatMap((capability) => {
+    const spawns = records(node.capabilities).filter((capability) => {
       const value = text(capability.name)
-      return value.startsWith('spawn:') && value.length > 6 ? [value.slice(6)] : []
+      return value.startsWith('spawn:') && value.length > 6
+    })
+    const harnesses = [...new Set(spawns.map((capability) => text(capability.name).slice(6)))].sort()
+    const repositories = [...new Set(spawns.flatMap((capability) => {
+      const listed = record(record(capability.metadata).configured).repositories
+      return Array.isArray(listed) ? listed.map(text).filter(Boolean) : []
     }))].sort()
-    return name && harnesses.length > 0 ? [{ name, harnesses }] : []
+    if (!name || harnesses.length === 0) return []
+    return [repositories.length > 0 ? { name, harnesses, repositories } : { name, harnesses }]
   })
   nodes.sort((a, b) => a.name.toLowerCase().localeCompare(b.name.toLowerCase()) || a.name.localeCompare(b.name))
   const seen = new Set<string>()

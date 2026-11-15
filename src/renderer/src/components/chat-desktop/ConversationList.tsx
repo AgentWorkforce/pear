@@ -99,6 +99,8 @@ export function sortConversations(
   })
 }
 
+const EMPTY_IDS: string[] = []
+
 export function ConversationList(): React.ReactNode {
   const conversations = useChatStore((s) => s.conversations)
   const refreshing = useChatStore((s) => s.conversationsLoading)
@@ -106,6 +108,7 @@ export function ConversationList(): React.ReactNode {
   const loadedOnce = useChatStore((s) => s.lastRefreshAt !== null)
   const loading = refreshing || (!loadedOnce && !error)
   const selectedId = useChatStore((s) => s.selectedId)
+  const gridIds = useChatStore((s) => (s.chatLayout === 'grid' ? s.gridIds : EMPTY_IDS))
   const unreadIDs = useChatStore((s) => s.unreadConversationIDs)
   const pinned = useChatStore((s) => s.pinnedConversationIDs)
   const hidden = useChatStore((s) => s.hiddenConversationIDs)
@@ -340,6 +343,7 @@ export function ConversationList(): React.ReactNode {
           const isHidden = hiddenSet.has(conversation.id)
           const reachable = isConversationReachable(conversation, now)
           const active = selectedId === conversation.id
+          const inGrid = !active && gridIds.includes(conversation.id)
           return (
             <div
               key={conversation.id}
@@ -351,7 +355,7 @@ export function ConversationList(): React.ReactNode {
                 if (event.key === 'Enter' || event.key === ' ') openConversation(conversation.id)
               }}
               className={`group relative flex cursor-pointer items-start gap-2.5 rounded-lg px-2.5 py-2.5 ${
-                active ? 'bg-[var(--pear-bg-overlay)]' : 'hover:bg-[var(--pear-bg)]/60'
+                active ? 'bg-[var(--pear-bg-overlay)]' : inGrid ? 'bg-[var(--pear-bg-overlay)]/50' : 'hover:bg-[var(--pear-bg)]/60'
               }`}
             >
               <span className="relative mt-0.5 flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-[var(--pear-bg)]/60 text-[var(--pear-text-secondary)]">

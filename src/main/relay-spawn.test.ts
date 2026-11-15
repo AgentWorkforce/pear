@@ -38,6 +38,19 @@ describe('parseSpawnNodes', () => {
     expect(parseSpawnNodes({ nodes: [node('a', ['spawn:claude']), null, 'x'] })).toEqual([{ name: 'a', harnesses: ['claude'] }])
     expect(parseSpawnNodes(null)).toEqual([])
   })
+
+  it('collects the repositories each spawn capability is configured for', () => {
+    const raw = [{
+      ...node('studio', []),
+      capabilities: [
+        { name: 'spawn:codex', metadata: { configured: { repositories: ['AgentWorkforce/relay', 'AgentWorkforce/pear'] } } },
+        { name: 'spawn:claude', metadata: { configured: { repositories: ['AgentWorkforce/pear', 7, ''] } } }
+      ]
+    }]
+    expect(parseSpawnNodes(raw)).toEqual([
+      { name: 'studio', harnesses: ['claude', 'codex'], repositories: ['AgentWorkforce/pear', 'AgentWorkforce/relay'] }
+    ])
+  })
 })
 
 describe('nodeNamesById', () => {

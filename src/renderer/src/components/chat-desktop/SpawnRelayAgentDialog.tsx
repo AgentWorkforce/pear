@@ -1,7 +1,8 @@
 import type React from 'react'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Loader2, RefreshCw, X } from 'lucide-react'
 import { pear, type RelaySpawnNode } from '@/lib/ipc'
+import { folderHistory, folderSuggestions, lastSegmentRange, withFolder } from '@/lib/spawn-folders'
 import { agentIdentity, useChatStore } from '@/stores/chat-store'
 import { useUIStore } from '@/stores/ui-store'
 
@@ -14,8 +15,8 @@ const STORAGE_KEY = 'pear.spawn.last'
 interface Remembered {
   node?: string
   harness?: string
-  /** Last folder per machine; paths only make sense on the machine they came from. */
-  folders?: Record<string, string>
+  /** Folders used per machine, newest first; paths only make sense on the machine they came from. */
+  folders?: Record<string, string[] | string>
 }
 
 function remembered(): Remembered {
@@ -53,8 +54,16 @@ export function SpawnRelayAgentDialog(): React.ReactNode {
   const [name, setName] = useState('')
   const [task, setTask] = useState('')
   const [folder, setFolder] = useState('')
+  /** The suggested folder, until edited: focusing it selects the project name. */
+  const prefilled = useRef('')
   const [phase, setPhase] = useState<'form' | 'starting' | 'unconfirmed'>('form')
   const [error, setError] = useState<string | null>(null)
+
+  const prefillFolder = (machine: string): void => {
+    const value = folderHistory(remembered().folders?.[machine])[0] ?? ''
+    prefilled.current = value
+    setFolder(value)
+  }
 
   const load = (): void => {
     setNodes(null)
@@ -66,7 +75,7 @@ export function SpawnRelayAgentDialog(): React.ReactNode {
       if (!chosen) return
       setNode(chosen.name)
       setHarness(chosen.harnesses.includes(last.harness ?? '') ? (last.harness as string) : chosen.harnesses[0])
-      setFolder(last.folders?.[chosen.name] ?? '')
+      prefillFolder(chosen.name)
     }).catch((err: unknown) => setLoadError(errorText(err)))
   }
 
@@ -81,6 +90,10 @@ export function SpawnRelayAgentDialog(): React.ReactNode {
   }, [closeDialog, phase])
 
   const selected = useMemo(() => nodes?.find((candidate) => candidate.name === node), [nodes, node])
+  const suggestions = useMemo(
+    () => folderSuggestions(folderHistory(remembered().folders?.[node]), selected?.repositories),
+    [node, selected]
+  )
   const trimmedName = name.trim()
   const nameProblem = trimmedName && !NAME_PATTERN.test(trimmedName)
     ? 'Start with a lowercase letter; use 2–48 lowercase letters, digits, or dashes.'
@@ -96,7 +109,7 @@ export function SpawnRelayAgentDialog(): React.ReactNode {
     setNode(value)
     const next = nodes?.find((candidate) => candidate.name === value)
     if (next && !next.harnesses.includes(harness)) setHarness(next.harnesses[0])
-    setFolder(remembered().folders?.[value] ?? '')
+    prefillFolder(value)
   }
 
   const handleSubmit = async (event: React.FormEvent): Promise<void> => {
@@ -105,7 +118,7 @@ export function SpawnRelayAgentDialog(): React.ReactNode {
     setError(null)
     setPhase('starting')
     const last = remembered()
-    remember({ node, harness, folders: { ...last.folders, [node]: folderValue } })
+    remember({ node, harness, folders: { ...last.folders, [node]: withFolder(folderHistory(last.folders?.[node]), folderValue) } })
     try {
       const result = await pear.chat.spawn({ node, harness, name: trimmedName, task: task.trim(), workingDirectory: folderValue || undefined })
       if (result.outcome === 'unconfirmed') {
@@ -235,11 +248,28 @@ export function SpawnRelayAgentDialog(): React.ReactNode {
               <input
                 value={folder}
                 onChange={(event) => setFolder(event.target.value)}
+                onFocus={(event) => {
+                  const input = event.currentTarget
+                  if (!input.value || input.value !== prefilled.current) return
+                  const [start, end] = lastSegmentRange(input.value)
+                  requestAnimationFrame(() => input.setSelectionRange(start, end))
+                }}
+                list="spawn-folder-suggestions"
                 placeholder="/Users/name/project"
+                spellCheck={false}
                 disabled={phase === 'starting'}
                 className={inputClass}
               />
-              {folderProblem && <span className="mt-1 block text-xs text-[var(--pear-red)]">{folderProblem}</span>}
+              <datalist id="spawn-folder-suggestions">
+                {suggestions.map((value) => <option key={value} value={value} />)}
+              </datalist>
+              {folderProblem
+                ? <span className="mt-1 block text-xs text-[var(--pear-red)]">{folderProblem}</span>
+                : folder && folder === prefilled.current && (
+                  <span className="mt-1 block text-xs text-[var(--pear-text-faint)]">
+                    Last folder used on {node}. Type to swap the project, or pick another from the list.
+                  </span>
+                )}
             </label>
             {error && (
               <p className="whitespace-pre-wrap rounded-lg border border-[var(--pear-red)]/20 bg-[var(--pear-red)]/10 px-4 py-2.5 text-xs text-[var(--pear-red)]">

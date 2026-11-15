@@ -10,12 +10,14 @@ import {
   LayoutGrid,
   MessageCircle,
   Server,
+  Square,
   Settings,
   X
 } from 'lucide-react'
 import { AccountMenu } from '@/components/sidebar/ProjectSidebar'
 import { ChatTitle } from '@/components/chat-desktop/ChatTitle'
 import { useProjectStore } from '@/stores/project-store'
+import { useChatStore } from '@/stores/chat-store'
 import { useUIStore, type AppTab } from '@/stores/ui-store'
 
 function TabIcon({ tab, className = '' }: { tab: AppTab; className?: string }): React.ReactNode {
@@ -91,6 +93,8 @@ export function AppTopBar(): React.ReactNode {
   const visibleTabs = tabs.filter((tab) => tab.kind !== 'agents')
   const chatOpen = tabs.find((tab) => tab.id === activeTabId)?.kind === 'agents'
   const chatSidebarWidth = useUIStore((s) => s.chatSidebarWidth)
+  const chatLayout = useChatStore((s) => s.chatLayout)
+  const setChatLayout = useChatStore((s) => s.setChatLayout)
   const projectNameById = useMemo(
     () => new Map(projects.map((project) => [project.id, project.name])),
     [projects]
@@ -228,6 +232,22 @@ export function AppTopBar(): React.ReactNode {
           )
         })}
       </div>
+      {chatOpen && (
+        <button
+          type="button"
+          onClick={() => setChatLayout(chatLayout === 'grid' ? 'single' : 'grid')}
+          aria-pressed={chatLayout === 'grid'}
+          title={chatLayout === 'grid' ? 'Show one conversation' : 'Show several conversations side by side'}
+          aria-label={chatLayout === 'grid' ? 'Show one conversation' : 'Show conversations in a grid'}
+          className={`titlebar-nodrag ml-2 flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-colors ${
+            chatLayout === 'grid'
+              ? 'bg-[var(--pear-bg-surface)] text-[var(--pear-text)]'
+              : 'text-[var(--pear-text-faint)] hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text)]'
+          }`}
+        >
+          {chatLayout === 'grid' ? <Square size={15} /> : <LayoutGrid size={16} />}
+        </button>
+      )}
       <div className="titlebar-nodrag ml-2 shrink-0">
         <AccountMenu compact />
       </div>

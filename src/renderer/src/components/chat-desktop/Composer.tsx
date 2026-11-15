@@ -30,8 +30,9 @@ export function pastedImages(clipboard: Pick<DataTransfer, 'files'> | null, now:
   })
 }
 
-export function Composer({ conversationId }: { conversationId: string }): React.ReactNode {
-  const draft = useChatStore((s) => s.composerDraft)
+export function Composer({ conversationId, compact = false }: { conversationId: string; compact?: boolean }): React.ReactNode {
+  // A restored failed message goes to the focused pane only, not every composer in the grid.
+  const draft = useChatStore((s) => (s.selectedId === conversationId ? s.composerDraft : ''))
   const setComposerDraft = useChatStore((s) => s.setComposerDraft)
   const sendMessage = useChatStore((s) => s.sendMessage)
 
@@ -90,14 +91,14 @@ export function Composer({ conversationId }: { conversationId: string }): React.
   // for tap-to-edit, so the composer clears without waiting on Relaycast.
   const handleSend = (): void => {
     if (!canSend) return
-    void sendMessage(text, attachmentIds)
+    void sendMessage(text, attachmentIds, conversationId)
     setText('')
     setAttachmentIds([])
     setAttachmentNames([])
   }
 
   return (
-    <div className="shrink-0 border-t border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] px-4 py-3">
+    <div className={`shrink-0 border-t border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] ${compact ? 'px-2.5 py-2' : 'px-4 py-3'}`}>
       {attachmentNames.length > 0 && (
         <div className="mb-2 flex flex-wrap gap-1.5">
           {attachmentNames.map((name, index) => (
@@ -161,8 +162,8 @@ export function Composer({ conversationId }: { conversationId: string }): React.
           }}
           placeholder={uploading ? 'Uploading…' : 'Message this thread…'}
           aria-label="Message"
-          rows={3}
-          className="max-h-72 min-h-[84px] flex-1 resize-y rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3.5 py-2.5 text-[15px] leading-relaxed text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent-dim)]"
+          rows={compact ? 2 : 3}
+          className={`${compact ? 'max-h-40 min-h-[56px]' : 'max-h-72 min-h-[84px]'} flex-1 resize-y rounded-lg border border-[var(--pear-border-subtle)] bg-[var(--pear-bg)] px-3.5 py-2.5 ${compact ? 'text-[13px]' : 'text-[15px]'} leading-relaxed text-[var(--pear-text)] outline-none placeholder:text-[var(--pear-text-faint)] focus:border-[var(--pear-accent-dim)]`}
         />
         <button
           type="button"

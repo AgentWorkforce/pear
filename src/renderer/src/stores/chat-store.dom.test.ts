@@ -5,6 +5,8 @@ import { act } from '@testing-library/react'
 import {
   agentIdentity,
   conversationMatchesAgents,
+  gridWithConversation,
+  visibleConversationIds,
   historyIdFor,
   isConversationReachable,
   parseChatHost,
@@ -541,3 +543,79 @@ describe('chat-store sync', () => {
     }
   })
 })
+
+describe('chat grid layout', () => {
+  const ids = (n: number): string[] => Array.from({ length: n }, (_, i) => `conversation:t${i}`)
+
+  it('adds panes once, and replaces the focused pane when full', () => {
+    expect(gridWithConversation([], 'a', null)).toEqual(['a'])
+    expect(gridWithConversation(['a', 'b'], 'a', 'b')).toEqual(['a', 'b'])
+    expect(gridWithConversation(ids(8), 'new', 'conversation:t2')).toEqual([
+      'conversation:t0', 'conversation:t1', 'new', 'conversation:t3',
+      'conversation:t4', 'conversation:t5', 'conversation:t6', 'conversation:t7'
+    ])
+    expect(gridWithConversation(ids(8), 'new', null)[7]).toBe('new')
+  })
+
+  it('is single-conversation by default and remembers the grid', async () => {
+    expect(useChatStore.getState().chatLayout).toBe('single')
+    chatMocks.listConversations.mockResolvedValue([dm('thread-1', 'alice@macbook', 2), dm('thread-2', 'bob@linuxbox', 5)])
+    await act(async () => {
+      await useChatStore.getState().refreshConversations()
+      await useChatStore.getState().selectConversation('conversation:thread-1')
+      useChatStore.getState().setChatLayout('grid')
+      await useChatStore.getState().selectConversation('conversation:thread-2')
+      // A repeated pick (double click, notification + click) must not open a second pane.
+      await useChatStore.getState().selectConversation('conversation:thread-2')
+    })
+    const state = useChatStore.getState()
+    expect(state.gridIds).toEqual(['conversation:thread-1', 'conversation:thread-2'])
+    expect(state.selectedId).toBe('conversation:thread-2')
+    expect(visibleConversationIds(state)).toEqual(['conversation:thread-1', 'conversation:thread-2'])
+    expect(localStorage.getItem('pear.chat.layout')).toBe('grid')
+    expect(JSON.parse(localStorage.getItem('pear.chat.grid') || '[]')).toEqual(state.gridIds)
+
+    act(() => useChatStore.getState().setChatLayout('single'))
+    expect(visibleConversationIds(useChatStore.getState())).toEqual(['conversation:thread-2'])
+  })
+
+  it('sends from a pane into its own conversation, not the focused one', async () => {
+    useChatStore.setState({
+      conversations: [dm('thread-1', 'alice@macbook', 2), dm('thread-2', 'bob@linuxbox', 5)],
+      chatLayout: 'grid',
+      gridIds: ['conversation:thread-1', 'conversation:thread-2'],
+      selectedId: 'conversation:thread-1'
+    })
+    chatMocks.send.mockResolvedValue(message('m9', 'khaliq-gant', 'hi bob', true))
+    await act(async () => {
+      await useChatStore.getState().sendMessage('hi bob', [], 'conversation:thread-2')
+    })
+    expect(chatMocks.send).toHaveBeenCalledWith(expect.objectContaining({ kind: 'dm', to: 'bob@linuxbox', text: 'hi bob' }))
+  })
+
+  it('treats every visible pane as read, and only hidden ones as unread', () => {
+    useChatStore.setState({
+      conversations: [dm('thread-1', 'alice@macbook', 2), dm('thread-2', 'bob@linuxbox', 5), dm('thread-3', 'carol@mini', 9)],
+      chatLayout: 'grid',
+      gridIds: ['conversation:thread-1', 'conversation:thread-2'],
+      selectedId: 'conversation:thread-1',
+      history: { 'conversation:thread-2': [] }
+    })
+    act(() => {
+      useChatStore.getState().applyChatMessage({ conversationId: 'conversation:thread-2', message: message('m2', 'bob@linuxbox', 'done', false) })
+      useChatStore.getState().applyChatMessage({ conversationId: 'conversation:thread-3', message: message('m3', 'carol@mini', 'ping', false) })
+    })
+    expect(chatMocks.markRead).toHaveBeenCalledWith('m2')
+    expect(useChatStore.getState().unreadConversationIDs).toEqual(['conversation:thread-3'])
+  })
+
+  it('closing the focused pane focuses its neighbour', () => {
+    useChatStore.setState({ chatLayout: 'grid', gridIds: ['a', 'b', 'c'], selectedId: 'b' })
+    act(() => useChatStore.getState().closeGridPane('b'))
+    expect(useChatStore.getState().gridIds).toEqual(['a', 'c'])
+    expect(useChatStore.getState().selectedId).toBe('c')
+    act(() => useChatStore.getState().closeGridPane('b'))
+    expect(useChatStore.getState().gridIds).toEqual(['a', 'c'])
+  })
+})
+

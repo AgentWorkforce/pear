@@ -3,6 +3,7 @@ import { MessageCircle } from 'lucide-react'
 import { ConversationList } from './ConversationList'
 import { ThreadView } from './ThreadView'
 import { Composer } from './Composer'
+import { ChatGrid } from './ChatGrid'
 import { useChatStore } from '@/stores/chat-store'
 
 /**
@@ -17,6 +18,7 @@ export function ChatDesktopView(): React.ReactNode {
   const startSync = useChatStore((s) => s.startSync)
   const stopSync = useChatStore((s) => s.stopSync)
   const selectedId = useChatStore((s) => s.selectedId)
+  const chatLayout = useChatStore((s) => s.chatLayout)
 
   useEffect(() => {
     startSync()
@@ -28,7 +30,9 @@ export function ChatDesktopView(): React.ReactNode {
       <div className="flex min-h-0 flex-1">
         <ConversationList />
         <div className="flex min-w-0 flex-1 flex-col">
-          {selectedId ? (
+          {chatLayout === 'grid' ? (
+            <ChatGrid />
+          ) : selectedId ? (
             <>
               <ThreadView conversationId={selectedId} />
               <Composer conversationId={selectedId} />

@@ -39,6 +39,52 @@ export interface ChatPendingMessage {
   createdAt: string
 }
 
+export type ChatLayout = 'single' | 'grid'
+export const MAX_GRID_PANES = 8
+
+const LAYOUT_KEY = 'pear.chat.layout'
+const GRID_KEY = 'pear.chat.grid'
+
+function loadLayout(): { chatLayout: ChatLayout; gridIds: string[] } {
+  try {
+    const layout = localStorage.getItem(LAYOUT_KEY) === 'grid' ? 'grid' : 'single'
+    const parsed: unknown = JSON.parse(localStorage.getItem(GRID_KEY) || '[]')
+    const gridIds = Array.isArray(parsed)
+      ? [...new Set(parsed.filter((id): id is string => typeof id === 'string'))].slice(0, MAX_GRID_PANES)
+      : []
+    return { chatLayout: layout, gridIds }
+  } catch {
+    return { chatLayout: 'single', gridIds: [] }
+  }
+}
+
+function saveLayout(chatLayout: ChatLayout, gridIds: string[]): void {
+  try {
+    localStorage.setItem(LAYOUT_KEY, chatLayout)
+    localStorage.setItem(GRID_KEY, JSON.stringify(gridIds))
+  } catch {
+    // Layout is a preference; failing to save only forgets it.
+  }
+}
+
+/**
+ * Panes after opening `id`: already open stays put; otherwise it is added,
+ * or replaces the focused pane once the grid is full.
+ */
+export function gridWithConversation(gridIds: readonly string[], id: string, focusedId: string | null): string[] {
+  if (gridIds.includes(id)) return [...gridIds]
+  if (gridIds.length < MAX_GRID_PANES) return [...gridIds, id]
+  const replace = focusedId ? gridIds.indexOf(focusedId) : -1
+  const index = replace >= 0 ? replace : gridIds.length - 1
+  return gridIds.map((existing, i) => (i === index ? id : existing))
+}
+
+/** Conversations on screen: every grid pane, or just the selected one. */
+export function visibleConversationIds(state: Pick<ChatDesktopState, 'chatLayout' | 'gridIds' | 'selectedId'>): string[] {
+  if (state.chatLayout === 'grid') return [...state.gridIds]
+  return state.selectedId ? [state.selectedId] : []
+}
+
 interface ChatDesktopState {
   conversations: RelayChatConversation[]
   conversationsLoading: boolean
@@ -58,11 +104,20 @@ interface ChatDesktopState {
   showHidden: boolean
   composerDraft: string
   lastRefreshAt: string | null
+  /** `grid` shows several conversations at once; `single` (the default) shows one. */
+  chatLayout: ChatLayout
+  /** Conversations open in the grid, in pane order. `selectedId` is the focused pane. */
+  gridIds: string[]
 
   refreshConversations: () => Promise<void>
   selectConversation: (id: string | null) => Promise<void>
   loadHistory: (id: string) => Promise<void>
-  sendMessage: (text: string, attachmentIds?: string[]) => Promise<void>
+  /** Sends into `conversationId`, or the selected conversation when omitted. */
+  sendMessage: (text: string, attachmentIds?: string[], conversationId?: string) => Promise<void>
+  setChatLayout: (layout: ChatLayout) => void
+  closeGridPane: (id: string) => void
+  /** Make an open grid pane the focused one, without reloading it. */
+  focusGridPane: (id: string) => void
   editFailedPending: (localId: string) => void
   retryPending: (localId: string) => Promise<void>
   togglePin: (id: string) => void
@@ -296,15 +351,20 @@ export function readState(
   return { markers: { since, seen }, unread }
 }
 
-/** The selected row plus the DM thread an agent row shows. */
+/** The given rows plus the DM thread each agent row shows. */
 function openConversationIds(
   conversations: readonly RelayChatConversation[],
-  selectedId: string | null
+  ids: string | null | readonly string[]
 ): Set<string> {
-  const selected = selectedId ? conversations.find((c) => c.id === selectedId) : undefined
-  if (!selected) return new Set()
-  const thread = selected.kind === 'agent' ? findDmThread(conversations, selected) : undefined
-  return new Set([selected.id, ...(thread ? [thread.id] : [])])
+  const open = new Set<string>()
+  for (const id of typeof ids === 'string' ? [ids] : ids || []) {
+    const row = conversations.find((c) => c.id === id)
+    if (!row) continue
+    open.add(row.id)
+    const thread = row.kind === 'agent' ? findDmThread(conversations, row) : undefined
+    if (thread) open.add(thread.id)
+  }
+  return open
 }
 
 /** DM threads that open from an agent's roster row, so they aren't listed twice. */
@@ -430,7 +490,9 @@ const initialState = {
   hiddenConversationIDs: [] as string[],
   showHidden: false,
   composerDraft: '',
-  lastRefreshAt: null as string | null
+  lastRefreshAt: null as string | null,
+  chatLayout: 'single' as ChatLayout,
+  gridIds: [] as string[]
 }
 
 /**
@@ -447,7 +509,7 @@ export const useChatStore = create<ChatDesktopState>()(
       set({ conversationsLoading: true, conversationsError: null })
       try {
         const conversations = await pear.chat.listConversations()
-        const open = openConversationIds(conversations, get().selectedId)
+        const open = openConversationIds(conversations, visibleConversationIds(get()))
         const read = readState(conversations, loadReadMarkers(), open)
         saveReadMarkers(read.markers)
         const previousUnread = get().unreadConversationIDs.filter((id) =>
@@ -513,6 +575,7 @@ export const useChatStore = create<ChatDesktopState>()(
 
     return {
     ...initialState,
+    ...loadLayout(),
 
     refreshConversations: () => {
       if (refreshInFlight) return refreshInFlight
@@ -533,7 +596,12 @@ export const useChatStore = create<ChatDesktopState>()(
     },
 
     selectConversation: async (id) => {
-      set({ selectedId: id })
+      set((state) => {
+        if (!id || state.chatLayout !== 'grid') return { selectedId: id }
+        const gridIds = gridWithConversation(state.gridIds, id, state.selectedId)
+        saveLayout(state.chatLayout, gridIds)
+        return { selectedId: id, gridIds }
+      })
       if (!id) return
       const conversation = get().conversations.find((c) => c.id === id)
       if (conversation && !get().history[id]) {
@@ -555,9 +623,9 @@ export const useChatStore = create<ChatDesktopState>()(
       })
     },
 
-    sendMessage: async (text, attachmentIds = []) => {
+    sendMessage: async (text, attachmentIds = [], conversationId) => {
       const { selectedId, conversations } = get()
-      const conversation = conversations.find((c) => c.id === selectedId)
+      const conversation = conversations.find((c) => c.id === (conversationId ?? selectedId))
       const body = text.trim()
       // Messages compose only inside a Pear-owned conversation — there is
       // no free-form recipient path, so a missing selection is a no-op.
@@ -654,8 +722,9 @@ export const useChatStore = create<ChatDesktopState>()(
       for (const rows of Object.values(pending)) {
         const row = rows.find((item) => item.localId === localId && item.status === 'failed')
         if (row) {
-          const selected = get().selectedId
-          if (selected !== row.conversationId) await get().selectConversation(row.conversationId)
+          if (!visibleConversationIds(get()).includes(row.conversationId)) {
+            await get().selectConversation(row.conversationId)
+          }
           set((state) => ({
             pending: {
               ...state.pending,
@@ -664,7 +733,7 @@ export const useChatStore = create<ChatDesktopState>()(
               )
             }
           }))
-          await get().sendMessage(row.text, row.attachmentIds)
+          await get().sendMessage(row.text, row.attachmentIds, row.conversationId)
           return
         }
       }
@@ -690,9 +759,34 @@ export const useChatStore = create<ChatDesktopState>()(
 
     setComposerDraft: (draft) => set({ composerDraft: draft }),
 
+    setChatLayout: (layout) => {
+      const { chatLayout, gridIds, selectedId } = get()
+      if (layout === chatLayout) return
+      const nextGrid = layout === 'grid' && selectedId ? gridWithConversation(gridIds, selectedId, null) : gridIds
+      saveLayout(layout, nextGrid)
+      set({ chatLayout: layout, gridIds: nextGrid })
+      if (layout === 'grid') for (const id of nextGrid) if (!get().history[id]) void get().loadHistory(id)
+    },
+
+    focusGridPane: (id) => {
+      if (get().selectedId !== id && get().gridIds.includes(id)) set({ selectedId: id })
+    },
+
+    closeGridPane: (id) => {
+      const { chatLayout, gridIds, selectedId } = get()
+      const nextGrid = gridIds.filter((existing) => existing !== id)
+      if (nextGrid.length === gridIds.length) return
+      saveLayout(chatLayout, nextGrid)
+      const index = gridIds.indexOf(id)
+      set({
+        gridIds: nextGrid,
+        ...(selectedId === id ? { selectedId: nextGrid[Math.min(index, nextGrid.length - 1)] ?? null } : {})
+      })
+    },
+
     applyChatMessage: (event) => {
       const { conversationId, message } = event
-      const { selectedId, conversations } = get()
+      const { conversations } = get()
       if (message.delivered !== undefined) {
         set((state) => ({ delivery: { ...state.delivery, [message.id]: message.delivered as boolean } }))
       }
@@ -728,10 +822,11 @@ export const useChatStore = create<ChatDesktopState>()(
         void get().refreshConversations()
       }
       if (message.mine) return
-      if (selectedId && touched.has(selectedId)) {
+      const visible = visibleConversationIds(get())
+      if (visible.some((id) => touched.has(id))) {
         void pear.chat.markRead(message.id).catch(() => undefined)
         const latest = get().conversations
-        saveReadMarkers(readState(latest, loadReadMarkers(), openConversationIds(latest, selectedId)).markers)
+        saveReadMarkers(readState(latest, loadReadMarkers(), openConversationIds(latest, visible)).markers)
       } else {
         const unread = keys.length > 0 ? keys : [conversationId]
         set((state) => ({
@@ -753,25 +848,28 @@ export const useChatStore = create<ChatDesktopState>()(
     },
 
     applyInvalidated: (event) => {
-      const selectedId = get().selectedId
+      const visible = visibleConversationIds(get())
       if (event.reason === 'summaries') {
         void get().refreshConversations()
         return
       }
       if (event.reason !== 'poll') {
         void get().refreshConversations()
-        if (selectedId) void get().loadHistory(selectedId)
+        for (const id of visible) void get().loadHistory(id)
         return
       }
-      // The interval tick reloads the open thread only when the list shows
+      // The interval tick reloads an open thread only when the list shows
       // it moved — the fallback for messages the live stream didn't push.
-      const before = selectedId ? threadActivity(get().conversations, selectedId) : undefined
+      const before = new Map(visible.map((id) => [id, threadActivity(get().conversations, id)]))
       void get().refreshConversations().then(() => {
-        if (!selectedId || get().selectedId !== selectedId) return
-        const conversation = get().conversations.find((c) => c.id === selectedId)
-        if (!conversation || conversation.kind === 'channel') return
-        const after = threadActivity(get().conversations, selectedId)
-        if (after && after !== before) void get().loadHistory(selectedId)
+        const still = new Set(visibleConversationIds(get()))
+        for (const id of visible) {
+          if (!still.has(id)) continue
+          const conversation = get().conversations.find((c) => c.id === id)
+          if (!conversation || conversation.kind === 'channel') continue
+          const after = threadActivity(get().conversations, id)
+          if (after && after !== before.get(id)) void get().loadHistory(id)
+        }
       })
     },
 
@@ -786,8 +884,7 @@ export const useChatStore = create<ChatDesktopState>()(
       if (unsubscribeOpen) unsubscribes.push(unsubscribeOpen)
       const foregroundRefresh = (): void => {
         void get().refreshConversations()
-        const selectedId = get().selectedId
-        if (selectedId) void get().loadHistory(selectedId)
+        for (const id of visibleConversationIds(get())) void get().loadHistory(id)
       }
       const onFocus = (): void => foregroundRefresh()
       const onVisibility = (): void => {

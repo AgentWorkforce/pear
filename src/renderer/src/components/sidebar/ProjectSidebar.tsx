@@ -4,7 +4,6 @@ import {
   ChevronDown,
   ChevronRight,
   ChevronUp,
-  AlertTriangle,
   FolderKanban,
   Hash,
   LayoutGrid,
@@ -28,7 +27,7 @@ import { getAgentKeyForAgent, useAgentStore, type Agent } from '@/stores/agent-s
 import { conversationMatchesAgents, useChatStore } from '@/stores/chat-store'
 import { useProjectStore, type Project } from '@/stores/project-store'
 import { useUIStore, type AppTab, type AppTabInput } from '@/stores/ui-store'
-import { pear, type AuthUser, type IntegrationAuthRecoveryState } from '@/lib/ipc'
+import { pear, type AuthUser } from '@/lib/ipc'
 
 function AgentRelayLogo(): React.ReactNode {
   return (
@@ -141,13 +140,6 @@ function hasSignedInUser(auth: { loggedIn: boolean; user?: AuthUser }): boolean 
   return auth.loggedIn
 }
 
-function recoverySummary(state: IntegrationAuthRecoveryState | null): string | null {
-  if (!state) return null
-  if (state.reason === 'cloud-auth-required') return 'Cloud sign-in required'
-  if (state.failureClass) return `Workspace unavailable: ${state.failureClass}`
-  return 'Workspace unavailable'
-}
-
 function UserAvatar({ user }: { user?: AuthUser }): React.ReactNode {
   const label = userDisplayName(user)
   const avatar = useAvatarUrl(avatarUrls(user))
@@ -179,7 +171,6 @@ function UserAvatar({ user }: { user?: AuthUser }): React.ReactNode {
 export function AccountMenu({ compact = false }: { compact?: boolean }): React.ReactNode {
   const openTab = useUIStore((s) => s.openTab)
   const [auth, setAuth] = useState<{ loggedIn: boolean; user?: AuthUser }>({ loggedIn: false })
-  const [authRecovery, setAuthRecovery] = useState<IntegrationAuthRecoveryState | null>(null)
   const [loading, setLoading] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const buttonRef = useRef<HTMLButtonElement | null>(null)
@@ -188,27 +179,6 @@ export function AccountMenu({ compact = false }: { compact?: boolean }): React.R
 
   useEffect(() => {
     void pear.auth.status().then(setAuth).catch(() => {})
-    // Initial recovery-state probe is best-effort: on failure we leave the
-    // banner hidden, and the integration-auth event listener below will set it
-    // if recovery is actually needed.
-    pear.integrations.authRecoveryState().then(setAuthRecovery).catch(() => undefined)
-  }, [])
-
-  useEffect(() => {
-    return pear.integrations.onEvent((event) => {
-      if (event.type === 'integration-auth-recovered') {
-        setAuthRecovery(null)
-        return
-      }
-      if (event.type !== 'integration-auth-required') return
-      pear.integrations.authRecoveryState().then(setAuthRecovery).catch(() => {
-        setAuthRecovery({
-          reason: event.reason,
-          since: Date.now(),
-          message: event.message
-        })
-      })
-    })
   }, [])
 
   const handleLogin = useCallback(async () => {
@@ -216,9 +186,6 @@ export function AccountMenu({ compact = false }: { compact?: boolean }): React.R
     try {
       const result = await pear.auth.login()
       setAuth(result.loggedIn ? await pear.auth.status() : result)
-      // Post-login recovery probe is best-effort: null just clears the banner,
-      // which is the correct post-login default if the probe itself fails.
-      setAuthRecovery(await pear.integrations.authRecoveryState().catch(() => null))
     } finally {
       setLoading(false)
     }
@@ -278,7 +245,7 @@ export function AccountMenu({ compact = false }: { compact?: boolean }): React.R
     }
 
     updateMenuPosition()
-  }, [menuOpen, updateMenuPosition, authRecovery])
+  }, [menuOpen, updateMenuPosition])
 
   useEffect(() => {
     if (!menuOpen) return
@@ -292,7 +259,6 @@ export function AccountMenu({ compact = false }: { compact?: boolean }): React.R
   }, [menuOpen, updateMenuPosition])
 
   const signedIn = hasSignedInUser(auth)
-  const recovery = recoverySummary(authRecovery)
 
   if (!signedIn) {
     return (
@@ -331,12 +297,7 @@ export function AccountMenu({ compact = false }: { compact?: boolean }): React.R
         {!compact && (
           <div className="min-w-0 flex-1 text-left">
             <div className="truncate text-sm leading-tight">{userDisplayName(auth.user)}</div>
-            {recovery ? (
-              <div className="flex min-w-0 items-center gap-1 truncate text-[11px] leading-tight text-[var(--pear-yellow)]">
-                <AlertTriangle size={10} className="shrink-0" />
-                <span className="truncate">{recovery}</span>
-              </div>
-            ) : auth.user?.organizationName && (
+            {auth.user?.organizationName && (
               <div className="truncate text-[11px] leading-tight text-[var(--pear-text-faint)]">{auth.user.organizationName}</div>
             )}
           </div>
@@ -359,29 +320,6 @@ export function AccountMenu({ compact = false }: { compact?: boolean }): React.R
               <Settings size={13} />
               <span>Account settings</span>
             </button>
-            {authRecovery && (
-              <div className="border-t border-[var(--pear-border-subtle)] px-3 py-2 text-xs leading-4 text-[var(--pear-text-dim)]">
-                <div className="font-medium text-[var(--pear-text)]">
-                  {authRecovery.reason === 'cloud-auth-required' ? 'Sign-in needed' : 'Workspace unavailable'}
-                </div>
-                <div className="mt-1 break-words">
-                  {authRecovery.reason === 'cloud-auth-required'
-                    ? 'Reconnect Agent Relay Cloud to resume integration mounts.'
-                    : 'Pear cannot resolve the Agent Relay Cloud workspace for integration writebacks.'}
-                </div>
-                {authRecovery.reason === 'cloud-auth-required' && (
-                  <button
-                    type="button"
-                    onClick={() => void handleLogin()}
-                    disabled={loading}
-                    className="mt-2 inline-flex h-7 items-center gap-1.5 rounded-md border border-[var(--pear-border)] px-2 text-[11px] text-[var(--pear-text)] hover:border-[var(--pear-accent-dim)] disabled:opacity-40"
-                  >
-                    <LogIn size={11} />
-                    <span>Sign in again</span>
-                  </button>
-                )}
-              </div>
-            )}
             <button
               type="button"
               onClick={handleLogout}

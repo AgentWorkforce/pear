@@ -586,6 +586,8 @@ export interface RelaySpawnNode {
   name: string
   /** Agent types it can start (`claude`, `codex`, …). */
   harnesses: string[]
+  /** Repositories the machine is configured for (`owner/repo`); names only, not folders. */
+  repositories?: string[]
 }
 
 export interface ChatSpawnInput {
