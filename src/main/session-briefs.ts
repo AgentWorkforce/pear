@@ -1,3 +1,6 @@
+import { MAX_SUMMARY_LENGTH } from './session-transcript'
+
+
 /**
  * History's generated session briefs (`{ title, description }`), read through
  * Cloud's `reflex/sessions/{id}/brief?admit=false`. Reading without
@@ -79,5 +82,5 @@ export function briefText(body: unknown): string | null {
   const text = typeof description === 'string' && description.trim()
     ? description.trim()
     : /\s/.test(titleText) ? titleText : ''
-  return text ? text.slice(0, 320) : null
+  return text ? text.slice(0, MAX_SUMMARY_LENGTH) : null
 }

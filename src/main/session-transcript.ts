@@ -392,6 +392,9 @@ export function agentCli(name: string, metadata: Record<string, unknown> | undef
  * doing, a description, then a session title. Titles without a space are
  * generated slugs (`khaliqgant-0e`) and say nothing.
  */
+/** Long enough for a full task brief; the chat header shows all of it. */
+export const MAX_SUMMARY_LENGTH = 2000
+
 export function agentSummary(metadata: Record<string, unknown> | undefined): string | null {
   // Desktop publishes the generated session slug (`infra-7d`) as both the title and `doing`.
   const sentence = (text: string): string => (/\s/.test(text) ? text : '')
@@ -403,7 +406,7 @@ export function agentSummary(metadata: Record<string, unknown> | undefined): str
     sentence(stringOf(metadata?.session_title))
   ]
   const text = candidates.find(Boolean)
-  return text ? text.slice(0, 200) : null
+  return text ? text.slice(0, MAX_SUMMARY_LENGTH) : null
 }
 
 function isMetadataRecord(value: unknown): value is Record<string, unknown> {

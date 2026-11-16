@@ -48,4 +48,9 @@ describe('briefText', () => {
     expect(briefText({ status: 'ready', brief: { title: 'infra-7d', description: '' } })).toBeNull()
     expect(briefText(null)).toBeNull()
   })
+
+  it('keeps a long description whole', () => {
+    const description = `Requested by Khaliq. ${'Audit every AGENTS.md. '.repeat(40)}`.trim()
+    expect(briefText({ status: 'ready', brief: { title: 'T', description } })).toBe(description)
+  })
 })

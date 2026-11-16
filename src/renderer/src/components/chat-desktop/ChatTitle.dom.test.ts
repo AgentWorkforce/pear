@@ -33,6 +33,19 @@ describe('ChatTitle', () => {
     expect(title.textContent).toContain('Rotating the RDS certificates')
   })
 
+  it('shows the whole summary, wrapped rather than cut off', () => {
+    const summary = 'Requested by Khaliq (via testingrok). AUDIT + PROPOSAL ONLY: do not push.\nReview every AGENTS.md and propose fixes.'
+    useChatStore.setState({
+      conversations: [{ kind: 'agent', id: 'relay:agents-md-auditor', name: 'agents-md-auditor', summary }],
+      selectedId: 'relay:agents-md-auditor'
+    })
+    render(React.createElement(ChatTitle))
+    const shown = screen.getByTestId('chat-title-summary')
+    expect(shown.textContent).toBe(summary)
+    expect(shown.className).not.toContain('truncate')
+    expect(shown.className).toContain('whitespace-pre-wrap')
+  })
+
   it('renders nothing when no conversation is open', () => {
     useChatStore.setState({ conversations: [], selectedId: null })
     render(React.createElement(ChatTitle))

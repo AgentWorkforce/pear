@@ -76,6 +76,8 @@ describe('agent tool and summary', () => {
     assert.equal(agentSummary({ objective: 'Ship it', session_title: 'Title' }), 'Ship it')
     assert.equal(agentSummary({ session_title: 'Fix reconnect' }), 'Fix reconnect')
     assert.equal(agentSummary({}), null)
+    const brief = `Requested by Khaliq (via testingrok). ${'AUDIT + PROPOSAL ONLY: do not push. '.repeat(20)}`.trim()
+    assert.equal(agentSummary({ objective: brief }), brief)
     assert.equal(agentSummary({ session_title: 'Fix reconnect', activity: { doing: 'Pull latest changes' } }), 'Pull latest changes')
     assert.equal(agentSummary({ session_title: 'khaliqgant-0e' }), null)
     assert.equal(agentSummary({ session_title: 'infra-7d', activity: { doing: 'infra-7d', repo: 'infra' } }), null)

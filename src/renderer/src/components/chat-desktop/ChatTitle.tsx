@@ -22,7 +22,7 @@ export function ChatTitle(): React.ReactNode {
   const details = conversationDetails(conversation)
   return (
     <div
-      className="flex h-full min-w-0 flex-1 items-center gap-3.5 border-l border-[var(--pear-border-subtle)] pl-5 pr-4"
+      className="flex min-h-16 min-w-0 flex-1 items-center gap-3.5 self-stretch border-l border-[var(--pear-border-subtle)] pl-5 pr-4"
       data-testid="chat-title"
     >
       {conversation.kind === 'channel' ? (
@@ -42,7 +42,10 @@ export function ChatTitle(): React.ReactNode {
           )}
         </div>
         {conversation.summary && (
-          <p className="truncate text-[11.5px] leading-[15px] text-[var(--pear-text-secondary)]" title={conversation.summary}>
+          <p
+            className="titlebar-nodrag max-h-[30vh] overflow-y-auto whitespace-pre-wrap break-words text-[11.5px] leading-[15px] text-[var(--pear-text-secondary)]"
+            data-testid="chat-title-summary"
+          >
             {conversation.summary}
           </p>
         )}

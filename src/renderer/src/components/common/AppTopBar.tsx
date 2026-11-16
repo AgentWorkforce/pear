@@ -100,10 +100,11 @@ export function AppTopBar(): React.ReactNode {
     [projects]
   )
   return (
-    <div className={`titlebar-drag relative z-40 flex h-16 shrink-0 items-center border-b border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] pr-3 text-[var(--pear-text)] ${chatOpen ? '' : 'pl-[138px]'}`}>
+    <div className={`titlebar-drag relative z-40 flex shrink-0 border-b border-[var(--pear-border-subtle)] bg-[var(--pear-bg-raised)] pr-3 text-[var(--pear-text)] ${chatOpen ? 'min-h-16 items-start' : 'h-16 items-center pl-[138px]'}`}>
+      {/* The chat title can grow the bar for a long summary; everything else stays in the top 64px, level with the window buttons. */}
       {/* With chat open this spans the conversation list's width so the header divider continues its border. */}
       <div
-        className={`flex items-center gap-2 ${chatOpen ? 'shrink-0 pl-[138px]' : ''}`}
+        className={`flex items-center gap-2 ${chatOpen ? 'h-16 shrink-0 pl-[138px]' : ''}`}
         style={chatOpen ? { width: chatSidebarWidth } : undefined}
       >
         <div className="relative">
@@ -183,7 +184,7 @@ export function AppTopBar(): React.ReactNode {
         </button>
       </div>
 
-      <div className={`flex h-full min-w-0 flex-1 items-center gap-1 overflow-x-auto ${chatOpen ? '' : 'ml-4'}`}>
+      <div className={`flex min-w-0 flex-1 items-center gap-1 overflow-x-auto ${chatOpen ? 'min-h-16 self-stretch' : 'h-full ml-4'}`}>
         {chatOpen && <ChatTitle />}
         {visibleTabs.map((tab) => {
           const active = tab.id === activeTabId
@@ -239,7 +240,7 @@ export function AppTopBar(): React.ReactNode {
           aria-pressed={chatLayout === 'grid'}
           title={chatLayout === 'grid' ? 'Show one conversation' : 'Show several conversations side by side'}
           aria-label={chatLayout === 'grid' ? 'Show one conversation' : 'Show conversations in a grid'}
-          className={`titlebar-nodrag ml-2 flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-colors ${
+          className={`titlebar-nodrag ml-2 mt-4 flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-colors ${
             chatLayout === 'grid'
               ? 'bg-[var(--pear-bg-surface)] text-[var(--pear-text)]'
               : 'text-[var(--pear-text-faint)] hover:bg-[var(--pear-bg-surface)] hover:text-[var(--pear-text)]'
@@ -248,7 +249,7 @@ export function AppTopBar(): React.ReactNode {
           {chatLayout === 'grid' ? <Square size={15} /> : <LayoutGrid size={16} />}
         </button>
       )}
-      <div className="titlebar-nodrag ml-2 shrink-0">
+      <div className={`titlebar-nodrag ml-2 shrink-0 ${chatOpen ? 'flex h-16 items-center' : ''}`}>
         <AccountMenu compact />
       </div>
     </div>
