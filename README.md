@@ -1,6 +1,6 @@
 # Pear by Agent Relay
 
-Pear is a macOS Electron desktop workspace where humans and AI agents collaborate in real time. It provides shared terminals (xterm.js), a chat layer, live git diffs, and integrations — all brokered through a local Agent Relay server that manages agent lifecycles, PTY streams, and IPC between the main process and the React UI.
+Pear brings people and coding agents into one desktop workspace, with shared terminals, conversations and a live view of changes.
 
 **Stack:** Electron 42 · electron-vite 5 · React 19 · Zustand 5 · xterm.js 5.5 · Tailwind CSS 4 · TypeScript 5.7 · Vite 6
 

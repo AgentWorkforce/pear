@@ -1,26 +1,35 @@
-# Agent Instructions
+# Working in pear
 
-## Duplicate Event Hardening
+```sh
+npm ci
+npm run lint
+npm run typecheck
+npm run test
+npm run build
+```
 
-Pear broker work must treat duplicate delivery as a normal failure mode. Renderer effects, dashboard reconnects, broker event-stream refreshes, and relay replay can all cause the same logical event to be observed more than once.
+- Broker lifecycle effects are idempotent and concurrent starts coalesce. Scope reconnect listeners by generation; notifications require a real transition.
+- PTY chunks use (generation, byte offset) AND content hash, never content alone or nonexistent event/seq IDs. Missing offsets deliver all bytes and report the blind spot.
+- Keep main and renderer delivery guards. Never drop different bytes sharing an offset, or identical consecutive terminal output.
+- Preserve terminal reconciliation as a backstop, including quiet/recheck/confirm/rate gates, independent divergence telemetry, dimension reassertion, stranded-prediction rollback and a surviving poll loop.
+- Read the terminal-reconciler module header and `docs/agent-reference.md` before changing those invariants; add replay and failure-path coverage.
 
-- Make lifecycle operations idempotent. `broker:start`, agent registration, integration notifications, and mount/link setup should return or record whether they actually changed state before triggering side effects.
-- Coalesce concurrent starts or attaches with keyed in-flight promises. Repeated UI calls for the same project/root/channels should wait on the existing operation instead of starting another broker or event stream.
-- Prefer stable event identity over content matching, and use the identity fields each event *actually* carries. Chat/broker events carry `event_id`, `id`, or `seq`; dedupe those by identity AND content hash together. `worker_stream` PTY chunks do **not** carry `seq`/`event_id` — those are ephemeral and excluded from the daemon replay buffer, so any dedup keyed on them is structurally inert (it can never match). PTY chunks instead carry a cumulative per-worker byte `offset`; dedupe them by `(generation, offset)` identity AND content hash, where `generation` is the broker event-stream generation the delivering listener was attached under (it scopes the offset so a fresh worker stream's low offset can't collide with a stale remembered one). Never drop a PTY chunk on content alone (identical consecutive chunks are normal terminal traffic — repeated keystroke echoes, byte-identical TUI repaint frames) and never on identity alone (a repeated offset with different bytes is fresh output, not a replay — dropping it corrupts the escape-sequence stream into the stacked-duplicate-lines rendering corruption). When correlation metadata is absent (no `offset`), deliver every chunk and log the blind spot loudly — do not silently claim a protection that isn't running. When in doubt, deliver: a rare duplicate repaints once; a dropped chunk mangles the screen until the next full repaint.
-- Scope live event listeners with a generation token when reconnecting or refreshing streams. Stale callbacks from an older listener must bail before publishing IPC events.
-- Keep PTY stream delivery separately guarded in main and renderer code. Main should suppress duplicate `worker_stream` chunks before `broker:pty-chunk`; renderer buffers should tolerate repeated chunk metadata as a final guardrail.
-- Do not post integration or launch metadata on reused broker sessions. Notify agents only after a real broker start, reconnect, or state transition, and make repeated payloads no-ops when possible.
-- Add regression tests when touching broker start, event streaming, PTY buffering, spawned personas, or integration notifications. Include duplicate/replay cases, not just the happy path.
-- Add low-noise telemetry for suppressed duplicates and a rate-limited *loud* warning (with a running count) when correlation metadata is missing, so both real replays and dedup blind spots are visible without flooding the terminal.
+## Agency and guidance
 
-## Terminal Screen Convergence
+- Act autonomously on routine assigned work; ask forgiveness rather than permission. Preserve explicit production, release and credential gates.
+- For guidance, ask the engineering leads, the agent that spawned you, or the layered owner on Agent Relay.
+- Only a truly pressing or blocking question goes to `khaliq-gant` or `will-washburn` on Agent Relay.
 
-The broker daemon's PTY emulation (served as attach snapshots, observable via `agent-relay-broker dump-pty`) is the ground truth for what a worker terminal shows. The renderer's xterm grid can diverge from it (e.g. xterm reflow-scrolls on width resizes; PTY-side emulators don't), and diff-painting TUIs like Claude Code then *preserve* the divergence forever — they skip cells they believe unchanged, so stale glyphs bleed through new rows and stacked repaint frames accumulate. `src/renderer/src/lib/terminal-reconciler.ts` closes the loop: when a terminal is quiet it compares the viewport to the broker's `plain` snapshot and repaints from the self-framing `ansi` snapshot on confirmed divergence. Do not remove it after fixing any individual corruption vector — it is the convergence backstop for the whole class, and its gating invariants (quiet window, activity-serial recheck, dimension match, confirm-twice, rate limit) each guard a real re-corruption path documented in the module header. Confirmed divergence logs `[terminal] viewport diverged from broker screen` — that line firing is the signal a new creation vector exists and is worth hunting.
+## Cross-repo context
 
-The gates themselves must not be able to disable the backstop silently or permanently:
+- Before and during changes, understand how this repo fits the wider system; consult its repo map and related-repo docs where available.
+- Check relevant agents’ summaries on Agent Relay and proactively contact owning agents about dependencies, adjacent changes and work in flight.
 
-- **Detection is reported, not just repair.** The line above fires on CONFIRMED divergence, before the repair is attempted, and states the outcome (`repainted from snapshot`, `repair rate-limited`, `repair skipped: …`) plus how many rows differ. This module is both the convergence backstop and the app's only always-on divergence *detector*, and those are different jobs: gating the only telemetry on a completed repair meant a divergence whose repair was deferred by the rate limit — or whose screen went busy again before the second confirmation — was healed-or-not in silence. It also made the backstop invisible to any observer sampling less than ~10s of quiet (quiet 1.5s + a check interval to align + a second confirming check), so a fully diverged screen could read back as zero telemetry, i.e. "clean". `RECONCILE_DIVERGENCE_LOG_GAP_MS` rate-limits the reports and MUST stay strictly below `RECONCILE_MIN_REPAIR_GAP_MS`, or the repair-rate-limited case — the one worth hearing about — goes quiet again.
+## Pull requests (when used)
 
-- **Persistent dims mismatch escalates, never just skips.** The dimension-match gate exists for resizes in flight, but a PTY that *stays* at a different size than the grid is the exact state that creates stacked-frame corruption (the TUI frames repaints for the wrong row count) — and it would also gate the reconciler off forever. After consecutive mismatched quiet checks the reconciler calls `onPersistentDimsMismatch`, which invalidates the size-sync ack and re-asserts the rendered grid as the PTY size (logs `[terminal] PTY RxC disagrees with grid RxC`).
-- **Stranded predictions roll back instead of holding the quiet gate shut.** Optimistic-echo predictions are only confirmed or dropped by server output; a keystroke the TUI swallows (or one typed into a hung agent) leaves `hasPredictions` true with no echo ever coming, which would close the quiet gate permanently. After `STRANDED_PREDICTION_ROLLBACK_MS` of output silence the registry rolls the predictions back (erasing only optimistic glyphs — confirmed bytes are untouched) and lets reconciliation proceed.
-- **A thrown check never kills the poll loop.** `snapshotTerminal` degrades to null, but the IPC bridge itself can reject; the check loop catches and rate-limit-logs instead of dying on an unhandled rejection.
+- Open PRs as ready for review by default. If merging requires Khaliq’s OK, use `merge-train:hold` instead of draft status.
+- If you open a PR, immediately subscribe to its feedback through Agent Relay using [this skill](https://github.com/AgentWorkforce/skills/blob/main/skills/subscribing-relay-webhooks-and-writebacks/SKILL.md), and verify subscription readiness.
+- Evaluate each review finding. Address applicable feedback and explain declined changes in the thread.
+- A PR is not ready while feedback remains unaddressed or merge conflicts remain.
+- When ready, alert the CODEOWNERS and the agent that spawned you on Agent Relay.
+- Keep related open PRs from going stale: find their authoring agent on Agent Relay and coordinate; if that agent is no longer on the relay, escalate to the CODEOWNERS or the layered owner.
